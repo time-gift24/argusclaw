@@ -16,96 +16,55 @@ impl SqliteAgentRepository {
         Self { pool }
     }
 
-    /// Returns a reference to the underlying pool (for testing).
+    /// Returns a reference to the underlying pool.
+    ///
+    /// This is exposed for integration tests that need to insert test data.
+    /// Production code should use the repository methods instead.
     #[must_use]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
+    /// Helper to get a column value with consistent error mapping.
+    fn get<T>(row: &sqlx::sqlite::SqliteRow, col: &str) -> Result<T, DbError>
+    where
+        T: for<'r> sqlx::decode::Decode<'r, sqlx::Sqlite> + sqlx::types::Type<sqlx::Sqlite>,
+    {
+        row.try_get(col).map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })
+    }
+
     fn map_record(row: sqlx::sqlite::SqliteRow) -> Result<AgentRecord, DbError> {
-        let tool_names_json: String =
-            row.try_get("tool_names")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?;
+        let tool_names_json: String = Self::get::<String>(&row, "tool_names")?;
         let tool_names: Vec<String> =
             serde_json::from_str(&tool_names_json).map_err(|e| DbError::QueryFailed {
                 reason: format!("failed to parse tool_names JSON: {e}"),
             })?;
 
-        let temperature: Option<f32> = row
-            .try_get::<Option<i64>, _>("temperature")
-            .map_err(|e| DbError::QueryFailed {
-                reason: e.to_string(),
-            })?
-            .map(|t| t as f32 / 100.0);
+        let temperature: Option<f32> =
+            Self::get::<Option<i64>>(&row, "temperature")?.map(|t| t as f32 / 100.0);
 
         Ok(AgentRecord {
-            id: AgentId::new(
-                row.try_get::<String, _>("id")
-                    .map_err(|e| DbError::QueryFailed {
-                        reason: e.to_string(),
-                    })?,
-            ),
-            display_name: row
-                .try_get("display_name")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
-            description: row
-                .try_get("description")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
-            version: row.try_get("version").map_err(|e| DbError::QueryFailed {
-                reason: e.to_string(),
-            })?,
-            provider_id: row
-                .try_get("provider_id")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
-            system_prompt: row
-                .try_get("system_prompt")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
+            id: AgentId::new(Self::get::<String>(&row, "id")?),
+            display_name: Self::get::<String>(&row, "display_name")?,
+            description: Self::get::<String>(&row, "description")?,
+            version: Self::get::<String>(&row, "version")?,
+            provider_id: Self::get::<String>(&row, "provider_id")?,
+            system_prompt: Self::get::<String>(&row, "system_prompt")?,
             tool_names,
-            max_tokens: row
-                .try_get("max_tokens")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
+            max_tokens: Self::get::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
             temperature,
         })
     }
 
     fn map_summary(row: sqlx::sqlite::SqliteRow) -> Result<AgentSummary, DbError> {
         Ok(AgentSummary {
-            id: AgentId::new(
-                row.try_get::<String, _>("id")
-                    .map_err(|e| DbError::QueryFailed {
-                        reason: e.to_string(),
-                    })?,
-            ),
-            display_name: row
-                .try_get("display_name")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
-            description: row
-                .try_get("description")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
-            version: row.try_get("version").map_err(|e| DbError::QueryFailed {
-                reason: e.to_string(),
-            })?,
-            provider_id: row
-                .try_get("provider_id")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
+            id: AgentId::new(Self::get::<String>(&row, "id")?),
+            display_name: Self::get::<String>(&row, "display_name")?,
+            description: Self::get::<String>(&row, "description")?,
+            version: Self::get::<String>(&row, "version")?,
+            provider_id: Self::get::<String>(&row, "provider_id")?,
         })
     }
 }
