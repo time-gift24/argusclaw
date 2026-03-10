@@ -13,9 +13,15 @@ use crate::db::DbError;
 pub struct AgentId(String);
 
 impl AgentId {
+    /// Creates a new agent ID.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `id` is empty.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "AgentId cannot be empty");
+        Self(id)
     }
 }
 
@@ -31,6 +37,10 @@ impl fmt::Display for AgentId {
     }
 }
 
+/// Parses an agent ID from a string.
+///
+/// This implementation is intentionally infallible to match the behavior of `AgentId::new()`.
+/// If validation is needed in the future, use `AgentId::try_from_str()` instead.
 impl FromStr for AgentId {
     type Err = std::convert::Infallible;
 
@@ -50,6 +60,7 @@ pub struct AgentRecord {
     pub system_prompt: String,
     pub tool_names: Vec<String>,
     pub max_tokens: Option<u32>,
+    /// Sampling temperature (0.0-2.0). Stored as INTEGER * 100 in SQLite for precision.
     pub temperature: Option<f32>,
 }
 
