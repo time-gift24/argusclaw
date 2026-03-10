@@ -12,8 +12,7 @@ pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
     LlmEventStream, LlmProvider, LlmStreamEvent, ModelMetadata, ProviderCapabilities, Role,
     ThinkingConfig, ThinkingMode, ToolCall, ToolCallDelta, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, ToolResult,
-    sanitize_tool_messages,
+    ToolCompletionResponse, ToolDefinition, ToolResult, sanitize_tool_messages,
 };
 pub use retry::{RetryConfig, RetryProvider};
 

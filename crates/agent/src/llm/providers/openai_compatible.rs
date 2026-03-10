@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmError,
-    LlmEventStream, LlmProvider, LlmStreamEvent, ProviderCapabilities, RetryConfig,
-    RetryProvider, Role, ToolCall, ThinkingConfig, ToolCallDelta, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    LlmEventStream, LlmProvider, LlmStreamEvent, ProviderCapabilities, RetryConfig, RetryProvider,
+    Role, ThinkingConfig, ToolCall, ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition,
 };
 
 #[derive(Debug, Clone)]
@@ -789,26 +789,24 @@ mod tests {
 
     #[test]
     fn openai_compatible_provider_reports_thinking_for_glm5() {
-        let provider =
-            OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
-                "https://example.com/v1",
-                "key",
-                "glm-5",
-            ))
-            .expect("provider should build");
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
+            "https://example.com/v1",
+            "key",
+            "glm-5",
+        ))
+        .expect("provider should build");
 
         assert!(provider.capabilities().thinking);
     }
 
     #[test]
     fn openai_compatible_provider_reports_no_thinking_for_legacy_model() {
-        let provider =
-            OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
-                "https://example.com/v1",
-                "key",
-                "gpt-4o-mini",
-            ))
-            .expect("provider should build");
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
+            "https://example.com/v1",
+            "key",
+            "gpt-4o-mini",
+        ))
+        .expect("provider should build");
 
         assert!(!provider.capabilities().thinking);
     }
