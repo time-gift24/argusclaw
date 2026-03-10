@@ -6,7 +6,7 @@ cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
 cargo test                                                   # unit tests
 cargo test --features integration                            # + Sqlite tests
-RUST_LOG=argusclaw=debug,agent=debug cargo run  # run with logging
+RUST_LOG=argusclaw=debug,claw=debug cargo run  # run with logging
 ```
 
 ## Code Style
@@ -31,11 +31,13 @@ All I/O is async with tokio. Use Arc<T> for shared state, RwLock for concurrent 
 
 ```text
 crates/
-├── agent/
+├── claw/
 │   ├── src/
 │   │   ├── lib.rs                    # Library root, module declarations and exports
-│   │   ├── error.rs                  # Top-level agent error types
-│   │   ├── agent.rs                  # Agent root object; owns LLMManager
+│   │   ├── error.rs                  # Top-level error types
+│   │   ├── claw.rs                   # AppContext; owns LLMManager, AgentManager
+│   │   ├── agents/                   # Agent management
+│   │   │   └── mod.rs                # AgentManager (placeholder)
 │   │   ├── db/                       # Storage abstractions and implementations
 │   │   │   ├── mod.rs                # DB module entry point and shared DB errors
 │   │   │   ├── llm.rs                # LLM provider records and repository trait
@@ -57,7 +59,7 @@ crates/
 └── cli/
     ├── CLAUDE.md                      # CLI module guide
     └── src/
-        ├── main.rs                    # CLI bootstrap: tracing, DB init, Agent startup
+        ├── main.rs                    # CLI bootstrap: tracing, DB init, AppContext startup
         ├── dev.rs                     # Dev-only commands (behind `dev` feature)
         └── dev/
             └── config.rs              # Provider import TOML format
