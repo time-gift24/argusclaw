@@ -51,4 +51,8 @@ pub enum LlmError {
     /// Session renewal failed.
     #[error("Session renewal failed for provider {provider}: {reason}")]
     SessionRenewalFailed { provider: String, reason: String },
+
+    /// Provider does not support a requested capability.
+    #[error("Provider {provider} does not support capability {capability}")]
+    UnsupportedCapability { provider: String, capability: String },
 }

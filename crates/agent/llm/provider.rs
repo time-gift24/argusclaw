@@ -11,6 +11,7 @@
 //! - Retains only the provider-agnostic API surface used by this crate.
 
 use async_trait::async_trait;
+use futures_core::Stream;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -217,6 +218,35 @@ pub struct CompletionResponse {
     pub cache_creation_input_tokens: u32,
 }
 
+/// A delta emitted while streaming a completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmStreamEvent {
+    /// Incremental text output from the model.
+    ContentDelta { delta: String },
+    /// Incremental tool call output from the model.
+    ToolCallDelta(ToolCallDelta),
+    /// Usage information emitted by the provider during streaming.
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    /// The model finished generating output.
+    Finished { finish_reason: FinishReason },
+}
+
+/// A delta for a tool call emitted during streaming.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments_delta: Option<String>,
+}
+
+/// A boxed stream of completion events.
+pub type LlmEventStream =
+    std::pin::Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, LlmError>> + Send + 'static>>;
+
 /// Why the completion finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishReason {
@@ -348,6 +378,28 @@ pub trait LlmProvider: Send + Sync {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
 
+    /// Stream a chat completion incrementally.
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: self.active_model_name(),
+            capability: "stream_complete".to_string(),
+        })
+    }
+
+    /// Stream a tool-capable completion incrementally.
+    async fn stream_complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: self.active_model_name(),
+            capability: "stream_complete_with_tools".to_string(),
+        })
+    }
+
     /// List available models from the provider.
     /// Default implementation returns empty list.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -468,6 +520,67 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct StubStream;
+
+    impl Stream for StubStream {
+        type Item = Result<LlmStreamEvent, LlmError>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(None)
+        }
+    }
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl LlmProvider for StubProvider {
+        fn model_name(&self) -> &str {
+            "stub"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<LlmEventStream, LlmError> {
+            Ok(Box::pin(StubStream))
+        }
+    }
 
     #[test]
     fn test_sanitize_preserves_valid_pairs() {
@@ -593,5 +706,68 @@ mod tests {
         assert!(messages[2].content.contains("200 OK"));
         assert!(messages[2].tool_call_id.is_none());
         assert!(messages[2].name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_methods_default_to_unsupported() {
+        struct UnsupportedProvider;
+
+        #[async_trait]
+        impl LlmProvider for UnsupportedProvider {
+            fn model_name(&self) -> &str {
+                "unsupported"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!()
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider = UnsupportedProvider;
+        let err = match provider.stream_complete(CompletionRequest::new(vec![])).await {
+            Ok(_) => panic!("default stream_complete should be unsupported"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            LlmError::UnsupportedCapability { capability, .. } if capability == "stream_complete"
+        ));
+
+        let err = match provider
+            .stream_complete_with_tools(ToolCompletionRequest::new(vec![], vec![]))
+            .await
+        {
+            Ok(_) => panic!("default stream_complete_with_tools should be unsupported"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            LlmError::UnsupportedCapability { capability, .. }
+                if capability == "stream_complete_with_tools"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_provider_can_override_streaming() {
+        let provider = StubProvider;
+        let stream = provider
+            .stream_complete(CompletionRequest::new(vec![]))
+            .await
+            .expect("override should return a stream");
+        let _stream: LlmEventStream = stream;
     }
 }
