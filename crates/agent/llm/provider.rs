@@ -1,4 +1,14 @@
 //! LLM provider trait and types.
+//!
+//! Derived from:
+//! - Repository: https://github.com/nearai/ironclaw
+//! - Upstream path: src/llm/provider.rs
+//! - Upstream commit: bcef04b82108222c9041e733de459130badd4cd7
+//! - License: MIT OR Apache-2.0
+//!
+//! Local modifications:
+//! - Vendored as ArgusClaw's stable `crate::llm` core interface.
+//! - Retains only the provider-agnostic API surface used by this crate.
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
