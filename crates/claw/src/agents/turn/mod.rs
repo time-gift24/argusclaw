@@ -9,4 +9,7 @@ pub use config::{
 };
 pub use error::TurnError;
 pub use execution::execute_turn;
-pub use hooks::{HookContext, HookEvent, HookHandler, HookRegistry};
+pub use hooks::{
+    BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookEvent, HookHandler, HookRegistry,
+    ToolHookContext,
+};

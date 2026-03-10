@@ -14,7 +14,8 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use claw::agents::turn::{
-    HookContext, HookEvent, HookHandler, HookRegistry, TurnConfig, TurnInputBuilder, execute_turn,
+    BeforeCallLLMContext, HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext,
+    TurnConfig, TurnInputBuilder, execute_turn,
 };
 use claw::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
@@ -176,7 +177,7 @@ impl NamedTool for CounterTool {
 // Test Hook Handlers
 // ============================================================================
 
-/// Hook handler that records all events it receives.
+/// Hook handler that records all tool events it receives.
 struct RecordingHookHandler {
     events: Mutex<Vec<(HookEvent, String)>>,
 }
@@ -195,10 +196,10 @@ impl RecordingHookHandler {
 
 #[async_trait]
 impl HookHandler for RecordingHookHandler {
-    async fn on_event(&self, ctx: &HookContext) -> Result<(), String> {
+    async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
         let mut events = self.events.lock().unwrap();
         events.push((ctx.event, ctx.tool_name.clone()));
-        Ok(())
+        HookAction::Continue
     }
 }
 
@@ -215,12 +216,29 @@ impl BlockingHookHandler {
 
 #[async_trait]
 impl HookHandler for BlockingHookHandler {
-    async fn on_event(&self, ctx: &HookContext) -> Result<(), String> {
+    async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
         if ctx.event == HookEvent::BeforeToolCall && self.blocked_tools.contains(&ctx.tool_name) {
-            Err(format!("Tool '{}' is blocked", ctx.tool_name))
+            HookAction::Block(format!("Tool '{}' is blocked", ctx.tool_name))
         } else {
-            Ok(())
+            HookAction::Continue
         }
+    }
+}
+
+/// Hook handler that modifies messages before LLM call.
+struct MessageModifierHook;
+
+#[async_trait]
+impl HookHandler for MessageModifierHook {
+    async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
+        let mut messages = ctx.messages.clone();
+        // Add a tracking message
+        if let Some(first) = messages.first_mut()
+            && first.role == claw::llm::Role::User
+        {
+            first.content = format!("[Modified by hook] {}", first.content);
+        }
+        HookAction::ModifyMessages(messages)
     }
 }
 
@@ -432,7 +450,6 @@ async fn test_hook_callbacks_are_invoked() {
     // Verify hooks were called in the right order
     let events = recording_handler.get_events();
     // We expect: BeforeToolCall, AfterToolCall, TurnEnd
-    // Note: Each handler is registered separately, so we get 3 calls to the same handler
     assert_eq!(events.len(), 3, "Expected 3 events, got: {:?}", events);
     assert_eq!(events[0].0, HookEvent::BeforeToolCall);
     assert_eq!(events[0].1, "counter");
@@ -638,4 +655,76 @@ async fn test_system_prompt_included() {
     // (it's expected to be added by the caller if needed)
     assert_eq!(output.messages.len(), 2);
     assert_eq!(output.messages[1].content, "Response with system prompt");
+}
+
+#[tokio::test]
+async fn test_before_call_llm_can_modify_messages() {
+    let responses = vec![ToolCompletionResponse {
+        content: Some("Response".to_string()),
+        reasoning_content: None,
+        tool_calls: vec![],
+        input_tokens: 30,
+        output_tokens: 10,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    }];
+
+    let provider = Arc::new(SequentialMockProvider::new(responses));
+
+    let hooks = Arc::new(HookRegistry::new());
+    hooks.register(HookEvent::BeforeCallLLM, Arc::new(MessageModifierHook));
+
+    let input = TurnInputBuilder::new()
+        .provider(provider)
+        .messages(vec![ChatMessage::user("Test message modification")])
+        .hooks(hooks)
+        .build();
+
+    let config = TurnConfig::default();
+    let output = execute_turn(input, config).await.unwrap();
+
+    // The hook should have modified the user message
+    assert!(output.messages[0].content.contains("[Modified by hook]"));
+}
+
+#[tokio::test]
+async fn test_before_call_llm_can_block() {
+    struct BlockingLlmHandler;
+
+    #[async_trait]
+    impl HookHandler for BlockingLlmHandler {
+        async fn on_before_call_llm(&self, _ctx: &BeforeCallLLMContext) -> HookAction {
+            HookAction::Block("LLM calls are disabled".to_string())
+        }
+    }
+
+    let responses = vec![ToolCompletionResponse {
+        content: Some("Should not reach".to_string()),
+        reasoning_content: None,
+        tool_calls: vec![],
+        input_tokens: 30,
+        output_tokens: 10,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    }];
+
+    let provider = Arc::new(SequentialMockProvider::new(responses));
+
+    let hooks = Arc::new(HookRegistry::new());
+    hooks.register(HookEvent::BeforeCallLLM, Arc::new(BlockingLlmHandler));
+
+    let input = TurnInputBuilder::new()
+        .provider(provider)
+        .messages(vec![ChatMessage::user("Test")])
+        .hooks(hooks)
+        .build();
+
+    let config = TurnConfig::default();
+    let result = execute_turn(input, config).await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(err, claw::agents::turn::TurnError::LlmCallBlocked { .. }));
 }

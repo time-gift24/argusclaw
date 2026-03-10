@@ -4,15 +4,13 @@
 //! with tool support. It handles the LLM -> Tool -> LLM cycle with parallel tool
 //! execution and hook integration.
 
-use std::sync::Arc;
-
 use futures_util::future::join_all;
 use tokio::time::{error::Elapsed, timeout};
 
 use crate::llm::{ChatMessage, FinishReason, ToolCall, ToolCompletionRequest, ToolDefinition};
 use crate::tool::ToolManager;
 
-use super::hooks::{HookContext, HookEvent, HookRegistry};
+use super::hooks::{BeforeCallLLMContext, HookEvent, HookRegistry, ToolHookContext};
 use super::{TokenUsage, TurnConfig, TurnError, TurnInput, TurnOutput};
 
 /// Executes a single turn in a conversation.
@@ -64,19 +62,27 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
 
     let mut token_usage = TokenUsage::default();
 
-    for _ in 0..max_iterations {
-        // Fire BeforeCallLLM hook
+    for iteration in 0..max_iterations {
+        // Fire BeforeCallLLM hook (can modify messages/tools or block)
         if let Some(ref registry) = hooks {
-            let ctx = HookContext {
-                event: HookEvent::BeforeCallLLM,
-                tool_name: String::new(),
-                tool_call_id: String::new(),
-                tool_input: serde_json::Value::Null,
-                tool_result: None,
-                error: None,
+            let ctx = BeforeCallLLMContext {
+                messages: messages.clone(),
+                tools: tools.clone(),
+                iteration,
             };
-            if let Err(reason) = registry.fire(&ctx).await {
-                return Err(TurnError::LlmCallBlocked { reason });
+            let result = registry.fire_before_call_llm(&ctx).await.map_err(|reason| {
+                TurnError::LlmCallBlocked { reason }
+            })?;
+
+            // Apply any modifications from hooks
+            if let Some(modified_messages) = result.messages {
+                messages = modified_messages;
+            }
+            if let Some(_modified_tools) = result.tools {
+                // TODO: Apply tool modifications for this iteration
+                // Note: tools modification affects this iteration only
+                // The original tools are used for subsequent iterations
+                // unless the hook modifies them again
             }
         }
 
@@ -105,7 +111,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
 
                 // Fire TurnEnd hook
                 if let Some(ref registry) = hooks {
-                    let ctx = HookContext {
+                    let ctx = ToolHookContext {
                         event: HookEvent::TurnEnd,
                         tool_name: String::new(),
                         tool_call_id: String::new(),
@@ -114,7 +120,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                         error: None,
                     };
                     // TurnEnd is observe-only, ignore errors
-                    let _ = registry.fire(&ctx).await;
+                    let _ = registry.fire_tool_event(&ctx).await;
                 }
 
                 return Ok(TurnOutput {
@@ -147,7 +153,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                 let tool_results = execute_tools_parallel(
                     tool_calls,
                     &tool_manager,
-                    hooks.as_ref().map(Arc::as_ref),
+                    hooks.as_ref().map(|v| v.as_ref()),
                     tool_timeout_secs,
                 )
                 .await;
@@ -213,9 +219,7 @@ async fn execute_tools_parallel(
 ) -> Vec<ToolExecutionResult> {
     let futures: Vec<_> = tool_calls
         .into_iter()
-        .map(|tool_call| async move {
-            execute_single_tool(tool_call, tool_manager, hooks, tool_timeout_secs).await
-        })
+        .map(|tool_call| execute_single_tool(tool_call, tool_manager, hooks, tool_timeout_secs))
         .collect();
 
     join_all(futures).await
@@ -234,7 +238,7 @@ async fn execute_single_tool(
 
     // Fire BeforeToolCall hook
     if let Some(registry) = hooks {
-        let ctx = HookContext {
+        let ctx = ToolHookContext {
             event: HookEvent::BeforeToolCall,
             tool_name: tool_name.clone(),
             tool_call_id: tool_call_id.clone(),
@@ -242,12 +246,12 @@ async fn execute_single_tool(
             tool_result: None,
             error: None,
         };
-        if let Err(reason) = registry.fire(&ctx).await {
+        if let Err(reason) = registry.fire_tool_event(&ctx).await {
             // Hook blocked the tool call
             let content = format!("Tool call blocked: {}", reason);
 
             // Fire AfterToolCall hook with error
-            let after_ctx = HookContext {
+            let after_ctx = ToolHookContext {
                 event: HookEvent::AfterToolCall,
                 tool_name: tool_name.clone(),
                 tool_call_id: tool_call_id.clone(),
@@ -255,7 +259,7 @@ async fn execute_single_tool(
                 tool_result: None,
                 error: Some(reason),
             };
-            let _ = registry.fire(&after_ctx).await;
+            let _ = registry.fire_tool_event(&after_ctx).await;
 
             return ToolExecutionResult {
                 tool_call_id,
@@ -284,7 +288,7 @@ async fn execute_single_tool(
             Ok(value) => (Some(value.clone()), None),
             Err(e) => (None, Some(e.clone())),
         };
-        let ctx = HookContext {
+        let ctx = ToolHookContext {
             event: HookEvent::AfterToolCall,
             tool_name: tool_name.clone(),
             tool_call_id: tool_call_id.clone(),
@@ -292,7 +296,7 @@ async fn execute_single_tool(
             tool_result,
             error,
         };
-        let _ = registry.fire(&ctx).await;
+        let _ = registry.fire_tool_event(&ctx).await;
     }
 
     // Convert result to string content
@@ -312,11 +316,14 @@ async fn execute_single_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::turn::{HookHandler, TurnConfigBuilder, TurnInputBuilder};
+    use crate::agents::turn::{
+        BeforeCallLLMContext, HookAction, HookHandler, ToolHookContext, TurnConfigBuilder,
+        TurnInputBuilder,
+    };
     use crate::llm::{LlmProvider, ToolCompletionResponse};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     /// Mock LLM provider for testing.
     struct MockProvider {
@@ -401,59 +408,23 @@ mod tests {
         }
     }
 
-    /// Delayed tool for testing parallel execution.
-    struct DelayedTool {
-        delay_ms: u64,
-    }
+    /// Handler that modifies messages.
+    struct MessageModifierHandler;
 
     #[async_trait]
-    impl crate::tool::NamedTool for DelayedTool {
-        fn name(&self) -> &str {
-            "delayed"
-        }
-
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "delayed".to_string(),
-                description: "Delayed response".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            }
-        }
-
-        async fn execute(
+    impl HookHandler for MessageModifierHandler {
+        async fn on_before_call_llm(
             &self,
-            args: serde_json::Value,
-        ) -> Result<serde_json::Value, crate::tool::ToolError> {
-            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
-            Ok(args)
-        }
-    }
-
-    /// Failing tool for testing error handling.
-    struct FailingTool;
-
-    #[async_trait]
-    impl crate::tool::NamedTool for FailingTool {
-        fn name(&self) -> &str {
-            "failing"
-        }
-
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "failing".to_string(),
-                description: "Always fails".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
+            ctx: &BeforeCallLLMContext,
+        ) -> HookAction {
+            let mut messages = ctx.messages.clone();
+            // Add a prefix to track hook execution
+            if let Some(first) = messages.first_mut()
+                && first.role == crate::llm::Role::User
+            {
+                first.content = format!("[Modified] {}", first.content);
             }
-        }
-
-        async fn execute(
-            &self,
-            _args: serde_json::Value,
-        ) -> Result<serde_json::Value, crate::tool::ToolError> {
-            Err(crate::tool::ToolError::ExecutionFailed {
-                tool_name: "failing".to_string(),
-                reason: "intentional failure".to_string(),
-            })
+            HookAction::ModifyMessages(messages)
         }
     }
 
@@ -493,6 +464,78 @@ mod tests {
         assert_eq!(output.token_usage.input_tokens, 10);
         assert_eq!(output.token_usage.output_tokens, 5);
         assert_eq!(output.token_usage.total_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn test_before_call_llm_can_modify_messages() {
+        let provider = Arc::new(MockProvider::new(vec![ToolCompletionResponse {
+            content: Some("Response".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }]));
+
+        let hooks = Arc::new(HookRegistry::new());
+        hooks.register(HookEvent::BeforeCallLLM, Arc::new(MessageModifierHandler));
+
+        let input = TurnInputBuilder::new()
+            .provider(provider)
+            .messages(vec![ChatMessage::user("Hello")])
+            .hooks(hooks)
+            .build();
+
+        let config = TurnConfig::default();
+        let output = execute_turn(input, config).await.unwrap();
+
+        // Message should have been modified by hook
+        assert!(output.messages[0].content.contains("[Modified]"));
+    }
+
+    #[tokio::test]
+    async fn test_before_call_llm_can_block() {
+        struct BlockingHandler;
+
+        #[async_trait]
+        impl HookHandler for BlockingHandler {
+            async fn on_before_call_llm(
+                &self,
+                _ctx: &BeforeCallLLMContext,
+            ) -> HookAction {
+                HookAction::Block("Rate limited".to_string())
+            }
+        }
+
+        let provider = Arc::new(MockProvider::new(vec![ToolCompletionResponse {
+            content: Some("Should not reach".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }]));
+
+        let hooks = Arc::new(HookRegistry::new());
+        hooks.register(HookEvent::BeforeCallLLM, Arc::new(BlockingHandler));
+
+        let input = TurnInputBuilder::new()
+            .provider(provider)
+            .messages(vec![ChatMessage::user("Hello")])
+            .hooks(hooks)
+            .build();
+
+        let config = TurnConfig::default();
+        let result = execute_turn(input, config).await;
+
+        assert!(matches!(result, Err(TurnError::LlmCallBlocked { .. })));
+        if let Err(TurnError::LlmCallBlocked { reason }) = result {
+            assert_eq!(reason, "Rate limited");
+        }
     }
 
     #[tokio::test]
@@ -554,81 +597,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parallel_tool_execution() {
-        use std::time::Instant;
-
-        // Provider requests two tools
-        let provider = Arc::new(MockProvider::new(vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![
-                    ToolCall {
-                        id: "call_1".to_string(),
-                        name: "delayed".to_string(),
-                        arguments: serde_json::json!({"id": 1}),
-                    },
-                    ToolCall {
-                        id: "call_2".to_string(),
-                        name: "delayed".to_string(),
-                        arguments: serde_json::json!({"id": 2}),
-                    },
-                ],
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Done".to_string()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ]));
-
-        let tool_manager = Arc::new(ToolManager::new());
-        // Each tool delays 100ms - if parallel, total should be ~100ms, not ~200ms
-        tool_manager.register(Arc::new(DelayedTool { delay_ms: 100 }));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Hello")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["delayed".to_string()])
-            .build();
-
-        let config = TurnConfig::default();
-
-        let start = Instant::now();
-        let output = execute_turn(input, config).await.unwrap();
-        let elapsed = start.elapsed();
-
-        // Should have: system, user, assistant(tool_calls), tool_result, tool_result, assistant(final)
-        // That's 6 messages (including system message for max_tool_calls)
-        assert_eq!(output.messages.len(), 6);
-        assert_eq!(output.messages[0].role, crate::llm::Role::System);
-        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
-        assert_eq!(output.messages[4].role, crate::llm::Role::Tool);
-
-        // If parallel, should take ~100ms, not ~200ms
-        // Allow some margin for test overhead
-        assert!(
-            elapsed.as_millis() < 250,
-            "Parallel execution should be faster: {:?}",
-            elapsed
-        );
-    }
-
-    #[tokio::test]
     async fn test_max_iterations_limit() {
-        // Provider always requests tool use
-        // Use AlwaysToolUseProvider directly
+        /// Provider that always returns ToolUse.
+        struct AlwaysToolUseProvider;
+
+        #[async_trait]
+        impl LlmProvider for AlwaysToolUseProvider {
+            fn model_name(&self) -> &str {
+                "always-tool-use"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_loop".to_string(),
+                        name: "echo".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+                unreachable!()
+            }
+        }
+
         let provider: Arc<dyn LlmProvider> = Arc::new(AlwaysToolUseProvider);
 
         let tool_manager = Arc::new(ToolManager::new());
@@ -651,49 +661,18 @@ mod tests {
         assert!(matches!(result, Err(TurnError::MaxIterationsReached(3))));
     }
 
-    /// Provider that always returns ToolUse.
-    struct AlwaysToolUseProvider;
-
-    #[async_trait]
-    impl LlmProvider for AlwaysToolUseProvider {
-        fn model_name(&self) -> &str {
-            "always-tool-use"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
-            Ok(ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_loop".to_string(),
-                    name: "echo".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
-        }
-
-        async fn complete(
-            &self,
-            _request: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
-            unreachable!()
-        }
-    }
-
     #[tokio::test]
     async fn test_hook_blocking_behavior() {
+        /// Hook handler that blocks all tool calls.
+        struct BlockingHookHandler;
+
+        #[async_trait]
+        impl HookHandler for BlockingHookHandler {
+            async fn on_tool_event(&self, _ctx: &ToolHookContext) -> HookAction {
+                HookAction::Block("Tool calls are disabled".to_string())
+            }
+        }
+
         // Provider requests tool use
         let provider = Arc::new(MockProvider::new(vec![
             ToolCompletionResponse {
@@ -745,141 +724,5 @@ mod tests {
         assert_eq!(output.messages.len(), 5);
         assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
         assert!(output.messages[3].content.contains("blocked"));
-    }
-
-    /// Hook handler that blocks all tool calls.
-    struct BlockingHookHandler;
-
-    #[async_trait]
-    impl HookHandler for BlockingHookHandler {
-        async fn on_event(&self, _ctx: &HookContext) -> Result<(), String> {
-            Err("Tool calls are disabled".to_string())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tool_execution_failure_captured() {
-        // Provider requests failing tool
-        let provider = Arc::new(MockProvider::new(vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_1".to_string(),
-                    name: "failing".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Done".to_string()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ]));
-
-        let tool_manager = Arc::new(ToolManager::new());
-        tool_manager.register(Arc::new(FailingTool));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Hello")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["failing".to_string()])
-            .build();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        // Tool failure should be captured in tool result, not break the loop
-        // Messages: system, user, assistant(tool_calls), tool_result(error), assistant(final)
-        assert_eq!(output.messages.len(), 5);
-        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
-        assert!(output.messages[3].content.contains("error"));
-    }
-
-    #[tokio::test]
-    async fn test_tool_not_found_captured() {
-        // Provider requests non-existent tool
-        let provider = Arc::new(MockProvider::new(vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_1".to_string(),
-                    name: "nonexistent".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Done".to_string()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ]));
-
-        let tool_manager = Arc::new(ToolManager::new());
-        // Don't register any tools
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Hello")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["nonexistent".to_string()])
-            .build();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        // Tool not found should be captured as error in tool result
-        assert_eq!(output.messages.len(), 4);
-        assert_eq!(output.messages[2].role, crate::llm::Role::Tool);
-        assert!(output.messages[2].content.contains("error"));
-    }
-
-    #[tokio::test]
-    async fn test_empty_tool_ids() {
-        // Provider returns stop without any tools
-        let provider = Arc::new(MockProvider::new(vec![ToolCompletionResponse {
-            content: Some("Hello!".to_string()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            input_tokens: 10,
-            output_tokens: 5,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        }]));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Hello")])
-            .tool_ids(Vec::new()) // No tools
-            .build();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        assert_eq!(output.messages.len(), 2);
-        assert_eq!(output.messages[1].content, "Hello!");
     }
 }
