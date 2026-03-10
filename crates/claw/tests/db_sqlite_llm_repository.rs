@@ -1,7 +1,7 @@
-use agent::db::llm::{
+use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
 };
-use agent::db::sqlite::{SqliteLlmProviderRepository, migrate};
+use claw::db::sqlite::{SqliteLlmProviderRepository, migrate};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 
