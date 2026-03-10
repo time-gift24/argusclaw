@@ -3,7 +3,7 @@ use std::env;
 #[cfg(feature = "dev")]
 mod dev;
 
-use agent::Agent;
+use claw::AppContext;
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
@@ -11,14 +11,14 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     init_tracing();
 
-    let agent = Agent::init(env::var("DATABASE_URL").ok()).await?;
+    let ctx = AppContext::init(env::var("DATABASE_URL").ok()).await?;
 
     #[cfg(feature = "dev")]
-    if dev::try_run(agent.clone()).await? {
+    if dev::try_run(ctx.clone()).await? {
         return Ok(());
     }
 
-    let provider_count = agent.llm_manager().list_providers().await?.len();
+    let provider_count = ctx.llm_manager().list_providers().await?.len();
 
     tracing::info!(provider_count, "argusclaw initialized");
 
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
 
 fn init_tracing() {
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("argusclaw=info,agent=info"));
+        .unwrap_or_else(|_| EnvFilter::new("argusclaw=info,claw=info"));
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
