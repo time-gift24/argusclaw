@@ -59,3 +59,29 @@ pub enum LlmError {
         capability: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    const UPSTREAM_URL: &str = "https://github.com/nearai/ironclaw";
+    const UPSTREAM_COMMIT: &str = "bcef04b82108222c9041e733de459130badd4cd7";
+    const UPSTREAM_LICENSE: &str = "MIT OR Apache-2.0";
+
+    #[test]
+    fn vendored_error_file_includes_provenance_header() {
+        let error = include_str!("error.rs");
+
+        assert!(error.contains(UPSTREAM_URL));
+        assert!(error.contains(UPSTREAM_COMMIT));
+        assert!(error.contains(UPSTREAM_LICENSE));
+    }
+
+    #[test]
+    fn third_party_notice_mentions_error_file() {
+        let notice = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/llm/THIRD_PARTY_NOTICES.md"
+        ));
+
+        assert!(notice.contains("crates/agent/src/llm/error.rs"));
+    }
+}

@@ -523,6 +523,10 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
+    const UPSTREAM_URL: &str = "https://github.com/nearai/ironclaw";
+    const UPSTREAM_COMMIT: &str = "bcef04b82108222c9041e733de459130badd4cd7";
+    const UPSTREAM_LICENSE: &str = "MIT OR Apache-2.0";
+
     struct StubStream;
 
     impl Stream for StubStream {
@@ -772,5 +776,24 @@ mod tests {
             .await
             .expect("override should return a stream");
         let _stream: LlmEventStream = stream;
+    }
+
+    #[test]
+    fn vendored_provider_file_includes_provenance_header() {
+        let provider = include_str!("provider.rs");
+
+        assert!(provider.contains(UPSTREAM_URL));
+        assert!(provider.contains(UPSTREAM_COMMIT));
+        assert!(provider.contains(UPSTREAM_LICENSE));
+    }
+
+    #[test]
+    fn third_party_notice_mentions_provider_file() {
+        let notice = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/llm/THIRD_PARTY_NOTICES.md"
+        ));
+
+        assert!(notice.contains("crates/agent/src/llm/provider.rs"));
     }
 }

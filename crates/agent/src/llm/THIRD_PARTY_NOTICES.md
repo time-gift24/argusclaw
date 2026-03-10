@@ -1,0 +1,42 @@
+# Third-Party Notices
+
+## nearai/ironclaw llm core
+
+- Source repository: https://github.com/nearai/ironclaw
+- Upstream commit: `bcef04b82108222c9041e733de459130badd4cd7`
+- License: `MIT OR Apache-2.0`
+- Imported files:
+- `crates/agent/src/llm/provider.rs`
+- `crates/agent/src/llm/error.rs`
+- `crates/agent/src/llm/retry.rs`
+- Local modifications:
+- `provider.rs`
+  - Kept as ArgusClaw's stable `crate::llm` facade
+  - Retained only the provider-agnostic API surface needed by this crate
+  - Added SSE-style streaming abstractions used by ArgusClaw providers:
+    - `LlmEventStream`
+    - `LlmStreamEvent`
+    - `ToolCallDelta`
+    - `stream_complete()`
+    - `stream_complete_with_tools()`
+  - Added runtime model-selection and metadata helpers on `LlmProvider`:
+    - `list_models()`
+    - `model_metadata()`
+    - `effective_model_name()`
+    - `active_model_name()`
+    - `set_model()`
+  - Added provider-side cost helpers:
+    - `calculate_cost()`
+    - `cache_write_multiplier()`
+    - `cache_read_discount()`
+  - Retained and tested `sanitize_tool_messages()` as the provider-agnostic message sanitation layer used before provider calls
+- `error.rs`
+  - Reduced to a smaller provider-agnostic error surface
+  - Excluded transport-specific conversions from concrete provider crates
+  - Kept only shared variants used across ArgusClaw-managed providers
+- `retry.rs`
+  - Adapted retry decoration to ArgusClaw's reduced `LlmError` surface
+  - Extended retry setup to `stream_complete` and `stream_complete_with_tools`
+  - Forwarded runtime model-selection and cost helper methods through the retry wrapper
+- Excluded upstream provider implementations, routing, cache, registry, and session modules
+- Added explicit provenance headers and repository metadata for auditability
