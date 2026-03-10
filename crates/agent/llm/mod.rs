@@ -1,5 +1,6 @@
 pub mod error;
 pub mod provider;
+pub mod retry;
 
 pub use error::LlmError;
 pub use provider::{
@@ -8,3 +9,4 @@ pub use provider::{
     ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
     sanitize_tool_messages,
 };
+pub use retry::{RetryConfig, RetryProvider};

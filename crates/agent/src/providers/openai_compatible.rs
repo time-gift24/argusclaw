@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmError,
-    LlmEventStream, LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCallDelta,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    LlmEventStream, LlmProvider, LlmStreamEvent, RetryConfig, RetryProvider, Role, ToolCall,
+    ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,39 @@ impl OpenAiCompatibleConfig {
     ) -> Self {
         self.extra_headers.insert(name.into(), value.into());
         self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatibleFactoryConfig {
+    pub provider: OpenAiCompatibleConfig,
+    pub retry: Option<RetryConfig>,
+}
+
+impl OpenAiCompatibleFactoryConfig {
+    #[must_use]
+    pub fn new(provider: OpenAiCompatibleConfig) -> Self {
+        Self {
+            provider,
+            retry: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = Some(retry);
+        self
+    }
+}
+
+pub fn create_openai_compatible_provider(
+    config: OpenAiCompatibleFactoryConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let provider: Arc<dyn LlmProvider> = Arc::new(OpenAiCompatibleProvider::new(config.provider)?);
+    if let Some(retry) = config.retry {
+        Ok(Arc::new(RetryProvider::new(provider, retry)))
+    } else {
+        Ok(provider)
     }
 }
 
@@ -665,5 +699,20 @@ mod tests {
         let config = OpenAiCompatibleConfig::new("https://example.com/v1", "key", "model")
             .with_extra_header("x-test", "1");
         assert_eq!(config.extra_headers.get("x-test"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn factory_can_wrap_provider_with_retry() {
+        let config = OpenAiCompatibleFactoryConfig::new(OpenAiCompatibleConfig::new(
+            "https://example.com/v1",
+            "key",
+            "model",
+        ))
+        .with_retry(RetryConfig { max_retries: 2 });
+
+        let provider =
+            create_openai_compatible_provider(config).expect("factory should build provider");
+
+        assert_eq!(provider.model_name(), "model");
     }
 }

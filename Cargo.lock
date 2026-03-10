@@ -10,6 +10,7 @@ dependencies = [
  "eventsource-stream",
  "futures-core",
  "futures-util",
+ "rand 0.8.5",
  "reqwest",
  "rust_decimal",
  "serde",

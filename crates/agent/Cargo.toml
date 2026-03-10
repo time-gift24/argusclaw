@@ -7,16 +7,18 @@ edition = "2024"
 source = "https://github.com/nearai/ironclaw"
 commit = "bcef04b82108222c9041e733de459130badd4cd7"
 license = "MIT OR Apache-2.0"
-files = ["llm/provider.rs", "llm/error.rs"]
-notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use as ArgusClaw's stable llm facade."
+files = ["llm/provider.rs", "llm/error.rs", "llm/retry.rs"]
+notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use as ArgusClaw's stable llm facade, including retry decoration."
 
 [dependencies]
 async-trait = "0.1"
 futures-core = "0.3"
+rand = "0.8"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.18"
+tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
 eventsource-stream = { version = "0.2", optional = true }
 futures-util = { version = "0.3", optional = true }

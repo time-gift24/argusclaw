@@ -8,7 +8,9 @@
 - Imported files:
 - `crates/agent/llm/provider.rs`
 - `crates/agent/llm/error.rs`
+- `crates/agent/llm/retry.rs`
 - Local modifications:
 - Reduced to ArgusClaw's provider-agnostic `crate::llm` core API.
-- Excluded upstream provider implementations, routing, retry, cache, registry, and session modules.
+- Adapted retry decoration to ArgusClaw's reduced `LlmError` surface and streaming setup methods.
+- Excluded upstream provider implementations, routing, cache, registry, and session modules.
 - Added explicit provenance headers and repository metadata for auditability.
