@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmError,
     LlmEventStream, LlmProvider, LlmStreamEvent, RetryConfig, RetryProvider, Role, ToolCall,
-    ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ThinkingConfig, ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 #[derive(Debug, Clone)]
@@ -196,6 +196,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         Ok(CompletionResponse {
             content: choice.message.content.unwrap_or_default(),
+            reasoning_content: choice.message.reasoning_content,
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             finish_reason: parse_finish_reason(choice.finish_reason.as_deref()),
@@ -233,6 +234,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         Ok(ToolCompletionResponse {
             content: choice.message.content,
+            reasoning_content: choice.message.reasoning_content,
             tool_calls: choice
                 .message
                 .tool_calls
@@ -302,6 +304,8 @@ struct ChatCompletionsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAiToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
@@ -323,6 +327,7 @@ impl ChatCompletionsRequest {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stop: request.stop_sequences,
+            thinking: request.thinking,
             tools: None,
             tool_choice: None,
             stream,
@@ -347,6 +352,7 @@ impl ChatCompletionsRequest {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stop: None,
+            thinking: request.thinking,
             tools: Some(
                 request
                     .tools
@@ -499,6 +505,7 @@ struct ChatCompletionChoice {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionMessage {
     content: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
@@ -636,6 +643,40 @@ async fn map_http_error(response: reqwest::Response) -> LlmError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_completions_request_serializes_thinking() {
+        let request = CompletionRequest::new(vec![ChatMessage::user("hi")])
+            .with_thinking(ThinkingConfig::enabled().with_clear_thinking(false));
+
+        let body = ChatCompletionsRequest::from_completion_request("glm-5", request, false);
+        let json = serde_json::to_value(body).expect("request should serialize");
+
+        assert_eq!(json["thinking"]["type"], "enabled");
+        assert_eq!(json["thinking"]["clear_thinking"], false);
+    }
+
+    #[test]
+    fn chat_completion_message_deserializes_reasoning_content() {
+        let payload: ChatCompletionResponse = serde_json::from_str(
+            r#"{
+              "choices": [{
+                "message": {
+                  "content": "final answer",
+                  "reasoning_content": "hidden chain"
+                },
+                "finish_reason": "stop"
+              }],
+              "usage": { "prompt_tokens": 3, "completion_tokens": 5 }
+            }"#,
+        )
+        .expect("response should deserialize");
+
+        assert_eq!(
+            payload.choices[0].message.reasoning_content.as_deref(),
+            Some("hidden chain")
+        );
+    }
 
     #[test]
     fn parse_stream_frame_extracts_content_delta() {
