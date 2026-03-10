@@ -1,6 +1,9 @@
-//! Tool module: defines NamedTool trait and ToolManager for agent/LLM tool management.
+//! Tool module: defines NamedTool trait and ToolError for agent/LLM tool management.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 
 use crate::llm::ToolDefinition;
 
@@ -27,4 +30,54 @@ pub trait NamedTool: Send + Sync {
 
     /// Execute the tool with the provided arguments.
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
+}
+
+/// Registry for tools with concurrent access support.
+pub struct ToolManager {
+    tools: DashMap<String, Arc<dyn NamedTool>>,
+}
+
+impl ToolManager {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tools: DashMap::new(),
+        }
+    }
+
+    /// Register a tool. Overwrites if tool with same name already exists.
+    pub fn register(&self, tool: Arc<dyn NamedTool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Get a tool by name.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn NamedTool>> {
+        self.tools.get(name).map(|v| v.clone())
+    }
+
+    /// List all registered tool definitions for LLM consumption.
+    pub fn list_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.iter().map(|e| e.definition()).collect()
+    }
+
+    /// Execute a tool by name with the provided arguments.
+    pub async fn execute(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolError> {
+        let tool = self.get(name).ok_or_else(|| ToolError::NotFound {
+            id: name.to_string(),
+        })?;
+        tool.execute(args).await.map_err(|e| match e {
+            ToolError::ExecutionFailed { .. } => e,
+            ToolError::NotFound { .. } => e,
+        })
+    }
+}
+
+impl Default for ToolManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
