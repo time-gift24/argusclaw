@@ -15,12 +15,14 @@ use crate::tool::ToolManager;
 ///
 /// Controls the behavior of a turn execution, including limits on tool calls,
 /// timeouts, and iteration counts.
-///
-/// Note: `max_tool_calls` is currently not enforced. Use `max_iterations` to
-/// limit the total number of LLM -> Tool -> LLM cycles.
 #[derive(Debug, Clone, Builder)]
 pub struct TurnConfig {
-    /// Maximum tool calls per turn (not yet enforced).
+    /// Maximum tool calls per LLM response.
+    ///
+    /// When set, limits the number of tool calls executed from a single LLM response.
+    /// If the LLM requests more tools than this limit, only the first N tools are executed,
+    /// forcing the LLM to proceed step-by-step in subsequent iterations.
+    /// Set to `None` or `Some(0)` to allow unlimited parallel tool calls.
     #[builder(default = Some(10))]
     pub max_tool_calls: Option<u32>,
     /// Maximum duration for a single tool execution (seconds).

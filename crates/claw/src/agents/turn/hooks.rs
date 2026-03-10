@@ -6,6 +6,8 @@ use std::sync::Arc;
 /// Hook event types that can be intercepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookEvent {
+    /// Fires before calling the LLM. Handler can block by returning Err.
+    BeforeCallLLM,
     /// Fires before a tool call. Handler can block by returning Err.
     BeforeToolCall,
     /// Fires after a tool call completes. Observe-only.
@@ -61,13 +63,13 @@ impl HookRegistry {
 
     /// Fire all handlers for an event.
     ///
-    /// For `BeforeToolCall`, the first Err stops execution and returns the reason.
+    /// For `BeforeCallLLM` and `BeforeToolCall`, the first Err stops execution and returns the reason.
     /// For other events, errors are logged but don't propagate.
     pub async fn fire(&self, ctx: &HookContext) -> Result<(), String> {
         if let Some(handlers) = self.handlers.get(&ctx.event) {
             for handler in handlers.iter() {
                 if let Err(reason) = handler.on_event(ctx).await {
-                    if ctx.event == HookEvent::BeforeToolCall {
+                    if matches!(ctx.event, HookEvent::BeforeCallLLM | HookEvent::BeforeToolCall) {
                         return Err(reason);
                     }
                     tracing::warn!(

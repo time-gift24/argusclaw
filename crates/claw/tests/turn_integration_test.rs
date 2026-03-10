@@ -281,16 +281,17 @@ async fn test_turn_with_multiple_tool_calls() {
     let config = TurnConfig::default();
     let output = execute_turn(input, config).await.unwrap();
 
-    // Verify message structure: user -> assistant (tool_calls) -> tool_result -> tool_result -> assistant (final)
-    assert_eq!(output.messages.len(), 5);
-    assert_eq!(output.messages[0].role, claw::llm::Role::User);
-    assert_eq!(output.messages[1].role, claw::llm::Role::Assistant);
-    assert!(output.messages[1].tool_calls.is_some());
-    assert_eq!(output.messages[1].tool_calls.as_ref().unwrap().len(), 2);
-    assert_eq!(output.messages[2].role, claw::llm::Role::Tool);
+    // Verify message structure: system -> user -> assistant (tool_calls) -> tool_result -> tool_result -> assistant (final)
+    assert_eq!(output.messages.len(), 6);
+    assert_eq!(output.messages[0].role, claw::llm::Role::System);
+    assert_eq!(output.messages[1].role, claw::llm::Role::User);
+    assert_eq!(output.messages[2].role, claw::llm::Role::Assistant);
+    assert!(output.messages[2].tool_calls.is_some());
+    assert_eq!(output.messages[2].tool_calls.as_ref().unwrap().len(), 2);
     assert_eq!(output.messages[3].role, claw::llm::Role::Tool);
-    assert_eq!(output.messages[4].role, claw::llm::Role::Assistant);
-    assert_eq!(output.messages[4].content, "Done!");
+    assert_eq!(output.messages[4].role, claw::llm::Role::Tool);
+    assert_eq!(output.messages[5].role, claw::llm::Role::Assistant);
+    assert_eq!(output.messages[5].content, "Done!");
 
     // Verify token usage is accumulated across both LLM calls
     assert_eq!(output.token_usage.input_tokens, 180); // 100 + 80
@@ -362,8 +363,8 @@ async fn test_parallel_tool_execution_timing() {
         elapsed
     );
 
-    // Verify we have the correct message structure
-    assert_eq!(output.messages.len(), 5);
+    // Verify we have the correct message structure (including system message)
+    assert_eq!(output.messages.len(), 6);
     assert_eq!(output.token_usage.total_tokens, 145); // 50+20+60+15
 }
 
@@ -425,8 +426,8 @@ async fn test_hook_callbacks_are_invoked() {
     // Verify the tool was actually called
     assert_eq!(counter_tool.get_count(), 1);
 
-    // Verify output structure
-    assert_eq!(output.messages.len(), 4);
+    // Verify output structure (including system message for max_tool_calls)
+    assert_eq!(output.messages.len(), 5);
 
     // Verify hooks were called in the right order
     let events = recording_handler.get_events();
@@ -499,8 +500,9 @@ async fn test_hook_can_block_tool_execution() {
     assert_eq!(counter_tool.get_count(), 0);
 
     // Verify the tool result message contains blocked info
-    assert_eq!(output.messages[2].role, claw::llm::Role::Tool);
-    assert!(output.messages[2].content.contains("blocked"));
+    // Messages: system, user, assistant(tool_calls), tool_result(blocked), assistant(final)
+    assert_eq!(output.messages[3].role, claw::llm::Role::Tool);
+    assert!(output.messages[3].content.contains("blocked"));
 }
 
 #[tokio::test]
@@ -563,9 +565,9 @@ async fn test_multiple_iterations_with_tools() {
     let config = TurnConfig::default();
     let output = execute_turn(input, config).await.unwrap();
 
-    // Verify message structure:
-    // user -> assistant(tool_calls) -> tool_result -> assistant(tool_calls) -> tool_result -> assistant(final)
-    assert_eq!(output.messages.len(), 6);
+    // Verify message structure (including system message):
+    // system -> user -> assistant(tool_calls) -> tool_result -> assistant(tool_calls) -> tool_result -> assistant(final)
+    assert_eq!(output.messages.len(), 7);
 
     // Verify token usage accumulated across all three LLM calls
     assert_eq!(output.token_usage.input_tokens, 180); // 50 + 60 + 70

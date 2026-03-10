@@ -39,7 +39,13 @@ crates/
 │   │   ├── error.rs                  # 顶层错误类型
 │   │   ├── claw.rs                   # AppContext；拥有 LLMManager、AgentManager
 │   │   ├── agents/                   # Agent 管理
-│   │   │   └── mod.rs                # AgentManager (占位)
+│   │   │   ├── mod.rs                # AgentManager (占位)
+│   │   │   └── turn/                 # Turn 执行模块
+│   │   │       ├── mod.rs            # Turn 模块入口和重导出
+│   │   │       ├── config.rs         # TurnConfig, TurnInput, TurnOutput, TokenUsage
+│   │   │       ├── error.rs          # TurnError 类型
+│   │   │       ├── hooks.rs          # Hook 系统 (HookEvent, HookHandler, HookRegistry)
+│   │   │       └── execution.rs      # execute_turn 及并行工具支持
 │   │   ├── db/                       # 存储抽象和实现
 │   │   │   ├── mod.rs                # DB 模块入口和共享错误
 │   │   │   ├── llm.rs                # LLM 提供商记录和仓库 trait
@@ -60,6 +66,7 @@ crates/
 │   │       └── mod.rs                # NamedTool trait、ToolManager、ToolError
 │   ├── migrations/                   # SQLx 迁移
 │   └── tests/                        # E2E 测试；不适合内联测试的多模块场景
+│       └── turn_integration_test.rs  # Turn 模块集成测试
 ├── desktop/                          # Tauri + React + TypeScript + Vite + Tailwind CSS v4
 │   ├── src/                         # React 前端
 │   └── src-tauri/                    # Rust 后端
@@ -86,3 +93,13 @@ crates/
 - `NamedTool` trait：`name()`、`definition()`、`execute()` — 用于 Agent/LLM 工具抽象
 - `ToolManager`：基于 DashMap 的注册表，包含 `register()`、`get()`、`list_definitions()`、`execute()`
 - 复用 `llm/provider.rs` 中的 `ToolDefinition`（单一事实来源）
+
+## Turn 模块
+
+- 单次 turn 执行（LLM → Tool → LLM 循环），支持并行工具调用
+- `TurnConfig`：配置 max_tool_calls、tool_timeout_secs、max_iterations
+- `TurnInput`：messages、system_prompt、provider、tool_manager、tool_ids、hooks
+- `TurnOutput`：更新后的消息历史和 token 使用统计
+- `TurnError`：LLM 失败、工具执行、hooks、限制等错误类型
+- `HookRegistry`：可扩展的 hook 系统
+- `execute_turn()`：turn 执行的主入口

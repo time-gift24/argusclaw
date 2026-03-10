@@ -45,11 +45,41 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
         .collect();
 
     let max_iterations = config.max_iterations.unwrap_or(50);
+    let max_tool_calls = config.max_tool_calls;
     let tool_timeout_secs = config.tool_timeout_secs.unwrap_or(120);
+
+    // Add system message about max_tool_calls if configured and tools are available
+    if let Some(max) = max_tool_calls
+        && !tools.is_empty()
+    {
+        let system_content = format!(
+            "IMPORTANT: You can only call at most {} tool(s) per response. \
+            If you need to call multiple tools, please proceed step by step - \
+            call tools one at a time and wait for the results before calling the next tool.",
+            max
+        );
+        // Prepend system message to messages
+        messages.insert(0, ChatMessage::system(system_content));
+    }
 
     let mut token_usage = TokenUsage::default();
 
-    for _iteration in 0..max_iterations {
+    for _ in 0..max_iterations {
+        // Fire BeforeCallLLM hook
+        if let Some(ref registry) = hooks {
+            let ctx = HookContext {
+                event: HookEvent::BeforeCallLLM,
+                tool_name: String::new(),
+                tool_call_id: String::new(),
+                tool_input: serde_json::Value::Null,
+                tool_result: None,
+                error: None,
+            };
+            if let Err(reason) = registry.fire(&ctx).await {
+                return Err(TurnError::LlmCallBlocked { reason });
+            }
+        }
+
         // Build the request with current messages and tools
         let request = ToolCompletionRequest::new(messages.clone(), tools.clone());
 
@@ -93,16 +123,29 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                 });
             }
             FinishReason::ToolUse => {
+                // Limit tool calls based on max_tool_calls config
+                let tool_calls: Vec<ToolCall> = match config.max_tool_calls {
+                    Some(max) if response.tool_calls.len() > max as usize => {
+                        tracing::debug!(
+                            requested = response.tool_calls.len(),
+                            max_allowed = max,
+                            "Limiting tool calls per iteration"
+                        );
+                        response.tool_calls.into_iter().take(max as usize).collect()
+                    }
+                    _ => response.tool_calls,
+                };
+
                 // Add assistant message with tool_calls to history
                 let assistant_msg = ChatMessage::assistant_with_tool_calls(
                     response.content.clone(),
-                    response.tool_calls.clone(),
+                    tool_calls.clone(),
                 );
                 messages.push(assistant_msg);
 
                 // Execute tools in parallel
                 let tool_results = execute_tools_parallel(
-                    response.tool_calls,
+                    tool_calls,
                     &tool_manager,
                     hooks.as_ref().map(Arc::as_ref),
                     tool_timeout_secs,
@@ -495,14 +538,15 @@ mod tests {
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();
 
-        // Should have: user -> assistant (tool_calls) -> tool_result -> assistant (final)
-        assert_eq!(output.messages.len(), 4);
-        assert_eq!(output.messages[0].role, crate::llm::Role::User);
-        assert_eq!(output.messages[1].role, crate::llm::Role::Assistant);
-        assert!(output.messages[1].tool_calls.is_some());
-        assert_eq!(output.messages[2].role, crate::llm::Role::Tool);
-        assert_eq!(output.messages[3].role, crate::llm::Role::Assistant);
-        assert_eq!(output.messages[3].content, "Done after tool");
+        // Should have: system (max_tool_calls hint) -> user -> assistant (tool_calls) -> tool_result -> assistant (final)
+        assert_eq!(output.messages.len(), 5);
+        assert_eq!(output.messages[0].role, crate::llm::Role::System);
+        assert_eq!(output.messages[1].role, crate::llm::Role::User);
+        assert_eq!(output.messages[2].role, crate::llm::Role::Assistant);
+        assert!(output.messages[2].tool_calls.is_some());
+        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
+        assert_eq!(output.messages[4].role, crate::llm::Role::Assistant);
+        assert_eq!(output.messages[4].content, "Done after tool");
 
         // Token usage should accumulate
         assert_eq!(output.token_usage.input_tokens, 25);
@@ -565,11 +609,12 @@ mod tests {
         let output = execute_turn(input, config).await.unwrap();
         let elapsed = start.elapsed();
 
-        // Should have: user, assistant(tool_calls), tool_result, tool_result, assistant(final)
-        // That's 5 messages
-        assert_eq!(output.messages.len(), 5);
-        assert_eq!(output.messages[2].role, crate::llm::Role::Tool);
+        // Should have: system, user, assistant(tool_calls), tool_result, tool_result, assistant(final)
+        // That's 6 messages (including system message for max_tool_calls)
+        assert_eq!(output.messages.len(), 6);
+        assert_eq!(output.messages[0].role, crate::llm::Role::System);
         assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
+        assert_eq!(output.messages[4].role, crate::llm::Role::Tool);
 
         // If parallel, should take ~100ms, not ~200ms
         // Allow some margin for test overhead
@@ -696,9 +741,10 @@ mod tests {
         let output = execute_turn(input, config).await.unwrap();
 
         // Tool should have been blocked - tool result should contain blocked message
-        assert_eq!(output.messages.len(), 4);
-        assert_eq!(output.messages[2].role, crate::llm::Role::Tool);
-        assert!(output.messages[2].content.contains("blocked"));
+        // Messages: system, user, assistant(tool_calls), tool_result(blocked), assistant(final)
+        assert_eq!(output.messages.len(), 5);
+        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
+        assert!(output.messages[3].content.contains("blocked"));
     }
 
     /// Hook handler that blocks all tool calls.
@@ -755,9 +801,10 @@ mod tests {
         let output = execute_turn(input, config).await.unwrap();
 
         // Tool failure should be captured in tool result, not break the loop
-        assert_eq!(output.messages.len(), 4);
-        assert_eq!(output.messages[2].role, crate::llm::Role::Tool);
-        assert!(output.messages[2].content.contains("error"));
+        // Messages: system, user, assistant(tool_calls), tool_result(error), assistant(final)
+        assert_eq!(output.messages.len(), 5);
+        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
+        assert!(output.messages[3].content.contains("error"));
     }
 
     #[tokio::test]

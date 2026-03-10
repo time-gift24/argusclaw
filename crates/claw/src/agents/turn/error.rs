@@ -11,6 +11,10 @@ pub enum TurnError {
     #[error("LLM call failed: {0}")]
     LlmFailed(#[from] LlmError),
 
+    /// LLM call blocked by hook.
+    #[error("LLM call blocked by hook: {reason}")]
+    LlmCallBlocked { reason: String },
+
     /// Tool not found in registry.
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
@@ -77,6 +81,16 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("blocked"));
         assert!(msg.contains("unsafe operation"));
+    }
+
+    #[test]
+    fn test_llm_call_blocked_display() {
+        let err = TurnError::LlmCallBlocked {
+            reason: "rate limit exceeded".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("LLM call blocked"));
+        assert!(msg.contains("rate limit exceeded"));
     }
 
     #[test]
