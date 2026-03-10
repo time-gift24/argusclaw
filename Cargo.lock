@@ -319,6 +319,7 @@ dependencies = [
  "agent",
  "anyhow",
  "clap",
+ "futures-util",
  "serde",
  "tokio",
  "toml",

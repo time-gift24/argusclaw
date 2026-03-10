@@ -1,14 +1,17 @@
 #[cfg(feature = "dev")]
 pub mod config;
 
+use std::io::{self, Write};
 use std::path::Path;
 
 use agent::Agent;
 use agent::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
+use agent::llm::LlmStreamEvent;
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use futures_util::StreamExt;
 
 #[derive(Debug, Parser)]
 pub struct DevCli {
@@ -64,11 +67,10 @@ pub struct ProviderUpsertArgs {
 #[derive(Debug, Subcommand)]
 pub enum LlmCommand {
     Complete {
-        #[arg(long, required_unless_present = "default", conflicts_with = "default")]
+        #[arg(long)]
         provider: Option<String>,
         #[arg(long, default_value_t = false)]
-        default: bool,
-        #[arg(long)]
+        stream: bool,
         prompt: String,
     },
 }
@@ -157,6 +159,61 @@ pub fn render_provider_output(record: &ProviderDisplayRecord) -> String {
     )
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct StreamRenderState {
+    reasoning_started: bool,
+    summary_started: bool,
+}
+
+fn render_stream_event(state: &mut StreamRenderState, event: &LlmStreamEvent) -> Option<String> {
+    match event {
+        LlmStreamEvent::ReasoningDelta { delta } if !delta.is_empty() => {
+            let mut output = String::new();
+            if !state.reasoning_started {
+                output.push_str("[Reasoning] ");
+                state.reasoning_started = true;
+            }
+            output.push_str(delta);
+            Some(output)
+        }
+        LlmStreamEvent::ContentDelta { delta } if !delta.is_empty() => {
+            let mut output = String::new();
+            if !state.summary_started {
+                if state.reasoning_started {
+                    output.push('\n');
+                }
+                output.push_str("[Summary] ");
+                state.summary_started = true;
+            }
+            output.push_str(delta);
+            Some(output)
+        }
+        _ => None,
+    }
+}
+
+fn finish_stream_output(state: &StreamRenderState) -> Option<&'static str> {
+    (state.reasoning_started || state.summary_started).then_some("\n")
+}
+
+#[cfg(test)]
+pub fn render_stream_output(events: &[LlmStreamEvent]) -> String {
+    let mut state = StreamRenderState::default();
+    let mut output = String::new();
+
+    for event in events {
+        if let Some(chunk) = render_stream_event(&mut state, event) {
+            output.push_str(&chunk);
+        }
+    }
+
+    if let Some(suffix) = finish_stream_output(&state) {
+        output.push_str(suffix);
+    }
+
+    output
+}
+
 async fn run_provider_command(agent: Agent, command: ProviderCommand) -> Result<()> {
     match command {
         ProviderCommand::Import { file } => {
@@ -197,16 +254,31 @@ async fn run_llm_command(agent: Agent, command: LlmCommand) -> Result<()> {
     match command {
         LlmCommand::Complete {
             provider,
-            default,
+            stream,
             prompt,
         } => {
-            let provider_id = match (provider, default) {
-                (Some(id), false) => Some(LlmProviderId::new(id)),
-                (None, true) => None,
-                _ => return Err(anyhow!("either --provider or --default must be selected")),
-            };
-            let content = agent.complete_text(provider_id.as_ref(), prompt).await?;
-            println!("{content}");
+            let provider_id = provider.map(LlmProviderId::new);
+            if stream {
+                let mut events = agent.stream_text(provider_id.as_ref(), prompt).await?;
+                let mut render_state = StreamRenderState::default();
+                let mut stdout = io::stdout();
+
+                while let Some(event) = events.next().await {
+                    let event = event?;
+                    if let Some(chunk) = render_stream_event(&mut render_state, &event) {
+                        write!(stdout, "{chunk}").context("failed to write stream output")?;
+                        stdout.flush().context("failed to flush stream output")?;
+                    }
+                }
+
+                if let Some(suffix) = finish_stream_output(&render_state) {
+                    write!(stdout, "{suffix}").context("failed to write stream output")?;
+                    stdout.flush().context("failed to flush stream output")?;
+                }
+            } else {
+                let content = agent.complete_text(provider_id.as_ref(), prompt).await?;
+                println!("{content}");
+            }
         }
     }
 
@@ -216,12 +288,14 @@ async fn run_llm_command(agent: Agent, command: LlmCommand) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use clap::error::ErrorKind;
 
     use agent::db::llm::LlmProviderRecord;
+    use agent::llm::LlmStreamEvent;
 
     use super::{DevCli, DevCommand, LlmCommand, ProviderCommand};
-    use crate::dev::{ProviderDisplayRecord, ProviderUpsertArgs, render_provider_output};
+    use crate::dev::{
+        ProviderDisplayRecord, ProviderUpsertArgs, render_provider_output, render_stream_output,
+    };
 
     #[test]
     fn parses_provider_import_command() {
@@ -236,25 +310,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_llm_complete_command_with_provider_selector() {
+    fn parses_llm_complete_command_with_provider_selector_and_streaming() {
         let cli = DevCli::parse_from([
             "cli",
             "llm",
             "complete",
             "--provider",
             "openai",
-            "--prompt",
+            "--stream",
             "say hello",
         ]);
 
         match cli.command {
             DevCommand::Llm(LlmCommand::Complete {
                 provider,
-                default,
+                stream,
                 prompt,
             }) => {
                 assert_eq!(provider.as_deref(), Some("openai"));
-                assert!(!default);
+                assert!(stream);
                 assert_eq!(prompt, "say hello");
             }
             _ => panic!("llm complete command should parse"),
@@ -262,11 +336,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_llm_complete_without_provider_or_default() {
-        let err = DevCli::try_parse_from(["cli", "llm", "complete", "--prompt", "say hello"])
-            .expect_err("llm complete should require a provider selector");
+    fn parses_llm_complete_command_with_default_provider() {
+        let cli = DevCli::parse_from(["cli", "llm", "complete", "say hello"]);
 
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        match cli.command {
+            DevCommand::Llm(LlmCommand::Complete {
+                provider,
+                stream,
+                prompt,
+            }) => {
+                assert_eq!(provider, None);
+                assert!(!stream);
+                assert_eq!(prompt, "say hello");
+            }
+            _ => panic!("llm complete command should parse"),
+        }
     }
 
     #[test]
@@ -301,5 +385,25 @@ mod tests {
         let error =
             LlmProviderRecord::try_from(args).expect_err("invalid provider kind should fail");
         assert!(error.to_string().contains("invalid llm provider kind"));
+    }
+
+    #[test]
+    fn render_stream_output_formats_reasoning_and_summary_sections() {
+        let output = render_stream_output(&[
+            LlmStreamEvent::ReasoningDelta {
+                delta: "step 1".to_string(),
+            },
+            LlmStreamEvent::ReasoningDelta {
+                delta: " -> step 2".to_string(),
+            },
+            LlmStreamEvent::ContentDelta {
+                delta: "final answer".to_string(),
+            },
+        ]);
+
+        assert_eq!(
+            output,
+            "[Reasoning] step 1 -> step 2\n[Summary] final answer\n"
+        );
     }
 }

@@ -550,6 +550,7 @@ struct ChatCompletionChunkChoice {
 
 #[derive(Debug, Default, Deserialize)]
 struct ChatCompletionChunkDelta {
+    reasoning_content: Option<String>,
     content: Option<String>,
     reasoning_content: Option<String>,
     tool_calls: Option<Vec<ChatCompletionChunkToolCall>>,
@@ -593,6 +594,12 @@ fn parse_stream_frame(data: &str) -> Vec<Result<crate::llm::LlmStreamEvent, LlmE
     }
 
     for choice in chunk.choices {
+        if let Some(reasoning) = choice.delta.reasoning_content
+            && !reasoning.is_empty()
+        {
+            events.push(Ok(LlmStreamEvent::ReasoningDelta { delta: reasoning }));
+        }
+
         if let Some(content) = choice.delta.content
             && !content.is_empty()
         {
@@ -734,6 +741,23 @@ mod tests {
             events,
             vec![LlmStreamEvent::ContentDelta {
                 delta: "hello".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_stream_frame_extracts_reasoning_delta() {
+        let events = parse_stream_frame(
+            r#"{"choices":[{"delta":{"reasoning_content":"step by step"},"finish_reason":null}]}"#,
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("reasoning frame should parse");
+
+        assert_eq!(
+            events,
+            vec![LlmStreamEvent::ReasoningDelta {
+                delta: "step by step".to_string(),
             }]
         );
     }

@@ -6,7 +6,7 @@ use crate::db::llm::{
 use crate::error::AgentError;
 use crate::llm::LlmProvider;
 #[cfg(feature = "dev")]
-use crate::llm::{ChatMessage, CompletionRequest};
+use crate::llm::{ChatMessage, CompletionRequest, LlmEventStream};
 
 pub struct LLMManager {
     repository: Arc<dyn LlmProviderRepository>,
@@ -103,6 +103,24 @@ impl LLMManager {
         let response = provider.complete(request).await?;
 
         Ok(response.content)
+    }
+
+    #[cfg(feature = "dev")]
+    pub async fn stream_text(
+        &self,
+        provider_id: Option<&LlmProviderId>,
+        prompt: impl Into<String>,
+    ) -> Result<LlmEventStream, AgentError> {
+        let provider = match provider_id {
+            Some(id) => self.get_provider(id).await?,
+            None => self.get_default_provider().await?,
+        };
+        let request = CompletionRequest::new(vec![ChatMessage::user(prompt.into())]);
+
+        provider
+            .stream_complete(request)
+            .await
+            .map_err(AgentError::from)
     }
 
     fn build_provider(

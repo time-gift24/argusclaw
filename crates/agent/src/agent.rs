@@ -6,6 +6,8 @@ use crate::db::llm::{LlmProviderId, LlmProviderRecord};
 use crate::db::sqlite::{SqliteLlmProviderRepository, connect, connect_path, migrate};
 use crate::error::AgentError;
 use crate::llm::LLMManager;
+#[cfg(feature = "dev")]
+use crate::llm::LlmEventStream;
 
 #[derive(Clone)]
 pub struct Agent {
@@ -78,6 +80,15 @@ impl Agent {
         prompt: impl Into<String>,
     ) -> Result<String, AgentError> {
         self.llm_manager.complete_text(provider_id, prompt).await
+    }
+
+    #[cfg(feature = "dev")]
+    pub async fn stream_text(
+        &self,
+        provider_id: Option<&LlmProviderId>,
+        prompt: impl Into<String>,
+    ) -> Result<LlmEventStream, AgentError> {
+        self.llm_manager.stream_text(provider_id, prompt).await
     }
 }
 
