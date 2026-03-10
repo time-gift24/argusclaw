@@ -3,6 +3,7 @@ use std::{env, path::Path, path::PathBuf};
 
 #[cfg(feature = "dev")]
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
+use crate::agents::AgentManager;
 use crate::db::sqlite::{SqliteLlmProviderRepository, connect, connect_path, migrate};
 use crate::error::AgentError;
 use crate::llm::LLMManager;
@@ -10,11 +11,13 @@ use crate::llm::LLMManager;
 use crate::llm::LlmEventStream;
 
 #[derive(Clone)]
-pub struct Agent {
+pub struct AppContext {
     llm_manager: Arc<LLMManager>,
+    #[allow(dead_code)]
+    agent_manager: Arc<AgentManager>,
 }
 
-impl Agent {
+impl AppContext {
     pub async fn init(database_target: Option<String>) -> Result<Self, AgentError> {
         let database_target = resolve_database_target(database_target)?;
         let pool = match &database_target {
@@ -28,13 +31,14 @@ impl Agent {
 
         let repository = Arc::new(SqliteLlmProviderRepository::new(pool));
         let llm_manager = Arc::new(LLMManager::new(repository));
+        let agent_manager = Arc::new(AgentManager::new());
 
-        Ok(Self::new(llm_manager))
+        Ok(Self::new(llm_manager, agent_manager))
     }
 
     #[must_use]
-    pub fn new(llm_manager: Arc<LLMManager>) -> Self {
-        Self { llm_manager }
+    pub fn new(llm_manager: Arc<LLMManager>, agent_manager: Arc<AgentManager>) -> Self {
+        Self { llm_manager, agent_manager }
     }
 
     #[must_use]
@@ -138,7 +142,7 @@ fn ensure_parent_dir(path: &Path) -> Result<(), AgentError> {
 mod tests {
     use tempfile::tempdir;
 
-    use super::{Agent, expand_home_path, resolve_database_target};
+    use super::{AppContext, expand_home_path, resolve_database_target};
 
     #[test]
     fn resolve_database_target_keeps_sqlite_urls() {
@@ -156,14 +160,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_creates_an_agent_from_a_filesystem_database_path() {
+    async fn init_creates_an_app_context_from_a_filesystem_database_path() {
         let temp_dir = tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("nested").join("sqlite.db");
 
-        let agent = Agent::init(Some(database_path.display().to_string()))
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
             .await
-            .expect("agent init should succeed");
-        let providers = agent
+            .expect("app context init should succeed");
+        let providers = ctx
             .llm_manager()
             .list_providers()
             .await
