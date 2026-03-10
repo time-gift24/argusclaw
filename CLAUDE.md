@@ -6,7 +6,7 @@ cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
 cargo test                                                   # unit tests
 cargo test --features integration                            # + Sqlite tests
-RUST_LOG=ironclaw=debug cargo run                            # run with logging
+RUST_LOG=argusclaw=debug,agent=debug cargo run  # run with logging
 ```
 
 ## Code Style
@@ -55,8 +55,12 @@ crates/
 │   ├── migrations/                   # SQLx migrations
 │   └── tests/                        # E2E tests only; multi-module scenarios that do not fit inline tests
 └── cli/
+    ├── CLAUDE.md                      # CLI module guide
     └── src/
-        └── main.rs                   # CLI bootstrap: tracing, DB init, migrations, Agent startup
+        ├── main.rs                    # CLI bootstrap: tracing, DB init, Agent startup
+        ├── dev.rs                     # Dev-only commands (behind `dev` feature)
+        └── dev/
+            └── config.rs              # Provider import TOML format
 ```
 
 ## Testing
