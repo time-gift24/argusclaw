@@ -69,10 +69,7 @@ impl ToolManager {
         let tool = self.get(name).ok_or_else(|| ToolError::NotFound {
             id: name.to_string(),
         })?;
-        tool.execute(args).await.map_err(|e| match e {
-            ToolError::ExecutionFailed { .. } => e,
-            ToolError::NotFound { .. } => e,
-        })
+        tool.execute(args).await
     }
 }
 
