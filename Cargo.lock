@@ -3,29 +3,6 @@
 version = 4
 
 [[package]]
-name = "agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dirs",
- "eventsource-stream",
- "futures-core",
- "futures-util",
- "mac_address",
- "rand 0.8.5",
- "reqwest",
- "ring",
- "rust_decimal",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -313,12 +290,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "claw"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "eventsource-stream",
+ "futures-core",
+ "futures-util",
+ "mac_address",
+ "rand 0.8.5",
+ "reqwest",
+ "ring",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cli"
 version = "0.1.0"
 dependencies = [
- "agent",
  "anyhow",
  "clap",
+ "claw",
  "futures-util",
  "serde",
  "tokio",

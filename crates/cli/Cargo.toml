@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agent = { path = "../agent", features = ["openai-compatible"] }
+claw = { path = "../claw", features = ["openai-compatible"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"], optional = true }
 futures-util = { version = "0.3", optional = true }
@@ -16,4 +16,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [features]
 default = []
-dev = ["agent/dev", "dep:clap", "dep:futures-util", "dep:serde", "dep:toml"]
+dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:serde", "dep:toml"]
