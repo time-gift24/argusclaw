@@ -4,7 +4,9 @@ use std::{env, path::Path, path::PathBuf};
 use crate::agents::AgentManager;
 #[cfg(feature = "dev")]
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
-use crate::db::sqlite::{SqliteAgentRepository, SqliteLlmProviderRepository, connect, connect_path, migrate};
+use crate::db::sqlite::{
+    SqliteAgentRepository, SqliteLlmProviderRepository, connect, connect_path, migrate,
+};
 use crate::error::AgentError;
 use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
