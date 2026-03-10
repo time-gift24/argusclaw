@@ -12,6 +12,7 @@ notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use 
 
 [dependencies]
 async-trait = "0.1"
+dirs = "6"
 futures-core = "0.3"
 mac_address = "1.1"
 rand = "0.8"
@@ -29,6 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 
 [features]
 default = []
+dev = []
 openai-compatible = ["dep:eventsource-stream", "dep:futures-util", "dep:reqwest"]
 
 [dev-dependencies]

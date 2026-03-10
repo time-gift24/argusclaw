@@ -80,3 +80,64 @@ async fn llm_manager_builds_a_provider_from_the_stored_default_configuration() {
 
     assert_eq!(provider.model_name(), "gpt-4o-mini");
 }
+
+#[cfg(feature = "dev")]
+#[tokio::test]
+async fn llm_manager_exposes_dev_passthrough_for_provider_records() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let openai = build_record("openai", "OpenAI", true);
+    let deepseek = build_record("deepseek", "DeepSeek", false);
+    let manager = LLMManager::new(Arc::new(repository));
+
+    manager
+        .upsert_provider(openai.clone())
+        .await
+        .expect("openai provider should be stored");
+    manager
+        .upsert_provider(deepseek.clone())
+        .await
+        .expect("deepseek provider should be stored");
+
+    manager
+        .set_default_provider(&deepseek.id)
+        .await
+        .expect("default provider should be updated");
+
+    let stored = manager
+        .get_provider_record(&deepseek.id)
+        .await
+        .expect("provider record should be fetched");
+    let default_provider = manager
+        .get_default_provider_record()
+        .await
+        .expect("default provider record should be fetched");
+
+    assert_eq!(stored.id, deepseek.id);
+    assert_eq!(default_provider.id, deepseek.id);
+}
+
+#[cfg(feature = "dev")]
+#[tokio::test]
+async fn llm_manager_can_import_multiple_providers() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let manager = LLMManager::new(Arc::new(repository));
+    let openai = build_record("openai", "OpenAI", false);
+    let deepseek = build_record("deepseek", "DeepSeek", true);
+
+    manager
+        .import_providers(vec![openai.clone(), deepseek.clone()])
+        .await
+        .expect("providers should import");
+
+    let providers = manager
+        .list_providers()
+        .await
+        .expect("providers should list after import");
+    let default_provider = manager
+        .get_default_provider_record()
+        .await
+        .expect("default provider should exist after import");
+
+    assert_eq!(providers.len(), 2);
+    assert_eq!(default_provider.id, deepseek.id);
+}

@@ -6,7 +6,13 @@ edition = "2024"
 [dependencies]
 agent = { path = "../agent", features = ["openai-compatible"] }
 anyhow = "1"
-dirs = "6"
+clap = { version = "4", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = { version = "0.8", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[features]
+default = []
+dev = ["agent/dev", "dep:clap", "dep:serde", "dep:toml"]
