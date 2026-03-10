@@ -49,6 +49,52 @@ pub struct ImageUrl {
     pub detail: Option<String>,
 }
 
+/// Controls whether the provider should generate reasoning content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    Enabled,
+    Disabled,
+}
+
+/// Provider-specific thinking configuration for a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "type")]
+    pub mode: ThinkingMode,
+    pub clear_thinking: bool,
+}
+
+impl ThinkingConfig {
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            mode: ThinkingMode::Enabled,
+            clear_thinking: true,
+        }
+    }
+
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            mode: ThinkingMode::Disabled,
+            clear_thinking: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_clear_thinking(mut self, clear_thinking: bool) -> Self {
+        self.clear_thinking = clear_thinking;
+        self
+    }
+}
+
+/// Explicit provider feature flags exposed to upper layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProviderCapabilities {
+    pub thinking: bool,
+}
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -167,6 +213,7 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
+    pub thinking: Option<ThinkingConfig>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -180,6 +227,7 @@ impl CompletionRequest {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            thinking: None,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -201,12 +249,19 @@ impl CompletionRequest {
         self.temperature = Some(temperature);
         self
     }
+
+    /// Set thinking configuration.
+    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
 }
 
 /// Response from a chat completion.
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub content: String,
+    pub reasoning_content: Option<String>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
@@ -223,6 +278,8 @@ pub struct CompletionResponse {
 pub enum LlmStreamEvent {
     /// Incremental text output from the model.
     ContentDelta { delta: String },
+    /// Incremental reasoning output from the model.
+    ReasoningDelta { delta: String },
     /// Incremental tool call output from the model.
     ToolCallDelta(ToolCallDelta),
     /// Usage information emitted by the provider during streaming.
@@ -293,6 +350,7 @@ pub struct ToolCompletionRequest {
     pub temperature: Option<f32>,
     /// How to handle tool use: "auto", "required", or "none".
     pub tool_choice: Option<String>,
+    pub thinking: Option<ThinkingConfig>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -307,6 +365,7 @@ impl ToolCompletionRequest {
             max_tokens: None,
             temperature: None,
             tool_choice: None,
+            thinking: None,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -334,6 +393,12 @@ impl ToolCompletionRequest {
         self.tool_choice = Some(choice.into());
         self
     }
+
+    /// Set thinking configuration.
+    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
 }
 
 /// Response from a completion with potential tool calls.
@@ -341,6 +406,8 @@ impl ToolCompletionRequest {
 pub struct ToolCompletionResponse {
     /// Text content (may be empty if tool calls are present).
     pub content: Option<String>,
+    /// Reasoning content emitted separately from visible content.
+    pub reasoning_content: Option<String>,
     /// Tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u32,
@@ -368,6 +435,11 @@ pub trait LlmProvider: Send + Sync {
 
     /// Get cost per token (input, output).
     fn cost_per_token(&self) -> (Decimal, Decimal);
+
+    /// Report explicit provider capabilities to upper layers.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 
     /// Complete a chat conversation.
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
@@ -555,6 +627,7 @@ mod tests {
         ) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
                 content: String::new(),
+                reasoning_content: None,
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
@@ -569,6 +642,7 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             Ok(ToolCompletionResponse {
                 content: None,
+                reasoning_content: None,
                 tool_calls: Vec::new(),
                 input_tokens: 0,
                 output_tokens: 0,
@@ -627,6 +701,32 @@ mod tests {
         let original_len = messages.len();
         sanitize_tool_messages(&mut messages);
         assert_eq!(messages.len(), original_len);
+    }
+
+    #[test]
+    fn test_completion_request_with_thinking_sets_config() {
+        let request = CompletionRequest::new(vec![ChatMessage::user("hi")])
+            .with_thinking(ThinkingConfig::enabled().with_clear_thinking(false));
+
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::enabled().with_clear_thinking(false))
+        );
+    }
+
+    #[test]
+    fn test_tool_completion_request_with_thinking_sets_config() {
+        let request = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], vec![])
+            .with_thinking(ThinkingConfig::disabled());
+
+        assert_eq!(request.thinking, Some(ThinkingConfig::disabled()));
+    }
+
+    #[test]
+    fn test_provider_capabilities_default_to_thinking_disabled() {
+        let provider = StubProvider;
+
+        assert!(!provider.capabilities().thinking);
     }
 
     #[test]

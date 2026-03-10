@@ -290,6 +290,7 @@ mod tests {
 
             Ok(CompletionResponse {
                 content: "ok".to_string(),
+                reasoning_content: None,
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,

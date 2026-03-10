@@ -29,6 +29,16 @@
     - `calculate_cost()`
     - `cache_write_multiplier()`
     - `cache_read_discount()`
+  - Added typed thinking and reasoning passthrough support:
+    - `ThinkingMode`
+    - `ThinkingConfig`
+    - `ProviderCapabilities`
+    - `CompletionRequest::thinking`
+    - `CompletionResponse::reasoning_content`
+    - `ToolCompletionRequest::thinking`
+    - `ToolCompletionResponse::reasoning_content`
+    - `LlmStreamEvent::ReasoningDelta`
+    - `LlmProvider::capabilities()`
   - Retained and tested `sanitize_tool_messages()` as the provider-agnostic message sanitation layer used before provider calls
 - `error.rs`
   - Reduced to a smaller provider-agnostic error surface
