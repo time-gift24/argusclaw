@@ -11,6 +11,15 @@ pub enum AgentError {
     #[error(transparent)]
     Llm(#[from] LlmError),
 
+    #[error("failed to resolve home directory for the default database path")]
+    HomeDirectoryUnavailable,
+
+    #[error("database path `{path}` has no parent directory")]
+    InvalidDatabasePath { path: String },
+
+    #[error("failed to create database directory `{path}`: {reason}")]
+    DatabaseDirectoryCreateFailed { path: String, reason: String },
+
     #[error("provider `{id}` was not found")]
     ProviderNotFound { id: String },
 

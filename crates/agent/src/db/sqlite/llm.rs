@@ -137,6 +137,53 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         Ok(())
     }
 
+    async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), DbError> {
+        let mut transaction = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        let exists =
+            sqlx::query_scalar::<_, i64>("select count(1) from llm_providers where id = ?1")
+                .bind(id.as_ref())
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
+
+        if exists == 0 {
+            return Err(DbError::QueryFailed {
+                reason: format!("provider `{id}` does not exist"),
+            });
+        }
+
+        sqlx::query("update llm_providers set is_default = 0, updated_at = CURRENT_TIMESTAMP where is_default = 1")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        sqlx::query(
+            "update llm_providers set is_default = 1, updated_at = CURRENT_TIMESTAMP where id = ?1",
+        )
+        .bind(id.as_ref())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        Ok(())
+    }
+
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
             "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default

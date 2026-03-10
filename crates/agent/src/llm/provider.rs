@@ -276,10 +276,10 @@ pub struct CompletionResponse {
 /// A delta emitted while streaming a completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmStreamEvent {
-    /// Incremental text output from the model.
-    ContentDelta { delta: String },
     /// Incremental reasoning output from the model.
     ReasoningDelta { delta: String },
+    /// Incremental text output from the model.
+    ContentDelta { delta: String },
     /// Incremental tool call output from the model.
     ToolCallDelta(ToolCallDelta),
     /// Usage information emitted by the provider during streaming.

@@ -100,3 +100,39 @@ async fn sqlite_repository_reassigns_the_default_provider() {
     assert!(!first_provider.is_default);
     assert_eq!(providers.len(), 2);
 }
+
+#[cfg(feature = "dev")]
+#[tokio::test]
+async fn sqlite_repository_can_set_the_default_provider_by_id() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let first = build_record("openai", "OpenAI", true);
+    let second = build_record("deepseek", "DeepSeek", false);
+
+    repository
+        .upsert_provider(&first)
+        .await
+        .expect("first provider should be stored");
+    repository
+        .upsert_provider(&second)
+        .await
+        .expect("second provider should be stored");
+
+    repository
+        .set_default_provider(&second.id)
+        .await
+        .expect("default provider should be updated");
+
+    let default_provider = repository
+        .get_default_provider()
+        .await
+        .expect("default query should succeed")
+        .expect("default provider should exist");
+    let first_provider = repository
+        .get_provider(&first.id)
+        .await
+        .expect("first provider query should succeed")
+        .expect("first provider should exist");
+
+    assert_eq!(default_provider.id, second.id);
+    assert!(!first_provider.is_default);
+}

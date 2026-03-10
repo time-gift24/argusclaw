@@ -119,6 +119,8 @@ impl From<LlmProviderRecord> for LlmProviderSummary {
 pub trait LlmProviderRepository: Send + Sync {
     async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError>;
 
+    async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), DbError>;
+
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError>;
 
     async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError>;
