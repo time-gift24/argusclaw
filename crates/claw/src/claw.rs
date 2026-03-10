@@ -9,12 +9,14 @@ use crate::error::AgentError;
 use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
+use crate::tool::ToolManager;
 
 #[derive(Clone)]
 pub struct AppContext {
     llm_manager: Arc<LLMManager>,
     #[allow(dead_code)]
     agent_manager: Arc<AgentManager>,
+    tool_manager: Arc<ToolManager>,
 }
 
 impl AppContext {
@@ -32,21 +34,32 @@ impl AppContext {
         let repository = Arc::new(SqliteLlmProviderRepository::new(pool));
         let llm_manager = Arc::new(LLMManager::new(repository));
         let agent_manager = Arc::new(AgentManager::new());
+        let tool_manager = Arc::new(ToolManager::new());
 
-        Ok(Self::new(llm_manager, agent_manager))
+        Ok(Self::new(llm_manager, agent_manager, tool_manager))
     }
 
     #[must_use]
-    pub fn new(llm_manager: Arc<LLMManager>, agent_manager: Arc<AgentManager>) -> Self {
+    pub fn new(
+        llm_manager: Arc<LLMManager>,
+        agent_manager: Arc<AgentManager>,
+        tool_manager: Arc<ToolManager>,
+    ) -> Self {
         Self {
             llm_manager,
             agent_manager,
+            tool_manager,
         }
     }
 
     #[must_use]
     pub fn llm_manager(&self) -> Arc<LLMManager> {
         Arc::clone(&self.llm_manager)
+    }
+
+    #[must_use]
+    pub fn tool_manager(&self) -> Arc<ToolManager> {
+        Arc::clone(&self.tool_manager)
     }
 
     #[cfg(feature = "dev")]
