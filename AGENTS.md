@@ -20,15 +20,45 @@ RUST_LOG=ironclaw=debug cargo run                            # run with logging
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
 
-## LLM & DB Conventions
+## Architecture
+Prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
 
-- Put storage entry points under `crates/agent/src/db/`
-- Keep LLM storage traits and records in `crates/agent/src/db/llm.rs`
-- Keep LLM provider implementations under `crates/agent/src/llm/`
-- Keep SQLite implementations under `crates/agent/src/db/sqlite/`
-- Use `sqlx` for SQLite access and schema management; migrations live in `crates/agent/migrations/`
-- `LLMManager` is responsible for listing providers and constructing concrete `LlmProvider` instances from stored records
-- OpenAI-compatible providers are modeled as one provider kind to many concrete provider records
-- `Agent` owns `LLMManager`; CLI bootstrap is responsible for tracing initialization, database connection, and migration execution
+Key traits for extensibility: Database, Channel, Tool, LlmProvider。
+
+All I/O is async with tokio. Use Arc<T> for shared state, RwLock for concurrent access.
+
+## Project Structure
+
+```text
+crates/
+├── agent/
+│   ├── src/
+│   │   ├── lib.rs                    # Library root, module declarations and exports
+│   │   ├── error.rs                  # Top-level agent error types
+│   │   ├── agent.rs                  # Agent root object; owns LLMManager
+│   │   ├── db/                       # Storage abstractions and implementations
+│   │   │   ├── mod.rs                # DB module entry point and shared DB errors
+│   │   │   ├── llm.rs                # LLM provider records and repository trait
+│   │   │   └── sqlite/               # SQLx-backed SQLite implementation
+│   │   │       ├── mod.rs            # SQLite connect/migrate helpers
+│   │   │       └── llm.rs            # SQLite LLM provider repository
+│   │   └── llm/                      # LLM domain types, manager, and provider implementations
+│   │       ├── mod.rs                # LLM module entry point and re-exports
+│   │       ├── error.rs              # Provider-agnostic LLM errors
+│   │       ├── manager.rs            # LLMManager: list providers and build provider instances
+│   │       ├── provider.rs           # Core LlmProvider trait and request/response types
+│   │       ├── retry.rs              # Retry wrapper for LlmProvider
+│   │       ├── secret.rs             # Host-bound API key encryption/decryption
+│   │       └── providers/            # Concrete provider implementations
+│   │           ├── mod.rs            # Provider module exports
+│   │           └── openai_compatible.rs # OpenAI-compatible provider factory and implementation
+│   ├── migrations/                   # SQLx migrations
+│   └── tests/                        # Integration tests for LLM, DB, and crypto behavior
+└── cli/
+    └── src/
+        └── main.rs                   # CLI bootstrap: tracing, DB init, migrations, Agent startup
+```
+
+## DB
+
 - Default `DATABASE_URL` is `~/.argusclaw/sqlite.db`
-- Never store provider API keys in plaintext; encrypt/decrypt them using host MAC-derived key material with mature cross-platform libraries
