@@ -16,6 +16,12 @@ impl SqliteAgentRepository {
         Self { pool }
     }
 
+    /// Returns a reference to the underlying pool (for testing).
+    #[must_use]
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     fn map_record(row: sqlx::sqlite::SqliteRow) -> Result<AgentRecord, DbError> {
         let tool_names_json: String =
             row.try_get("tool_names")
