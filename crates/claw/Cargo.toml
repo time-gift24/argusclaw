@@ -12,6 +12,7 @@ notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use 
 
 [dependencies]
 async-trait = "0.1"
+derive_builder = "0.20"
 dashmap = "6"
 dirs = "6"
 futures-core = "0.3"
