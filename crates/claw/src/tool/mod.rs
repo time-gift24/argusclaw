@@ -257,9 +257,7 @@ mod tests {
     async fn execute_error_not_found() {
         let manager = ToolManager::new();
 
-        let result = manager
-            .execute("nonexistent", serde_json::json!({}))
-            .await;
+        let result = manager.execute("nonexistent", serde_json::json!({})).await;
 
         assert!(result.is_err());
         match result {

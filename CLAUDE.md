@@ -23,7 +23,7 @@ RUST_LOG=argusclaw=debug,claw=debug cargo run  # run with logging
 ## Architecture
 Prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
 
-Key traits for extensibility: Database, Channel, Tool, LlmProvider。
+Key traits for extensibility: Database, Channel, NamedTool, LlmProvider。
 
 All I/O is async with tokio. Use Arc<T> for shared state, RwLock for concurrent access.
 
@@ -44,16 +44,18 @@ crates/
 │   │   │   └── sqlite/               # SQLx-backed SQLite implementation
 │   │   │       ├── mod.rs            # SQLite connect/migrate helpers
 │   │   │       └── llm.rs            # SQLite LLM provider repository
-│   │   └── llm/                      # LLM domain types, manager, and provider implementations
-│   │       ├── mod.rs                # LLM module entry point and re-exports
-│   │       ├── error.rs              # Provider-agnostic LLM errors
-│   │       ├── manager.rs            # LLMManager: list providers and build provider instances
-│   │       ├── provider.rs           # Core LlmProvider trait and request/response types
-│   │       ├── retry.rs              # Retry wrapper for LlmProvider
-│   │       ├── secret.rs             # Host-bound API key encryption/decryption
-│   │       └── providers/            # Concrete provider implementations
-│   │           ├── mod.rs            # Provider module exports
-│   │           └── openai_compatible.rs # OpenAI-compatible provider factory and implementation
+│   │   ├── llm/                      # LLM domain types, manager, and provider implementations
+│   │   │   ├── mod.rs                # LLM module entry point and re-exports
+│   │   │   ├── error.rs              # Provider-agnostic LLM errors
+│   │   │   ├── manager.rs            # LLMManager: list providers and build provider instances
+│   │   │   ├── provider.rs           # Core LlmProvider trait and request/response types
+│   │   │   ├── retry.rs              # Retry wrapper for LlmProvider
+│   │   │   ├── secret.rs             # Host-bound API key encryption/decryption
+│   │   │   └── providers/            # Concrete provider implementations
+│   │   │       ├── mod.rs            # Provider module exports
+│   │   │       └── openai_compatible.rs # OpenAI-compatible provider factory and implementation
+│   │   └── tool/                     # Tool registry for agent/LLM tool management
+│   │       └── mod.rs                # NamedTool trait, ToolManager, ToolError
 │   ├── migrations/                   # SQLx migrations
 │   └── tests/                        # E2E tests only; multi-module scenarios that do not fit inline tests
 └── cli/
@@ -73,3 +75,9 @@ crates/
 ## DB
 
 - Default `DATABASE_URL` is `~/.argusclaw/sqlite.db`
+
+## Tool Module
+
+- `NamedTool` trait: `name()`, `definition()`, `execute()` — for agent/LLM tool abstraction
+- `ToolManager`: DashMap-based registry with `register()`, `get()`, `list_definitions()`, `execute()`
+- Reuses `ToolDefinition` from `llm/provider.rs` (single source of truth)
