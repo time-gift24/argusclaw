@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::db::DbError;
 use crate::llm::LlmError;
+use crate::tool::ToolError;
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -10,6 +11,9 @@ pub enum AgentError {
 
     #[error(transparent)]
     Llm(#[from] LlmError),
+
+    #[error(transparent)]
+    Tool(#[from] ToolError),
 
     #[error("failed to resolve home directory for the default database path")]
     HomeDirectoryUnavailable,
