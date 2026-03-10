@@ -15,9 +15,12 @@ use crate::tool::ToolManager;
 ///
 /// Controls the behavior of a turn execution, including limits on tool calls,
 /// timeouts, and iteration counts.
+///
+/// Note: `max_tool_calls` is currently not enforced. Use `max_iterations` to
+/// limit the total number of LLM -> Tool -> LLM cycles.
 #[derive(Debug, Clone, Builder)]
 pub struct TurnConfig {
-    /// Maximum tool calls per turn.
+    /// Maximum tool calls per turn (not yet enforced).
     #[builder(default = Some(10))]
     pub max_tool_calls: Option<u32>,
     /// Maximum duration for a single tool execution (seconds).
@@ -49,92 +52,49 @@ impl Default for TurnConfig {
 ///
 /// Contains all the data needed to execute a single turn in a conversation,
 /// including message history, system prompt, LLM provider, and tools.
+///
+/// Note: `system_prompt` is not automatically added to messages. The caller
+/// should include system instructions in the `messages` field if needed.
+#[derive(Builder)]
+#[builder(pattern = "owned", build_fn(skip))]
 pub struct TurnInput {
     /// Historical messages for the conversation.
+    #[builder(default)]
     pub messages: Vec<ChatMessage>,
-    /// System prompt for this turn.
+    /// System prompt for this turn (caller should include in messages if needed).
+    #[builder(default, setter(into))]
     pub system_prompt: String,
     /// LLM provider instance.
     pub provider: Arc<dyn LlmProvider>,
     /// Tool manager for registry.
+    #[builder(default = "Arc::new(ToolManager::new())")]
     pub tool_manager: Arc<ToolManager>,
     /// Tool IDs to use (resolved via ToolManager).
+    #[builder(default)]
     pub tool_ids: Vec<String>,
     /// Optional hook registry for lifecycle events.
+    #[builder(default, setter(strip_option))]
     pub hooks: Option<Arc<HookRegistry>>,
 }
 
-impl TurnInput {
-    /// Create a new TurnInput with the required fields.
-    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self {
-            messages: Vec::new(),
-            system_prompt: String::new(),
-            provider,
-            tool_manager: Arc::new(ToolManager::new()),
-            tool_ids: Vec::new(),
-            hooks: None,
-        }
+impl std::fmt::Debug for TurnInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnInput")
+            .field("messages", &self.messages.len())
+            .field("system_prompt", &self.system_prompt)
+            .field("provider", &self.provider.model_name())
+            .field("tool_manager", &"ToolManager")
+            .field("tool_ids", &self.tool_ids)
+            .field("hooks", &self.hooks.is_some())
+            .finish()
     }
-}
-
-/// Builder for TurnInput.
-pub struct TurnInputBuilder {
-    messages: Option<Vec<ChatMessage>>,
-    system_prompt: Option<String>,
-    provider: Option<Arc<dyn LlmProvider>>,
-    tool_manager: Option<Arc<ToolManager>>,
-    tool_ids: Option<Vec<String>>,
-    hooks: Option<Arc<HookRegistry>>,
 }
 
 impl TurnInputBuilder {
     /// Create a new builder.
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            messages: None,
-            system_prompt: None,
-            provider: None,
-            tool_manager: None,
-            tool_ids: None,
-            hooks: None,
-        }
-    }
-
-    /// Set the messages.
-    pub fn messages(mut self, messages: Vec<ChatMessage>) -> Self {
-        self.messages = Some(messages);
-        self
-    }
-
-    /// Set the system prompt.
-    pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.system_prompt = Some(prompt.into());
-        self
-    }
-
-    /// Set the LLM provider.
-    pub fn provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
-        self.provider = Some(provider);
-        self
-    }
-
-    /// Set the tool manager.
-    pub fn tool_manager(mut self, tool_manager: Arc<ToolManager>) -> Self {
-        self.tool_manager = Some(tool_manager);
-        self
-    }
-
-    /// Set the tool IDs.
-    pub fn tool_ids(mut self, tool_ids: Vec<String>) -> Self {
-        self.tool_ids = Some(tool_ids);
-        self
-    }
-
-    /// Set the hook registry.
-    pub fn hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
-        self.hooks = Some(hooks);
-        self
+        Self::default()
     }
 
     /// Build the TurnInput.
@@ -151,14 +111,8 @@ impl TurnInputBuilder {
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
             tool_ids: self.tool_ids.unwrap_or_default(),
-            hooks: self.hooks,
+            hooks: self.hooks.flatten(),
         }
-    }
-}
-
-impl Default for TurnInputBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
