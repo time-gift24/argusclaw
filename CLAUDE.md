@@ -1,83 +1,88 @@
-# ArgusClaw Development Guide
-## Build & Test
+# ArgusClaw 开发指南
+
+## 构建与测试
 
 ```bash
-cargo fmt                                                    # format
-cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)
-cargo test                                                   # unit tests
-cargo test --features integration                            # + Sqlite tests
-RUST_LOG=argusclaw=debug,claw=debug cargo run  # run with logging
+cargo fmt                                                    # 格式化
+cargo clippy --all --benches --tests --examples --all-features  # 检查 (零警告)
+cargo test                                                   # 单元测试
+cargo test --features integration                            # + Sqlite 测试
+RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 ```
 
-## Code Style
+## 代码风格
 
-- Prefer `crate::` for cross-module imports; `super::` is fine in tests and intra-module refs
-- No `pub use` re-exports unless exposing to downstream consumers
-- No `.unwrap()` or `.expect()` in production code (tests are fine)
-- Use `thiserror` for error types in `error.rs`
-- Map errors with context: `.map_err(|e| SomeError::Variant { reason: e.to_string() })?`
-- Prefer strong types over strings (enums, newtypes)
-- Keep functions focused, extract helpers when logic is reused
-- Comments for non-obvious logic only
+- 跨模块导入使用 `crate::`；测试和模块内引用使用 `super::`
+- 不使用 `pub use` 重导出，除非是暴露给下游消费者
+- 生产代码中不使用 `.unwrap()` 或 `.expect()`（测试中可以使用）
+- 错误类型使用 `thiserror` 定义在 `error.rs` 中
+- 错误映射添加上下文：`.map_err(|e| SomeError::Variant { reason: e.to_string() })?`
+- 优先使用强类型而非字符串（枚举、新类型）
+- 保持函数职责单一，逻辑复用时提取辅助函数
+- 只在逻辑不明显时添加注释
 
-## Architecture
-Prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
+## 架构
 
-Key traits for extensibility: Database, Channel, NamedTool, LlmProvider。
+优先使用通用/可扩展的架构，而非硬编码特定集成。实现前请先询问期望的抽象层次。
 
-All I/O is async with tokio. Use Arc<T> for shared state, RwLock for concurrent access.
+可扩展性关键 trait：Database、Channel、NamedTool、LlmProvider
 
-## Project Structure
+所有 I/O 使用 tokio 异步。使用 Arc<T> 共享状态，RwLock 并发访问。
+
+## 项目结构
 
 ```text
 crates/
 ├── claw/
 │   ├── src/
-│   │   ├── lib.rs                    # Library root, module declarations and exports
-│   │   ├── error.rs                  # Top-level error types
-│   │   ├── claw.rs                   # AppContext; owns LLMManager, AgentManager
-│   │   ├── agents/                   # Agent management
-│   │   │   └── mod.rs                # AgentManager (placeholder)
-│   │   ├── db/                       # Storage abstractions and implementations
-│   │   │   ├── mod.rs                # DB module entry point and shared DB errors
-│   │   │   ├── llm.rs                # LLM provider records and repository trait
-│   │   │   └── sqlite/               # SQLx-backed SQLite implementation
-│   │   │       ├── mod.rs            # SQLite connect/migrate helpers
-│   │   │       └── llm.rs            # SQLite LLM provider repository
-│   │   ├── llm/                      # LLM domain types, manager, and provider implementations
-│   │   │   ├── mod.rs                # LLM module entry point and re-exports
-│   │   │   ├── error.rs              # Provider-agnostic LLM errors
-│   │   │   ├── manager.rs            # LLMManager: list providers and build provider instances
-│   │   │   ├── provider.rs           # Core LlmProvider trait and request/response types
-│   │   │   ├── retry.rs              # Retry wrapper for LlmProvider
-│   │   │   ├── secret.rs             # Host-bound API key encryption/decryption
-│   │   │   └── providers/            # Concrete provider implementations
-│   │   │       ├── mod.rs            # Provider module exports
-│   │   │       └── openai_compatible.rs # OpenAI-compatible provider factory and implementation
-│   │   └── tool/                     # Tool registry for agent/LLM tool management
-│   │       └── mod.rs                # NamedTool trait, ToolManager, ToolError
-│   ├── migrations/                   # SQLx migrations
-│   └── tests/                        # E2E tests only; multi-module scenarios that do not fit inline tests
+│   │   ├── lib.rs                    # 库入口，模块声明和导出
+│   │   ├── error.rs                  # 顶层错误类型
+│   │   ├── claw.rs                   # AppContext；拥有 LLMManager、AgentManager
+│   │   ├── agents/                   # Agent 管理
+│   │   │   └── mod.rs                # AgentManager (占位)
+│   │   ├── db/                       # 存储抽象和实现
+│   │   │   ├── mod.rs                # DB 模块入口和共享错误
+│   │   │   ├── llm.rs                # LLM 提供商记录和仓库 trait
+│   │   │   └── sqlite/               # SQLx 支持的 SQLite 实现
+│   │   │       ├── mod.rs            # SQLite 连接和迁移辅助
+│   │   │       └── llm.rs            # SQLite LLM 提供商仓库
+│   │   ├── llm/                      # LLM 领域类型、管理器和提供商实现
+│   │   │   ├── mod.rs                # LLM 模块入口和导出
+│   │   │   ├── error.rs              # 提供商无关的 LLM 错误
+│   │   │   ├── manager.rs            # LLMManager：列出提供商和构建实例
+│   │   │   ├── provider.rs           # 核心 LlmProvider trait 和请求/响应类型
+│   │   │   ├── retry.rs              # LlmProvider 重试包装器
+│   │   │   ├── secret.rs             # 主机绑定的 API 密钥加密/解密
+│   │   │   └── providers/            # 具体提供商实现
+│   │   │       ├── mod.rs            # 提供商模块导出
+│   │   │       └── openai_compatible.rs # OpenAI 兼容提供商工厂和实现
+│   │   └── tool/                     # Agent/LLM 工具注册表
+│   │       └── mod.rs                # NamedTool trait、ToolManager、ToolError
+│   ├── migrations/                   # SQLx 迁移
+│   └── tests/                        # E2E 测试；不适合内联测试的多模块场景
+├── desktop/                          # Tauri + React + TypeScript + Vite + Tailwind CSS v4
+│   ├── src/                         # React 前端
+│   └── src-tauri/                    # Rust 后端
 └── cli/
-    ├── CLAUDE.md                      # CLI module guide
+    ├── CLAUDE.md                      # CLI 模块指南
     └── src/
-        ├── main.rs                    # CLI bootstrap: tracing, DB init, AppContext startup
-        ├── dev.rs                     # Dev-only commands (behind `dev` feature)
+        ├── main.rs                    # CLI 引导：tracing、DB 初始化、AppContext 启动
+        ├── dev.rs                     # 开发-only 命令 (behind `dev` feature)
         └── dev/
-            └── config.rs              # Provider import TOML format
+            └── config.rs              # 提供商导入 TOML 格式
 ```
 
-## Testing
+## 测试
 
-- Prefer colocated tests with `#[cfg(test)]` in the same file as the implementation
-- Use `crates/*/tests/` only for E2E-style coverage that exercises multiple modules together
+- 优先使用 `#[cfg(test)]` 在实现文件中的内联测试
+- 只在需要测试多个模块组合的 E2E 场景使用 `crates/*/tests/`
 
-## DB
+## 数据库
 
-- Default `DATABASE_URL` is `~/.argusclaw/sqlite.db`
+- 默认 `DATABASE_URL` 为 `~/.argusclaw/sqlite.db`
 
-## Tool Module
+## 工具模块
 
-- `NamedTool` trait: `name()`, `definition()`, `execute()` — for agent/LLM tool abstraction
-- `ToolManager`: DashMap-based registry with `register()`, `get()`, `list_definitions()`, `execute()`
-- Reuses `ToolDefinition` from `llm/provider.rs` (single source of truth)
+- `NamedTool` trait：`name()`、`definition()`、`execute()` — 用于 Agent/LLM 工具抽象
+- `ToolManager`：基于 DashMap 的注册表，包含 `register()`、`get()`、`list_definitions()`、`execute()`
+- 复用 `llm/provider.rs` 中的 `ToolDefinition`（单一事实来源）
