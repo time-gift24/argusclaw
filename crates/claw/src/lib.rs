@@ -7,3 +7,4 @@ pub mod tool;
 
 pub use claw::AppContext;
 pub use error::AgentError;
+pub use tool::{NamedTool, ToolError, ToolManager};
