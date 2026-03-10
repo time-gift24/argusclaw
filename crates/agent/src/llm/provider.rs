@@ -70,7 +70,7 @@ impl ThinkingConfig {
     pub fn enabled() -> Self {
         Self {
             mode: ThinkingMode::Enabled,
-            clear_thinking: true,
+            clear_thinking: false,
         }
     }
 
@@ -78,7 +78,7 @@ impl ThinkingConfig {
     pub fn disabled() -> Self {
         Self {
             mode: ThinkingMode::Disabled,
-            clear_thinking: true,
+            clear_thinking: false,
         }
     }
 
@@ -727,6 +727,12 @@ mod tests {
         let provider = StubProvider;
 
         assert!(!provider.capabilities().thinking);
+    }
+
+    #[test]
+    fn test_thinking_config_defaults_to_preserved_history() {
+        assert!(!ThinkingConfig::enabled().clear_thinking);
+        assert!(!ThinkingConfig::disabled().clear_thinking);
     }
 
     #[test]
