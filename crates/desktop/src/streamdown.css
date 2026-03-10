@@ -1,0 +1,246 @@
+/* Streamdown Custom Styles using data-streamdown attribute selectors */
+
+/* ============================================
+   CSS Variables - Global theme tokens
+   ============================================ */
+:root {
+  --sd-font-size: 14px;
+  --sd-line-height: 1.6;
+  --sd-heading-1-size: 24px;
+  --sd-heading-2-size: 20px;
+  --sd-heading-3-size: 18px;
+  --sd-paragraph-spacing: 12px;
+  --sd-list-spacing: 8px;
+  --sd-blockquote-padding: 12px 16px;
+  --sd-blockquote-border: 4px solid #6366f1;
+  --sd-code-font-size: 13px;
+  --sd-code-background: #f1f5f9;
+  --sd-code-color: #334155;
+  --sd-code-block-padding: 12px;
+  --sd-code-block-radius: 6px;
+  --sd-table-cell-padding: 8px 12px;
+  --sd-link-color: #6366f1;
+  --sd-link-decoration: underline;
+}
+
+/* Streamdown content container */
+.streamdown-content {
+  font-size: var(--sd-font-size);
+  line-height: var(--sd-line-height);
+}
+
+.streamdown-content > * {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.streamdown-content h1,
+.streamdown-content [data-streamdown="heading-1"] {
+  font-size: var(--sd-heading-1-size);
+}
+
+.streamdown-content h2,
+.streamdown-content [data-streamdown="heading-2"] {
+  font-size: var(--sd-heading-2-size);
+}
+
+.streamdown-content h3,
+.streamdown-content [data-streamdown="heading-3"] {
+  font-size: var(--sd-heading-3-size);
+}
+
+.streamdown-content p,
+.streamdown-content [data-streamdown="paragraph"] {
+  margin-bottom: var(--sd-paragraph-spacing);
+}
+
+/* ============================================
+   Headings
+   ============================================ */
+[data-streamdown="heading-1"] {
+  font-size: var(--sd-heading-1-size);
+  font-weight: 600;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  color: var(--foreground);
+}
+
+[data-streamdown="heading-2"] {
+  font-size: var(--sd-heading-2-size);
+  font-weight: 600;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  color: var(--foreground);
+}
+
+[data-streamdown="heading-3"] {
+  font-size: var(--sd-heading-3-size);
+  font-weight: 600;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  color: var(--foreground);
+}
+
+[data-streamdown="heading-4"],
+[data-streamdown="heading-5"],
+[data-streamdown="heading-6"] {
+  font-weight: 600;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+}
+
+/* ============================================
+   Text elements
+   ============================================ */
+[data-streamdown="paragraph"] {
+  margin-bottom: var(--sd-paragraph-spacing) !important;
+  font-size: var(--sd-font-size) !important;
+  line-height: var(--sd-line-height) !important;
+}
+
+[data-streamdown="strong"] {
+  font-weight: 600;
+}
+
+[data-streamdown="emphasis"] {
+  font-style: italic;
+}
+
+[data-streamdown="delete"] {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+[data-streamdown="link"] {
+  color: var(--sd-link-color);
+  text-decoration: var(--sd-link-decoration);
+}
+
+[data-streamdown="link"]:hover {
+  opacity: 0.8;
+}
+
+[data-streamdown="inline-code"] {
+  background: var(--sd-code-background);
+  color: var(--sd-code-color);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: calc(var(--sd-code-font-size) - 1px);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* ============================================
+   Lists
+   ============================================ */
+[data-streamdown="ordered-list"],
+[data-streamdown="unordered-list"] {
+  margin-bottom: var(--sd-list-spacing);
+  padding-left: 1.5em;
+}
+
+[data-streamdown="list-item"] {
+  margin-bottom: 4px;
+}
+
+/* ============================================
+   Blocks
+   ============================================ */
+[data-streamdown="blockquote"] {
+  padding: var(--sd-blockquote-padding);
+  border-left: var(--sd-blockquote-border);
+  background: #f8fafc;
+  margin: 12px 0;
+  border-radius: 0 4px 4px 0;
+}
+
+[data-streamdown="horizontal-rule"] {
+  margin: 24px 0;
+  border: none;
+  border-top: 1px solid #e2e8f0;
+}
+
+/* ============================================
+   Code
+   ============================================ */
+[data-streamdown="code-block"] {
+  padding: var(--sd-code-block-padding);
+  border-radius: var(--sd-code-block-radius);
+  margin: 12px 0;
+  overflow-x: auto;
+  background: #1e293b;
+}
+
+[data-streamdown="code-block"] code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--sd-code-font-size);
+  line-height: 1.5;
+}
+
+/* ============================================
+   Mermaid diagrams
+   ============================================ */
+[data-streamdown="mermaid-block"] {
+  margin: 16px 0;
+  display: flex;
+  justify-content: center;
+}
+
+/* ============================================
+   Tables
+   ============================================ */
+[data-streamdown="table-wrapper"] {
+  margin: 12px 0;
+  overflow-x: auto;
+}
+
+[data-streamdown="table"] {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+[data-streamdown="table-header"] {
+  background: #f8fafc;
+  font-weight: 600;
+}
+
+[data-streamdown="table-body"] {
+  background: var(--background);
+}
+
+[data-streamdown="table-row"]:nth-child(even) {
+  background: #fafafa;
+}
+
+[data-streamdown="table-header-cell"],
+[data-streamdown="table-cell"] {
+  padding: var(--sd-table-cell-padding);
+  border: 1px solid #e2e8f0;
+  text-align: left;
+}
+
+[data-streamdown="table-header-cell"] {
+  background: #f8fafc;
+  font-weight: 600;
+}
+
+/* ============================================
+   Other elements
+   ============================================ */
+[data-streamdown="superscript"],
+[data-streamdown="subscript"] {
+  font-size: 0.75em;
+  vertical-align: super;
+}
+
+[data-streamdown="image"] {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
+/* ============================================
+   Inline styles override (for controls)
+   These are applied via React inline styles
+   and have highest priority
+   ============================================ */

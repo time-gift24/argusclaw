@@ -14,7 +14,7 @@
 ## 开发命令
 
 ```bash
-pnpm dev          # 开发模式 (Vite 端口 5173)
+pnpm dev          # 开发模式
 pnpm tauri dev    # Tauri 开发模式
 pnpm build        # 生产构建
 pnpm tauri build  # Tauri 生产构建
