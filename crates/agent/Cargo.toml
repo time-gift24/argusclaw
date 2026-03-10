@@ -7,16 +7,19 @@ edition = "2024"
 source = "https://github.com/nearai/ironclaw"
 commit = "bcef04b82108222c9041e733de459130badd4cd7"
 license = "MIT OR Apache-2.0"
-files = ["llm/provider.rs", "llm/error.rs", "llm/retry.rs"]
+files = ["src/llm/provider.rs", "src/llm/error.rs", "src/llm/retry.rs"]
 notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use as ArgusClaw's stable llm facade, including retry decoration."
 
 [dependencies]
 async-trait = "0.1"
 futures-core = "0.3"
+mac_address = "1.1"
 rand = "0.8"
+ring = "0.17"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate", "macros"] }
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
@@ -29,4 +32,5 @@ default = []
 openai-compatible = ["dep:eventsource-stream", "dep:futures-util", "dep:reqwest"]
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -20,3 +20,15 @@ RUST_LOG=ironclaw=debug cargo run                            # run with logging
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
 
+## LLM & DB Conventions
+
+- Put storage entry points under `crates/agent/src/db/`
+- Keep LLM storage traits and records in `crates/agent/src/db/llm.rs`
+- Keep LLM provider implementations under `crates/agent/src/llm/`
+- Keep SQLite implementations under `crates/agent/src/db/sqlite/`
+- Use `sqlx` for SQLite access and schema management; migrations live in `crates/agent/migrations/`
+- `LLMManager` is responsible for listing providers and constructing concrete `LlmProvider` instances from stored records
+- OpenAI-compatible providers are modeled as one provider kind to many concrete provider records
+- `Agent` owns `LLMManager`; CLI bootstrap is responsible for tracing initialization, database connection, and migration execution
+- Default `DATABASE_URL` is `~/.argusclaw/sqlite.db`
+- Never store provider API keys in plaintext; encrypt/decrypt them using host MAC-derived key material with mature cross-platform libraries

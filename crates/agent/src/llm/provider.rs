@@ -738,7 +738,10 @@ mod tests {
         }
 
         let provider = UnsupportedProvider;
-        let err = match provider.stream_complete(CompletionRequest::new(vec![])).await {
+        let err = match provider
+            .stream_complete(CompletionRequest::new(vec![]))
+            .await
+        {
             Ok(_) => panic!("default stream_complete should be unsupported"),
             Err(err) => err,
         };

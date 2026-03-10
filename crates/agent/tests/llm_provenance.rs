@@ -7,9 +7,9 @@ const UPSTREAM_LICENSE: &str = "MIT OR Apache-2.0";
 #[test]
 fn vendored_llm_files_include_provenance_header() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let provider = std::fs::read_to_string(manifest_dir.join("llm/provider.rs"))
+    let provider = std::fs::read_to_string(manifest_dir.join("src/llm/provider.rs"))
         .expect("provider.rs should be readable");
-    let error = std::fs::read_to_string(manifest_dir.join("llm/error.rs"))
+    let error = std::fs::read_to_string(manifest_dir.join("src/llm/error.rs"))
         .expect("error.rs should be readable");
 
     for contents in [&provider, &error] {
@@ -27,6 +27,6 @@ fn third_party_notice_matches_vendored_files() {
 
     assert!(notice.contains("nearai/ironclaw"));
     assert!(notice.contains(UPSTREAM_COMMIT));
-    assert!(notice.contains("crates/agent/llm/provider.rs"));
-    assert!(notice.contains("crates/agent/llm/error.rs"));
+    assert!(notice.contains("crates/agent/src/llm/provider.rs"));
+    assert!(notice.contains("crates/agent/src/llm/error.rs"));
 }

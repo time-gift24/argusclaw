@@ -54,11 +54,13 @@ impl LlmProvider for FlakyProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if self.complete_failures.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |value| value.checked_sub(1),
-        ).is_ok() {
+        if self
+            .complete_failures
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
+        {
             return Err(LlmError::RateLimited {
                 provider: "flaky".to_string(),
                 retry_after: Some(Duration::ZERO),
@@ -87,11 +89,13 @@ impl LlmProvider for FlakyProvider {
         _request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        if self.stream_failures.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |value| value.checked_sub(1),
-        ).is_ok() {
+        if self
+            .stream_failures
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
+        {
             return Err(LlmError::RateLimited {
                 provider: "flaky".to_string(),
                 retry_after: Some(Duration::ZERO),

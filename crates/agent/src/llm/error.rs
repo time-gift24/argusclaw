@@ -54,5 +54,8 @@ pub enum LlmError {
 
     /// Provider does not support a requested capability.
     #[error("Provider {provider} does not support capability {capability}")]
-    UnsupportedCapability { provider: String, capability: String },
+    UnsupportedCapability {
+        provider: String,
+        capability: String,
+    },
 }

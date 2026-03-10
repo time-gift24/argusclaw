@@ -1,9 +1,7 @@
-#[path = "../llm/mod.rs"]
+pub mod agent;
+pub mod db;
+pub mod error;
 pub mod llm;
-#[cfg(feature = "openai-compatible")]
-pub mod providers;
 
-#[must_use]
-pub fn greeting() -> &'static str {
-    "Hello, world!"
-}
+pub use agent::Agent;
+pub use error::AgentError;

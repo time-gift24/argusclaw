@@ -47,11 +47,7 @@ impl OpenAiCompatibleConfig {
     }
 
     #[must_use]
-    pub fn with_extra_header(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn with_extra_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_headers.insert(name.into(), value.into());
         self
     }
@@ -109,18 +105,16 @@ impl OpenAiCompatibleProvider {
         headers.insert(AUTHORIZATION, auth);
 
         for (name, value) in &config.extra_headers {
-            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
-                LlmError::RequestFailed {
+            let header_name =
+                HeaderName::from_bytes(name.as_bytes()).map_err(|e| LlmError::RequestFailed {
                     provider: "openai-compatible".to_string(),
                     reason: format!("invalid header name `{name}`: {e}"),
-                }
-            })?;
-            let header_value = HeaderValue::from_str(value).map_err(|e| {
-                LlmError::RequestFailed {
+                })?;
+            let header_value =
+                HeaderValue::from_str(value).map_err(|e| LlmError::RequestFailed {
                     provider: "openai-compatible".to_string(),
                     reason: format!("invalid header value for `{name}`: {e}"),
-                }
-            })?;
+                })?;
             headers.insert(header_name, header_value);
         }
 
@@ -180,21 +174,24 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let body = ChatCompletionsRequest::from_completion_request(&self.model, request, false);
         let response = self.send_chat_request(&body).await?;
-        let payload: ChatCompletionResponse = response.json().await.map_err(|e| {
-            LlmError::InvalidResponse {
-                provider: "openai-compatible".to_string(),
-                reason: e.to_string(),
-            }
-        })?;
+        let payload: ChatCompletionResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| LlmError::InvalidResponse {
+                    provider: "openai-compatible".to_string(),
+                    reason: e.to_string(),
+                })?;
 
-        let choice = payload
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::InvalidResponse {
-                provider: "openai-compatible".to_string(),
-                reason: "response had no choices".to_string(),
-            })?;
+        let choice =
+            payload
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::InvalidResponse {
+                    provider: "openai-compatible".to_string(),
+                    reason: "response had no choices".to_string(),
+                })?;
         let usage = payload.usage.unwrap_or_default();
 
         Ok(CompletionResponse {
@@ -214,21 +211,24 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let body =
             ChatCompletionsRequest::from_tool_completion_request(&self.model, request, false);
         let response = self.send_chat_request(&body).await?;
-        let payload: ChatCompletionResponse = response.json().await.map_err(|e| {
-            LlmError::InvalidResponse {
-                provider: "openai-compatible".to_string(),
-                reason: e.to_string(),
-            }
-        })?;
+        let payload: ChatCompletionResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| LlmError::InvalidResponse {
+                    provider: "openai-compatible".to_string(),
+                    reason: e.to_string(),
+                })?;
 
-        let choice = payload
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::InvalidResponse {
-                provider: "openai-compatible".to_string(),
-                reason: "response had no choices".to_string(),
-            })?;
+        let choice =
+            payload
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::InvalidResponse {
+                    provider: "openai-compatible".to_string(),
+                    reason: "response had no choices".to_string(),
+                })?;
         let usage = payload.usage.unwrap_or_default();
 
         Ok(ToolCompletionResponse {
@@ -281,8 +281,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .map(|event| match event {
                 Ok(event) => parse_stream_frame(&event.data),
                 Err(err) => vec![Err(LlmError::RequestFailed {
-                        provider: "openai-compatible".to_string(),
-                        reason: err.to_string(),
+                    provider: "openai-compatible".to_string(),
+                    reason: err.to_string(),
                 })],
             })
             .flat_map(futures_util::stream::iter);
@@ -315,7 +315,11 @@ impl ChatCompletionsRequest {
     fn from_completion_request(model: &str, request: CompletionRequest, stream: bool) -> Self {
         Self {
             model: request.model.unwrap_or_else(|| model.to_string()),
-            messages: request.messages.into_iter().map(OpenAiMessage::from).collect(),
+            messages: request
+                .messages
+                .into_iter()
+                .map(OpenAiMessage::from)
+                .collect(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stop: request.stop_sequences,
@@ -335,7 +339,11 @@ impl ChatCompletionsRequest {
     ) -> Self {
         Self {
             model: request.model.unwrap_or_else(|| model.to_string()),
-            messages: request.messages.into_iter().map(OpenAiMessage::from).collect(),
+            messages: request
+                .messages
+                .into_iter()
+                .map(OpenAiMessage::from)
+                .collect(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stop: None,
@@ -420,7 +428,8 @@ impl From<ChatMessage> for OpenAiMessage {
             tool_call_id: value.tool_call_id,
             name: value.name,
             tool_calls: value.tool_calls.map(|calls| {
-                calls.into_iter()
+                calls
+                    .into_iter()
                     .map(|call| OpenAiToolCall {
                         id: call.id,
                         kind: "function".to_string(),
@@ -559,10 +568,10 @@ fn parse_stream_frame(data: &str) -> Vec<Result<crate::llm::LlmStreamEvent, LlmE
     }
 
     for choice in chunk.choices {
-        if let Some(content) = choice.delta.content {
-            if !content.is_empty() {
-                events.push(Ok(LlmStreamEvent::ContentDelta { delta: content }));
-            }
+        if let Some(content) = choice.delta.content
+            && !content.is_empty()
+        {
+            events.push(Ok(LlmStreamEvent::ContentDelta { delta: content }));
         }
 
         if let Some(tool_calls) = choice.delta.tool_calls {
