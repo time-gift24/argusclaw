@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmError,
-    LlmEventStream, LlmProvider, LlmStreamEvent, RetryConfig, RetryProvider, Role, ToolCall,
-    ThinkingConfig, ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    LlmEventStream, LlmProvider, LlmStreamEvent, ProviderCapabilities, RetryConfig,
+    RetryProvider, Role, ToolCall, ThinkingConfig, ToolCallDelta, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
 
 #[derive(Debug, Clone)]
@@ -161,6 +162,16 @@ impl OpenAiCompatibleProvider {
     }
 }
 
+fn model_supports_thinking(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+
+    model.starts_with("glm-5")
+        || model.starts_with("glm-4.7")
+        || model.starts_with("glm-4.6")
+        || model.starts_with("glm-4.5")
+        || model.starts_with("glm-4.1v-thinking")
+}
+
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     fn model_name(&self) -> &str {
@@ -169,6 +180,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
         (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            thinking: model_supports_thinking(&self.model),
+        }
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -768,6 +785,32 @@ mod tests {
     fn parse_stream_frame_ignores_done_sentinel() {
         let events = parse_stream_frame("[DONE]");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_provider_reports_thinking_for_glm5() {
+        let provider =
+            OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
+                "https://example.com/v1",
+                "key",
+                "glm-5",
+            ))
+            .expect("provider should build");
+
+        assert!(provider.capabilities().thinking);
+    }
+
+    #[test]
+    fn openai_compatible_provider_reports_no_thinking_for_legacy_model() {
+        let provider =
+            OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
+                "https://example.com/v1",
+                "key",
+                "gpt-4o-mini",
+            ))
+            .expect("provider should build");
+
+        assert!(!provider.capabilities().thinking);
     }
 
     #[test]
