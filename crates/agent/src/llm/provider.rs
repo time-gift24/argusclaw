@@ -280,8 +280,6 @@ pub enum LlmStreamEvent {
     ReasoningDelta { delta: String },
     /// Incremental text output from the model.
     ContentDelta { delta: String },
-    /// Incremental reasoning output from the model.
-    ReasoningDelta { delta: String },
     /// Incremental tool call output from the model.
     ToolCallDelta(ToolCallDelta),
     /// Usage information emitted by the provider during streaming.
