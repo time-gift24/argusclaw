@@ -3,8 +3,8 @@ use std::env;
 #[cfg(feature = "dev")]
 mod dev;
 
-use claw::AppContext;
 use anyhow::Result;
+use claw::AppContext;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

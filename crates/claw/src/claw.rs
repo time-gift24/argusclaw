@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::{env, path::Path, path::PathBuf};
 
+use crate::agents::AgentManager;
 #[cfg(feature = "dev")]
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
-use crate::agents::AgentManager;
 use crate::db::sqlite::{SqliteLlmProviderRepository, connect, connect_path, migrate};
 use crate::error::AgentError;
 use crate::llm::LLMManager;
@@ -38,7 +38,10 @@ impl AppContext {
 
     #[must_use]
     pub fn new(llm_manager: Arc<LLMManager>, agent_manager: Arc<AgentManager>) -> Self {
-        Self { llm_manager, agent_manager }
+        Self {
+            llm_manager,
+            agent_manager,
+        }
     }
 
     #[must_use]

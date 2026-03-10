@@ -4,13 +4,13 @@ pub mod config;
 use std::io::{self, Write};
 use std::path::Path;
 
-use agent::Agent;
-use agent::db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
-};
-use agent::llm::LlmStreamEvent;
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand};
+use claw::AppContext;
+use claw::db::llm::{
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
+};
+use claw::llm::LlmStreamEvent;
 use futures_util::StreamExt;
 
 #[derive(Debug, Parser)]
@@ -112,7 +112,7 @@ impl From<LlmProviderRecord> for ProviderDisplayRecord {
 }
 
 impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
-    type Error = agent::db::DbError;
+    type Error = claw::db::DbError;
 
     fn try_from(value: ProviderUpsertArgs) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -127,7 +127,7 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
     }
 }
 
-pub async fn try_run(agent: Agent) -> Result<bool> {
+pub async fn try_run(ctx: AppContext) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
@@ -136,14 +136,14 @@ pub async fn try_run(agent: Agent) -> Result<bool> {
     }
 
     let cli = DevCli::parse();
-    run(agent, cli.command).await?;
+    run(ctx, cli.command).await?;
     Ok(true)
 }
 
-pub async fn run(agent: Agent, command: DevCommand) -> Result<()> {
+pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
     match command {
-        DevCommand::Provider(command) => run_provider_command(agent, command).await,
-        DevCommand::Llm(command) => run_llm_command(agent, command).await,
+        DevCommand::Provider(command) => run_provider_command(ctx, command).await,
+        DevCommand::Llm(command) => run_llm_command(ctx, command).await,
     }
 }
 
@@ -214,7 +214,7 @@ pub fn render_stream_output(events: &[LlmStreamEvent]) -> String {
     output
 }
 
-async fn run_provider_command(agent: Agent, command: ProviderCommand) -> Result<()> {
+async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> Result<()> {
     match command {
         ProviderCommand::Import { file } => {
             let contents = std::fs::read_to_string(Path::new(&file))
@@ -222,27 +222,27 @@ async fn run_provider_command(agent: Agent, command: ProviderCommand) -> Result<
             let config: config::ProviderImportFile =
                 toml::from_str(&contents).context("failed to parse provider import toml")?;
             let records = config.into_records().map_err(|e| anyhow!(e.to_string()))?;
-            agent.import_providers(records).await?;
+            ctx.import_providers(records).await?;
         }
         ProviderCommand::List => {
-            for provider in agent.llm_manager().list_providers().await? {
+            for provider in ctx.llm_manager().list_providers().await? {
                 println!("{}", render_provider_output(&provider.into()));
                 println!();
             }
         }
         ProviderCommand::Get { id } => {
-            let provider = agent.get_provider_record(&LlmProviderId::new(id)).await?;
+            let provider = ctx.get_provider_record(&LlmProviderId::new(id)).await?;
             println!("{}", render_provider_output(&provider.into()));
         }
         ProviderCommand::Upsert(args) => {
             let record = LlmProviderRecord::try_from(args).map_err(|e| anyhow!(e.to_string()))?;
-            agent.upsert_provider(record).await?;
+            ctx.upsert_provider(record).await?;
         }
         ProviderCommand::SetDefault { id } => {
-            agent.set_default_provider(&LlmProviderId::new(id)).await?;
+            ctx.set_default_provider(&LlmProviderId::new(id)).await?;
         }
         ProviderCommand::GetDefault => {
-            let provider = agent.get_default_provider_record().await?;
+            let provider = ctx.get_default_provider_record().await?;
             println!("{}", render_provider_output(&provider.into()));
         }
     }
@@ -250,7 +250,7 @@ async fn run_provider_command(agent: Agent, command: ProviderCommand) -> Result<
     Ok(())
 }
 
-async fn run_llm_command(agent: Agent, command: LlmCommand) -> Result<()> {
+async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
     match command {
         LlmCommand::Complete {
             provider,
@@ -259,7 +259,7 @@ async fn run_llm_command(agent: Agent, command: LlmCommand) -> Result<()> {
         } => {
             let provider_id = provider.map(LlmProviderId::new);
             if stream {
-                let mut events = agent.stream_text(provider_id.as_ref(), prompt).await?;
+                let mut events = ctx.stream_text(provider_id.as_ref(), prompt).await?;
                 let mut render_state = StreamRenderState::default();
                 let mut stdout = io::stdout();
 
@@ -276,7 +276,7 @@ async fn run_llm_command(agent: Agent, command: LlmCommand) -> Result<()> {
                     stdout.flush().context("failed to flush stream output")?;
                 }
             } else {
-                let content = agent.complete_text(provider_id.as_ref(), prompt).await?;
+                let content = ctx.complete_text(provider_id.as_ref(), prompt).await?;
                 println!("{content}");
             }
         }
@@ -289,8 +289,8 @@ async fn run_llm_command(agent: Agent, command: LlmCommand) -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    use agent::db::llm::LlmProviderRecord;
-    use agent::llm::LlmStreamEvent;
+    use claw::db::llm::LlmProviderRecord;
+    use claw::llm::LlmStreamEvent;
 
     use super::{DevCli, DevCommand, LlmCommand, ProviderCommand};
     use crate::dev::{

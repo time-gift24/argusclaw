@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use agent::db::llm::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
+use claw::db::llm::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderImportFile {
@@ -20,7 +20,7 @@ pub struct ProviderImportRecord {
 }
 
 impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
-    type Error = agent::db::DbError;
+    type Error = claw::db::DbError;
 
     fn try_from(value: ProviderImportRecord) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -36,7 +36,7 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
 }
 
 impl ProviderImportFile {
-    pub fn into_records(self) -> Result<Vec<LlmProviderRecord>, agent::db::DbError> {
+    pub fn into_records(self) -> Result<Vec<LlmProviderRecord>, claw::db::DbError> {
         self.providers.into_iter().map(TryInto::try_into).collect()
     }
 }
