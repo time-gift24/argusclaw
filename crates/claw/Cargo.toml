@@ -16,6 +16,7 @@ derive_builder = "0.20"
 dashmap = "6"
 dirs = "6"
 futures-core = "0.3"
+futures-util = "0.3"
 mac_address = "1.1"
 rand = "0.8"
 ring = "0.17"
@@ -24,16 +25,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate", "macros"] }
 thiserror = "2.0.18"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "macros", "rt"] }
 tracing = "0.1"
 eventsource-stream = { version = "0.2", optional = true }
-futures-util = { version = "0.3", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"], optional = true }
 
 [features]
 default = []
 dev = []
-openai-compatible = ["dep:eventsource-stream", "dep:futures-util", "dep:reqwest"]
+openai-compatible = ["dep:eventsource-stream", "dep:reqwest"]
 
 [dev-dependencies]
 tempfile = "3"

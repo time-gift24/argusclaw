@@ -8,4 +8,5 @@ pub use config::{
     TurnOutputBuilder,
 };
 pub use error::TurnError;
+pub use execution::execute_turn;
 pub use hooks::{HookContext, HookEvent, HookHandler, HookRegistry};
