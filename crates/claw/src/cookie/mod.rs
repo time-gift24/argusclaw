@@ -40,6 +40,11 @@ pub async fn get_cookies(
     // Parse response
     let response: serde_json::Value = serde_json::from_str(&cookies_json)?;
 
+    // Verify response matches our request (ID=1)
+    if response.get("id").and_then(|v| v.as_i64()) != Some(1) {
+        return Err(CookieError::InvalidResponse("Unexpected message ID".into()));
+    }
+
     if let Some(error) = response.get("error") {
         return Err(CookieError::CdpFailed(error.to_string()));
     }
@@ -49,13 +54,20 @@ pub async fn get_cookies(
         .ok_or_else(|| CookieError::InvalidResponse("Missing cookies array".into()))?;
 
     // Parse cookies
-    let all_cookies: Vec<Cookie> = serde_json::from_value(json!(all_cookies))?;
+    let all_cookies: Vec<Cookie> = serde_json::from_value(serde_json::Value::Array(all_cookies.clone()))?;
 
-    // Filter by domain (substring match, handles .example.com and example.com)
+    // Filter by domain (proper domain matching, handles .example.com and example.com)
     let filtered: Vec<Cookie> = all_cookies
         .into_iter()
-        .filter(|c| c.domain.contains(domain))
+        .filter(|c| {
+            let cookie_domain = c.domain.trim_start_matches('.');
+            let filter_domain = domain.trim_start_matches('.');
+            cookie_domain == filter_domain || cookie_domain.ends_with(&format!(".{}", filter_domain))
+        })
         .collect();
+
+    // Explicitly close WebSocket connection
+    let _ = write.close().await;
 
     Ok(filtered)
 }
@@ -102,3 +114,4 @@ mod tests {
         assert_eq!(filtered[0].name, "session");
     }
 }
+
