@@ -10,7 +10,7 @@ cargo test --features integration                            # + Sqlite 测试
 RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 ```
 
-## 设计原则(非常重要)
+## 设计与检视原则(非常重要)
 - YAGNI（You Ain't Gonna Need It，你不会需要它）
 - KISS (Keep It Simple and Stupid，尽可能保持简单)
 - DRY (Don't Repeat Yourself, 禁止重复你自身)
