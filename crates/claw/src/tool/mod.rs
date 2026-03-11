@@ -37,6 +37,13 @@ pub struct ToolManager {
     tools: DashMap<String, Arc<dyn NamedTool>>,
 }
 
+impl std::fmt::Debug for ToolManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let keys: Vec<String> = self.tools.iter().map(|e| e.key().clone()).collect();
+        f.debug_struct("ToolManager").field("tools", &keys).finish()
+    }
+}
+
 impl ToolManager {
     #[must_use]
     pub fn new() -> Self {
