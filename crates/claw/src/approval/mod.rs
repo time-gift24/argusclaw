@@ -52,5 +52,7 @@ pub use policy::ApprovalPolicy;
 pub use types::{
     ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_ACTION_SUMMARY_LEN,
     MAX_DESCRIPTION_LEN, MAX_PENDING_PER_AGENT, MAX_TIMEOUT_SECS, MAX_TOOL_NAME_LEN,
-    MIN_TIMEOUT_SECS, RiskLevel,
+    MIN_TIMEOUT_SECS,
 };
+// Re-export RiskLevel from protocol for backward compatibility
+pub use crate::protocol::RiskLevel;

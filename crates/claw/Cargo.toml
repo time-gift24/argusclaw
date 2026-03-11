@@ -38,5 +38,6 @@ dev = []
 openai-compatible = ["dep:eventsource-stream", "dep:reqwest"]
 
 [dev-dependencies]
+mockall = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

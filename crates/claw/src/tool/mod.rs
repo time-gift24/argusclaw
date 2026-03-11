@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 
 use crate::llm::ToolDefinition;
+use crate::protocol::RiskLevel;
 
 /// Error type for tool operations.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +31,12 @@ pub trait NamedTool: Send + Sync {
 
     /// Execute the tool with the provided arguments.
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
+
+    /// Returns the risk level of this tool for approval gating.
+    /// Default is `RiskLevel::Low` for read-only/safe operations.
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
 }
 
 /// Registry for tools with concurrent access support.
@@ -77,6 +84,14 @@ impl ToolManager {
             id: name.to_string(),
         })?;
         tool.execute(args).await
+    }
+
+    /// Get the risk level for a tool by name.
+    /// Returns `RiskLevel::Low` if the tool is not found.
+    pub fn get_risk_level(&self, name: &str) -> RiskLevel {
+        self.get(name)
+            .map(|t| t.risk_level())
+            .unwrap_or(RiskLevel::Low)
     }
 }
 
@@ -186,6 +201,35 @@ mod tests {
 
         async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({"value": self.value}))
+        }
+    }
+
+    /// A tool with configurable risk level.
+    struct RiskyTool {
+        name: String,
+        risk: RiskLevel,
+    }
+
+    #[async_trait]
+    impl NamedTool for RiskyTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.clone(),
+                description: "A risky tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({}))
+        }
+
+        fn risk_level(&self) -> RiskLevel {
+            self.risk
         }
     }
 
@@ -301,5 +345,46 @@ mod tests {
         // Should be able to register tools
         manager.register(Arc::new(EchoTool));
         assert!(manager.get("echo").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // risk_level tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_risk_level_is_low() {
+        let manager = ToolManager::new();
+        manager.register(Arc::new(EchoTool));
+
+        assert_eq!(manager.get_risk_level("echo"), RiskLevel::Low);
+    }
+
+    #[test]
+    fn tool_can_override_risk_level() {
+        let manager = ToolManager::new();
+
+        manager.register(Arc::new(RiskyTool {
+            name: "shell_exec".to_string(),
+            risk: RiskLevel::Critical,
+        }));
+        manager.register(Arc::new(RiskyTool {
+            name: "file_write".to_string(),
+            risk: RiskLevel::High,
+        }));
+        manager.register(Arc::new(RiskyTool {
+            name: "web_fetch".to_string(),
+            risk: RiskLevel::Medium,
+        }));
+
+        assert_eq!(manager.get_risk_level("shell_exec"), RiskLevel::Critical);
+        assert_eq!(manager.get_risk_level("file_write"), RiskLevel::High);
+        assert_eq!(manager.get_risk_level("web_fetch"), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn get_risk_level_returns_low_for_nonexistent_tool() {
+        let manager = ToolManager::new();
+
+        assert_eq!(manager.get_risk_level("nonexistent"), RiskLevel::Low);
     }
 }

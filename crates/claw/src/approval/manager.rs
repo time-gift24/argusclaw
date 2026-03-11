@@ -11,7 +11,6 @@ use super::error::ApprovalError;
 use super::policy::ApprovalPolicy;
 use super::types::{
     ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_PENDING_PER_AGENT,
-    RiskLevel,
 };
 
 /// Manages approval requests with oneshot channels for blocking resolution.
@@ -160,11 +159,6 @@ impl ApprovalManager {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-
-    /// Classify the risk level of a tool invocation.
-    pub fn classify_risk(tool_name: &str) -> RiskLevel {
-        RiskLevel::from_tool(tool_name)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +168,7 @@ impl ApprovalManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::RiskLevel;
 
     fn default_manager() -> ApprovalManager {
         ApprovalManager::new(ApprovalPolicy::default())
@@ -185,6 +180,7 @@ mod tests {
             tool_name.to_string(),
             "test action".to_string(),
             timeout_secs,
+            RiskLevel::Critical,
         )
     }
 
@@ -212,39 +208,6 @@ mod tests {
         assert!(mgr.requires_approval("file_delete"));
         assert!(!mgr.requires_approval("shell_exec"));
         assert!(!mgr.requires_approval("file_read"));
-    }
-
-    // -----------------------------------------------------------------------
-    // classify_risk
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_classify_risk() {
-        assert_eq!(
-            ApprovalManager::classify_risk("shell_exec"),
-            RiskLevel::Critical
-        );
-        assert_eq!(
-            ApprovalManager::classify_risk("file_write"),
-            RiskLevel::High
-        );
-        assert_eq!(
-            ApprovalManager::classify_risk("file_delete"),
-            RiskLevel::High
-        );
-        assert_eq!(
-            ApprovalManager::classify_risk("web_fetch"),
-            RiskLevel::Medium
-        );
-        assert_eq!(
-            ApprovalManager::classify_risk("browser_navigate"),
-            RiskLevel::Medium
-        );
-        assert_eq!(ApprovalManager::classify_risk("file_read"), RiskLevel::Low);
-        assert_eq!(
-            ApprovalManager::classify_risk("unknown_tool"),
-            RiskLevel::Low
-        );
     }
 
     // -----------------------------------------------------------------------

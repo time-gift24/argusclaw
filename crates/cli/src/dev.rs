@@ -458,7 +458,19 @@ async fn create_dev_approval_repository() -> Result<(SqliteApprovalRepository, S
 /// This function tests the approval module functionality independently.
 async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Result<()> {
     use claw::approval::{ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest};
+    use claw::protocol::RiskLevel;
     use std::sync::OnceLock;
+
+    /// Simple risk classification for CLI testing.
+    /// In production, this comes from the tool's `risk_level()` method via ToolManager.
+    fn classify_risk_for_cli(tool_name: &str) -> RiskLevel {
+        match tool_name {
+            "shell_exec" | "bash" => RiskLevel::Critical,
+            "file_write" | "file_delete" => RiskLevel::High,
+            "web_fetch" | "browser_navigate" => RiskLevel::Medium,
+            _ => RiskLevel::Low,
+        }
+    }
 
     // Use a global manager for CLI testing (simplified approach)
     static MANAGER: OnceLock<std::sync::Arc<ApprovalManager>> = OnceLock::new();
@@ -500,10 +512,16 @@ async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Res
             action,
             timeout,
         } => {
-            let req = ApprovalRequest::new(agent.clone(), tool.clone(), action.clone(), timeout);
+            let risk_level = classify_risk_for_cli(&tool);
+            let req = ApprovalRequest::new(
+                agent.clone(),
+                tool.clone(),
+                action.clone(),
+                timeout,
+                risk_level,
+            );
 
             let request_id = req.id;
-            let risk_level = ApprovalManager::classify_risk(&tool);
 
             repo.insert_request(&req).await?;
 
@@ -529,15 +547,16 @@ async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Res
                 return Err(anyhow!("Cannot specify both --approve and --deny"));
             }
 
+            let risk_level = classify_risk_for_cli(&tool);
             let req = ApprovalRequest::new(
                 agent.clone(),
                 tool.clone(),
                 format!("Test approval for {tool}"),
                 timeout,
+                risk_level,
             );
 
             let request_id = req.id;
-            let risk_level = ApprovalManager::classify_risk(&tool);
 
             println!("Submitting approval request...");
             println!();

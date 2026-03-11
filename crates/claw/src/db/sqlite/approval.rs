@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalResponse, RiskLevel};
+use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalResponse};
 use crate::db::{ApprovalRepository, DbError};
+use crate::protocol::RiskLevel;
 
 /// SQLite-backed approval repository.
 pub struct SqliteApprovalRepository {
@@ -236,6 +237,7 @@ mod tests {
             "shell_exec".to_string(),
             "rm -rf /tmp/test".to_string(),
             60,
+            RiskLevel::Critical,
         );
 
         repo.insert_request(&request).await.unwrap();
@@ -256,6 +258,7 @@ mod tests {
             "file_write".to_string(),
             "write test".to_string(),
             60,
+            RiskLevel::High,
         );
 
         repo.insert_request(&request).await.unwrap();
@@ -287,6 +290,7 @@ mod tests {
             "shell_exec".to_string(),
             "test".to_string(),
             60,
+            RiskLevel::Critical,
         );
 
         repo.insert_request(&request).await.unwrap();
@@ -312,6 +316,7 @@ mod tests {
                 format!("tool_{}", i),
                 format!("action {}", i),
                 60,
+                RiskLevel::Medium,
             );
             repo.insert_request(&request).await.unwrap();
         }
