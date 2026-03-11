@@ -10,6 +10,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = { version = "0.8", optional = true }
 tracing = "0.1"
@@ -18,4 +19,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:toml"]
+dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:toml"]
