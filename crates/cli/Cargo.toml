@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 claw = { path = "../claw", features = ["openai-compatible"] }
 anyhow = "1"
+chrono = "0.4"
 clap = { version = "4", features = ["derive"], optional = true }
 futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
