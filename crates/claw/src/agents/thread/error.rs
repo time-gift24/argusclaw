@@ -4,6 +4,21 @@ use thiserror::Error;
 
 use crate::agents::turn::TurnError;
 
+/// Compact operation error.
+#[derive(Debug, Error)]
+pub enum CompactError {
+    /// Compact failed with a reason.
+    #[error("Compact failed: {reason}")]
+    Failed {
+        /// Reason for the failure.
+        reason: String,
+    },
+
+    /// Summarize strategy not implemented.
+    #[error("Summarize strategy not implemented")]
+    SummarizeNotImplemented,
+}
+
 /// Errors that can occur during Thread operations.
 #[derive(Debug, Error)]
 pub enum ThreadError {
@@ -12,11 +27,8 @@ pub enum ThreadError {
     TurnFailed(#[from] TurnError),
 
     /// Compact operation failed.
-    #[error("Compact failed: {reason}")]
-    CompactFailed {
-        /// Reason for the failure.
-        reason: String,
-    },
+    #[error("Compact failed: {0}")]
+    CompactFailed(#[from] CompactError),
 
     /// Provider not configured.
     #[error("LLM provider not configured")]
@@ -36,10 +48,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn thread_error_display_compact_failed() {
-        let err = ThreadError::CompactFailed {
+    fn compact_error_display_failed() {
+        let err = CompactError::Failed {
             reason: "test reason".to_string(),
         };
+        assert!(err.to_string().contains("test reason"));
+    }
+
+    #[test]
+    fn compact_error_display_summarize_not_implemented() {
+        let err = CompactError::SummarizeNotImplemented;
+        assert!(err.to_string().contains("not implemented"));
+    }
+
+    #[test]
+    fn thread_error_display_compact_failed() {
+        let err = ThreadError::CompactFailed(CompactError::Failed {
+            reason: "test reason".to_string(),
+        });
         assert!(err.to_string().contains("test reason"));
     }
 

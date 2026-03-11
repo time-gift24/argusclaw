@@ -5,21 +5,16 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use tokio::sync::{broadcast, oneshot};
 
+use crate::agents::compact::Compactor;
 use crate::agents::turn::{TurnError, TurnInputBuilder, TurnOutput, execute_turn};
 use crate::approval::ApprovalManager;
-use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent, Role};
+use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use crate::tool::ToolManager;
 
-use super::{
-    CompactStrategy, ThreadConfig, ThreadError, ThreadEvent, ThreadId, ThreadInfo, ThreadState,
-};
+use super::{ThreadConfig, ThreadError, ThreadEvent, ThreadId, ThreadInfo, ThreadState};
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
-
-/// Default context window size for token calculations.
-/// Used when provider doesn't specify a context window.
-const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
 /// Handle for receiving Turn execution events.
 pub struct TurnStreamHandle {
@@ -65,6 +60,9 @@ pub struct Thread {
     #[builder(default = "Arc::new(ToolManager::new())")]
     pub tool_manager: Arc<ToolManager>,
 
+    /// Compactor for managing context size.
+    pub compactor: Arc<dyn Compactor>,
+
     /// Approval manager (optional).
     #[builder(default, setter(strip_option))]
     pub approval_manager: Option<Arc<ApprovalManager>>,
@@ -109,7 +107,7 @@ impl ThreadBuilder {
     ///
     /// # Panics
     ///
-    /// Panics if provider is not set.
+    /// Panics if provider or compactor is not set.
     #[must_use]
     pub fn build(self) -> Thread {
         let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
@@ -121,6 +119,7 @@ impl ThreadBuilder {
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
+            compactor: self.compactor.expect("compactor is required"),
             approval_manager: self.approval_manager.flatten(),
             config: self.config.unwrap_or_default(),
             token_count: 0,
@@ -139,7 +138,7 @@ impl Thread {
     pub fn new(
         provider: Arc<dyn LlmProvider>,
         tool_manager: Arc<ToolManager>,
-        _compact_manager: Arc<crate::agents::compact::CompactManager>,
+        compactor: Arc<dyn Compactor>,
         approval_manager: Option<Arc<ApprovalManager>>,
         config: ThreadConfig,
     ) -> Self {
@@ -150,6 +149,7 @@ impl Thread {
             messages: Vec::new(),
             provider,
             tool_manager,
+            compactor,
             approval_manager,
             config,
             token_count: 0,
@@ -200,19 +200,39 @@ impl Thread {
         self.turn_count
     }
 
-    /// Check if compact is needed based on token threshold.
-    pub fn should_compact(&self) -> bool {
-        let threshold =
-            (DEFAULT_CONTEXT_WINDOW as f32 * self.config.compact_threshold_ratio) as u32;
-        self.token_count >= threshold
+    /// Get the LLM provider.
+    pub fn provider(&self) -> &Arc<dyn LlmProvider> {
+        &self.provider
+    }
+
+    /// Get mutable access to messages (for Compactor).
+    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
+        &mut self.messages
+    }
+
+    /// Set the token count (for Compactor).
+    pub fn set_token_count(&mut self, count: u32) {
+        self.token_count = count;
+    }
+
+    /// Recalculate token count from messages.
+    pub fn recalculate_token_count(&mut self) {
+        self.token_count = self
+            .messages
+            .iter()
+            .map(|m| Self::estimate_tokens(&m.content))
+            .sum();
     }
 
     /// Send user message and execute Turn.
     ///
     /// Returns a handle for receiving streaming events and the final result.
     pub async fn send_message(&mut self, user_input: String) -> TurnStreamHandle {
-        if self.should_compact() {
-            let _ = self.compact().await;
+        // Compactor decides internally whether to compact
+        // Clone the Arc first to avoid borrow conflicts
+        let compactor = self.compactor.clone();
+        if let Err(e) = compactor.compact(self).await {
+            tracing::warn!("Compact failed: {}", e);
         }
 
         self.messages.push(ChatMessage::user(user_input));
@@ -270,93 +290,6 @@ impl Thread {
         }
     }
 
-    /// Compact the message history.
-    pub async fn compact(&mut self) -> Result<(), ThreadError> {
-        match &self.config.compact_strategy {
-            CompactStrategy::KeepRecent { count } => {
-                self.compact_keep_recent(*count);
-            }
-            CompactStrategy::KeepTokens { ratio } => {
-                self.compact_keep_tokens(*ratio);
-            }
-            CompactStrategy::Summarize { .. } => {
-                return Err(ThreadError::CompactFailed {
-                    reason: "Summarize strategy not yet implemented".to_string(),
-                });
-            }
-        }
-
-        let _ = self.event_sender.send(ThreadEvent::Compacted {
-            thread_id: self.id,
-            new_token_count: self.token_count,
-        });
-
-        Ok(())
-    }
-
-    fn compact_keep_recent(&mut self, count: usize) {
-        let system_msgs: Vec<_> = self
-            .messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .cloned()
-            .collect();
-
-        let non_system: Vec<_> = self
-            .messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .cloned()
-            .collect();
-
-        let start = non_system.len().saturating_sub(count);
-        let recent: Vec<_> = non_system.into_iter().skip(start).collect();
-
-        self.messages = [system_msgs, recent].concat();
-        self.recalculate_token_count();
-    }
-
-    fn compact_keep_tokens(&mut self, ratio: f32) {
-        let target_tokens = (self.token_count as f32 * ratio) as usize;
-        self.truncate_to_token_budget(target_tokens);
-    }
-
-    fn truncate_to_token_budget(&mut self, target_tokens: usize) {
-        let system_msgs: Vec<_> = self
-            .messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .cloned()
-            .collect();
-
-        let mut kept: Vec<ChatMessage> = Vec::new();
-        let mut current_tokens = 0u32;
-
-        for msg in self.messages.iter().rev() {
-            if msg.role == Role::System {
-                continue;
-            }
-            let msg_tokens = Self::estimate_tokens(&msg.content);
-            if current_tokens + msg_tokens > target_tokens as u32 {
-                break;
-            }
-            kept.push(msg.clone());
-            current_tokens += msg_tokens;
-        }
-
-        kept.reverse();
-        self.messages = [system_msgs, kept].concat();
-        self.token_count = current_tokens;
-    }
-
-    fn recalculate_token_count(&mut self) {
-        self.token_count = self
-            .messages
-            .iter()
-            .map(|m| Self::estimate_tokens(&m.content))
-            .sum();
-    }
-
     /// Estimate token count for a string.
     fn estimate_tokens(content: &str) -> u32 {
         (content.len() / 4).max(1) as u32
@@ -370,9 +303,20 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::compact::KeepRecentCompactor;
 
     #[test]
     fn thread_builder_requires_provider() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        // Use AssertUnwindSafe to allow catch_unwind with Arc<dyn Compactor>
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ThreadBuilder::new().compactor(compactor).build();
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn thread_builder_requires_compactor() {
         let result = std::panic::catch_unwind(|| ThreadBuilder::new().build());
         assert!(result.is_err());
     }

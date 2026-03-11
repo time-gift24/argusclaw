@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use derive_builder::Builder;
 
-use crate::agents::compact::CompactManager;
+use crate::agents::compact::{Compactor, CompactorManager};
 use crate::agents::thread::{Thread, ThreadConfig, ThreadId, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
 use crate::approval::ApprovalManager;
@@ -41,7 +41,7 @@ impl AgentRuntimeInfo {
 /// An Agent manages multiple conversation threads with shared configuration.
 ///
 /// Each agent has a default LLM provider and manages multiple threads.
-/// Threads share the same provider, tool manager, and compact manager.
+/// Threads share the same provider, tool manager, and compactor manager.
 #[derive(Builder)]
 #[builder(pattern = "owned", build_fn(skip))]
 pub struct Agent {
@@ -57,9 +57,9 @@ pub struct Agent {
     /// Tool manager.
     #[builder(default = "Arc::new(ToolManager::new())")]
     pub tool_manager: Arc<ToolManager>,
-    /// Compact manager.
-    #[builder(default)]
-    pub compact_manager: Option<Arc<CompactManager>>,
+    /// Compactor manager.
+    #[builder(default = "Arc::new(CompactorManager::with_defaults())")]
+    pub compactor_manager: Arc<CompactorManager>,
     /// Approval manager.
     #[builder(default)]
     pub approval_manager: Option<Arc<ApprovalManager>>,
@@ -92,8 +92,12 @@ impl AgentBuilder {
             runtime_id: self.runtime_id.unwrap_or_default(),
             system_prompt: self.system_prompt.unwrap_or_default(),
             provider: self.provider.expect("provider is required"),
-            tool_manager: self.tool_manager.unwrap_or_else(|| Arc::new(ToolManager::new())),
-            compact_manager: self.compact_manager.flatten(),
+            tool_manager: self
+                .tool_manager
+                .unwrap_or_else(|| Arc::new(ToolManager::new())),
+            compactor_manager: self
+                .compactor_manager
+                .unwrap_or_else(|| Arc::new(CompactorManager::with_defaults())),
             approval_manager: self.approval_manager.flatten(),
             threads: DashMap::new(),
         }
@@ -125,10 +129,10 @@ impl Agent {
         &self.tool_manager
     }
 
-    /// Get the compact manager.
+    /// Get the compactor manager.
     #[must_use]
-    pub fn compact_manager(&self) -> Option<&Arc<CompactManager>> {
-        self.compact_manager.as_ref()
+    pub fn compactor_manager(&self) -> &Arc<CompactorManager> {
+        &self.compactor_manager
     }
 
     /// Get the approval manager (if configured).
@@ -139,15 +143,12 @@ impl Agent {
 
     /// Create a new thread in this agent.
     pub fn create_thread(&self, config: ThreadConfig) -> ThreadId {
-        let compact = self
-            .compact_manager
-            .clone()
-            .unwrap_or_else(|| Arc::new(CompactManager::with_defaults(128_000)));
+        let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
 
         let thread = Thread::new(
             self.provider.clone(),
             self.tool_manager.clone(),
-            compact,
+            compactor,
             self.approval_manager.clone(),
             config,
         );
@@ -222,7 +223,7 @@ impl Clone for Agent {
             system_prompt: self.system_prompt.clone(),
             provider: self.provider.clone(),
             tool_manager: self.tool_manager.clone(),
-            compact_manager: self.compact_manager.clone(),
+            compactor_manager: self.compactor_manager.clone(),
             approval_manager: self.approval_manager.clone(),
             threads: DashMap::new(),
         }

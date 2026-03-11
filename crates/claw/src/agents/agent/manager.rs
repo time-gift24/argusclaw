@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use super::runtime::{Agent, AgentBuilder};
-use crate::agents::compact::CompactManager;
+use crate::agents::compact::CompactorManager;
 use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentRuntimeId};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
@@ -22,16 +22,14 @@ pub struct AgentManager {
     repository: Arc<dyn AgentRepository>,
     /// LLM manager for building providers.
     llm_manager: Arc<LLMManager>,
-    /// Global CompactManager (shared by all agents).
-    compact_manager: Arc<CompactManager>,
+    /// Global CompactorManager (shared by all agents).
+    compactor_manager: Arc<CompactorManager>,
     /// Global ApprovalManager (shared by all agents).
     approval_manager: Option<Arc<ApprovalManager>>,
     /// Global ToolManager (shared by all agents).
     tool_manager: Arc<ToolManager>,
     /// Active agents indexed by runtime ID.
     agents: DashMap<AgentRuntimeId, Agent>,
-    /// Default context window (used if provider doesn't specify).
-    default_context_window: u32,
 }
 
 impl AgentManager {
@@ -45,18 +43,17 @@ impl AgentManager {
         Self {
             repository,
             llm_manager,
-            compact_manager: Arc::new(CompactManager::with_defaults(128_000)),
+            compactor_manager: Arc::new(CompactorManager::with_defaults()),
             approval_manager,
             tool_manager,
             agents: DashMap::new(),
-            default_context_window: 128_000,
         }
     }
 
-    /// Get the compact manager.
+    /// Get the compactor manager.
     #[must_use]
-    pub fn compact_manager(&self) -> &Arc<CompactManager> {
-        &self.compact_manager
+    pub fn compactor_manager(&self) -> &Arc<CompactorManager> {
+        &self.compactor_manager
     }
 
     /// Get the tool manager.
@@ -81,17 +78,13 @@ impl AgentManager {
             .get_provider(&LlmProviderId::new(&record.provider_id))
             .await?;
 
-        // Use default context window for now
-        let context_window = self.default_context_window;
-        let compact_manager = Arc::new(CompactManager::with_defaults(context_window));
-
         let agent = AgentBuilder::from_record(record, provider)
             .tool_manager(self.tool_manager.clone())
-            .compact_manager(Some(compact_manager))
+            .compactor_manager(self.compactor_manager.clone())
             .approval_manager(self.approval_manager.clone())
             .build();
 
-        let runtime_id = agent.runtime_id;
+        let runtime_id = agent.runtime_id();
         self.agents.insert(runtime_id, agent);
         Ok(runtime_id)
     }
@@ -162,7 +155,7 @@ impl std::fmt::Debug for AgentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentManager")
             .field("agent_count", &self.agents.len())
-            .field("compact_manager", &self.compact_manager)
+            .field("compactor_manager", &self.compactor_manager)
             .finish()
     }
 }

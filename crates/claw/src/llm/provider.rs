@@ -505,6 +505,15 @@ pub trait LlmProvider: Send + Sync {
         self.model_name().to_string()
     }
 
+    /// Get the context window size (maximum context length) for this provider.
+    ///
+    /// Returns the maximum number of tokens that can be used in the context.
+    /// Default is 128,000 tokens (common for modern models).
+    /// Providers should override this if they have model-specific context limits.
+    fn context_window(&self) -> u32 {
+        128_000
+    }
+
     /// Switch the active model at runtime. Not all providers support this.
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {
         Err(LlmError::RequestFailed {
