@@ -3,18 +3,21 @@
 use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::types::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse, MAX_PENDING_PER_AGENT,
-    RiskLevel,
+    ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+    MAX_PENDING_PER_AGENT, RiskLevel,
 };
 
 /// Manages approval requests with oneshot channels for blocking resolution.
 pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
     policy: std::sync::RwLock<ApprovalPolicy>,
+    /// Broadcast sender for approval events (RequestCreated, Resolved).
+    event_tx: broadcast::Sender<ApprovalEvent>,
 }
 
 struct PendingRequest {
@@ -25,15 +28,25 @@ struct PendingRequest {
 impl ApprovalManager {
     /// Create a new approval manager with the given policy.
     pub fn new(policy: ApprovalPolicy) -> Self {
+        let (event_tx, _) = broadcast::channel(16);
         Self {
             pending: DashMap::new(),
             policy: std::sync::RwLock::new(policy),
+            event_tx,
         }
     }
 
     /// Create a new approval manager wrapped in Arc.
     pub fn new_shared(policy: ApprovalPolicy) -> Arc<Self> {
         Arc::new(Self::new(policy))
+    }
+
+    /// Subscribe to approval events (RequestCreated, Resolved).
+    ///
+    /// The returned receiver will get all events broadcast after subscription.
+    /// Old messages are automatically dropped if the subscriber is slow.
+    pub fn subscribe(&self) -> broadcast::Receiver<ApprovalEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Check if a tool requires approval based on current policy.
@@ -67,10 +80,13 @@ impl ApprovalManager {
         self.pending.insert(
             id,
             PendingRequest {
-                request: req,
+                request: req.clone(),
                 sender: tx,
             },
         );
+
+        // Broadcast RequestCreated event (ignore if no subscribers)
+        let _ = self.event_tx.send(ApprovalEvent::RequestCreated(req));
 
         info!(request_id = %id, "Approval request submitted, waiting for resolution");
 
@@ -104,6 +120,12 @@ impl ApprovalManager {
                 };
                 // Send decision to waiting agent (ignore error if receiver dropped)
                 let _ = pending.sender.send(decision);
+
+                // Broadcast Resolved event (ignore if no subscribers)
+                let _ = self
+                    .event_tx
+                    .send(ApprovalEvent::Resolved(response.clone()));
+
                 info!(request_id = %request_id, ?decision, "Approval request resolved");
                 Ok(response)
             }
@@ -401,5 +423,115 @@ mod tests {
         assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
+    }
+
+    // -----------------------------------------------------------------------
+    // event subscription
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_subscribe_request_created() {
+        let mgr = Arc::new(default_manager());
+        let mut rx = mgr.subscribe();
+
+        let req = make_request("agent-1", "shell_exec", 60);
+        let request_id = req.id;
+        let mgr2 = Arc::clone(&mgr);
+
+        // Spawn task to resolve after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = mgr2.resolve(request_id, ApprovalDecision::Approved, None);
+        });
+
+        let _ = mgr.request_approval(req).await;
+
+        // Should receive RequestCreated event
+        let event = rx.try_recv().expect("should receive RequestCreated event");
+        match event {
+            ApprovalEvent::RequestCreated(r) => {
+                assert_eq!(r.id, request_id);
+                assert_eq!(r.agent_id, "agent-1");
+                assert_eq!(r.tool_name, "shell_exec");
+            }
+            ApprovalEvent::Resolved(_) => panic!("expected RequestCreated, got Resolved"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_resolved() {
+        let mgr = Arc::new(default_manager());
+        let mut rx = mgr.subscribe();
+
+        let req = make_request("agent-1", "shell_exec", 60);
+        let request_id = req.id;
+        let mgr2 = Arc::clone(&mgr);
+
+        // Spawn task to resolve after a short delay
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = mgr2.resolve(
+                request_id,
+                ApprovalDecision::Approved,
+                Some("admin".to_string()),
+            );
+        });
+
+        let _ = mgr.request_approval(req).await;
+
+        // Skip RequestCreated event
+        let _ = rx.try_recv();
+
+        // Should receive Resolved event
+        let event = rx.try_recv().expect("should receive Resolved event");
+        match event {
+            ApprovalEvent::RequestCreated(_) => panic!("expected Resolved, got RequestCreated"),
+            ApprovalEvent::Resolved(resp) => {
+                assert_eq!(resp.request_id, request_id);
+                assert_eq!(resp.decision, ApprovalDecision::Approved);
+                assert_eq!(resp.decided_by, Some("admin".to_string()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_subscribers() {
+        let mgr = Arc::new(default_manager());
+        let mut rx1 = mgr.subscribe();
+        let mut rx2 = mgr.subscribe();
+
+        let req = make_request("agent-1", "shell_exec", 60);
+        let request_id = req.id;
+        let mgr2 = Arc::clone(&mgr);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = mgr2.resolve(request_id, ApprovalDecision::Denied, None);
+        });
+
+        let _ = mgr.request_approval(req).await;
+
+        // Both subscribers should receive events
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_no_subscribers_still_works() {
+        let mgr = Arc::new(default_manager());
+        // No subscription created
+
+        let req = make_request("agent-1", "shell_exec", 60);
+        let request_id = req.id;
+        let mgr2 = Arc::clone(&mgr);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let _ = mgr2.resolve(request_id, ApprovalDecision::Approved, None);
+        });
+
+        // Should still work without subscribers
+        let decision = mgr.request_approval(req).await;
+        assert_eq!(decision, ApprovalDecision::Approved);
     }
 }

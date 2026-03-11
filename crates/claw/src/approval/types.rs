@@ -202,6 +202,20 @@ pub struct ApprovalResponse {
 }
 
 // ---------------------------------------------------------------------------
+// ApprovalEvent
+// ---------------------------------------------------------------------------
+
+/// Approval event for subscribers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalEvent {
+    /// A new approval request was created.
+    RequestCreated(ApprovalRequest),
+    /// An approval request was resolved.
+    Resolved(ApprovalResponse),
+}
+
+// ---------------------------------------------------------------------------
 // ApprovalPolicy
 // ---------------------------------------------------------------------------
 
