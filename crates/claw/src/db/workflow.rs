@@ -247,6 +247,29 @@ impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> Result<(), DbError> {
+        // Check current status - terminal states cannot be changed
+        let current_status: Option<String> = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?1")
+            .bind(id.as_ref())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        let current_status = current_status.ok_or_else(|| DbError::QueryFailed {
+            reason: format!("job not found: {}", id),
+        })?;
+
+        let current = WorkflowStatus::parse_str(&current_status).map_err(|e| DbError::QueryFailed {
+            reason: e,
+        })?;
+
+        if current.is_terminal() {
+            return Err(DbError::QueryFailed {
+                reason: format!("cannot change status from terminal state: {}", current),
+            });
+        }
+
         let result = sqlx::query("UPDATE jobs SET status = ?1, started_at = ?2, finished_at = ?3 WHERE id = ?4")
             .bind(Self::status_as_str(status))
             .bind(started_at)

@@ -171,6 +171,12 @@ impl WorkflowStatus {
             _ => Err(format!("invalid workflow status: {s}")),
         }
     }
+
+    /// Returns true if this is a terminal status (cannot transition to another state).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
 }
 
 impl fmt::Display for WorkflowStatus {
