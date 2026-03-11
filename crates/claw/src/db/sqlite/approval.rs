@@ -66,16 +66,9 @@ impl SqliteApprovalRepository {
             tool_name: row.try_get("tool_name").map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?,
-            description: row
-                .try_get("description")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
-            action_summary: row
-                .try_get("action_summary")
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?,
+            action: row.try_get("action").map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?,
             risk_level,
             requested_at,
             timeout_secs: row.try_get::<i64, _>("timeout_secs").map_err(|e| {
@@ -98,14 +91,13 @@ impl ApprovalRepository for SqliteApprovalRepository {
         };
 
         sqlx::query(
-            "INSERT INTO approval_requests (id, agent_id, tool_name, description, action_summary, risk_level, requested_at, timeout_secs)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO approval_requests (id, agent_id, tool_name, action, risk_level, requested_at, timeout_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(request.id.to_string())
         .bind(&request.agent_id)
         .bind(&request.tool_name)
-        .bind(&request.description)
-        .bind(&request.action_summary)
+        .bind(&request.action)
         .bind(risk_level)
         .bind(request.requested_at.to_rfc3339())
         .bind(request.timeout_secs as i64)
@@ -124,7 +116,7 @@ impl ApprovalRepository for SqliteApprovalRepository {
         })?;
 
         let row = sqlx::query(
-            "SELECT id, agent_id, tool_name, description, action_summary, risk_level, requested_at, timeout_secs
+            "SELECT id, agent_id, tool_name, action, risk_level, requested_at, timeout_secs
              FROM approval_requests
              WHERE id = ?1",
         )
@@ -167,7 +159,7 @@ impl ApprovalRepository for SqliteApprovalRepository {
 
     async fn list_pending(&self) -> Result<Vec<ApprovalRequest>, DbError> {
         let rows = sqlx::query(
-            "SELECT id, agent_id, tool_name, description, action_summary, risk_level, requested_at, timeout_secs
+            "SELECT id, agent_id, tool_name, action, risk_level, requested_at, timeout_secs
              FROM approval_requests
              ORDER BY requested_at ASC",
         )
@@ -246,6 +238,7 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, request.id);
         assert_eq!(pending[0].tool_name, "shell_exec");
+        assert_eq!(pending[0].action, "rm -rf /tmp/test");
     }
 
     #[tokio::test]
@@ -288,7 +281,7 @@ mod tests {
         let request = ApprovalRequest::new(
             "test-agent".to_string(),
             "shell_exec".to_string(),
-            "test".to_string(),
+            "test action".to_string(),
             60,
             RiskLevel::Critical,
         );

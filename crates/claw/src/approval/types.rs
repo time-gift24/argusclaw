@@ -17,11 +17,8 @@ use crate::protocol::RiskLevel;
 /// Maximum length of tool names (chars).
 pub const MAX_TOOL_NAME_LEN: usize = 64;
 
-/// Maximum length of a request description (chars).
-pub const MAX_DESCRIPTION_LEN: usize = 1024;
-
 /// Maximum length of an action summary (chars).
-pub const MAX_ACTION_SUMMARY_LEN: usize = 512;
+pub const MAX_ACTION_LEN: usize = 512;
 
 /// Minimum approval timeout in seconds.
 pub const MIN_TIMEOUT_SECS: u64 = 10;
@@ -58,10 +55,8 @@ pub struct ApprovalRequest {
     pub agent_id: String,
     /// Name of the tool requiring approval.
     pub tool_name: String,
-    /// Human-readable description of the operation.
-    pub description: String,
-    /// The specific action being requested (sanitized for display).
-    pub action_summary: String,
+    /// Human-readable summary of the action (e.g., "rm -rf /tmp/test").
+    pub action: String,
     /// Risk level of this operation.
     pub risk_level: RiskLevel,
     /// When this request was created.
@@ -77,7 +72,7 @@ impl ApprovalRequest {
     pub fn new(
         agent_id: String,
         tool_name: String,
-        action_summary: String,
+        action: String,
         timeout_secs: u64,
         risk_level: RiskLevel,
     ) -> Self {
@@ -85,8 +80,7 @@ impl ApprovalRequest {
             id: Uuid::new_v4(),
             agent_id,
             tool_name,
-            description: String::new(),
-            action_summary,
+            action,
             risk_level,
             requested_at: Utc::now(),
             timeout_secs: timeout_secs.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS),
@@ -117,19 +111,11 @@ impl ApprovalRequest {
             );
         }
 
-        // -- description --
-        if self.description.len() > MAX_DESCRIPTION_LEN {
+        // -- action --
+        if self.action.len() > MAX_ACTION_LEN {
             return Err(format!(
-                "description too long ({} chars, max {MAX_DESCRIPTION_LEN})",
-                self.description.len()
-            ));
-        }
-
-        // -- action_summary --
-        if self.action_summary.len() > MAX_ACTION_SUMMARY_LEN {
-            return Err(format!(
-                "action_summary too long ({} chars, max {MAX_ACTION_SUMMARY_LEN})",
-                self.action_summary.len()
+                "action too long ({} chars, max {MAX_ACTION_LEN})",
+                self.action.len()
             ));
         }
 
@@ -346,49 +332,29 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ApprovalRequest — description
+    // ApprovalRequest — action
     // -----------------------------------------------------------------------
 
     #[test]
-    fn request_description_too_long() {
+    fn request_action_too_long() {
         let mut req = valid_request();
-        req.description = "x".repeat(1025);
+        req.action = "x".repeat(513);
         let err = req.validate().unwrap_err();
-        assert!(err.contains("description"), "{err}");
+        assert!(err.contains("action"), "{err}");
         assert!(err.contains("too long"), "{err}");
     }
 
     #[test]
-    fn request_description_1024_ok() {
+    fn request_action_512_ok() {
         let mut req = valid_request();
-        req.description = "x".repeat(1024);
+        req.action = "x".repeat(512);
         assert!(req.validate().is_ok());
     }
 
     #[test]
-    fn request_description_empty_ok() {
+    fn request_action_empty_ok() {
         let mut req = valid_request();
-        req.description = String::new();
-        assert!(req.validate().is_ok());
-    }
-
-    // -----------------------------------------------------------------------
-    // ApprovalRequest — action_summary
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn request_action_summary_too_long() {
-        let mut req = valid_request();
-        req.action_summary = "x".repeat(513);
-        let err = req.validate().unwrap_err();
-        assert!(err.contains("action_summary"), "{err}");
-        assert!(err.contains("too long"), "{err}");
-    }
-
-    #[test]
-    fn request_action_summary_512_ok() {
-        let mut req = valid_request();
-        req.action_summary = "x".repeat(512);
+        req.action = String::new();
         assert!(req.validate().is_ok());
     }
 
@@ -471,8 +437,7 @@ mod tests {
         assert_eq!(back.id, req.id);
         assert_eq!(back.agent_id, req.agent_id);
         assert_eq!(back.tool_name, req.tool_name);
-        assert_eq!(back.description, req.description);
-        assert_eq!(back.action_summary, req.action_summary);
+        assert_eq!(back.action, req.action);
         assert_eq!(back.risk_level, req.risk_level);
         assert_eq!(back.timeout_secs, req.timeout_secs);
     }
