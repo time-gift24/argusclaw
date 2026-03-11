@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::protocol::RiskLevel;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -29,42 +31,6 @@ pub const MAX_TIMEOUT_SECS: u64 = 300;
 
 /// Max pending requests per agent.
 pub const MAX_PENDING_PER_AGENT: usize = 5;
-
-// ---------------------------------------------------------------------------
-// RiskLevel
-// ---------------------------------------------------------------------------
-
-/// Risk level of an operation requiring approval.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RiskLevel {
-    Low,
-    Medium,
-    High,
-    Critical,
-}
-
-impl RiskLevel {
-    /// Returns a warning emoji suitable for display in dashboards and chat.
-    pub fn emoji(&self) -> &'static str {
-        match self {
-            RiskLevel::Low => "\u{2139}\u{fe0f}",      // information source
-            RiskLevel::Medium => "\u{26a0}\u{fe0f}",   // warning sign
-            RiskLevel::High => "\u{1f6a8}",            // rotating light
-            RiskLevel::Critical => "\u{2620}\u{fe0f}", // skull and crossbones
-        }
-    }
-
-    /// Classify the risk level of a tool invocation.
-    pub fn from_tool(tool_name: &str) -> Self {
-        match tool_name {
-            "shell_exec" => RiskLevel::Critical,
-            "file_write" | "file_delete" => RiskLevel::High,
-            "web_fetch" | "browser_navigate" => RiskLevel::Medium,
-            _ => RiskLevel::Low,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ApprovalDecision
@@ -105,14 +71,16 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// Create a new approval request with defaults.
+    /// Create a new approval request with an explicit risk level.
+    ///
+    /// Use the risk level from `ToolManager::get_risk_level()`.
     pub fn new(
         agent_id: String,
         tool_name: String,
         action_summary: String,
         timeout_secs: u64,
+        risk_level: RiskLevel,
     ) -> Self {
-        let risk_level = RiskLevel::from_tool(&tool_name);
         Self {
             id: Uuid::new_v4(),
             agent_id,
@@ -230,6 +198,7 @@ mod tests {
             "shell_exec".into(),
             "rm -rf /tmp/stale_cache".into(),
             60,
+            RiskLevel::Critical,
         )
     }
 
@@ -243,17 +212,6 @@ mod tests {
         assert_eq!(RiskLevel::Medium.emoji(), "\u{26a0}\u{fe0f}");
         assert_eq!(RiskLevel::High.emoji(), "\u{1f6a8}");
         assert_eq!(RiskLevel::Critical.emoji(), "\u{2620}\u{fe0f}");
-    }
-
-    #[test]
-    fn risk_level_from_tool() {
-        assert_eq!(RiskLevel::from_tool("shell_exec"), RiskLevel::Critical);
-        assert_eq!(RiskLevel::from_tool("file_write"), RiskLevel::High);
-        assert_eq!(RiskLevel::from_tool("file_delete"), RiskLevel::High);
-        assert_eq!(RiskLevel::from_tool("web_fetch"), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_tool("browser_navigate"), RiskLevel::Medium);
-        assert_eq!(RiskLevel::from_tool("file_read"), RiskLevel::Low);
-        assert_eq!(RiskLevel::from_tool("unknown_tool"), RiskLevel::Low);
     }
 
     #[test]
@@ -312,11 +270,37 @@ mod tests {
 
     #[test]
     fn request_new_clamps_timeout() {
-        let req = ApprovalRequest::new("agent".into(), "shell_exec".into(), "test".into(), 5);
+        let req = ApprovalRequest::new(
+            "agent".into(),
+            "shell_exec".into(),
+            "test".into(),
+            5,
+            RiskLevel::Critical,
+        );
         assert_eq!(req.timeout_secs, MIN_TIMEOUT_SECS);
 
-        let req = ApprovalRequest::new("agent".into(), "shell_exec".into(), "test".into(), 500);
+        let req = ApprovalRequest::new(
+            "agent".into(),
+            "shell_exec".into(),
+            "test".into(),
+            500,
+            RiskLevel::Critical,
+        );
         assert_eq!(req.timeout_secs, MAX_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn request_new_with_risk_level() {
+        let req = ApprovalRequest::new(
+            "agent".into(),
+            "custom_tool".into(),
+            "test action".into(),
+            30,
+            RiskLevel::High,
+        );
+        assert_eq!(req.tool_name, "custom_tool");
+        assert_eq!(req.risk_level, RiskLevel::High);
+        assert_eq!(req.timeout_secs, 30);
     }
 
     // -----------------------------------------------------------------------
