@@ -5,18 +5,19 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use claw::AppContext;
+use claw::approval::ApprovalResponse;
+use claw::db::ApprovalRepository;
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
+use claw::db::sqlite::SqliteApprovalRepository;
 use claw::llm::LlmStreamEvent;
 use futures_util::StreamExt;
 #[cfg(feature = "dev")]
 use owo_colors::OwoColorize;
-
-/// Default path for persisted approval requests (testing).
-const APPROVAL_TEST_FILE: &str = "/tmp/argusw-cli-approval.test";
 
 #[derive(Debug, Parser)]
 pub struct DevCli {
@@ -67,13 +68,9 @@ pub enum TurnCommand {
 #[derive(Debug, Subcommand)]
 pub enum ApprovalCommand {
     /// List pending approval requests.
-    List {
-        /// Read from persisted file instead of in-memory manager.
-        #[arg(long)]
-        file: bool,
-    },
+    List,
 
-    /// Submit a request and persist to file (for testing).
+    /// Submit a request and persist to database (for testing).
     Submit {
         /// Tool name to request approval for.
         #[arg(long, default_value = "shell_exec")]
@@ -254,7 +251,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Provider(command) => run_provider_command(ctx, command).await,
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
-        DevCommand::Approval(command) => run_approval_command(command).await,
+        DevCommand::Approval(command) => run_approval_command(ctx, command).await,
     }
 }
 
@@ -397,34 +394,13 @@ async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Approval file helpers (for testing)
+// Approval SQLite helpers
 // ---------------------------------------------------------------------------
-
-/// Read persisted requests from file.
-fn read_pending_requests() -> Result<Vec<claw::approval::ApprovalRequest>> {
-    let path = Path::new(APPROVAL_TEST_FILE);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let content = std::fs::read_to_string(path).context("failed to read approval test file")?;
-    let requests: Vec<claw::approval::ApprovalRequest> =
-        serde_json::from_str(&content).context("failed to parse approval requests")?;
-    Ok(requests)
-}
-
-/// Write requests to file.
-fn write_pending_requests(requests: &[claw::approval::ApprovalRequest]) -> Result<()> {
-    let path = Path::new(APPROVAL_TEST_FILE);
-    let content =
-        serde_json::to_string_pretty(requests).context("failed to serialize approval requests")?;
-    std::fs::write(path, content).context("failed to write approval test file")?;
-    Ok(())
-}
 
 /// Run an approval command.
 ///
 /// This function tests the approval module functionality independently.
-async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
+async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Result<()> {
     use claw::approval::{ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest};
     use std::sync::OnceLock;
 
@@ -436,41 +412,28 @@ async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
         ApprovalManager::new_shared(policy)
     });
 
+    // Get SQLite repository from context
+    let repo = SqliteApprovalRepository::new(ctx.db_pool().clone());
+
     match command {
-        ApprovalCommand::List { file } => {
-            if file {
-                let requests = read_pending_requests()?;
-                if requests.is_empty() {
-                    println!("No persisted requests in {}", APPROVAL_TEST_FILE);
-                } else {
-                    println!("Persisted requests ({}):", requests.len());
-                    for req in requests {
-                        println!();
-                        println!("  ID:            {}", req.id);
-                        println!("  Tool:          {}", req.tool_name);
-                        println!("  Action:        {}", req.action_summary);
-                        println!("  Risk Level:    {:?}", req.risk_level);
-                    }
-                }
+        ApprovalCommand::List => {
+            let requests = repo.list_pending().await?;
+            if requests.is_empty() {
+                println!("No pending approval requests.");
             } else {
-                let pending = manager.list_pending();
-                if pending.is_empty() {
-                    println!("No pending approval requests.");
-                } else {
-                    println!("Pending approval requests ({}):", pending.len());
-                    for req in pending {
-                        println!();
-                        println!("  ID:            {}", req.id);
-                        println!("  Agent:         {}", req.agent_id);
-                        println!("  Tool:          {}", req.tool_name);
-                        println!("  Action:        {}", req.action_summary);
-                        println!("  Risk Level:    {:?}", req.risk_level);
-                        println!("  Timeout:       {}s", req.timeout_secs);
-                        println!(
-                            "  Requested At:  {}",
-                            req.requested_at.format("%Y-%m-%d %H:%M:%S UTC")
-                        );
-                    }
+                println!("Pending approval requests ({}):", requests.len());
+                for req in requests {
+                    println!();
+                    println!("  ID:            {}", req.id);
+                    println!("  Agent:         {}", req.agent_id);
+                    println!("  Tool:          {}", req.tool_name);
+                    println!("  Action:        {}", req.action_summary);
+                    println!("  Risk Level:    {:?}", req.risk_level);
+                    println!("  Timeout:       {}s", req.timeout_secs);
+                    println!(
+                        "  Requested At:  {}",
+                        req.requested_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
                 }
             }
         }
@@ -490,10 +453,7 @@ async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
             let request_id = req.id;
             let risk_level = ApprovalManager::classify_risk(&tool);
 
-            // Read existing, append, write back
-            let mut requests = read_pending_requests()?;
-            requests.push(req);
-            write_pending_requests(&requests)?;
+            repo.insert_request(&req).await?;
 
             println!("Request submitted and persisted:");
             println!();
@@ -502,7 +462,7 @@ async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
             println!("  Action:        {action}");
             println!("  Risk Level:    {risk_level:?}");
             println!("  Timeout:       {timeout}s");
-            println!("  File:          {}", APPROVAL_TEST_FILE);
+            println!("  Storage:       SQLite");
         }
 
         ApprovalCommand::Test {
@@ -571,56 +531,45 @@ async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
                 ApprovalDecision::Denied
             };
 
-            // Parse UUID
+            // Parse UUID or try prefix matching
             let request_id = if id.len() == 36 {
                 id.parse::<uuid::Uuid>()
                     .map_err(|e| anyhow!("Invalid UUID: {e}"))?
             } else {
-                // Try prefix matching in file first
-                let file_requests = read_pending_requests()?;
-                let file_matching: Vec<_> = file_requests
+                // Try prefix matching in database
+                let pending = repo.list_pending().await?;
+                let matching: Vec<_> = pending
                     .iter()
                     .filter(|r| r.id.to_string().starts_with(&id))
                     .collect();
 
-                if file_matching.len() == 1 {
-                    file_matching[0].id
-                } else if file_matching.len() > 1 {
-                    return Err(anyhow!(
-                        "Ambiguous ID prefix '{}'. Found {} matching requests in file.",
-                        id,
-                        file_matching.len()
-                    ));
-                } else {
-                    // Try in-memory manager
-                    let pending = manager.list_pending();
-                    let matching: Vec<_> = pending
-                        .iter()
-                        .filter(|r| r.id.to_string().starts_with(&id))
-                        .collect();
-
-                    match matching.len() {
-                        0 => return Err(anyhow!("No pending request found with ID prefix: {id}")),
-                        1 => matching[0].id,
-                        _ => {
-                            return Err(anyhow!(
-                                "Ambiguous ID prefix '{}'. Found {} matching requests.",
-                                id,
-                                matching.len()
-                            ));
-                        }
+                match matching.len() {
+                    0 => return Err(anyhow!("No pending request found with ID prefix: {id}")),
+                    1 => matching[0].id,
+                    _ => {
+                        return Err(anyhow!(
+                            "Ambiguous ID prefix '{}'. Found {} matching requests.",
+                            id,
+                            matching.len()
+                        ));
                     }
                 }
             };
 
-            // Try to resolve from file first
-            let mut requests = read_pending_requests()?;
-            if let Some(idx) = requests.iter().position(|r| r.id == request_id) {
-                let removed = requests.remove(idx);
-                write_pending_requests(&requests)?;
-                println!("Resolved from file: {} -> {:?}", removed.id, decision);
+            // Remove from database
+            let removed = repo.remove_request(request_id).await?;
+            if let Some(req) = removed {
+                // Insert response record
+                let response = ApprovalResponse {
+                    request_id,
+                    decision,
+                    decided_at: Utc::now(),
+                    decided_by: Some("cli-user".to_string()),
+                };
+                repo.insert_response(&response).await?;
+                println!("Request {} -> {:?}", req.id, decision);
             } else {
-                // Fall back to in-memory manager
+                // Try in-memory manager as fallback
                 match manager.resolve(request_id, decision, Some("cli-user".to_string())) {
                     Ok(response) => {
                         println!("Request {} {:?}", response.request_id, response.decision);
@@ -675,12 +624,11 @@ async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
         }
 
         ApprovalCommand::Clear => {
-            let path = Path::new(APPROVAL_TEST_FILE);
-            if path.exists() {
-                std::fs::remove_file(path).context("failed to remove approval test file")?;
-                println!("Cleared persisted requests from {}", APPROVAL_TEST_FILE);
+            let count = repo.clear_pending().await?;
+            if count > 0 {
+                println!("Cleared {} pending requests from database.", count);
             } else {
-                println!("No persisted requests file to clear.");
+                println!("No pending requests to clear.");
             }
         }
     }

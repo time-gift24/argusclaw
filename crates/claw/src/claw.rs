@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::{env, path::Path, path::PathBuf};
 
+use sqlx::SqlitePool;
+
 use crate::agents::AgentManager;
 #[cfg(feature = "dev")]
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
@@ -15,6 +17,7 @@ use crate::tool::ToolManager;
 
 #[derive(Clone)]
 pub struct AppContext {
+    db_pool: SqlitePool,
     llm_manager: Arc<LLMManager>,
     #[allow(dead_code)]
     agent_manager: Arc<AgentManager>,
@@ -39,7 +42,12 @@ impl AppContext {
         let agent_manager = Arc::new(AgentManager::new(agent_repository));
         let tool_manager = Arc::new(ToolManager::new());
 
-        Ok(Self::new(llm_manager, agent_manager, tool_manager))
+        Ok(Self {
+            db_pool: pool,
+            llm_manager,
+            agent_manager,
+            tool_manager,
+        })
     }
 
     #[must_use]
@@ -49,10 +57,35 @@ impl AppContext {
         tool_manager: Arc<ToolManager>,
     ) -> Self {
         Self {
+            db_pool: SqlitePool::connect_lazy_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(std::path::Path::new(":memory:")),
+            ),
             llm_manager,
             agent_manager,
             tool_manager,
         }
+    }
+
+    /// Create a new AppContext with an explicit database pool.
+    #[must_use]
+    pub fn with_pool(
+        pool: SqlitePool,
+        llm_manager: Arc<LLMManager>,
+        agent_manager: Arc<AgentManager>,
+        tool_manager: Arc<ToolManager>,
+    ) -> Self {
+        Self {
+            db_pool: pool,
+            llm_manager,
+            agent_manager,
+            tool_manager,
+        }
+    }
+
+    #[must_use]
+    pub fn db_pool(&self) -> &SqlitePool {
+        &self.db_pool
     }
 
     #[must_use]
