@@ -16,6 +16,5 @@ CREATE TABLE IF NOT EXISTS approval_responses (
     request_id TEXT PRIMARY KEY NOT NULL,
     decision TEXT NOT NULL,
     decided_at TEXT NOT NULL,
-    decided_by TEXT,
-    FOREIGN KEY (request_id) REFERENCES approval_requests(id) ON DELETE CASCADE
+    decided_by TEXT
 );
