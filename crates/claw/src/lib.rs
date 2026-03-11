@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod approval;
 pub mod claw;
 pub mod db;
 pub mod error;

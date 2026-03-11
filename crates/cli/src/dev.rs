@@ -29,6 +29,8 @@ pub enum DevCommand {
     Llm(LlmCommand),
     #[command(subcommand)]
     Turn(TurnCommand),
+    #[command(subcommand)]
+    Approval(ApprovalCommand),
 }
 
 /// Turn execution commands for testing agent/LLM turn flow.
@@ -55,6 +57,57 @@ pub enum TurnCommand {
         /// Enable verbose output (shows all messages and tool calls).
         #[arg(short, long)]
         verbose: bool,
+    },
+}
+
+/// Approval commands for testing the approval flow.
+#[derive(Debug, Subcommand)]
+pub enum ApprovalCommand {
+    /// List pending approval requests.
+    List,
+
+    /// Test approval flow with a simulated request.
+    Test {
+        /// Tool name to request approval for.
+        #[arg(long, default_value = "shell_exec")]
+        tool: String,
+
+        /// Timeout in seconds.
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+
+        /// Auto-approve (simulate approval).
+        #[arg(long)]
+        approve: bool,
+
+        /// Auto-deny (simulate denial).
+        #[arg(long)]
+        deny: bool,
+    },
+
+    /// Resolve a pending approval request.
+    Resolve {
+        /// Request ID (or prefix).
+        #[arg(long)]
+        id: String,
+
+        /// Decision: approve or deny.
+        #[arg(long)]
+        approve: bool,
+    },
+
+    /// Show current approval policy.
+    Policy,
+
+    /// Update approval policy.
+    SetPolicy {
+        /// Tools requiring approval (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+
+        /// Auto-approve all (disables approval).
+        #[arg(long)]
+        auto_approve: bool,
     },
 }
 
@@ -162,7 +215,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
-    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn") {
+    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval") {
         return Ok(false);
     }
 
@@ -176,6 +229,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Provider(command) => run_provider_command(ctx, command).await,
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
+        DevCommand::Approval(command) => run_approval_command(command).await,
     }
 }
 
@@ -311,6 +365,191 @@ async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
                 let content = ctx.complete_text(provider_id.as_ref(), prompt).await?;
                 println!("{content}");
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run an approval command.
+///
+/// This function tests the approval module functionality independently.
+async fn run_approval_command(command: ApprovalCommand) -> Result<()> {
+    use claw::approval::{ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest};
+    use std::sync::OnceLock;
+
+    // Use a global manager for CLI testing (simplified approach)
+    static MANAGER: OnceLock<std::sync::Arc<ApprovalManager>> = OnceLock::new();
+
+    let manager = MANAGER.get_or_init(|| {
+        let policy = ApprovalPolicy::default();
+        ApprovalManager::new_shared(policy)
+    });
+
+    match command {
+        ApprovalCommand::List => {
+            let pending = manager.list_pending();
+            if pending.is_empty() {
+                println!("No pending approval requests.");
+            } else {
+                println!("Pending approval requests ({}):", pending.len());
+                for req in pending {
+                    println!();
+                    println!("  ID:            {}", req.id);
+                    println!("  Agent:         {}", req.agent_id);
+                    println!("  Tool:          {}", req.tool_name);
+                    println!("  Action:        {}", req.action_summary);
+                    println!("  Risk Level:    {:?}", req.risk_level);
+                    println!("  Timeout:       {}s", req.timeout_secs);
+                    println!(
+                        "  Requested At:  {}",
+                        req.requested_at.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
+                }
+            }
+        }
+
+        ApprovalCommand::Test {
+            tool,
+            timeout,
+            approve,
+            deny,
+        } => {
+            if approve && deny {
+                return Err(anyhow!("Cannot specify both --approve and --deny"));
+            }
+
+            let req = ApprovalRequest::new(
+                "cli-test-agent".to_string(),
+                tool.clone(),
+                format!("Test approval for {tool}"),
+                timeout,
+            );
+
+            let request_id = req.id;
+            let risk_level = ApprovalManager::classify_risk(&tool);
+
+            println!("Submitting approval request...");
+            println!();
+            println!("  Request ID:   {request_id}");
+            println!("  Tool:         {tool}");
+            println!("  Risk Level:   {risk_level:?}");
+            println!("  Timeout:      {timeout}s");
+            println!();
+
+            // If auto-approve or auto-deny, spawn a task to resolve it
+            if approve || deny {
+                let mgr_clone = std::sync::Arc::clone(manager);
+                let decision = if approve {
+                    ApprovalDecision::Approved
+                } else {
+                    ApprovalDecision::Denied
+                };
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let _ = mgr_clone.resolve(request_id, decision, Some("cli-auto".to_string()));
+                });
+            }
+
+            println!("Waiting for resolution...");
+            let decision = manager.request_approval(req).await;
+
+            println!();
+            match decision {
+                ApprovalDecision::Approved => {
+                    println!("Result: APPROVED");
+                }
+                ApprovalDecision::Denied => {
+                    println!("Result: DENIED");
+                }
+                ApprovalDecision::TimedOut => {
+                    println!("Result: TIMED OUT");
+                }
+            }
+        }
+
+        ApprovalCommand::Resolve { id, approve } => {
+            // Parse UUID (support prefix matching)
+            let request_id = if id.len() == 36 {
+                id.parse::<uuid::Uuid>()
+                    .map_err(|e| anyhow!("Invalid UUID: {e}"))?
+            } else {
+                // Try prefix matching
+                let pending = manager.list_pending();
+                let matching: Vec<_> = pending
+                    .iter()
+                    .filter(|r| r.id.to_string().starts_with(&id))
+                    .collect();
+
+                match matching.len() {
+                    0 => return Err(anyhow!("No pending request found with ID prefix: {id}")),
+                    1 => matching[0].id,
+                    _ => {
+                        return Err(anyhow!(
+                            "Ambiguous ID prefix '{}'. Found {} matching requests.",
+                            id,
+                            matching.len()
+                        ));
+                    }
+                }
+            };
+
+            let decision = if approve {
+                ApprovalDecision::Approved
+            } else {
+                ApprovalDecision::Denied
+            };
+
+            match manager.resolve(request_id, decision, Some("cli-user".to_string())) {
+                Ok(response) => {
+                    println!("Request {} {:?}", response.request_id, response.decision);
+                }
+                Err(e) => {
+                    return Err(anyhow!("{e}"));
+                }
+            }
+        }
+
+        ApprovalCommand::Policy => {
+            let policy = manager.policy();
+            println!("Current Approval Policy:");
+            println!();
+            println!("  Require Approval: {:?}", policy.require_approval);
+            println!("  Timeout:          {}s", policy.timeout_secs);
+            println!("  Auto-approve:     {}", policy.auto_approve);
+        }
+
+        ApprovalCommand::SetPolicy {
+            tools,
+            auto_approve,
+        } => {
+            let new_policy = if auto_approve {
+                ApprovalPolicy {
+                    require_approval: vec![],
+                    timeout_secs: 60,
+                    auto_approve_autonomous: false,
+                    auto_approve: true,
+                }
+            } else {
+                ApprovalPolicy {
+                    require_approval: tools,
+                    timeout_secs: 60,
+                    auto_approve_autonomous: false,
+                    auto_approve: false,
+                }
+            };
+
+            new_policy
+                .validate()
+                .map_err(|e| anyhow!("Invalid policy: {e}"))?;
+
+            manager.update_policy(new_policy);
+
+            println!("Policy updated.");
+            println!();
+            let policy = manager.policy();
+            println!("  Require Approval: {:?}", policy.require_approval);
+            println!("  Timeout:          {}s", policy.timeout_secs);
         }
     }
 

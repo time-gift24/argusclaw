@@ -12,8 +12,9 @@ notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use 
 
 [dependencies]
 async-trait = "0.1"
-derive_builder = "0.20"
+chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
+derive_builder = "0.20"
 dirs = "6"
 futures-core = "0.3"
 futures-util = "0.3"
@@ -27,6 +28,7 @@ sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runti
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["time", "macros", "rt"] }
 tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
 eventsource-stream = { version = "0.2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"], optional = true }
 
