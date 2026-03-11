@@ -1,5 +1,6 @@
 import "./streamdown.css";
 
+import React from "react";
 import {
   Sidebar,
   SidebarContent,
@@ -15,10 +16,9 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ChatIcon, CodeIcon, AiMagicIcon } from "@hugeicons/core-free-icons";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Streamdown } from "streamdown";
-import { code } from "@streamdown/code";
-import { mermaid } from "@streamdown/mermaid";
 import { math } from "@streamdown/math";
 import { cjk } from "@streamdown/cjk";
+import { CodeBlock } from "@/components/ui/code-block";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -186,9 +186,32 @@ function ChatView({
         {/* AI 消息 - 主体内容，无边框 */}
         <div className="mb-4">
           <div className="p-4 streamdown-content">
-            <Streamdown mode="static" plugins={{ code, mermaid, math, cjk }}>
-              {SAMPLE_MARKDOWN}
-            </Streamdown>
+            <Streamdown
+            mode="static"
+            plugins={{ math, cjk }}
+            components={{
+              pre: ({ children }) => {
+                // Extract code element from pre
+                const codeEl = children as React.ReactElement<{ className?: string; children?: string }>;
+                const className = codeEl?.props?.className || "";
+                const langMatch = className.match(/language-(\w+)/);
+                const language = langMatch ? langMatch[1] : "";
+                const code = codeEl?.props?.children || "";
+
+                return (
+                  <CodeBlock
+                    className={className}
+                    language={language}
+                    code={typeof code === "string" ? code : ""}
+                  >
+                    {code}
+                  </CodeBlock>
+                );
+              },
+            }}
+          >
+            {SAMPLE_MARKDOWN}
+          </Streamdown>
           </div>
         </div>
       </div>
