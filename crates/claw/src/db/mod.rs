@@ -11,7 +11,7 @@ use thiserror::Error;
 pub use approval::ApprovalRepository;
 
 #[cfg(feature = "dev")]
-pub use workflow::SqliteWorkflowRepository;
+pub use workflow::{SqliteWorkflowRepository, WorkflowRepository};
 
 #[derive(Debug, Error)]
 pub enum DbError {
