@@ -1,7 +1,7 @@
-pub mod llm;
-pub mod sqlite;
 #[cfg(feature = "dev")]
 pub mod approval;
+pub mod llm;
+pub mod sqlite;
 #[cfg(feature = "dev")]
 pub mod workflow;
 

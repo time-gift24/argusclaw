@@ -81,17 +81,15 @@ impl SqliteWorkflowRepository {
 impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
     // Workflow CRUD
     async fn create_workflow(&self, workflow: &WorkflowRecord) -> Result<(), DbError> {
-        sqlx::query(
-            "INSERT INTO workflows (id, name, status) VALUES (?1, ?2, ?3)",
-        )
-        .bind(workflow.id.as_ref())
-        .bind(&workflow.name)
-        .bind(Self::status_as_str(workflow.status))
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+        sqlx::query("INSERT INTO workflows (id, name, status) VALUES (?1, ?2, ?3)")
+            .bind(workflow.id.as_ref())
+            .bind(&workflow.name)
+            .bind(Self::status_as_str(workflow.status))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -243,18 +241,16 @@ impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> Result<(), DbError> {
-        sqlx::query(
-            "UPDATE jobs SET status = ?1, started_at = ?2, finished_at = ?3 WHERE id = ?4",
-        )
-        .bind(Self::status_as_str(status))
-        .bind(started_at)
-        .bind(finished_at)
-        .bind(id.as_ref())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+        sqlx::query("UPDATE jobs SET status = ?1, started_at = ?2, finished_at = ?3 WHERE id = ?4")
+            .bind(Self::status_as_str(status))
+            .bind(started_at)
+            .bind(finished_at)
+            .bind(id.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
