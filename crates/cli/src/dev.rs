@@ -37,6 +37,8 @@ pub enum DevCommand {
     Turn(TurnCommand),
     #[command(subcommand)]
     Approval(ApprovalCommand),
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
 }
 
 /// Turn execution commands for testing agent/LLM turn flow.
@@ -143,6 +145,69 @@ pub enum ApprovalCommand {
     Clear,
 }
 
+/// Workflow commands for testing workflow execution.
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// Create a new workflow.
+    Create {
+        /// Workflow name.
+        name: String,
+    },
+
+    /// List all workflows.
+    List,
+
+    /// Show workflow details with stages and jobs.
+    Show {
+        /// Workflow ID.
+        id: String,
+    },
+
+    /// Delete a workflow.
+    Delete {
+        /// Workflow ID.
+        id: String,
+    },
+
+    /// Add a stage to a workflow.
+    AddStage {
+        /// Workflow ID.
+        #[arg(long)]
+        workflow: String,
+        /// Stage name.
+        name: String,
+        /// Stage sequence (order).
+        sequence: i32,
+    },
+
+    /// Add a job to a stage.
+    AddJob {
+        /// Stage ID.
+        #[arg(long)]
+        stage: String,
+        /// Agent ID.
+        #[arg(long)]
+        agent: String,
+        /// Job name.
+        name: String,
+    },
+
+    /// Update job status.
+    JobStatus {
+        /// Job ID.
+        #[arg(long)]
+        id: String,
+        /// New status.
+        status: String,
+    },
+
+    /// Show workflow status tree.
+    Status {
+        /// Workflow ID.
+        id: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
     Import {
@@ -247,7 +312,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
-    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval") {
+    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval" | "workflow") {
         return Ok(false);
     }
 
@@ -262,6 +327,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
         DevCommand::Approval(command) => run_approval_command(ctx, command).await,
+        DevCommand::Workflow(command) => run_workflow_command(ctx, command).await,
     }
 }
 
@@ -842,7 +908,7 @@ mod tests {
 
     use super::{
         ApprovalCommand, DevCli, DevCommand, LlmCommand, ProviderCommand, TurnCommand,
-        resolve_approval_dev_database_url,
+        WorkflowCommand, resolve_approval_dev_database_url,
     };
     use crate::dev::{
         ProviderDisplayRecord, ProviderUpsertArgs, render_provider_output, render_stream_output,
