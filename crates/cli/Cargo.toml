@@ -10,8 +10,10 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"], optional = true }
 futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+shellexpand = { version = "3", optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = { version = "0.8", optional = true }
@@ -21,4 +23,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:sqlx", "dep:toml"]
+dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:owo-colors", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:shellexpand", "dep:sqlx", "dep:toml"]

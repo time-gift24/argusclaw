@@ -44,7 +44,7 @@ fn resolve_database_target_for_startup() -> Result<Option<String>> {
     #[cfg(feature = "dev")]
     {
         if let Some(first_arg) = env::args().nth(1)
-            && matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval")
+            && matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval" | "cookie")
         {
             let tmp_dir = env::current_dir()?.join("tmp");
             std::fs::create_dir_all(&tmp_dir)?;

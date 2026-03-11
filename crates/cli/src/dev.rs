@@ -37,6 +37,8 @@ pub enum DevCommand {
     Turn(TurnCommand),
     #[command(subcommand)]
     Approval(ApprovalCommand),
+    #[command(subcommand)]
+    Cookie(CookieCommand),
 }
 
 /// Turn execution commands for testing agent/LLM turn flow.
@@ -143,6 +145,28 @@ pub enum ApprovalCommand {
     Clear,
 }
 
+/// Cookie commands for extracting and managing browser cookies.
+#[derive(Debug, Subcommand)]
+pub enum CookieCommand {
+    /// Extract cookies from Chrome via CDP.
+    Extract {
+        /// Domain to filter cookies (e.g., "google.com").
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// CDP WebSocket URL (defaults to localhost:9222).
+        #[arg(long, default_value = "ws://localhost:9222/devtools/browser")]
+        cdp_url: String,
+
+        /// Restart Chrome with debugging enabled (macOS only).
+        #[arg(short, long)]
+        restart: bool,
+    },
+
+    /// Show Chrome debugging instructions.
+    Instructions,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
     Import {
@@ -247,7 +271,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
-    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval") {
+    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval" | "cookie") {
         return Ok(false);
     }
 
@@ -262,6 +286,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
         DevCommand::Approval(command) => run_approval_command(ctx, command).await,
+        DevCommand::Cookie(command) => run_cookie_command(command).await,
     }
 }
 
@@ -829,6 +854,261 @@ async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<()> {
     println!("{}", "Summary:".bold());
     println!("  Duration: {duration:?}");
     println!("  Messages: {}", output.messages.len());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cookie commands
+// ---------------------------------------------------------------------------
+
+async fn run_cookie_command(command: CookieCommand) -> Result<()> {
+    match command {
+        CookieCommand::Extract { domain, cdp_url, restart } => {
+            if restart {
+                run_cookie_extract_with_restart(cdp_url, domain).await
+            } else {
+                run_cookie_extract(&cdp_url, domain).await
+            }
+        }
+        CookieCommand::Instructions => {
+            show_chrome_debug_instructions();
+            Ok(())
+        }
+    }
+}
+
+fn show_chrome_debug_instructions() {
+    println!("{}", "Chrome DevTools Protocol Instructions".cyan().bold());
+    println!();
+    println!("To extract cookies with decrypted values, Chrome must be started with remote debugging:");
+    println!();
+    println!("  open -a \"Google Chrome\" --args --remote-debugging-port=9222");
+    println!();
+    println!("Or from terminal:");
+    println!();
+    println!("  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222");
+    println!();
+    println!("Note: Close all Chrome instances first, then start with the debugging flag.");
+}
+
+async fn run_cookie_extract(cdp_url: &str, domain: Option<String>) -> Result<()> {
+    use claw::cookie;
+
+    println!("Extracting cookies via CDP...");
+
+    // Get the WebSocket URL from Chrome's debug endpoint
+    let ws_url = get_cdp_websocket_url(cdp_url).await?;
+
+    let domain_filter = domain.as_deref().unwrap_or("");
+    let cookies = cookie::get_cookies(&ws_url, domain_filter).await?;
+
+    if cookies.is_empty() {
+        println!("No cookies found.");
+        return Ok(());
+    }
+
+    println!();
+    println!("Found {} cookies:", cookies.len());
+    println!();
+
+    for cookie in &cookies {
+        println!("  {}: {} = {}", cookie.domain.cyan(), cookie.name, cookie.value.dimmed());
+    }
+
+    Ok(())
+}
+
+/// Get WebSocket debugger URL from Chrome's debug endpoint.
+async fn get_cdp_websocket_url(base_url: &str) -> Result<String> {
+    // Convert ws:// to http:// for the /json endpoint
+    let http_url = base_url
+        .replace("ws://", "http://")
+        .replace("/devtools/browser", "/json");
+
+    let response = reqwest::get(&http_url)
+        .await
+        .context("Failed to connect to Chrome debug endpoint. Is Chrome running with --remote-debugging-port=9222?")?;
+
+    let targets: Vec<serde_json::Value> = response
+        .json()
+        .await
+        .context("Failed to parse Chrome debug targets")?;
+
+    // Find the first page target
+    let page_target = targets
+        .iter()
+        .find(|t| t["type"].as_str() == Some("page"))
+        .ok_or_else(|| anyhow!("No page target found in Chrome. Open a page in Chrome."))?;
+
+    let ws_url = page_target["webSocketDebuggerUrl"]
+        .as_str()
+        .ok_or_else(|| anyhow!("No webSocketDebuggerUrl in page target"))?
+        .to_string();
+
+    Ok(ws_url)
+}
+
+async fn run_cookie_extract_with_restart(cdp_url: String, domain: Option<String>) -> Result<()> {
+    println!("{}", "═".repeat(50).dimmed());
+    println!("{}", " Chrome Restart Flow ".cyan().bold());
+    println!("{}", "═".repeat(50).dimmed());
+    println!();
+
+    // Step 1: Save current Chrome tabs
+    let saved_tabs = get_chrome_tabs().context("Failed to get Chrome tabs")?;
+
+    if saved_tabs.is_empty() {
+        println!("{} Chrome is not running or has no tabs", "○".dimmed());
+    } else {
+        println!("{} Saved {} open tabs", "📝".cyan(), saved_tabs.len());
+        for (i, url) in saved_tabs.iter().enumerate().take(5) {
+            println!("   {}. {}", i + 1, url.dimmed());
+        }
+        if saved_tabs.len() > 5 {
+            println!("   ... and {} more", saved_tabs.len() - 5);
+        }
+    }
+    println!();
+
+    // Step 2: Quit Chrome
+    quit_chrome().context("Failed to quit Chrome")?;
+
+    // Step 3: Launch Chrome with debugging
+    launch_chrome_debug().context("Failed to start Chrome with debugging")?;
+
+    // Step 4: Extract cookies
+    println!();
+    println!("{}", "═".repeat(50).dimmed());
+    println!("{}", " Cookie Extraction ".cyan().bold());
+    println!("{}", "═".repeat(50).dimmed());
+    println!();
+
+    let result = run_cookie_extract(&cdp_url, domain).await;
+
+    // Step 5: Restore tabs
+    println!();
+    println!("{}", "═".repeat(50).dimmed());
+    println!("{}", " Restore Session ".cyan().bold());
+    println!("{}", "═".repeat(50).dimmed());
+    println!();
+
+    restore_chrome_tabs(&saved_tabs)?;
+
+    result
+}
+
+/// Get currently open Chrome tabs using AppleScript.
+fn get_chrome_tabs() -> Result<Vec<String>> {
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(
+            r#"
+            tell application "Google Chrome"
+                set tabUrls to {}
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        set URL_of_t to URL of t
+                        if URL_of_t is not "" and URL_of_t does not start with "chrome://" then
+                            set end of tabUrls to URL_of_t
+                        end if
+                    end repeat
+                end repeat
+
+                set output to ""
+                repeat with aUrl in tabUrls
+                    set output to output & aUrl & "|||"
+                end repeat
+
+                return output
+            end tell
+        "#,
+        )
+        .output()
+        .context("Failed to get Chrome tabs via AppleScript")?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let urls_str = String::from_utf8_lossy(&output.stdout);
+    let urls: Vec<String> = urls_str
+        .split("|||")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    Ok(urls)
+}
+
+/// Quit Chrome using AppleScript.
+fn quit_chrome() -> Result<()> {
+    println!("{} Closing Chrome...", "⟳".cyan());
+
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(r#"tell application "Google Chrome" to quit"#)
+        .output()
+        .context("Failed to quit Chrome")?;
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    Ok(())
+}
+
+/// Launch Chrome with remote debugging enabled.
+fn launch_chrome_debug() -> Result<()> {
+    println!("{} Starting Chrome with debugging (port 9222)...", "⟳".cyan());
+
+    // Create a temporary profile directory for debugging
+    let temp_dir = std::env::temp_dir().join("chrome-debug-profile");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).context("Failed to clean temp profile dir")?;
+    }
+    std::fs::create_dir_all(&temp_dir).context("Failed to create temp profile dir")?;
+
+    // Create a symlink to the Default profile to access cookies
+    let default_profile = shellexpand::tilde("~/Library/Application Support/Google/Chrome/Default");
+    let link_target = temp_dir.join("Default");
+
+    #[cfg(target_os = "macos")]
+    std::os::unix::fs::symlink(&*default_profile, &link_target)
+        .context("Failed to create profile symlink")?;
+
+    std::process::Command::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        .arg("--remote-debugging-port=9222")
+        .arg(format!("--user-data-dir={}", temp_dir.display()))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .spawn()
+        .context("Failed to start Chrome with debugging")?;
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    Ok(())
+}
+
+/// Restore Chrome tabs.
+fn restore_chrome_tabs(urls: &[String]) -> Result<()> {
+    if urls.is_empty() {
+        println!("{} No tabs to restore", "○".dimmed());
+        return Ok(());
+    }
+
+    println!("{} Restoring {} tabs...", "⟳".cyan(), urls.len());
+
+    for url in urls {
+        std::process::Command::new("open")
+            .arg("-a")
+            .arg("Google Chrome")
+            .arg(url)
+            .spawn()
+            .context("Failed to open URL in Chrome")?;
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    println!("{} Restored {} tabs", "✓".green(), urls.len());
 
     Ok(())
 }
