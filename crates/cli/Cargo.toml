@@ -24,12 +24,12 @@ owo-colors = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate"], optional = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-toml = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+toml = { version = "0.8", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["claw/dev", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:sqlx"]
+dev = ["claw/dev", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:sqlx", "dep:toml"]
