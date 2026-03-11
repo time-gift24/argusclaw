@@ -11,11 +11,11 @@ use claw::AppContext;
 use claw::agents::AgentId;
 use claw::approval::ApprovalResponse;
 use claw::db::ApprovalRepository;
+use claw::db::SqliteWorkflowRepository;
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
 use claw::db::sqlite::SqliteApprovalRepository;
-use claw::db::SqliteWorkflowRepository;
 use claw::llm::LlmStreamEvent;
 use claw::workflow::{
     JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowRepository,
@@ -69,6 +69,52 @@ pub enum TurnCommand {
         message: String,
 
         /// Enable verbose output (shows all messages and tool calls).
+        #[arg(short, long)]
+        verbose: bool,
+    },
+}
+
+/// Thread commands for testing multi-turn conversation flow.
+#[derive(Debug, Subcommand)]
+pub enum ThreadCommand {
+    /// Start interactive multi-turn conversation.
+    Chat {
+        /// Provider ID to use (defaults to default provider).
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Tool IDs to enable (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+
+        /// System prompt for the conversation.
+        #[arg(long, default_value = "You are a helpful assistant.")]
+        system_prompt: String,
+
+        /// Enable verbose output (shows all messages and tool calls).
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
+    /// Run automated multi-turn conversation test.
+    Test {
+        /// Provider ID to use (defaults to default provider).
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Tool IDs to enable (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+
+        /// System prompt for the conversation.
+        #[arg(long, default_value = "You are a helpful assistant.")]
+        system_prompt: String,
+
+        /// Number of turns to execute.
+        #[arg(long, default_value = "3")]
+        turns: u32,
+
+        /// Enable verbose output.
         #[arg(short, long)]
         verbose: bool,
     },
@@ -318,7 +364,10 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
-    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval" | "workflow") {
+    if !matches!(
+        first_arg.as_str(),
+        "provider" | "llm" | "turn" | "approval" | "workflow"
+    ) {
         return Ok(false);
     }
 
@@ -332,6 +381,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Provider(command) => run_provider_command(ctx, command).await,
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
+        DevCommand::Thread(command) => run_thread_command(ctx, command).await,
         DevCommand::Approval(command) => run_approval_command(ctx, command).await,
         DevCommand::Workflow(command) => run_workflow_command(ctx, command).await,
     }
@@ -967,11 +1017,7 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
             }
         }
 
-        WorkflowCommand::AddJob {
-            stage,
-            agent,
-            name,
-        } => {
+        WorkflowCommand::AddJob { stage, agent, name } => {
             let stage_id = StageId::new(stage.clone());
             let agent_id = AgentId::new(agent.clone());
 
@@ -1001,8 +1047,8 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
 
         WorkflowCommand::JobStatus { id, status } => {
             let job_id = JobId::new(id.clone());
-            let new_status = WorkflowStatus::parse_str(&status)
-                .map_err(|e| anyhow!("Invalid status: {}", e))?;
+            let new_status =
+                WorkflowStatus::parse_str(&status).map_err(|e| anyhow!("Invalid status: {}", e))?;
 
             repo.update_job_status(&job_id, new_status, None, None)
                 .await?;
@@ -1495,11 +1541,7 @@ mod tests {
         ]);
 
         match cli.command {
-            DevCommand::Workflow(WorkflowCommand::AddJob {
-                stage,
-                agent,
-                name,
-            }) => {
+            DevCommand::Workflow(WorkflowCommand::AddJob { stage, agent, name }) => {
                 assert_eq!(stage, "stage-456");
                 assert_eq!(agent, "agent-789");
                 assert_eq!(name, "job-1");
@@ -1542,9 +1584,8 @@ mod tests {
 
     #[test]
     fn workflow_database_url_prefers_explicit_override() {
-        let resolved =
-            resolve_workflow_dev_database_url(Some("sqlite:./custom-workflow.db"), None)
-                .expect("db url should resolve");
+        let resolved = resolve_workflow_dev_database_url(Some("sqlite:./custom-workflow.db"), None)
+            .expect("db url should resolve");
         assert_eq!(resolved, "sqlite:./custom-workflow.db");
     }
 }
