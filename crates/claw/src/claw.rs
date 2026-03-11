@@ -4,7 +4,9 @@ use std::{env, path::Path, path::PathBuf};
 use crate::agents::AgentManager;
 #[cfg(feature = "dev")]
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
-use crate::db::sqlite::{SqliteLlmProviderRepository, connect, connect_path, migrate};
+use crate::db::sqlite::{
+    SqliteAgentRepository, SqliteLlmProviderRepository, connect, connect_path, migrate,
+};
 use crate::error::AgentError;
 use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
@@ -31,9 +33,10 @@ impl AppContext {
         }?;
         migrate(&pool).await?;
 
-        let repository = Arc::new(SqliteLlmProviderRepository::new(pool));
+        let repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
+        let agent_repository = Arc::new(SqliteAgentRepository::new(pool));
         let llm_manager = Arc::new(LLMManager::new(repository));
-        let agent_manager = Arc::new(AgentManager::new());
+        let agent_manager = Arc::new(AgentManager::new(agent_repository));
         let tool_manager = Arc::new(ToolManager::new());
 
         Ok(Self::new(llm_manager, agent_manager, tool_manager))
@@ -55,6 +58,11 @@ impl AppContext {
     #[must_use]
     pub fn llm_manager(&self) -> Arc<LLMManager> {
         Arc::clone(&self.llm_manager)
+    }
+
+    #[must_use]
+    pub fn agent_manager(&self) -> Arc<AgentManager> {
+        Arc::clone(&self.agent_manager)
     }
 
     #[must_use]
