@@ -160,7 +160,7 @@ impl WorkflowStatus {
     ///
     /// # Errors
     /// Returns an error if the string is not a valid status representation.
-    pub fn from_str(s: &str) -> Result<Self, String> {
+    pub fn parse_str(s: &str) -> Result<Self, String> {
         match s {
             "pending" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
@@ -182,7 +182,7 @@ impl TryFrom<&str> for WorkflowStatus {
     type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::from_str(value)
+        Self::parse_str(value)
     }
 }
 
@@ -219,18 +219,18 @@ mod tests {
 
     #[test]
     fn workflow_status_from_str_valid() {
-        assert_eq!(WorkflowStatus::from_str("pending").unwrap(), WorkflowStatus::Pending);
-        assert_eq!(WorkflowStatus::from_str("running").unwrap(), WorkflowStatus::Running);
-        assert_eq!(WorkflowStatus::from_str("succeeded").unwrap(), WorkflowStatus::Succeeded);
-        assert_eq!(WorkflowStatus::from_str("failed").unwrap(), WorkflowStatus::Failed);
-        assert_eq!(WorkflowStatus::from_str("cancelled").unwrap(), WorkflowStatus::Cancelled);
+        assert_eq!(WorkflowStatus::parse_str("pending").unwrap(), WorkflowStatus::Pending);
+        assert_eq!(WorkflowStatus::parse_str("running").unwrap(), WorkflowStatus::Running);
+        assert_eq!(WorkflowStatus::parse_str("succeeded").unwrap(), WorkflowStatus::Succeeded);
+        assert_eq!(WorkflowStatus::parse_str("failed").unwrap(), WorkflowStatus::Failed);
+        assert_eq!(WorkflowStatus::parse_str("cancelled").unwrap(), WorkflowStatus::Cancelled);
     }
 
     #[test]
     fn workflow_status_from_str_invalid() {
-        assert!(WorkflowStatus::from_str("invalid").is_err());
-        assert!(WorkflowStatus::from_str("PENDING").is_err());
-        assert!(WorkflowStatus::from_str("").is_err());
+        assert!(WorkflowStatus::parse_str("invalid").is_err());
+        assert!(WorkflowStatus::parse_str("PENDING").is_err());
+        assert!(WorkflowStatus::parse_str("").is_err());
     }
 
     #[test]
