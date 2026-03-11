@@ -18,7 +18,8 @@ use claw::db::sqlite::SqliteApprovalRepository;
 use claw::db::SqliteWorkflowRepository;
 use claw::llm::LlmStreamEvent;
 use claw::workflow::{
-    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowStatus,
+    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowRepository,
+    WorkflowStatus,
 };
 use futures_util::StreamExt;
 #[cfg(feature = "dev")]
@@ -938,9 +939,9 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
             sequence,
         } => {
             let workflow_id = WorkflowId::new(workflow.clone());
-            let workflow = repo.get_workflow(&workflow_id).await?;
+            let wf_record = repo.get_workflow(&workflow_id).await?;
 
-            match workflow {
+            match wf_record {
                 Some(_) => {
                     let stage_id = StageId::new(uuid::Uuid::new_v4().to_string());
                     let stage = StageRecord {
@@ -1176,7 +1177,7 @@ mod tests {
 
     use super::{
         ApprovalCommand, DevCli, DevCommand, LlmCommand, ProviderCommand, TurnCommand,
-        WorkflowCommand, resolve_approval_dev_database_url,
+        WorkflowCommand, resolve_approval_dev_database_url, resolve_workflow_dev_database_url,
     };
     use crate::dev::{
         ProviderDisplayRecord, ProviderUpsertArgs, render_provider_output, render_stream_output,
@@ -1440,5 +1441,110 @@ mod tests {
         );
 
         std::fs::remove_dir_all(run_dir).expect("should remove run dir");
+    }
+
+    #[test]
+    fn parses_workflow_create_command() {
+        let cli = DevCli::parse_from(["cli", "workflow", "create", "my-workflow"]);
+
+        match cli.command {
+            DevCommand::Workflow(WorkflowCommand::Create { name }) => {
+                assert_eq!(name, "my-workflow");
+            }
+            _ => panic!("workflow create command should parse"),
+        }
+    }
+
+    #[test]
+    fn parses_workflow_add_stage_command() {
+        let cli = DevCli::parse_from([
+            "cli",
+            "workflow",
+            "add-stage",
+            "--workflow",
+            "wf-123",
+            "stage-1",
+            "10",
+        ]);
+
+        match cli.command {
+            DevCommand::Workflow(WorkflowCommand::AddStage {
+                workflow,
+                name,
+                sequence,
+            }) => {
+                assert_eq!(workflow, "wf-123");
+                assert_eq!(name, "stage-1");
+                assert_eq!(sequence, 10);
+            }
+            _ => panic!("workflow add-stage command should parse"),
+        }
+    }
+
+    #[test]
+    fn parses_workflow_add_job_command() {
+        let cli = DevCli::parse_from([
+            "cli",
+            "workflow",
+            "add-job",
+            "--stage",
+            "stage-456",
+            "--agent",
+            "agent-789",
+            "job-1",
+        ]);
+
+        match cli.command {
+            DevCommand::Workflow(WorkflowCommand::AddJob {
+                stage,
+                agent,
+                name,
+            }) => {
+                assert_eq!(stage, "stage-456");
+                assert_eq!(agent, "agent-789");
+                assert_eq!(name, "job-1");
+            }
+            _ => panic!("workflow add-job command should parse"),
+        }
+    }
+
+    #[test]
+    fn parses_workflow_status_command() {
+        let cli = DevCli::parse_from(["cli", "workflow", "status", "wf-abc"]);
+
+        match cli.command {
+            DevCommand::Workflow(WorkflowCommand::Status { id }) => {
+                assert_eq!(id, "wf-abc");
+            }
+            _ => panic!("workflow status command should parse"),
+        }
+    }
+
+    #[test]
+    fn parses_workflow_job_status_command() {
+        let cli = DevCli::parse_from([
+            "cli",
+            "workflow",
+            "job-status",
+            "--id",
+            "job-xyz",
+            "in_progress",
+        ]);
+
+        match cli.command {
+            DevCommand::Workflow(WorkflowCommand::JobStatus { id, status }) => {
+                assert_eq!(id, "job-xyz");
+                assert_eq!(status, "in_progress");
+            }
+            _ => panic!("workflow job-status command should parse"),
+        }
+    }
+
+    #[test]
+    fn workflow_database_url_prefers_explicit_override() {
+        let resolved =
+            resolve_workflow_dev_database_url(Some("sqlite:./custom-workflow.db"), None)
+                .expect("db url should resolve");
+        assert_eq!(resolved, "sqlite:./custom-workflow.db");
     }
 }
