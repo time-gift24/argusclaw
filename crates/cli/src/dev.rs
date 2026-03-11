@@ -18,6 +18,8 @@ use claw::llm::LlmStreamEvent;
 use futures_util::StreamExt;
 #[cfg(feature = "dev")]
 use owo_colors::OwoColorize;
+#[cfg(feature = "dev")]
+static APPROVAL_DEV_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./src/dev/migrations");
 
 #[derive(Debug, Parser)]
 pub struct DevCli {
@@ -72,6 +74,10 @@ pub enum ApprovalCommand {
 
     /// Submit a request and persist to database (for testing).
     Submit {
+        /// Agent ID submitting the request.
+        #[arg(long, default_value = "cli-test-agent")]
+        agent: String,
+
         /// Tool name to request approval for.
         #[arg(long, default_value = "shell_exec")]
         tool: String,
@@ -87,6 +93,10 @@ pub enum ApprovalCommand {
 
     /// Test approval flow with a simulated request.
     Test {
+        /// Agent ID submitting the request.
+        #[arg(long, default_value = "cli-test-agent")]
+        agent: String,
+
         /// Tool name to request approval for.
         #[arg(long, default_value = "shell_exec")]
         tool: String,
@@ -397,10 +407,56 @@ async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
 // Approval SQLite helpers
 // ---------------------------------------------------------------------------
 
+fn resolve_approval_dev_database_url(
+    explicit_database_url: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<String> {
+    if let Some(database_url) = explicit_database_url.filter(|value| !value.trim().is_empty()) {
+        return Ok(database_url.to_string());
+    }
+
+    let cwd = match cwd {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("failed to resolve current working directory")?,
+    };
+    let tmp_dir = cwd.join("tmp");
+    std::fs::create_dir_all(&tmp_dir).with_context(|| {
+        format!(
+            "failed to create dev approval tmp directory at {}",
+            tmp_dir.display()
+        )
+    })?;
+
+    let db_path = tmp_dir.join("approval-dev.sqlite");
+    Ok(format!("sqlite:{}", db_path.display()))
+}
+
+async fn create_dev_approval_repository() -> Result<(SqliteApprovalRepository, String)> {
+    let env_database_url = std::env::var("APPROVAL_DATABASE_URL").ok();
+    let database_url = resolve_approval_dev_database_url(env_database_url.as_deref(), None)?;
+    let pool = claw::db::sqlite::connect(&database_url)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect approval dev database at `{}`",
+                database_url
+            )
+        })?;
+
+    APPROVAL_DEV_MIGRATOR.run(&pool).await.with_context(|| {
+        format!(
+            "failed to run approval dev migrations for `{}`",
+            database_url
+        )
+    })?;
+
+    Ok((SqliteApprovalRepository::new(pool), database_url))
+}
+
 /// Run an approval command.
 ///
 /// This function tests the approval module functionality independently.
-async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Result<()> {
+async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Result<()> {
     use claw::approval::{ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest};
     use std::sync::OnceLock;
 
@@ -412,8 +468,7 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
         ApprovalManager::new_shared(policy)
     });
 
-    // Get SQLite repository from context
-    let repo = SqliteApprovalRepository::new(ctx.db_pool().clone());
+    let (repo, database_url) = create_dev_approval_repository().await?;
 
     match command {
         ApprovalCommand::List => {
@@ -421,6 +476,7 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
             if requests.is_empty() {
                 println!("No pending approval requests.");
             } else {
+                println!("Storage: {database_url}");
                 println!("Pending approval requests ({}):", requests.len());
                 for req in requests {
                     println!();
@@ -439,16 +495,12 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
         }
 
         ApprovalCommand::Submit {
+            agent,
             tool,
             action,
             timeout,
         } => {
-            let req = ApprovalRequest::new(
-                "cli-test-agent".to_string(),
-                tool.clone(),
-                action.clone(),
-                timeout,
-            );
+            let req = ApprovalRequest::new(agent.clone(), tool.clone(), action.clone(), timeout);
 
             let request_id = req.id;
             let risk_level = ApprovalManager::classify_risk(&tool);
@@ -458,14 +510,16 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
             println!("Request submitted and persisted:");
             println!();
             println!("  ID:            {request_id}");
+            println!("  Agent:         {agent}");
             println!("  Tool:          {tool}");
             println!("  Action:        {action}");
             println!("  Risk Level:    {risk_level:?}");
             println!("  Timeout:       {timeout}s");
-            println!("  Storage:       SQLite");
+            println!("  Storage:       {database_url}");
         }
 
         ApprovalCommand::Test {
+            agent,
             tool,
             timeout,
             approve,
@@ -476,7 +530,7 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
             }
 
             let req = ApprovalRequest::new(
-                "cli-test-agent".to_string(),
+                agent.clone(),
                 tool.clone(),
                 format!("Test approval for {tool}"),
                 timeout,
@@ -488,6 +542,7 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
             println!("Submitting approval request...");
             println!();
             println!("  Request ID:   {request_id}");
+            println!("  Agent:        {agent}");
             println!("  Tool:         {tool}");
             println!("  Risk Level:   {risk_level:?}");
             println!("  Timeout:      {timeout}s");
@@ -566,7 +621,12 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
                     decided_at: Utc::now(),
                     decided_by: Some("cli-user".to_string()),
                 };
-                repo.insert_response(&response).await?;
+                if let Err(err) = repo.insert_response(&response).await {
+                    eprintln!(
+                        "Warning: failed to persist approval response for {}: {}",
+                        request_id, err
+                    );
+                }
                 println!("Request {} -> {:?}", req.id, decision);
             } else {
                 // Try in-memory manager as fallback
@@ -626,9 +686,12 @@ async fn run_approval_command(ctx: AppContext, command: ApprovalCommand) -> Resu
         ApprovalCommand::Clear => {
             let count = repo.clear_pending().await?;
             if count > 0 {
-                println!("Cleared {} pending requests from database.", count);
+                println!(
+                    "Cleared {} pending requests from database ({database_url}).",
+                    count
+                );
             } else {
-                println!("No pending requests to clear.");
+                println!("No pending requests to clear in {database_url}.");
             }
         }
     }
@@ -758,7 +821,10 @@ mod tests {
     use claw::db::llm::LlmProviderRecord;
     use claw::llm::LlmStreamEvent;
 
-    use super::{DevCli, DevCommand, LlmCommand, ProviderCommand, TurnCommand};
+    use super::{
+        ApprovalCommand, DevCli, DevCommand, LlmCommand, ProviderCommand, TurnCommand,
+        resolve_approval_dev_database_url,
+    };
     use crate::dev::{
         ProviderDisplayRecord, ProviderUpsertArgs, render_provider_output, render_stream_output,
     };
@@ -928,5 +994,98 @@ mod tests {
             }
             _ => panic!("turn test command should parse"),
         }
+    }
+
+    #[test]
+    fn parses_approval_submit_command_with_agent() {
+        let cli = DevCli::parse_from([
+            "cli",
+            "approval",
+            "submit",
+            "--agent",
+            "agent-42",
+            "--tool",
+            "shell_exec",
+            "--action",
+            "run dangerous command",
+            "--timeout",
+            "120",
+        ]);
+
+        match cli.command {
+            DevCommand::Approval(ApprovalCommand::Submit {
+                agent,
+                tool,
+                action,
+                timeout,
+            }) => {
+                assert_eq!(agent, "agent-42");
+                assert_eq!(tool, "shell_exec");
+                assert_eq!(action, "run dangerous command");
+                assert_eq!(timeout, 120);
+            }
+            _ => panic!("approval submit command should parse"),
+        }
+    }
+
+    #[test]
+    fn parses_approval_test_command_with_agent_and_auto_approve() {
+        let cli = DevCli::parse_from([
+            "cli",
+            "approval",
+            "test",
+            "--agent",
+            "agent-99",
+            "--tool",
+            "file_write",
+            "--timeout",
+            "15",
+            "--approve",
+        ]);
+
+        match cli.command {
+            DevCommand::Approval(ApprovalCommand::Test {
+                agent,
+                tool,
+                timeout,
+                approve,
+                deny,
+            }) => {
+                assert_eq!(agent, "agent-99");
+                assert_eq!(tool, "file_write");
+                assert_eq!(timeout, 15);
+                assert!(approve);
+                assert!(!deny);
+            }
+            _ => panic!("approval test command should parse"),
+        }
+    }
+
+    #[test]
+    fn approval_database_url_prefers_explicit_override() {
+        let resolved = resolve_approval_dev_database_url(Some("sqlite:./custom.db"), None)
+            .expect("db url should resolve");
+        assert_eq!(resolved, "sqlite:./custom.db");
+    }
+
+    #[test]
+    fn approval_database_url_defaults_to_tmp_under_current_directory() {
+        let run_dir =
+            std::env::temp_dir().join(format!("argusclaw-dev-cli-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&run_dir).expect("should create run dir");
+
+        let resolved = resolve_approval_dev_database_url(None, Some(&run_dir))
+            .expect("default db url should resolve");
+
+        assert!(
+            resolved.ends_with("tmp/approval-dev.sqlite"),
+            "resolved path should point to ./tmp/approval-dev.sqlite, got {resolved}"
+        );
+        assert!(
+            run_dir.join("tmp").exists(),
+            "tmp directory should be created under run dir"
+        );
+
+        std::fs::remove_dir_all(run_dir).expect("should remove run dir");
     }
 }

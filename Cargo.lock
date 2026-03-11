@@ -688,6 +688,7 @@ dependencies = [
  "owo-colors",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "toml 0.8.2",
  "tracing",

@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     init_tracing();
 
-    let ctx = AppContext::init(env::var("DATABASE_URL").ok()).await?;
+    let ctx = AppContext::init(resolve_database_target_for_startup()?).await?;
 
     #[cfg(feature = "dev")]
     if dev::try_run(ctx.clone()).await? {
@@ -34,4 +34,24 @@ fn init_tracing() {
         .with_target(false)
         .compact()
         .init();
+}
+
+fn resolve_database_target_for_startup() -> Result<Option<String>> {
+    if let Ok(database_url) = env::var("DATABASE_URL") {
+        return Ok(Some(database_url));
+    }
+
+    #[cfg(feature = "dev")]
+    {
+        if let Some(first_arg) = env::args().nth(1)
+            && matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval")
+        {
+            let tmp_dir = env::current_dir()?.join("tmp");
+            std::fs::create_dir_all(&tmp_dir)?;
+            let db_path = tmp_dir.join("cli-dev.sqlite");
+            return Ok(Some(db_path.display().to_string()));
+        }
+    }
+
+    Ok(None)
 }
