@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
+use super::runtime::{Agent, AgentBuilder};
 use crate::agents::compact::CompactManager;
 use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentRuntimeId};
 use crate::approval::ApprovalManager;
@@ -100,15 +100,6 @@ impl AgentManager {
     #[must_use]
     pub fn get(&self, id: AgentRuntimeId) -> Option<Agent> {
         self.agents.get(&id).map(|entry| entry.value().clone())
-    }
-
-    /// List all active agents.
-    #[must_use]
-    pub fn list(&self) -> Vec<AgentRuntimeInfo> {
-        self.agents
-            .iter()
-            .map(|entry| entry.value().runtime_info())
-            .collect()
     }
 
     /// Delete an agent by runtime ID.
