@@ -93,6 +93,11 @@ impl ToolManager {
             .map(|t| t.risk_level())
             .unwrap_or(RiskLevel::Low)
     }
+
+    /// List all registered tool IDs (names).
+    pub fn list_ids(&self) -> Vec<String> {
+        self.tools.iter().map(|e| e.key().clone()).collect()
+    }
 }
 
 impl Default for ToolManager {
