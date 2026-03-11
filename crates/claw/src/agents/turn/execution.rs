@@ -70,9 +70,10 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                 tools: tools.clone(),
                 iteration,
             };
-            let result = registry.fire_before_call_llm(&ctx).await.map_err(|reason| {
-                TurnError::LlmCallBlocked { reason }
-            })?;
+            let result = registry
+                .fire_before_call_llm(&ctx)
+                .await
+                .map_err(|reason| TurnError::LlmCallBlocked { reason })?;
 
             // Apply any modifications from hooks
             if let Some(modified_messages) = result.messages {
@@ -413,10 +414,7 @@ mod tests {
 
     #[async_trait]
     impl HookHandler for MessageModifierHandler {
-        async fn on_before_call_llm(
-            &self,
-            ctx: &BeforeCallLLMContext,
-        ) -> HookAction {
+        async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
             let mut messages = ctx.messages.clone();
             // Add a prefix to track hook execution
             if let Some(first) = messages.first_mut()
@@ -501,10 +499,7 @@ mod tests {
 
         #[async_trait]
         impl HookHandler for BlockingHandler {
-            async fn on_before_call_llm(
-                &self,
-                _ctx: &BeforeCallLLMContext,
-            ) -> HookAction {
+            async fn on_before_call_llm(&self, _ctx: &BeforeCallLLMContext) -> HookAction {
                 HookAction::Block("Rate limited".to_string())
             }
         }

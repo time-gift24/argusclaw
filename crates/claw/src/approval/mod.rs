@@ -46,7 +46,7 @@ mod types;
 
 pub use manager::ApprovalManager;
 pub use types::{
-    ApprovalDecision, ApprovalPolicy, ApprovalRequest, ApprovalResponse, MAX_ACTION_SUMMARY_LEN,
-    MAX_DESCRIPTION_LEN, MAX_PENDING_PER_AGENT, MAX_TIMEOUT_SECS, MAX_TOOL_NAME_LEN,
-    MIN_TIMEOUT_SECS, RiskLevel,
+    ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+    MAX_ACTION_SUMMARY_LEN, MAX_DESCRIPTION_LEN, MAX_PENDING_PER_AGENT, MAX_TIMEOUT_SECS,
+    MAX_TOOL_NAME_LEN, MIN_TIMEOUT_SECS, RiskLevel,
 };
