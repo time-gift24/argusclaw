@@ -26,14 +26,17 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("argusclaw=info,claw=info"));
+    // Only initialize tracing if RUST_LOG is set
+    if std::env::var("RUST_LOG").is_ok() {
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("argusclaw=info,claw=info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .compact()
-        .init();
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    }
 }
 
 fn resolve_database_target_for_startup() -> Result<Option<String>> {
@@ -44,7 +47,7 @@ fn resolve_database_target_for_startup() -> Result<Option<String>> {
     #[cfg(feature = "dev")]
     {
         if let Some(first_arg) = env::args().nth(1)
-            && matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval")
+            && matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "approval" | "workflow")
         {
             let tmp_dir = env::current_dir()?.join("tmp");
             std::fs::create_dir_all(&tmp_dir)?;

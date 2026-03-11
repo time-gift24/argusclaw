@@ -67,8 +67,17 @@ crates/
 │   │   │   └── providers/            # 具体提供商实现
 │   │   │       ├── mod.rs            # 提供商模块导出
 │   │   │       └── openai_compatible.rs # OpenAI 兼容提供商工厂和实现
-│   │   └── tool/                     # Agent/LLM 工具注册表
-│   │       └── mod.rs                # NamedTool trait、ToolManager、ToolError
+│   │   ├── tool/                     # Agent/LLM 工具注册表
+│   │   │   └── mod.rs                # NamedTool trait、ToolManager、ToolError
+│   │   ├── workflow/                 # Workflow 领域模型
+│   │   │   ├── mod.rs                # 模块入口
+│   │   │   ├── types.rs              # WorkflowId, StageId, JobId, WorkflowStatus
+│   │   │   └── repository.rs         # WorkflowRepository trait
+│   │   └── api/                      # GraphQL API 层
+│   │       ├── mod.rs                # Schema 构建器
+│   │       ├── types.rs              # Workflow/Stage/Job GraphQL 类型
+│   │       ├── query.rs              # Query resolvers
+│   │       └── mutation.rs           # Mutation resolvers
 │   ├── migrations/                   # SQLx 迁移
 │   └── tests/                        # E2E 测试；不适合内联测试的多模块场景
 │       └── turn_integration_test.rs  # Turn 模块集成测试
@@ -108,3 +117,16 @@ crates/
 - `TurnError`：LLM 失败、工具执行、hooks、限制等错误类型
 - `HookRegistry`：可扩展的 hook 系统
 - `execute_turn()`：turn 执行的主入口
+
+## Workflow 模块
+
+- 领域模型：Workflow → Stage → Job 三层结构，状态为 WorkflowStatus
+- `WorkflowRepository` trait：定义 CRUD 操作
+- 状态：Pending、Running、Completed、Failed
+
+## API 模块
+
+- 使用 async-graphql 实现 GraphQL schema
+- Query：workflow、workflows
+- Mutation：create_workflow、add_stage、add_job、update_job_status
+- 通过 Tauri Commands 暴露给前端
