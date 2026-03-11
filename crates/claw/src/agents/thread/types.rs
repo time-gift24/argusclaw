@@ -6,6 +6,19 @@ use uuid::Uuid;
 use crate::agents::turn::TokenUsage;
 use crate::llm::LlmStreamEvent;
 
+/// Information about a Thread for listing and display.
+#[derive(Debug, Clone)]
+pub struct ThreadInfo {
+    /// Thread ID.
+    pub id: ThreadId,
+    /// Number of messages in history.
+    pub message_count: usize,
+    /// Current token count.
+    pub token_count: u32,
+    /// Number of turns completed.
+    pub turn_count: u32,
+}
+
 /// Unique identifier for a Thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ThreadId(pub Uuid);

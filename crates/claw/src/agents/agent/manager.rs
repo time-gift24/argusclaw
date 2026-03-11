@@ -123,9 +123,9 @@ impl RuntimeAgentManager {
     }
 
     /// Update the compact manager configuration.
-    pub fn set_compact_config(&self, context_window: u32, threshold_ratio: f32) {
+    pub fn set_compact_config(&self, context_window: u32, _threshold_ratio: f32) {
         // Create a new compact manager with updated configuration
-        let compact_manager = Arc::new(CompactManager::with_defaults(context_window));
+        let _compact_manager = Arc::new(CompactManager::with_defaults(context_window));
     }
 
     /// Access the agents map for advanced operations.

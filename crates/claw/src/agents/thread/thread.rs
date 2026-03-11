@@ -10,10 +10,16 @@ use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent, Role};
 use crate::tool::ToolManager;
 
-use super::{CompactStrategy, ThreadConfig, ThreadError, ThreadEvent, ThreadId, ThreadState};
+use super::{
+    CompactStrategy, ThreadConfig, ThreadError, ThreadEvent, ThreadId, ThreadInfo, ThreadState,
+};
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
+
+/// Default context window size for token calculations.
+/// Used when provider doesn't specify a context window.
+const DEFAULT_CONTEXT_WINDOW: u32 = 128_000;
 
 /// Handle for receiving Turn execution events.
 pub struct TurnStreamHandle {
@@ -125,6 +131,48 @@ impl ThreadBuilder {
 }
 
 impl Thread {
+    /// Create a new Thread with the given provider and configuration.
+    ///
+    /// This is a convenience method that creates a Thread with default settings.
+    /// For more control, use `ThreadBuilder`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        tool_manager: Arc<ToolManager>,
+        _compact_manager: Arc<crate::agents::compact::CompactManager>,
+        approval_manager: Option<Arc<ApprovalManager>>,
+        config: ThreadConfig,
+    ) -> Self {
+        let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+
+        Self {
+            id: ThreadId::new(),
+            messages: Vec::new(),
+            provider,
+            tool_manager,
+            approval_manager,
+            config,
+            token_count: 0,
+            turn_count: 0,
+            event_sender,
+        }
+    }
+
+    /// Get the Thread ID.
+    pub fn id(&self) -> &ThreadId {
+        &self.id
+    }
+
+    /// Get information about this thread.
+    pub fn info(&self) -> ThreadInfo {
+        ThreadInfo {
+            id: self.id,
+            message_count: self.messages.len(),
+            token_count: self.token_count,
+            turn_count: self.turn_count,
+        }
+    }
+
     /// Subscribe to Thread events.
     ///
     /// Multiple subscribers can receive events simultaneously.
@@ -154,8 +202,8 @@ impl Thread {
 
     /// Check if compact is needed based on token threshold.
     pub fn should_compact(&self) -> bool {
-        let context_window = 128_000u32;
-        let threshold = (context_window as f32 * self.config.compact_threshold_ratio) as u32;
+        let threshold =
+            (DEFAULT_CONTEXT_WINDOW as f32 * self.config.compact_threshold_ratio) as u32;
         self.token_count >= threshold
     }
 
@@ -188,7 +236,6 @@ impl Thread {
 
         let config = self.config.turn_config.clone();
         let event_sender = self.event_sender.clone();
-        let messages = self.messages.clone();
 
         tokio::spawn(async move {
             let result = execute_turn(turn_input, config).await;
@@ -214,9 +261,6 @@ impl Thread {
                 }
             }
         });
-
-        // Update local messages (simplified - in real impl, would wait for result)
-        let _ = messages;
 
         TurnStreamHandle {
             thread_id,

@@ -21,7 +21,11 @@ pub struct AgentRuntimeInfo {
 
 impl AgentRuntimeInfo {
     #[must_use]
-    pub fn new(id: crate::agents::types::AgentId, thread_count: usize, provider_model: String) -> Self {
+    pub fn new(
+        id: crate::agents::types::AgentId,
+        thread_count: usize,
+        provider_model: String,
+    ) -> Self {
         Self {
             id,
             thread_count,
@@ -108,40 +112,39 @@ impl Agent {
             self.approval_manager.clone(),
             config,
         );
-        let id = thread.id().clone();
-        self.threads.insert(id.clone(), thread);
+        let id = *thread.id();
+        self.threads.insert(id, thread);
         id
     }
 
     /// Get a thread by ID.
     #[must_use]
     pub fn get_thread(&self, id: &ThreadId) -> Option<AgentHandle> {
-        self.threads
-            .get(id)
-            .map(|entry| AgentHandle {
-                id: id.clone(),
-                agent_id: self.id.clone(),
-            })
+        self.threads.get(id).map(|_entry| AgentHandle {
+            id: *id,
+            agent_id: self.id.clone(),
+        })
     }
 
     /// Get mutable reference to a thread by ID.
     /// Note: This holds a write lock on the thread map.
     #[must_use]
-    pub fn get_thread_mut(&self, id: &ThreadId) -> Option<dashmap::mapref::one::RefMut<'_, ThreadId, Thread>> {
+    pub fn get_thread_mut(
+        &self,
+        id: &ThreadId,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, ThreadId, Thread>> {
         self.threads.get_mut(id)
     }
 
     /// Send a message to a thread.
     ///
     /// This is a convenience method that creates a thread if it doesn't exist.
-    pub fn send_message(&self, thread_id: &ThreadId, message: String) -> Option<AgentHandle> {
+    pub fn send_message(&self, thread_id: &ThreadId, _message: String) -> Option<AgentHandle> {
         // Check if thread exists, if not return None
-        self.threads
-            .get(thread_id)
-            .map(|entry| AgentHandle {
-                id: thread_id.clone(),
-                agent_id: self.id.clone(),
-            })
+        self.threads.get(thread_id).map(|_entry| AgentHandle {
+            id: *thread_id,
+            agent_id: self.id.clone(),
+        })
     }
 
     /// List all threads in this agent.
@@ -233,17 +236,19 @@ mod tests {
     #[test]
     fn test_agent_info() {
         // Just test the basic struct construction
-        let info = AgentRuntimeInfo::new(crate::agents::types::AgentId::new("test"), 5, "gpt-4".to_string());
+        let info = AgentRuntimeInfo::new(
+            crate::agents::types::AgentId::new("test"),
+            5,
+            "gpt-4".to_string(),
+        );
         assert_eq!(info.thread_count, 5);
     }
 
     #[test]
     fn test_thread_handle() {
-        let handle = AgentHandle::new(
-            ThreadId::new("thread-1"),
-            crate::agents::types::AgentId::new("agent-1"),
-        );
-        assert_eq!(handle.id().to_string(), "thread-1");
+        let thread_id = ThreadId::new();
+        let handle = AgentHandle::new(thread_id, crate::agents::types::AgentId::new("agent-1"));
+        assert_eq!(*handle.id(), thread_id);
         assert_eq!(handle.agent_id().to_string(), "agent-1");
     }
 }
