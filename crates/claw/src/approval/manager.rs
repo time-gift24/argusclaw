@@ -7,9 +7,11 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::error::ApprovalError;
+use super::policy::ApprovalPolicy;
 use super::types::{
-    ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
-    MAX_PENDING_PER_AGENT, RiskLevel,
+    ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_PENDING_PER_AGENT,
+    RiskLevel,
 };
 
 /// Manages approval requests with oneshot channels for blocking resolution.
@@ -109,7 +111,7 @@ impl ApprovalManager {
         request_id: Uuid,
         decision: ApprovalDecision,
         decided_by: Option<String>,
-    ) -> Result<ApprovalResponse, String> {
+    ) -> Result<ApprovalResponse, ApprovalError> {
         match self.pending.remove(&request_id) {
             Some((_, pending)) => {
                 let response = ApprovalResponse {
@@ -129,7 +131,7 @@ impl ApprovalManager {
                 info!(request_id = %request_id, ?decision, "Approval request resolved");
                 Ok(response)
             }
-            None => Err(format!("No pending approval request with id {request_id}")),
+            None => Err(ApprovalError::NotFound(request_id)),
         }
     }
 
@@ -251,10 +253,14 @@ mod tests {
 
     #[test]
     fn test_resolve_nonexistent() {
+        use crate::approval::ApprovalError;
         let mgr = default_manager();
         let result = mgr.resolve(Uuid::new_v4(), ApprovalDecision::Approved, None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No pending approval request"));
+        match result.unwrap_err() {
+            ApprovalError::NotFound(_) => {}
+            other => panic!("expected NotFound error, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------

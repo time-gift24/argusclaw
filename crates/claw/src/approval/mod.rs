@@ -41,12 +41,16 @@
 //! cargo run --features dev -- approval resolve --id <uuid> --approve
 //! ```
 
+mod error;
 mod manager;
+mod policy;
 mod types;
 
+pub use error::ApprovalError;
 pub use manager::ApprovalManager;
+pub use policy::ApprovalPolicy;
 pub use types::{
-    ApprovalDecision, ApprovalEvent, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
-    MAX_ACTION_SUMMARY_LEN, MAX_DESCRIPTION_LEN, MAX_PENDING_PER_AGENT, MAX_TIMEOUT_SECS,
-    MAX_TOOL_NAME_LEN, MIN_TIMEOUT_SECS, RiskLevel,
+    ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_ACTION_SUMMARY_LEN,
+    MAX_DESCRIPTION_LEN, MAX_PENDING_PER_AGENT, MAX_TIMEOUT_SECS, MAX_TOOL_NAME_LEN,
+    MIN_TIMEOUT_SECS, RiskLevel,
 };
