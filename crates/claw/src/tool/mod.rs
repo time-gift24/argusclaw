@@ -8,6 +8,8 @@ use dashmap::DashMap;
 use crate::llm::ToolDefinition;
 use crate::protocol::RiskLevel;
 
+pub mod cookie;
+
 /// Error type for tool operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -54,9 +56,14 @@ impl std::fmt::Debug for ToolManager {
 impl ToolManager {
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        let manager = Self {
             tools: DashMap::new(),
-        }
+        };
+
+        // Register cookie extractor
+        manager.register(std::sync::Arc::new(cookie::CookieTool));
+
+        manager
     }
 
     /// Register a tool. Overwrites if tool with same name already exists.
@@ -271,21 +278,23 @@ mod tests {
     fn list_definitions_returns_definitions() {
         let manager = ToolManager::new();
 
-        // Initially empty
+        // Initially contains cookie_extractor
         let defs = manager.list_definitions();
-        assert!(defs.is_empty());
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "cookie_extractor");
 
         // Register tools
         manager.register(Arc::new(EchoTool));
         manager.register(Arc::new(AnotherTool));
 
         let defs = manager.list_definitions();
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 3);
 
         // Verify definitions are present
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"echo"));
         assert!(names.contains(&"another"));
+        assert!(names.contains(&"cookie_extractor"));
 
         // Verify definition content
         let echo_def = defs.iter().find(|d| d.name == "echo").unwrap();
@@ -338,11 +347,12 @@ mod tests {
     fn default_trait() {
         let manager = ToolManager::default();
 
-        // Default should create an empty manager
+        // Default should create a manager with cookie_extractor registered
         let defs = manager.list_definitions();
-        assert!(defs.is_empty());
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "cookie_extractor");
 
-        // Should be able to register tools
+        // Should be able to register more tools
         manager.register(Arc::new(EchoTool));
         assert!(manager.get("echo").is_some());
     }

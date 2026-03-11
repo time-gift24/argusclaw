@@ -17,7 +17,7 @@ dashmap = "6"
 derive_builder = "0.20"
 dirs = "6"
 futures-core = "0.3"
-futures-util = "0.3"
+futures-util = { version = "0.3", optional = true }
 mac_address = "1.1"
 rand = "0.8"
 ring = "0.17"
@@ -27,13 +27,15 @@ serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate", "macros"] }
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["time", "macros", "rt"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"], optional = true }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 eventsource-stream = { version = "0.2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"], optional = true }
 
 [features]
-default = []
+default = ["cookie"]
+cookie = ["tokio-tungstenite", "futures-util"]
 dev = []
 openai-compatible = ["dep:eventsource-stream", "dep:reqwest"]
 
