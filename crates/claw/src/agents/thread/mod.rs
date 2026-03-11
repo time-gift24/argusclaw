@@ -38,7 +38,7 @@ mod error;
 mod thread;
 mod types;
 
-pub use config::{CompactStrategy, ThreadConfig, ThreadConfigBuilder};
-pub use error::ThreadError;
+pub use config::{ThreadConfig, ThreadConfigBuilder};
+pub use error::{CompactError, ThreadError};
 pub use thread::{Thread, ThreadBuilder, TurnStreamHandle};
 pub use types::{ThreadEvent, ThreadId, ThreadInfo, ThreadState};

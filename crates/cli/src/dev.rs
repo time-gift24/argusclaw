@@ -368,11 +368,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     };
     if !matches!(
         first_arg.as_str(),
-<<<<<<< HEAD
-        "provider" | "llm" | "turn" | "approval" | "workflow"
-=======
-        "provider" | "llm" | "turn" | "thread" | "approval"
->>>>>>> f9f7925 (feat(db): add Thread persistence with SQLite repository)
+        "provider" | "llm" | "turn" | "thread" | "approval" | "workflow"
     ) {
         return Ok(false);
     }
