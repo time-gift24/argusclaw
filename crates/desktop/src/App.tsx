@@ -175,23 +175,17 @@ function ChatView({
         "--sd-link-decoration": styleConfig.linkDecoration,
       } as React.CSSProperties}
     >
-      <div className="max-w-3xl mx-auto">
-        {/* 用户消息 */}
-        <div className="flex gap-3 mb-4">
-          <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white text-sm font-medium shrink-0">
-            U
-          </div>
-          <div className="bg-white border rounded-lg p-3 shadow-sm max-w-[80%]">
+      <div className="max-w-4xl mx-auto">
+        {/* 用户消息 - 右侧显示，带背景 */}
+        <div className="flex justify-end mb-4">
+          <div className="bg-slate-100 rounded-2xl px-4 py-3 max-w-[85%]">
             <p className="text-sm">你好，请介绍一下 ArgusClaw 的功能</p>
           </div>
         </div>
 
-        {/* AI 消息 */}
-        <div className="flex gap-3 mb-4">
-          <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-white text-sm font-medium shrink-0">
-            AI
-          </div>
-          <div className="bg-white border rounded-lg p-4 shadow-sm max-w-[85%] streamdown-content">
+        {/* AI 消息 - 主体内容，无边框 */}
+        <div className="mb-4">
+          <div className="p-4 streamdown-content">
             <Streamdown mode="static" plugins={{ code, mermaid, math, cjk }}>
               {SAMPLE_MARKDOWN}
             </Streamdown>
