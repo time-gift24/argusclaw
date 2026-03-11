@@ -3,6 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::agents::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a workflow.
@@ -183,6 +184,78 @@ impl TryFrom<&str> for WorkflowStatus {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::parse_str(value)
+    }
+}
+
+/// Workflow record stored in database.
+pub struct WorkflowRecord {
+    pub id: WorkflowId,
+    pub name: String,
+    pub status: WorkflowStatus,
+}
+
+#[cfg(test)]
+impl WorkflowRecord {
+    /// Creates a test workflow record.
+    #[must_use]
+    pub fn for_test(id: &str, name: &str) -> Self {
+        Self {
+            id: WorkflowId::new(id),
+            name: name.to_string(),
+            status: WorkflowStatus::Pending,
+        }
+    }
+}
+
+/// Stage record stored in database.
+pub struct StageRecord {
+    pub id: StageId,
+    pub workflow_id: WorkflowId,
+    pub name: String,
+    pub sequence: i32,
+    pub status: WorkflowStatus,
+}
+
+#[cfg(test)]
+impl StageRecord {
+    /// Creates a test stage record.
+    #[must_use]
+    pub fn for_test(id: &str, workflow_id: &str, name: &str, sequence: i32) -> Self {
+        Self {
+            id: StageId::new(id),
+            workflow_id: WorkflowId::new(workflow_id),
+            name: name.to_string(),
+            sequence,
+            status: WorkflowStatus::Pending,
+        }
+    }
+}
+
+/// Job record stored in database.
+pub struct JobRecord {
+    pub id: JobId,
+    pub stage_id: StageId,
+    pub agent_id: AgentId,
+    pub name: String,
+    pub status: WorkflowStatus,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[cfg(test)]
+impl JobRecord {
+    /// Creates a test job record.
+    #[must_use]
+    pub fn for_test(id: &str, stage_id: &str, agent_id: &str, name: &str) -> Self {
+        Self {
+            id: JobId::new(id),
+            stage_id: StageId::new(stage_id),
+            agent_id: AgentId::new(agent_id),
+            name: name.to_string(),
+            status: WorkflowStatus::Pending,
+            started_at: None,
+            finished_at: None,
+        }
     }
 }
 
