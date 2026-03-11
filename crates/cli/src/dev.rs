@@ -368,7 +368,11 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     };
     if !matches!(
         first_arg.as_str(),
+<<<<<<< HEAD
         "provider" | "llm" | "turn" | "approval" | "workflow"
+=======
+        "provider" | "llm" | "turn" | "thread" | "approval"
+>>>>>>> f9f7925 (feat(db): add Thread persistence with SQLite repository)
     ) {
         return Ok(false);
     }
@@ -383,6 +387,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Provider(command) => run_provider_command(ctx, command).await,
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
+        DevCommand::Thread(command) => run_thread_command(ctx, command).await,
         DevCommand::Approval(command) => run_approval_command(ctx, command).await,
         DevCommand::Workflow(command) => run_workflow_command(ctx, command).await,
     }
@@ -639,7 +644,7 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
     match command {
         ThreadCommand::Chat {
             provider,
-            tools,
+            tools: _,
             system_prompt,
             verbose,
         } => {
@@ -669,7 +674,10 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
             println!("{}", "═".repeat(60).dimmed());
             println!("{}", " Interactive Thread Chat ".bold().cyan());
             println!("{}", "═".repeat(60).dimmed());
-            println!("{}", "Type your message and press Enter. Type 'quit' to exit.".dimmed());
+            println!(
+                "{}",
+                "Type your message and press Enter. Type 'quit' to exit.".dimmed()
+            );
             println!();
 
             // Subscribe to events
@@ -679,7 +687,11 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
             let event_handle = tokio::spawn(async move {
                 while let Ok(event) = event_rx.recv().await {
                     match event {
-                        ThreadEvent::TurnCompleted { turn_number, token_usage, .. } => {
+                        ThreadEvent::TurnCompleted {
+                            turn_number,
+                            token_usage,
+                            ..
+                        } => {
                             println!();
                             println!(
                                 "{} Turn {} completed ({} tokens)",
@@ -688,7 +700,9 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
                                 token_usage.total_tokens
                             );
                         }
-                        ThreadEvent::TurnFailed { turn_number, error, .. } => {
+                        ThreadEvent::TurnFailed {
+                            turn_number, error, ..
+                        } => {
                             println!();
                             println!("{} Turn {} failed: {}", "✗".red(), turn_number, error);
                         }
@@ -696,7 +710,9 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
                             println!();
                             println!("{}", "> ".green());
                         }
-                        ThreadEvent::Compacted { new_token_count, .. } => {
+                        ThreadEvent::Compacted {
+                            new_token_count, ..
+                        } => {
                             println!();
                             println!(
                                 "{} Context compacted, new token count: {}",
@@ -734,10 +750,10 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
                         match handle.wait_for_result().await {
                             Ok(output) => {
                                 // Print assistant response
-                                if let Some(last_msg) = output.messages.last() {
-                                    if last_msg.role == claw::llm::Role::Assistant {
-                                        println!("{} {}", "Assistant:".green(), last_msg.content);
-                                    }
+                                if let Some(last_msg) = output.messages.last()
+                                    && last_msg.role == claw::llm::Role::Assistant
+                                {
+                                    println!("{} {}", "Assistant:".green(), last_msg.content);
                                 }
 
                                 if verbose {
@@ -746,8 +762,12 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
                                     for msg in &output.messages {
                                         let role_str: String = match msg.role {
                                             claw::llm::Role::User => "USER".blue().to_string(),
-                                            claw::llm::Role::Assistant => "ASSISTANT".green().to_string(),
-                                            claw::llm::Role::System => "SYSTEM".yellow().to_string(),
+                                            claw::llm::Role::Assistant => {
+                                                "ASSISTANT".green().to_string()
+                                            }
+                                            claw::llm::Role::System => {
+                                                "SYSTEM".yellow().to_string()
+                                            }
                                             claw::llm::Role::Tool => "TOOL".magenta().to_string(),
                                         };
                                         let content = if msg.content.len() > 100 {
@@ -781,7 +801,7 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
 
         ThreadCommand::Test {
             provider,
-            tools,
+            tools: _,
             system_prompt,
             turns,
             verbose,
@@ -833,8 +853,7 @@ async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<(
                             println!("  Messages in history: {}", output.messages.len());
                             println!(
                                 "  Tokens: {} in / {} out",
-                                output.token_usage.input_tokens,
-                                output.token_usage.output_tokens
+                                output.token_usage.input_tokens, output.token_usage.output_tokens
                             );
                         } else {
                             print!("{}", ".".cyan());

@@ -12,9 +12,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use claw::agents::thread::{
-    CompactStrategy, ThreadBuilder, ThreadConfigBuilder, ThreadEvent,
-};
+use claw::agents::thread::{CompactStrategy, ThreadBuilder, ThreadConfigBuilder, ThreadEvent};
 use claw::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -50,10 +48,7 @@ impl LlmProvider for SequentialMockProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         unimplemented!("complete not used in thread execution")
     }
 
@@ -76,7 +71,11 @@ impl LlmProvider for SequentialMockProvider {
 // Helper Functions
 // ============================================================================
 
-fn create_simple_response(content: &str, input_tokens: u32, output_tokens: u32) -> ToolCompletionResponse {
+fn create_simple_response(
+    content: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> ToolCompletionResponse {
     ToolCompletionResponse {
         content: Some(content.to_string()),
         reasoning_content: None,
@@ -247,8 +246,12 @@ async fn test_compact_keep_recent() {
 
     // Add multiple user/assistant messages
     for i in 1..=5 {
-        thread.messages.push(ChatMessage::user(format!("User {}", i)));
-        thread.messages.push(ChatMessage::assistant(format!("Assistant {}", i)));
+        thread
+            .messages
+            .push(ChatMessage::user(format!("User {}", i)));
+        thread
+            .messages
+            .push(ChatMessage::assistant(format!("Assistant {}", i)));
     }
 
     // Subscribe to capture compact event
@@ -263,7 +266,11 @@ async fn test_compact_keep_recent() {
     assert!(matches!(event, Ok(ThreadEvent::Compacted { .. })));
 
     // Should have system + 2 recent non-system messages
-    let non_system_count = thread.messages.iter().filter(|m| m.role != claw::llm::Role::System).count();
+    let non_system_count = thread
+        .messages
+        .iter()
+        .filter(|m| m.role != claw::llm::Role::System)
+        .count();
     assert_eq!(non_system_count, 2);
 }
 
@@ -288,7 +295,9 @@ async fn test_compact_keep_tokens() {
     // Add messages with known token counts
     for i in 1..=10 {
         let content = "x".repeat(40); // ~10 tokens each
-        thread.messages.push(ChatMessage::user(format!("{} {}", i, content)));
+        thread
+            .messages
+            .push(ChatMessage::user(format!("{} {}", i, content)));
     }
 
     // Get initial token count (via public API)
@@ -373,7 +382,9 @@ async fn test_compact_preserves_system_messages() {
 
     // Add user messages
     for i in 1..=5 {
-        thread.messages.push(ChatMessage::user(format!("User {}", i)));
+        thread
+            .messages
+            .push(ChatMessage::user(format!("User {}", i)));
     }
 
     // Compact
@@ -381,10 +392,18 @@ async fn test_compact_preserves_system_messages() {
     assert!(result.is_ok());
 
     // System messages should be preserved
-    let system_count = thread.messages.iter().filter(|m| m.role == claw::llm::Role::System).count();
+    let system_count = thread
+        .messages
+        .iter()
+        .filter(|m| m.role == claw::llm::Role::System)
+        .count();
     assert_eq!(system_count, 2);
 
     // Only 1 recent non-system message
-    let non_system_count = thread.messages.iter().filter(|m| m.role != claw::llm::Role::System).count();
+    let non_system_count = thread
+        .messages
+        .iter()
+        .filter(|m| m.role != claw::llm::Role::System)
+        .count();
     assert_eq!(non_system_count, 1);
 }
