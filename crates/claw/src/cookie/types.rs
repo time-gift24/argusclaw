@@ -8,8 +8,10 @@ pub struct Cookie {
     pub path: String,
     pub expires: Option<f64>,
     pub size: Option<i64>,
+    #[serde(rename = "httpOnly")]
     pub http_only: Option<bool>,
     pub secure: Option<bool>,
     pub session: Option<bool>,
+    #[serde(rename = "sameSite")]
     pub same_site: Option<String>,
 }

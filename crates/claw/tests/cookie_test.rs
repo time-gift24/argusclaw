@@ -30,13 +30,16 @@ fn test_cookie_serialization() {
         "domain": ".example.com",
         "path": "/",
         "secure": true,
-        "httpOnly": false
+        "httpOnly": false,
+        "sameSite": "Lax"
     }"#;
 
     let cookie: Cookie = serde_json::from_str(cookie_json).unwrap();
     assert_eq!(cookie.name, "test");
     assert_eq!(cookie.value, "value123");
     assert_eq!(cookie.domain, ".example.com");
+    assert_eq!(cookie.http_only, Some(false));  // Verify httpOnly field
+    assert_eq!(cookie.same_site, Some("Lax".to_string()));  // Verify sameSite field
 }
 
 // Note: Live CDP test requires Chrome running
