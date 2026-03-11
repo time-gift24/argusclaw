@@ -8,13 +8,18 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use claw::AppContext;
+use claw::agents::AgentId;
 use claw::approval::ApprovalResponse;
 use claw::db::ApprovalRepository;
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
 use claw::db::sqlite::SqliteApprovalRepository;
+use claw::db::SqliteWorkflowRepository;
 use claw::llm::LlmStreamEvent;
+use claw::workflow::{
+    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowStatus,
+};
 use futures_util::StreamExt;
 #[cfg(feature = "dev")]
 use owo_colors::OwoColorize;
@@ -470,6 +475,56 @@ async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Workflow SQLite helpers
+// ---------------------------------------------------------------------------
+
+fn resolve_workflow_dev_database_url(
+    explicit_database_url: Option<&str>,
+    cwd: Option<&Path>,
+) -> Result<String> {
+    if let Some(database_url) = explicit_database_url.filter(|value| !value.trim().is_empty()) {
+        return Ok(database_url.to_string());
+    }
+
+    let cwd = match cwd {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("failed to resolve current working directory")?,
+    };
+    let tmp_dir = cwd.join("tmp");
+    std::fs::create_dir_all(&tmp_dir).with_context(|| {
+        format!(
+            "failed to create dev workflow tmp directory at {}",
+            tmp_dir.display()
+        )
+    })?;
+
+    let db_path = tmp_dir.join("workflow-dev.sqlite");
+    Ok(format!("sqlite:{}", db_path.display()))
+}
+
+async fn create_dev_workflow_repository() -> Result<(SqliteWorkflowRepository, String)> {
+    let env_database_url = std::env::var("WORKFLOW_DATABASE_URL").ok();
+    let database_url = resolve_workflow_dev_database_url(env_database_url.as_deref(), None)?;
+    let pool = claw::db::sqlite::connect(&database_url)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect workflow dev database at `{}`",
+                database_url
+            )
+        })?;
+
+    claw::db::sqlite::migrate(&pool).await.with_context(|| {
+        format!(
+            "failed to run workflow dev migrations for `{}`",
+            database_url
+        )
+    })?;
+
+    Ok((SqliteWorkflowRepository::new(pool), database_url))
+}
+
+// ---------------------------------------------------------------------------
 // Approval SQLite helpers
 // ---------------------------------------------------------------------------
 
@@ -777,6 +832,219 @@ async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Res
                 );
             } else {
                 println!("No pending requests to clear in {database_url}.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run a workflow command.
+///
+/// This function tests the workflow module functionality independently.
+async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Result<()> {
+    let (repo, database_url) = create_dev_workflow_repository().await?;
+
+    match command {
+        WorkflowCommand::Create { name } => {
+            let id = WorkflowId::new(uuid::Uuid::new_v4().to_string());
+            let workflow = WorkflowRecord {
+                id: id.clone(),
+                name: name.clone(),
+                status: WorkflowStatus::Pending,
+            };
+
+            repo.create_workflow(&workflow).await?;
+
+            println!("Workflow created:");
+            println!();
+            println!("  ID:     {}", id);
+            println!("  Name:   {}", name);
+            println!("  Status: {}", workflow.status);
+            println!("  Storage: {}", database_url);
+        }
+
+        WorkflowCommand::List => {
+            let workflows = repo.list_workflows().await?;
+            if workflows.is_empty() {
+                println!("No workflows found.");
+            } else {
+                println!("Workflows ({}):", workflows.len());
+                println!();
+                for wf in workflows {
+                    println!("  {} ({})", wf.id, wf.name);
+                    println!("    Status: {}", wf.status);
+                    println!();
+                }
+            }
+        }
+
+        WorkflowCommand::Show { id } => {
+            let workflow_id = WorkflowId::new(id.clone());
+            let workflow = repo.get_workflow(&workflow_id).await?;
+
+            match workflow {
+                Some(wf) => {
+                    println!("Workflow:");
+                    println!();
+                    println!("  ID:     {}", wf.id);
+                    println!("  Name:   {}", wf.name);
+                    println!("  Status: {}", wf.status);
+                    println!();
+
+                    // Show stages
+                    let stages = repo.list_stages_by_workflow(&wf.id).await?;
+                    if !stages.is_empty() {
+                        println!("  Stages:");
+                        for stage in stages {
+                            println!("    [{}] {} ({})", stage.sequence, stage.id, stage.name);
+                            println!("      Status: {}", stage.status);
+
+                            // Show jobs for this stage
+                            let jobs = repo.list_jobs_by_stage(&stage.id).await?;
+                            if !jobs.is_empty() {
+                                println!("      Jobs:");
+                                for job in jobs {
+                                    println!(
+                                        "        - {} (Agent: {}, Status: {})",
+                                        job.name, job.agent_id, job.status
+                                    );
+                                }
+                            }
+                            println!();
+                        }
+                    }
+                }
+                None => {
+                    return Err(anyhow!("Workflow not found: {}", id));
+                }
+            }
+        }
+
+        WorkflowCommand::Delete { id } => {
+            let workflow_id = WorkflowId::new(id.clone());
+            let deleted = repo.delete_workflow(&workflow_id).await?;
+
+            if deleted {
+                println!("Workflow {} deleted.", id);
+            } else {
+                return Err(anyhow!("Workflow not found: {}", id));
+            }
+        }
+
+        WorkflowCommand::AddStage {
+            workflow,
+            name,
+            sequence,
+        } => {
+            let workflow_id = WorkflowId::new(workflow.clone());
+            let workflow = repo.get_workflow(&workflow_id).await?;
+
+            match workflow {
+                Some(_) => {
+                    let stage_id = StageId::new(uuid::Uuid::new_v4().to_string());
+                    let stage = StageRecord {
+                        id: stage_id.clone(),
+                        workflow_id,
+                        name: name.clone(),
+                        sequence,
+                        status: WorkflowStatus::Pending,
+                    };
+
+                    repo.create_stage(&stage).await?;
+
+                    println!("Stage added:");
+                    println!();
+                    println!("  ID:        {}", stage_id);
+                    println!("  Workflow:  {}", workflow);
+                    println!("  Name:      {}", name);
+                    println!("  Sequence:  {}", sequence);
+                }
+                None => {
+                    return Err(anyhow!("Workflow not found: {}", workflow));
+                }
+            }
+        }
+
+        WorkflowCommand::AddJob {
+            stage,
+            agent,
+            name,
+        } => {
+            let stage_id = StageId::new(stage.clone());
+            let agent_id = AgentId::new(agent.clone());
+
+            // Verify stage exists by trying to list jobs (empty list is ok)
+            let _jobs = repo.list_jobs_by_stage(&stage_id).await?;
+
+            let job_id = JobId::new(uuid::Uuid::new_v4().to_string());
+            let job = JobRecord {
+                id: job_id.clone(),
+                stage_id: stage_id.clone(),
+                agent_id,
+                name: name.clone(),
+                status: WorkflowStatus::Pending,
+                started_at: None,
+                finished_at: None,
+            };
+
+            repo.create_job(&job).await?;
+
+            println!("Job added:");
+            println!();
+            println!("  ID:      {}", job_id);
+            println!("  Stage:   {}", stage);
+            println!("  Agent:   {}", agent);
+            println!("  Name:    {}", name);
+        }
+
+        WorkflowCommand::JobStatus { id, status } => {
+            let job_id = JobId::new(id.clone());
+            let new_status = WorkflowStatus::parse_str(&status)
+                .map_err(|e| anyhow!("Invalid status: {}", e))?;
+
+            repo.update_job_status(&job_id, new_status, None, None)
+                .await?;
+
+            println!("Job {} status updated to {}", id, new_status);
+        }
+
+        WorkflowCommand::Status { id } => {
+            let workflow_id = WorkflowId::new(id.clone());
+            let workflow = repo.get_workflow(&workflow_id).await?;
+
+            match workflow {
+                Some(wf) => {
+                    println!("Workflow Status:");
+                    println!();
+                    println!("  {} - {}", wf.name, wf.status);
+                    println!();
+
+                    let stages = repo.list_stages_by_workflow(&wf.id).await?;
+                    if stages.is_empty() {
+                        println!("  (no stages)");
+                    } else {
+                        for stage in stages {
+                            println!("  [{}] {} - {}", stage.sequence, stage.name, stage.status);
+
+                            let jobs = repo.list_jobs_by_stage(&stage.id).await?;
+                            if jobs.is_empty() {
+                                println!("    (no jobs)");
+                            } else {
+                                for job in jobs {
+                                    println!(
+                                        "      - {} (Agent: {}) {}",
+                                        job.name, job.agent_id, job.status
+                                    );
+                                }
+                            }
+                            println!();
+                        }
+                    }
+                }
+                None => {
+                    return Err(anyhow!("Workflow not found: {}", id));
+                }
             }
         }
     }
