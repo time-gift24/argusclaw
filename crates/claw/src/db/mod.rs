@@ -1,13 +1,17 @@
 pub mod llm;
 pub mod sqlite;
-
 #[cfg(feature = "dev")]
 pub mod approval;
+#[cfg(feature = "dev")]
+pub mod workflow;
 
 use thiserror::Error;
 
 #[cfg(feature = "dev")]
 pub use approval::ApprovalRepository;
+
+#[cfg(feature = "dev")]
+pub use workflow::SqliteWorkflowRepository;
 
 #[derive(Debug, Error)]
 pub enum DbError {
