@@ -726,5 +726,8 @@ async fn test_before_call_llm_can_block() {
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, claw::agents::turn::TurnError::LlmCallBlocked { .. }));
+    assert!(matches!(
+        err,
+        claw::agents::turn::TurnError::LlmCallBlocked { .. }
+    ));
 }
