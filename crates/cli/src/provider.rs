@@ -4,19 +4,14 @@
 //! to both the production and development CLI binaries.
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
 use claw::AppContext;
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
-
-#[cfg(feature = "dev")]
-use anyhow::Context;
-
-#[cfg(feature = "dev")]
-use std::path::Path;
 
 #[cfg(feature = "dev")]
 use crate::dev::config;
@@ -90,6 +85,7 @@ pub struct ProviderUpsertArgs {
     pub is_default: bool,
 }
 
+/// Display record for provider output (hides sensitive data).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderDisplayRecord {
     pub id: String,
