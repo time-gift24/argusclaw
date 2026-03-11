@@ -889,6 +889,18 @@ async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Res
     Ok(())
 }
 
+/// Format workflow status with Unicode symbol and color.
+#[cfg(feature = "dev")]
+fn format_workflow_status(status: WorkflowStatus) -> String {
+    match status {
+        WorkflowStatus::Pending => format!("{} {}", "○".yellow(), status.as_str().yellow()),
+        WorkflowStatus::Running => format!("{} {}", "⟳".cyan(), status.as_str().cyan()),
+        WorkflowStatus::Succeeded => format!("{} {}", "✓".green(), status.as_str().green()),
+        WorkflowStatus::Failed => format!("{} {}", "✗".red(), status.as_str().red()),
+        WorkflowStatus::Cancelled => format!("{} {}", "⊘".dimmed(), status.as_str().dimmed()),
+    }
+}
+
 /// Run a workflow command.
 ///
 /// This function tests the workflow module functionality independently.
@@ -1061,32 +1073,66 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
 
             match workflow {
                 Some(wf) => {
-                    println!("Workflow Status:");
                     println!();
-                    println!("  {} - {}", wf.name, wf.status);
+                    println!("{} {}", wf.name.bold(), format_workflow_status(wf.status));
                     println!();
 
                     let stages = repo.list_stages_by_workflow(&wf.id).await?;
                     if stages.is_empty() {
                         println!("  (no stages)");
                     } else {
-                        for stage in stages {
-                            println!("  [{}] {} - {}", stage.sequence, stage.name, stage.status);
+                        for (stage_idx, stage) in stages.iter().enumerate() {
+                            let is_last_stage = stage_idx == stages.len() - 1;
 
-                            let jobs = repo.list_jobs_by_stage(&stage.id).await?;
-                            if jobs.is_empty() {
-                                println!("    (no jobs)");
+                            // Stage line
+                            if is_last_stage {
+                                println!(
+                                    "└── [Stage {}] {} {}",
+                                    stage.sequence,
+                                    stage.name,
+                                    format_workflow_status(stage.status)
+                                );
                             } else {
-                                for job in jobs {
-                                    println!(
-                                        "      - {} (Agent: {}) {}",
-                                        job.name, job.agent_id, job.status
-                                    );
-                                }
+                                println!(
+                                    "├── [Stage {}] {} {}",
+                                    stage.sequence,
+                                    stage.name,
+                                    format_workflow_status(stage.status)
+                                );
                             }
-                            println!();
+
+                            // Jobs under this stage
+                            let jobs = repo.list_jobs_by_stage(&stage.id).await?;
+                            for (job_idx, job) in jobs.iter().enumerate() {
+                                let is_last_job = job_idx == jobs.len() - 1;
+
+                                // Prefix: vertical line for non-last stages, space for last stage
+                                let stage_prefix = if is_last_stage { "    " } else { "│   " };
+
+                                // Branch: ├ for non-last jobs, └ for last job
+                                let job_branch = if is_last_job {
+                                    "└── "
+                                } else {
+                                    "├── "
+                                };
+
+                                println!(
+                                    "{}{}{} (Agent: {}) {}",
+                                    stage_prefix,
+                                    job_branch,
+                                    job.name,
+                                    job.agent_id.as_ref().dimmed(),
+                                    format_workflow_status(job.status)
+                                );
+                            }
+
+                            // Add empty line with vertical connector between stages
+                            if !is_last_stage {
+                                println!("│");
+                            }
                         }
                     }
+                    println!();
                 }
                 None => {
                     return Err(anyhow!("Workflow not found: {}", id));
