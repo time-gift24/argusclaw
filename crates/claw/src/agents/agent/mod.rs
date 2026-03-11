@@ -5,8 +5,8 @@
 //! - `AgentHandle`: Handle for accessing an Agent.
 //! - `RuntimeAgentManager`: Creates and manages Agent instances.
 
-mod runtime;
 mod manager;
+mod runtime;
 
-pub use runtime::{Agent, AgentHandle};
 pub use manager::RuntimeAgentManager;
+pub use runtime::{Agent, AgentHandle};
