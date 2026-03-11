@@ -15,6 +15,11 @@ impl ThreadId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Parse a ThreadId from a string representation.
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
 }
 
 impl Default for ThreadId {
@@ -61,9 +66,7 @@ pub enum ThreadEvent {
         error: String,
     },
     /// Thread entered idle state.
-    Idle {
-        thread_id: ThreadId,
-    },
+    Idle { thread_id: ThreadId },
     /// Context was compacted.
     Compacted {
         thread_id: ThreadId,
