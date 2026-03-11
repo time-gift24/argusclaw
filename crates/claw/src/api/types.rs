@@ -1,5 +1,4 @@
 // crates/claw/src/api/types.rs
-use async_graphql::ID;
 
 #[derive(Clone, async_graphql::SimpleObject)]
 pub struct Workflow {

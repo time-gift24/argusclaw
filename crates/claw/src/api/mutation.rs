@@ -115,9 +115,9 @@ impl MutationRoot {
         let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
         let job_id = JobId::new(input.job_id.to_string());
         let status = WorkflowStatus::parse_str(&input.status)
-            .map_err(|e| async_graphql::Error::new(e))?;
+            .map_err(async_graphql::Error::new)?;
 
-        repo.update_job_status(&job_id, status.clone(), None, None).await?;
+        repo.update_job_status(&job_id, status, None, None).await?;
 
         Ok(Job {
             id: input.job_id.to_string(),
