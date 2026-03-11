@@ -42,6 +42,8 @@ pub enum DevCommand {
     #[command(subcommand)]
     Turn(TurnCommand),
     #[command(subcommand)]
+    Thread(ThreadCommand),
+    #[command(subcommand)]
     Approval(ApprovalCommand),
     #[command(subcommand)]
     Workflow(WorkflowCommand),
@@ -622,6 +624,248 @@ async fn create_dev_approval_repository() -> Result<(SqliteApprovalRepository, S
     })?;
 
     Ok((SqliteApprovalRepository::new(pool), database_url))
+}
+
+/// Run a thread command.
+///
+/// This function tests the thread module's multi-turn conversation functionality.
+#[cfg(feature = "dev")]
+async fn run_thread_command(ctx: AppContext, command: ThreadCommand) -> Result<()> {
+    use claw::agents::thread::{ThreadBuilder, ThreadConfig, ThreadEvent};
+    use claw::llm::ChatMessage;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    match command {
+        ThreadCommand::Chat {
+            provider,
+            tools,
+            system_prompt,
+            verbose,
+        } => {
+            // Get provider
+            let llm_provider = if let Some(id) = provider {
+                ctx.llm_manager()
+                    .get_provider(&LlmProviderId::new(id))
+                    .await?
+            } else {
+                ctx.llm_manager().get_default_provider().await?
+            };
+
+            // Build tool manager
+            let tool_manager = Arc::new(claw::tool::ToolManager::new());
+            // TODO: Register tools based on IDs when tool registration is available
+
+            // Build thread
+            let mut thread = ThreadBuilder::new()
+                .provider(llm_provider)
+                .tool_manager(tool_manager)
+                .config(ThreadConfig::default())
+                .build();
+
+            // Add system prompt as initial message
+            thread.messages.push(ChatMessage::system(&system_prompt));
+
+            println!("{}", "═".repeat(60).dimmed());
+            println!("{}", " Interactive Thread Chat ".bold().cyan());
+            println!("{}", "═".repeat(60).dimmed());
+            println!("{}", "Type your message and press Enter. Type 'quit' to exit.".dimmed());
+            println!();
+
+            // Subscribe to events
+            let mut event_rx = thread.subscribe();
+
+            // Spawn event listener task
+            let event_handle = tokio::spawn(async move {
+                while let Ok(event) = event_rx.recv().await {
+                    match event {
+                        ThreadEvent::TurnCompleted { turn_number, token_usage, .. } => {
+                            println!();
+                            println!(
+                                "{} Turn {} completed ({} tokens)",
+                                "✓".green(),
+                                turn_number,
+                                token_usage.total_tokens
+                            );
+                        }
+                        ThreadEvent::TurnFailed { turn_number, error, .. } => {
+                            println!();
+                            println!("{} Turn {} failed: {}", "✗".red(), turn_number, error);
+                        }
+                        ThreadEvent::Idle { .. } => {
+                            println!();
+                            println!("{}", "> ".green());
+                        }
+                        ThreadEvent::Compacted { new_token_count, .. } => {
+                            println!();
+                            println!(
+                                "{} Context compacted, new token count: {}",
+                                "⟳".yellow(),
+                                new_token_count
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            // Read from stdin
+            let stdin = BufReader::new(tokio::io::stdin());
+            let mut lines = stdin.lines();
+
+            loop {
+                print!("{}", "You: ".blue());
+                std::io::stdout().flush()?;
+
+                let line = lines.next_line().await?;
+                match line {
+                    Some(input) if input == "quit" || input == "exit" => {
+                        println!("Goodbye!");
+                        break;
+                    }
+                    Some(input) if !input.is_empty() => {
+                        if verbose {
+                            println!("{} Sending message...", "→".cyan());
+                        }
+
+                        let handle = thread.send_message(input).await;
+
+                        // Wait for turn to complete
+                        match handle.wait_for_result().await {
+                            Ok(output) => {
+                                // Print assistant response
+                                if let Some(last_msg) = output.messages.last() {
+                                    if last_msg.role == claw::llm::Role::Assistant {
+                                        println!("{} {}", "Assistant:".green(), last_msg.content);
+                                    }
+                                }
+
+                                if verbose {
+                                    println!();
+                                    println!("{}", "Messages:".bold());
+                                    for msg in &output.messages {
+                                        let role_str: String = match msg.role {
+                                            claw::llm::Role::User => "USER".blue().to_string(),
+                                            claw::llm::Role::Assistant => "ASSISTANT".green().to_string(),
+                                            claw::llm::Role::System => "SYSTEM".yellow().to_string(),
+                                            claw::llm::Role::Tool => "TOOL".magenta().to_string(),
+                                        };
+                                        let content = if msg.content.len() > 100 {
+                                            format!("{}...", &msg.content[..100])
+                                        } else {
+                                            msg.content.clone()
+                                        };
+                                        println!("  {} {}", role_str, content);
+                                    }
+                                    println!();
+                                    println!(
+                                        "Token usage: {} in / {} out / {} total",
+                                        output.token_usage.input_tokens,
+                                        output.token_usage.output_tokens,
+                                        output.token_usage.total_tokens
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                println!("{} Error: {}", "✗".red(), e);
+                            }
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            event_handle.abort();
+            Ok(())
+        }
+
+        ThreadCommand::Test {
+            provider,
+            tools,
+            system_prompt,
+            turns,
+            verbose,
+        } => {
+            // Get provider
+            let llm_provider = if let Some(id) = provider {
+                ctx.llm_manager()
+                    .get_provider(&LlmProviderId::new(id))
+                    .await?
+            } else {
+                ctx.llm_manager().get_default_provider().await?
+            };
+
+            // Build tool manager
+            let tool_manager = Arc::new(claw::tool::ToolManager::new());
+
+            // Build thread
+            let mut thread = ThreadBuilder::new()
+                .provider(llm_provider)
+                .tool_manager(tool_manager)
+                .config(ThreadConfig::default())
+                .build();
+
+            // Add system prompt
+            thread.messages.push(ChatMessage::system(&system_prompt));
+
+            println!("{}", "═".repeat(60).dimmed());
+            println!("{}", " Automated Thread Test ".bold().cyan());
+            println!("{}", "═".repeat(60).dimmed());
+            println!();
+            println!("Running {} turns...", turns);
+
+            let start = std::time::Instant::now();
+
+            for i in 1..=turns {
+                let message = format!("Turn {}: Please respond with a brief greeting.", i);
+
+                if verbose {
+                    println!("\n{} Turn {} started", "→".cyan(), i);
+                    println!("  Message: {}", message);
+                }
+
+                let handle = thread.send_message(message).await;
+
+                match handle.wait_for_result().await {
+                    Ok(output) => {
+                        if verbose {
+                            println!("  {} Turn {} completed", "✓".green(), i);
+                            println!("  Messages in history: {}", output.messages.len());
+                            println!(
+                                "  Tokens: {} in / {} out",
+                                output.token_usage.input_tokens,
+                                output.token_usage.output_tokens
+                            );
+                        } else {
+                            print!("{}", ".".cyan());
+                        }
+                    }
+                    Err(e) => {
+                        println!("\n{} Turn {} failed: {}", "✗".red(), i, e);
+                    }
+                }
+            }
+
+            let duration = start.elapsed();
+
+            println!();
+            println!();
+            println!("{}", "═".repeat(60).dimmed());
+            println!("{}", " Test Summary ".bold());
+            println!("{}", "═".repeat(60).dimmed());
+            println!("  Turns executed: {}", turns);
+            println!("  Total time: {:.2}s", duration.as_secs_f64());
+            println!("  Messages in history: {}", thread.history().len());
+            println!("  Token count: {}", thread.token_count());
+
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(feature = "dev"))]
+async fn run_thread_command(_ctx: AppContext, _command: ThreadCommand) -> Result<()> {
+    anyhow::bail!("Thread commands require 'dev' feature")
 }
 
 /// Run an approval command.
