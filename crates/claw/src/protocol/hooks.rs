@@ -148,18 +148,18 @@ impl HookRegistry {
                 HookAction::Continue => {}
                 HookAction::Block(reason) => return Err(reason),
                 HookAction::ModifyMessages(messages) => {
+                    result.messages = Some(messages.clone());
                     current_messages = messages;
-                    result.messages = Some(current_messages.clone());
                 }
                 HookAction::ModifyTools(tools) => {
+                    result.tools = Some(tools.clone());
                     current_tools = tools;
-                    result.tools = Some(current_tools.clone());
                 }
                 HookAction::Modify { messages, tools } => {
+                    result.messages = Some(messages.clone());
+                    result.tools = Some(tools.clone());
                     current_messages = messages;
                     current_tools = tools;
-                    result.messages = Some(current_messages.clone());
-                    result.tools = Some(current_tools.clone());
                 }
             }
         }

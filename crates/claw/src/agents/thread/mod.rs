@@ -41,4 +41,4 @@ mod types;
 pub use config::{CompactStrategy, ThreadConfig, ThreadConfigBuilder};
 pub use error::ThreadError;
 pub use thread::{Thread, ThreadBuilder, TurnStreamHandle};
-pub use types::{ThreadEvent, ThreadId, ThreadState};
+pub use types::{ThreadEvent, ThreadId, ThreadInfo, ThreadState};
