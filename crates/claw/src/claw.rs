@@ -14,6 +14,7 @@ use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
 use crate::tool::ToolManager;
+use crate::workflow::WorkflowManager;
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -22,6 +23,7 @@ pub struct AppContext {
     #[allow(dead_code)]
     agent_manager: Arc<AgentManager>,
     tool_manager: Arc<ToolManager>,
+    workflow_manager: Arc<WorkflowManager>,
 }
 
 impl AppContext {
@@ -41,12 +43,14 @@ impl AppContext {
         let llm_manager = Arc::new(LLMManager::new(repository));
         let agent_manager = Arc::new(AgentManager::new(agent_repository));
         let tool_manager = Arc::new(ToolManager::new());
+        let workflow_manager = Arc::new(WorkflowManager::new());
 
         Ok(Self {
             db_pool: pool,
             llm_manager,
             agent_manager,
             tool_manager,
+            workflow_manager,
         })
     }
 
@@ -64,6 +68,7 @@ impl AppContext {
             llm_manager,
             agent_manager,
             tool_manager,
+            workflow_manager: Arc::new(WorkflowManager::new()),
         }
     }
 
@@ -80,6 +85,7 @@ impl AppContext {
             llm_manager,
             agent_manager,
             tool_manager,
+            workflow_manager: Arc::new(WorkflowManager::new()),
         }
     }
 
@@ -101,6 +107,33 @@ impl AppContext {
     #[must_use]
     pub fn tool_manager(&self) -> Arc<ToolManager> {
         Arc::clone(&self.tool_manager)
+    }
+
+    #[must_use]
+    pub fn workflow_manager(&self) -> Arc<WorkflowManager> {
+        Arc::clone(&self.workflow_manager)
+    }
+
+    /// Create a minimal AppContext for desktop app (no database migrations).
+    pub async fn new_desktop() -> Self {
+        let pool = SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(std::path::Path::new(":memory:"))
+                .create_if_missing(true),
+        )
+        .await
+        .expect("failed to create in-memory pool");
+
+        let repository = Arc::new(crate::db::sqlite::SqliteLlmProviderRepository::new(pool.clone()));
+        let agent_repository = Arc::new(crate::db::sqlite::SqliteAgentRepository::new(pool.clone()));
+
+        Self {
+            db_pool: pool,
+            llm_manager: Arc::new(LLMManager::new(repository)),
+            agent_manager: Arc::new(AgentManager::new(agent_repository)),
+            tool_manager: Arc::new(ToolManager::new()),
+            workflow_manager: Arc::new(WorkflowManager::new()),
+        }
     }
 
     #[cfg(feature = "dev")]

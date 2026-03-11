@@ -6,8 +6,12 @@ pub mod error;
 pub mod llm;
 pub mod protocol;
 pub mod tool;
+pub mod workflow;
 
 pub use claw::AppContext;
 pub use error::AgentError;
 pub use protocol::RiskLevel;
 pub use tool::{NamedTool, ToolError, ToolManager};
+pub use workflow::{
+    NodeData, Position, Workflow, WorkflowEdge, WorkflowError, WorkflowManager, WorkflowNode,
+};

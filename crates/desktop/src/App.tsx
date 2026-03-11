@@ -13,7 +13,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { ChatIcon, CodeIcon, AiMagicIcon } from "@hugeicons/core-free-icons";
+import { ChatIcon, CodeIcon, AiMagicIcon, FlowIcon } from "@hugeicons/core-free-icons";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Streamdown } from "streamdown";
 import { math } from "@streamdown/math";
@@ -22,9 +22,11 @@ import { CodeBlock } from "@/components/ui/code-block";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Canvas, Edge } from "@/components/ai-elements";
+import { useWorkflow } from "@/hooks/useWorkflow";
 
 // 页面类型
-type Page = "chat" | "streamdown-dev";
+type Page = "chat" | "streamdown-dev" | "workflow";
 
 // 完整的测试 Markdown 内容
 const SAMPLE_MARKDOWN = `# ArgusClaw AI 助手
@@ -623,6 +625,15 @@ function App() {
                   <span>Streamdown 开发</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={currentPage === "workflow"}
+                  onClick={() => setCurrentPage("workflow")}
+                >
+                  <HugeiconsIcon icon={FlowIcon} />
+                  <span>Workflow</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
             </SidebarMenu>
           </SidebarContent>
         </Sidebar>
@@ -630,16 +641,18 @@ function App() {
           <header className="flex h-14 items-center gap-2 border-b px-4">
             <SidebarTrigger />
             <span className="text-sm font-medium">
-              {currentPage === "chat" ? "聊天" : "Streamdown 开发"}
+              {currentPage === "chat" ? "聊天" : currentPage === "streamdown-dev" ? "Streamdown 开发" : "Workflow"}
             </span>
           </header>
           {currentPage === "chat" ? (
             <ChatPage />
-          ) : (
+          ) : currentPage === "streamdown-dev" ? (
             <StreamdownDevPage
               styleConfig={styleConfig}
               onStyleChange={setStyleConfig}
             />
+          ) : (
+            <WorkflowPage />
           )}
         </SidebarInset>
       </SidebarProvider>
@@ -671,6 +684,60 @@ function StreamdownDevPage({
     <div className="flex h-full">
       <ChatView styleConfig={styleConfig} />
       <StyleControls config={styleConfig} onChange={onStyleChange} />
+    </div>
+  );
+}
+
+// Workflow 页面 - Canvas 和 Edge 组件演示
+const edgeTypes = {
+  temporary: Edge.Temporary,
+  animated: Edge.Animated,
+};
+
+function WorkflowPage() {
+  const {
+    nodes,
+    edges,
+    onNodesChange,
+    onEdgesChange,
+    loading,
+    error,
+    save,
+  } = useWorkflow("demo");
+
+  if (loading) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-muted-foreground">
+        <p>加载中...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-red-500">
+        <p>错误: {error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 h-full flex flex-col">
+      <div className="p-2 border-b flex items-center gap-2">
+        <Button onClick={save} size="sm">
+          保存
+        </Button>
+      </div>
+      <div className="flex-1">
+        <Canvas
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          edgeTypes={edgeTypes}
+          fitView
+        />
+      </div>
     </div>
   );
 }
