@@ -37,7 +37,7 @@ impl AppContext {
         migrate(&pool).await?;
 
         let repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
-        let agent_repository = Arc::new(SqliteAgentRepository::new(pool));
+        let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
         let llm_manager = Arc::new(LLMManager::new(repository));
         let agent_manager = Arc::new(AgentManager::new(agent_repository));
         let tool_manager = Arc::new(ToolManager::new());
