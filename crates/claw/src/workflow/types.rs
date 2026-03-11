@@ -292,11 +292,26 @@ mod tests {
 
     #[test]
     fn workflow_status_from_str_valid() {
-        assert_eq!(WorkflowStatus::parse_str("pending").unwrap(), WorkflowStatus::Pending);
-        assert_eq!(WorkflowStatus::parse_str("running").unwrap(), WorkflowStatus::Running);
-        assert_eq!(WorkflowStatus::parse_str("succeeded").unwrap(), WorkflowStatus::Succeeded);
-        assert_eq!(WorkflowStatus::parse_str("failed").unwrap(), WorkflowStatus::Failed);
-        assert_eq!(WorkflowStatus::parse_str("cancelled").unwrap(), WorkflowStatus::Cancelled);
+        assert_eq!(
+            WorkflowStatus::parse_str("pending").unwrap(),
+            WorkflowStatus::Pending
+        );
+        assert_eq!(
+            WorkflowStatus::parse_str("running").unwrap(),
+            WorkflowStatus::Running
+        );
+        assert_eq!(
+            WorkflowStatus::parse_str("succeeded").unwrap(),
+            WorkflowStatus::Succeeded
+        );
+        assert_eq!(
+            WorkflowStatus::parse_str("failed").unwrap(),
+            WorkflowStatus::Failed
+        );
+        assert_eq!(
+            WorkflowStatus::parse_str("cancelled").unwrap(),
+            WorkflowStatus::Cancelled
+        );
     }
 
     #[test]

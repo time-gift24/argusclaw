@@ -61,9 +61,7 @@ pub enum ThreadEvent {
         error: String,
     },
     /// Thread entered idle state.
-    Idle {
-        thread_id: ThreadId,
-    },
+    Idle { thread_id: ThreadId },
     /// Context was compacted.
     Compacted {
         thread_id: ThreadId,

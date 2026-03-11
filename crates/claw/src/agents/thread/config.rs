@@ -31,9 +31,15 @@ pub enum CompactStrategy {
 impl std::fmt::Debug for CompactStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::KeepRecent { count } => f.debug_struct("KeepRecent").field("count", count).finish(),
-            Self::KeepTokens { ratio } => f.debug_struct("KeepTokens").field("ratio", ratio).finish(),
-            Self::Summarize { max_summary_tokens, .. } => f
+            Self::KeepRecent { count } => {
+                f.debug_struct("KeepRecent").field("count", count).finish()
+            }
+            Self::KeepTokens { ratio } => {
+                f.debug_struct("KeepTokens").field("ratio", ratio).finish()
+            }
+            Self::Summarize {
+                max_summary_tokens, ..
+            } => f
                 .debug_struct("Summarize")
                 .field("max_summary_tokens", max_summary_tokens)
                 .field("provider", &"Arc<dyn LlmProvider>")
@@ -47,7 +53,10 @@ impl Clone for CompactStrategy {
         match self {
             Self::KeepRecent { count } => Self::KeepRecent { count: *count },
             Self::KeepTokens { ratio } => Self::KeepTokens { ratio: *ratio },
-            Self::Summarize { max_summary_tokens, provider } => Self::Summarize {
+            Self::Summarize {
+                max_summary_tokens,
+                provider,
+            } => Self::Summarize {
                 max_summary_tokens: *max_summary_tokens,
                 provider: provider.clone(),
             },

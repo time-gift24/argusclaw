@@ -1,7 +1,9 @@
 //! Workflow orchestration module.
 
-pub mod types;
 pub mod repository;
+pub mod types;
 
-pub use types::{JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowStatus};
 pub use repository::WorkflowRepository;
+pub use types::{
+    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowStatus,
+};
