@@ -69,15 +69,15 @@ pub struct Thread {
 
     /// Token count (internal).
     #[builder(default)]
-    token_count: u32,
+    pub(super) token_count: u32,
 
     /// Turn count (internal).
     #[builder(default)]
-    turn_count: u32,
+    pub(super) turn_count: u32,
 
     /// Event broadcaster (internal).
     #[builder(default)]
-    event_sender: broadcast::Sender<ThreadEvent>,
+    pub(super) event_sender: broadcast::Sender<ThreadEvent>,
 }
 
 impl std::fmt::Debug for Thread {
