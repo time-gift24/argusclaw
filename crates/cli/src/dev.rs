@@ -1073,9 +1073,8 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
 
             match workflow {
                 Some(wf) => {
-                    println!();
-                    println!("{} {}", wf.name.bold(), format_workflow_status(wf.status));
-                    println!();
+                    // Print workflow name and status: "name (status)"
+                    println!("{} ({})", wf.name, format_workflow_status(wf.status));
 
                     let stages = repo.list_stages_by_workflow(&wf.id).await?;
                     if stages.is_empty() {
@@ -1084,40 +1083,28 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
                         for (stage_idx, stage) in stages.iter().enumerate() {
                             let is_last_stage = stage_idx == stages.len() - 1;
 
-                            // Stage line
-                            if is_last_stage {
-                                println!(
-                                    "└── [Stage {}] {} {}",
-                                    stage.sequence,
-                                    stage.name,
-                                    format_workflow_status(stage.status)
-                                );
-                            } else {
-                                println!(
-                                    "├── [Stage {}] {} {}",
-                                    stage.sequence,
-                                    stage.name,
-                                    format_workflow_status(stage.status)
-                                );
-                            }
+                            // Stage line: use ├─ for non-last, └─ for last
+                            let stage_branch = if is_last_stage { "└─ " } else { "├─ " };
+                            println!(
+                                "{}{} ({})",
+                                stage_branch,
+                                stage.name,
+                                format_workflow_status(stage.status)
+                            );
 
                             // Jobs under this stage
                             let jobs = repo.list_jobs_by_stage(&stage.id).await?;
                             for (job_idx, job) in jobs.iter().enumerate() {
                                 let is_last_job = job_idx == jobs.len() - 1;
 
-                                // Prefix: vertical line for non-last stages, space for last stage
-                                let stage_prefix = if is_last_stage { "    " } else { "│   " };
+                                // Prefix: │  for non-last stages,    for last stage
+                                let stage_prefix = if is_last_stage { "   " } else { "│  " };
 
-                                // Branch: ├ for non-last jobs, └ for last job
-                                let job_branch = if is_last_job {
-                                    "└── "
-                                } else {
-                                    "├── "
-                                };
+                                // Branch: ├─ for non-last jobs, └─ for last job
+                                let job_branch = if is_last_job { "└─ " } else { "├─ " };
 
                                 println!(
-                                    "{}{}{} (Agent: {}) {}",
+                                    "{}{}{} ({}) {}",
                                     stage_prefix,
                                     job_branch,
                                     job.name,
@@ -1125,14 +1112,11 @@ async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Res
                                     format_workflow_status(job.status)
                                 );
                             }
-
-                            // Add empty line with vertical connector between stages
-                            if !is_last_stage {
-                                println!("│");
-                            }
                         }
                     }
-                    println!();
+
+                    // Print done line
+                    println!("└─ done ({})", format_workflow_status(wf.status));
                 }
                 None => {
                     return Err(anyhow!("Workflow not found: {}", id));
