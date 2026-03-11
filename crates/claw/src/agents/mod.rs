@@ -1,5 +1,6 @@
 //! Agent management module.
 
+pub mod thread;
 pub mod turn;
 
 mod types;
