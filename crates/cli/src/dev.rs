@@ -381,7 +381,6 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Provider(command) => run_provider_command(ctx, command).await,
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
         DevCommand::Turn(command) => run_turn_command(ctx, command).await,
-        DevCommand::Thread(command) => run_thread_command(ctx, command).await,
         DevCommand::Approval(command) => run_approval_command(ctx, command).await,
         DevCommand::Workflow(command) => run_workflow_command(ctx, command).await,
     }
