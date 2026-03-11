@@ -111,7 +111,7 @@ impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
         id: &WorkflowId,
         status: WorkflowStatus,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE workflows SET status = ?1 WHERE id = ?2")
+        let result = sqlx::query("UPDATE workflows SET status = ?1 WHERE id = ?2")
             .bind(Self::status_as_str(status))
             .bind(id.as_ref())
             .execute(&self.pool)
@@ -119,6 +119,12 @@ impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::QueryFailed {
+                reason: format!("workflow not found: {}", id),
+            });
+        }
 
         Ok(())
     }
@@ -241,7 +247,7 @@ impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> Result<(), DbError> {
-        sqlx::query("UPDATE jobs SET status = ?1, started_at = ?2, finished_at = ?3 WHERE id = ?4")
+        let result = sqlx::query("UPDATE jobs SET status = ?1, started_at = ?2, finished_at = ?3 WHERE id = ?4")
             .bind(Self::status_as_str(status))
             .bind(started_at)
             .bind(finished_at)
@@ -251,6 +257,12 @@ impl crate::workflow::WorkflowRepository for SqliteWorkflowRepository {
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::QueryFailed {
+                reason: format!("job not found: {}", id),
+            });
+        }
 
         Ok(())
     }
