@@ -6,6 +6,7 @@ pub mod error;
 pub mod llm;
 pub mod protocol;
 pub mod tool;
+pub mod api;
 pub mod workflow;
 
 pub use claw::AppContext;
