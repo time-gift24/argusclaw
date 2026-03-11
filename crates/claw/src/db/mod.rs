@@ -1,5 +1,6 @@
 pub mod llm;
 pub mod sqlite;
+pub mod thread;
 
 #[cfg(feature = "dev")]
 pub mod approval;
@@ -8,6 +9,7 @@ use thiserror::Error;
 
 #[cfg(feature = "dev")]
 pub use approval::ApprovalRepository;
+pub use thread::{MessageId, MessageRecord, ThreadRecord, ThreadRepository};
 
 #[derive(Debug, Error)]
 pub enum DbError {

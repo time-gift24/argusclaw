@@ -2,6 +2,7 @@ mod agent;
 #[cfg(feature = "dev")]
 mod approval;
 mod llm;
+mod thread;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -15,6 +16,7 @@ pub use agent::SqliteAgentRepository;
 #[cfg(feature = "dev")]
 pub use approval::SqliteApprovalRepository;
 pub use llm::SqliteLlmProviderRepository;
+pub use thread::SqliteThreadRepository;
 
 pub async fn connect(database: &str) -> Result<SqlitePool, DbError> {
     let options = if database.starts_with("sqlite:") {

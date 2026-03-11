@@ -40,6 +40,12 @@ crates/
 │   │   ├── claw.rs                   # AppContext；拥有 LLMManager、AgentManager
 │   │   ├── agents/                   # Agent 管理
 │   │   │   ├── mod.rs                # AgentManager (占位)
+│   │   │   ├── thread/               # Thread 多轮对话模块
+│   │   │   │   ├── mod.rs            # Thread 模块入口和重导出
+│   │   │   │   ├── config.rs         # ThreadConfig, CompactStrategy
+│   │   │   │   ├── error.rs          # ThreadError 类型
+│   │   │   │   ├── thread.rs         # Thread, ThreadBuilder, TurnStreamHandle
+│   │   │   │   └── types.rs          # ThreadId, ThreadState, ThreadEvent
 │   │   │   └── turn/                 # Turn 执行模块
 │   │   │       ├── mod.rs            # Turn 模块入口和重导出
 │   │   │       ├── config.rs         # TurnConfig, TurnInput, TurnOutput, TokenUsage
@@ -49,9 +55,11 @@ crates/
 │   │   ├── db/                       # 存储抽象和实现
 │   │   │   ├── mod.rs                # DB 模块入口和共享错误
 │   │   │   ├── llm.rs                # LLM 提供商记录和仓库 trait
+│   │   │   ├── thread.rs             # Thread 持久化类型和 ThreadRepository trait
 │   │   │   └── sqlite/               # SQLx 支持的 SQLite 实现
 │   │   │       ├── mod.rs            # SQLite 连接和迁移辅助
-│   │   │       └── llm.rs            # SQLite LLM 提供商仓库
+│   │   │       ├── llm.rs            # SQLite LLM 提供商仓库
+│   │   │       └── thread.rs         # SQLite Thread 仓库
 │   │   ├── llm/                      # LLM 领域类型、管理器和提供商实现
 │   │   │   ├── mod.rs                # LLM 模块入口和导出
 │   │   │   ├── error.rs              # 提供商无关的 LLM 错误
@@ -66,7 +74,9 @@ crates/
 │   │       └── mod.rs                # NamedTool trait、ToolManager、ToolError
 │   ├── migrations/                   # SQLx 迁移
 │   └── tests/                        # E2E 测试；不适合内联测试的多模块场景
-│       └── turn_integration_test.rs  # Turn 模块集成测试
+│       ├── turn_integration_test.rs  # Turn 模块集成测试
+│       ├── thread_integration_test.rs # Thread 模块集成测试
+│       └── thread_repository_test.rs # Thread SQLite 持久化测试
 ├── desktop/                          # Tauri + React + TypeScript + Vite + Tailwind CSS v4
 │   ├── src/                         # React 前端
 │   └── src-tauri/                    # Rust 后端
@@ -103,3 +113,19 @@ crates/
 - `TurnError`：LLM 失败、工具执行、hooks、限制等错误类型
 - `HookRegistry`：可扩展的 hook 系统
 - `execute_turn()`：turn 执行的主入口
+
+## Thread 模块
+
+- 多轮对话会话管理，封装消息历史并顺序执行 Turn
+- `ThreadId`：强类型 UUID 包装器
+- `ThreadState`：`Idle` | `Processing`
+- `ThreadEvent`：Processing/TurnCompleted/TurnFailed/Idle/Compacted 事件（broadcast channel）
+- `ThreadConfig`：compact_threshold_ratio、compact_strategy、turn_config
+- `CompactStrategy`：KeepRecent(count) | KeepTokens(ratio) | Summarize (TODO)
+- `Thread`：核心结构，包含 messages、token_count、turn_count、event_sender
+- `ThreadBuilder`：使用 derive_builder 构建 Thread
+- `send_message()`：发送用户消息并执行 Turn
+- `compact()`：根据策略压缩上下文（保留 system 消息）
+- `subscribe()`：订阅 Thread 事件（CLI、Tauri）
+- `ThreadRepository` trait：持久化抽象（upsert_thread、get_messages、delete_messages_before 等）
+- `SqliteThreadRepository`：SQLite 实现，支持 CASCADE 删除
