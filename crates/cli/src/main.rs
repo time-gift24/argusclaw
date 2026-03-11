@@ -1,3 +1,5 @@
+mod agent;
+mod provider;
 use std::env;
 
 #[cfg(feature = "dev")]
@@ -12,6 +14,16 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let ctx = AppContext::init(resolve_database_target_for_startup()?).await?;
+
+    // Provider command (production, not dev)
+    if provider::try_run(ctx.clone()).await? {
+        return Ok(());
+    }
+
+    // Agent command (production, not dev)
+    if agent::try_run(ctx.clone()).await? {
+        return Ok(());
+    }
 
     #[cfg(feature = "dev")]
     if dev::try_run(ctx.clone()).await? {
@@ -44,12 +56,25 @@ fn resolve_database_target_for_startup() -> Result<Option<String>> {
         return Ok(Some(database_url));
     }
 
+    // Production commands that need database
+    let first_arg = env::args().nth(1);
+    if let Some(ref arg) = first_arg
+        && matches!(arg.as_str(), "agent" | "provider")
+    {
+        let data_dir = dirs::data_dir()
+            .unwrap_or_else(|| env::current_dir().unwrap())
+            .join("argusclaw");
+        std::fs::create_dir_all(&data_dir)?;
+        let db_path = data_dir.join("sqlite.db");
+        return Ok(Some(db_path.display().to_string()));
+    }
+
     #[cfg(feature = "dev")]
     {
         if let Some(first_arg) = env::args().nth(1)
             && matches!(
                 first_arg.as_str(),
-                "provider" | "llm" | "turn" | "thread" | "approval" | "workflow"
+                "llm" | "turn" | "thread" | "approval" | "workflow"
             )
         {
             let tmp_dir = env::current_dir()?.join("tmp");

@@ -4,21 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-claw = { path = "../claw", features = ["openai-compatible"] }
 anyhow = "1"
 chrono = "0.4"
-clap = { version = "4", features = ["derive"], optional = true }
+clap = { version = "4", features = ["derive"] }
+claw = { path = "../claw", features = ["openai-compatible"] }
+dirs = "5"
 futures-util = { version = "0.3", optional = true }
-owo-colors = { version = "4", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
+owo-colors = { version = "4" }
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
-toml = { version = "0.8", optional = true }
+toml = { version = "0.8" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:sqlx", "dep:toml"]
+dev = ["claw/dev", "dep:futures-util", "dep:serde_json", "dep:sqlx"]
