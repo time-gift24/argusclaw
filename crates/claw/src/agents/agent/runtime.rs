@@ -1,12 +1,13 @@
 //! Agent and AgentHandle implementations.
 
-use std::fmt;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use derive_builder::Builder;
 
 use crate::agents::compact::CompactManager;
 use crate::agents::thread::{Thread, ThreadConfig, ThreadId, ThreadInfo};
+use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
 use crate::approval::ApprovalManager;
 use crate::llm::LlmProvider;
 use crate::tool::ToolManager;
@@ -14,7 +15,8 @@ use crate::tool::ToolManager;
 /// Runtime information about an agent.
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeInfo {
-    pub id: crate::agents::types::AgentId,
+    pub template_id: AgentId,
+    pub runtime_id: AgentRuntimeId,
     pub thread_count: usize,
     pub provider_model: String,
 }
@@ -22,12 +24,14 @@ pub struct AgentRuntimeInfo {
 impl AgentRuntimeInfo {
     #[must_use]
     pub fn new(
-        id: crate::agents::types::AgentId,
+        template_id: AgentId,
+        runtime_id: AgentRuntimeId,
         thread_count: usize,
         provider_model: String,
     ) -> Self {
         Self {
-            id,
+            template_id,
+            runtime_id,
             thread_count,
             provider_model,
         }
@@ -38,51 +42,81 @@ impl AgentRuntimeInfo {
 ///
 /// Each agent has a default LLM provider and manages multiple threads.
 /// Threads share the same provider, tool manager, and compact manager.
+#[derive(Builder)]
+#[builder(pattern = "owned", build_fn(skip))]
 pub struct Agent {
-    /// Unique agent ID.
-    id: crate::agents::types::AgentId,
-    /// Default provider for new threads.
-    default_provider: Arc<dyn LlmProvider>,
-    /// Tool manager (shared).
-    tool_manager: Arc<ToolManager>,
-    /// Compact manager (shared).
-    compact_manager: Arc<CompactManager>,
-    /// Approval manager (optional).
-    approval_manager: Option<Arc<ApprovalManager>>,
-    /// Active threads managed by this agent.
+    /// Template ID from AgentRecord.
+    pub template_id: AgentId,
+    /// Unique runtime instance ID.
+    #[builder(default = AgentRuntimeId::new())]
+    pub runtime_id: AgentRuntimeId,
+    /// System prompt from AgentRecord.
+    pub system_prompt: String,
+    /// LLM provider (required).
+    pub provider: Arc<dyn LlmProvider>,
+    /// Tool manager.
+    #[builder(default = "Arc::new(ToolManager::new())")]
+    pub tool_manager: Arc<ToolManager>,
+    /// Compact manager.
+    #[builder(default)]
+    pub compact_manager: Option<Arc<CompactManager>>,
+    /// Approval manager.
+    #[builder(default)]
+    pub approval_manager: Option<Arc<ApprovalManager>>,
+    /// Active threads.
+    #[builder(default)]
     threads: DashMap<ThreadId, Thread>,
 }
 
-impl Agent {
-    /// Create a new Agent.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        id: crate::agents::types::AgentId,
-        default_provider: Arc<dyn LlmProvider>,
-        tool_manager: Arc<ToolManager>,
-        compact_manager: Arc<CompactManager>,
-        approval_manager: Option<Arc<ApprovalManager>>,
-    ) -> Self {
-        Self {
-            id,
-            default_provider,
-            tool_manager,
-            compact_manager,
-            approval_manager,
+impl AgentBuilder {
+    /// Create a new AgentBuilder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create an AgentBuilder from an AgentRecord and provider.
+    #[must_use]
+    pub fn from_record(record: &AgentRecord, provider: Arc<dyn LlmProvider>) -> Self {
+        Self::default()
+            .template_id(record.id.clone())
+            .system_prompt(record.system_prompt.clone())
+            .provider(provider)
+    }
+
+    /// Build the Agent.
+    #[must_use]
+    pub fn build(self) -> Agent {
+        Agent {
+            template_id: self.template_id.expect("template_id is required"),
+            runtime_id: self.runtime_id.unwrap_or_default(),
+            system_prompt: self.system_prompt.unwrap_or_default(),
+            provider: self.provider.expect("provider is required"),
+            tool_manager: self.tool_manager.unwrap_or_else(|| Arc::new(ToolManager::new())),
+            compact_manager: self.compact_manager.flatten(),
+            approval_manager: self.approval_manager.flatten(),
             threads: DashMap::new(),
         }
     }
+}
 
-    /// Get the agent ID.
+impl Agent {
+    /// Get the template ID.
     #[must_use]
-    pub fn id(&self) -> &crate::agents::types::AgentId {
-        &self.id
+    pub fn template_id(&self) -> &AgentId {
+        &self.template_id
     }
 
-    /// Get the default provider.
+    /// Get the runtime ID.
+    #[must_use]
+    pub fn runtime_id(&self) -> AgentRuntimeId {
+        self.runtime_id
+    }
+
+    /// Get the provider.
     #[must_use]
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
-        &self.default_provider
+        &self.provider
     }
 
     /// Get the tool manager.
@@ -93,8 +127,8 @@ impl Agent {
 
     /// Get the compact manager.
     #[must_use]
-    pub fn compact_manager(&self) -> &Arc<CompactManager> {
-        &self.compact_manager
+    pub fn compact_manager(&self) -> Option<&Arc<CompactManager>> {
+        self.compact_manager.as_ref()
     }
 
     /// Get the approval manager (if configured).
@@ -105,10 +139,15 @@ impl Agent {
 
     /// Create a new thread in this agent.
     pub fn create_thread(&self, config: ThreadConfig) -> ThreadId {
+        let compact = self
+            .compact_manager
+            .clone()
+            .unwrap_or_else(|| Arc::new(CompactManager::with_defaults(128_000)));
+
         let thread = Thread::new(
-            self.default_provider.clone(),
+            self.provider.clone(),
             self.tool_manager.clone(),
-            self.compact_manager.clone(),
+            compact,
             self.approval_manager.clone(),
             config,
         );
@@ -122,12 +161,11 @@ impl Agent {
     pub fn get_thread(&self, id: &ThreadId) -> Option<AgentHandle> {
         self.threads.get(id).map(|_entry| AgentHandle {
             id: *id,
-            agent_id: self.id.clone(),
+            runtime_id: self.runtime_id,
         })
     }
 
     /// Get mutable reference to a thread by ID.
-    /// Note: This holds a write lock on the thread map.
     #[must_use]
     pub fn get_thread_mut(
         &self,
@@ -137,13 +175,10 @@ impl Agent {
     }
 
     /// Send a message to a thread.
-    ///
-    /// This is a convenience method that creates a thread if it doesn't exist.
     pub fn send_message(&self, thread_id: &ThreadId, _message: String) -> Option<AgentHandle> {
-        // Check if thread exists, if not return None
         self.threads.get(thread_id).map(|_entry| AgentHandle {
             id: *thread_id,
-            agent_id: self.id.clone(),
+            runtime_id: self.runtime_id,
         })
     }
 
@@ -165,9 +200,10 @@ impl Agent {
     #[must_use]
     pub fn runtime_info(&self) -> AgentRuntimeInfo {
         AgentRuntimeInfo::new(
-            self.id.clone(),
+            self.template_id.clone(),
+            self.runtime_id,
             self.threads.len(),
-            self.default_provider.model_name().to_string(),
+            self.provider.model_name().to_string(),
         )
     }
 
@@ -178,33 +214,46 @@ impl Agent {
     }
 }
 
+impl Clone for Agent {
+    fn clone(&self) -> Self {
+        Self {
+            template_id: self.template_id.clone(),
+            runtime_id: self.runtime_id,
+            system_prompt: self.system_prompt.clone(),
+            provider: self.provider.clone(),
+            tool_manager: self.tool_manager.clone(),
+            compact_manager: self.compact_manager.clone(),
+            approval_manager: self.approval_manager.clone(),
+            threads: DashMap::new(),
+        }
+    }
+}
+
 impl std::fmt::Debug for Agent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Agent")
-            .field("id", &self.id)
+            .field("template_id", &self.template_id)
+            .field("runtime_id", &self.runtime_id)
             .field("thread_count", &self.threads.len())
-            .field("provider", &self.default_provider.model_name())
+            .field("provider", &self.provider.model_name())
             .finish()
     }
 }
 
 /// A handle for accessing a thread through an agent.
-///
-/// This is a lightweight handle that allows access to thread operations
-/// without needing a reference to the full Agent.
 #[derive(Clone)]
 pub struct AgentHandle {
     /// Thread ID.
     id: ThreadId,
-    /// Agent ID (for reference).
-    agent_id: crate::agents::types::AgentId,
+    /// Agent runtime ID.
+    runtime_id: AgentRuntimeId,
 }
 
 impl AgentHandle {
     /// Create a new AgentHandle.
     #[must_use]
-    pub fn new(id: ThreadId, agent_id: crate::agents::types::AgentId) -> Self {
-        Self { id, agent_id }
+    pub fn new(id: ThreadId, runtime_id: AgentRuntimeId) -> Self {
+        Self { id, runtime_id }
     }
 
     /// Get the thread ID.
@@ -213,18 +262,18 @@ impl AgentHandle {
         &self.id
     }
 
-    /// Get the agent ID.
+    /// Get the agent runtime ID.
     #[must_use]
-    pub fn agent_id(&self) -> &crate::agents::types::AgentId {
-        &self.agent_id
+    pub fn runtime_id(&self) -> AgentRuntimeId {
+        self.runtime_id
     }
 }
 
 impl std::fmt::Debug for AgentHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentHandle")
             .field("id", &self.id)
-            .field("agent_id", &self.agent_id)
+            .field("runtime_id", &self.runtime_id)
             .finish()
     }
 }
@@ -234,10 +283,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_agent_info() {
-        // Just test the basic struct construction
+    fn test_agent_runtime_info() {
         let info = AgentRuntimeInfo::new(
-            crate::agents::types::AgentId::new("test"),
+            AgentId::new("test"),
+            AgentRuntimeId::new(),
             5,
             "gpt-4".to_string(),
         );
@@ -245,10 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn test_thread_handle() {
+    fn test_agent_handle() {
         let thread_id = ThreadId::new();
-        let handle = AgentHandle::new(thread_id, crate::agents::types::AgentId::new("agent-1"));
+        let runtime_id = AgentRuntimeId::new();
+        let handle = AgentHandle::new(thread_id, runtime_id);
         assert_eq!(*handle.id(), thread_id);
-        assert_eq!(handle.agent_id().to_string(), "agent-1");
+        assert_eq!(handle.runtime_id(), runtime_id);
     }
 }

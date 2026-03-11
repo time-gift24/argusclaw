@@ -5,12 +5,37 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::db::DbError;
 
-/// Unique identifier for an agent.
+/// Unique identifier for an agent template.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(String);
+
+/// Unique runtime identifier for an Agent instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentRuntimeId(pub Uuid);
+
+impl AgentRuntimeId {
+    /// Create a new runtime ID.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for AgentRuntimeId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentRuntimeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl AgentId {
     /// Creates a new agent ID.

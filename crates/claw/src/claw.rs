@@ -19,7 +19,6 @@ use crate::tool::ToolManager;
 pub struct AppContext {
     db_pool: SqlitePool,
     llm_manager: Arc<LLMManager>,
-    #[allow(dead_code)]
     agent_manager: Arc<AgentManager>,
     tool_manager: Arc<ToolManager>,
 }
@@ -36,11 +35,16 @@ impl AppContext {
         }?;
         migrate(&pool).await?;
 
-        let repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
+        let llm_repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
         let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
-        let llm_manager = Arc::new(LLMManager::new(repository));
-        let agent_manager = Arc::new(AgentManager::new(agent_repository));
+        let llm_manager = Arc::new(LLMManager::new(llm_repository));
         let tool_manager = Arc::new(ToolManager::new());
+        let agent_manager = Arc::new(AgentManager::new(
+            agent_repository,
+            llm_manager.clone(),
+            tool_manager.clone(),
+            None,
+        ));
 
         Ok(Self {
             db_pool: pool,

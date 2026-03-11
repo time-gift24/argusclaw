@@ -2,11 +2,12 @@
 //!
 //! This module provides:
 //! - `Agent`: Manages multiple threads with shared configuration.
-//! - `AgentHandle`: Handle for accessing an Agent.
-//! - `RuntimeAgentManager`: Creates and manages Agent instances.
+//! - `AgentBuilder`: Builder for creating Agent instances.
+//! - `AgentHandle`: Handle for accessing a thread through an Agent.
+//! - `AgentManager`: Creates and manages runtime Agent instances.
 
 mod manager;
 mod runtime;
 
-pub use manager::RuntimeAgentManager;
-pub use runtime::{Agent, AgentHandle};
+pub use manager::AgentManager;
+pub use runtime::{Agent, AgentBuilder, AgentHandle, AgentRuntimeInfo};

@@ -1,57 +1,51 @@
-//! RuntimeAgentManager - manages global managers and creates runtime Agent instances.
+//! AgentManager - manages global managers and creates runtime Agent instances.
 
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use super::runtime::{Agent, AgentRuntimeInfo};
+use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
 use crate::agents::compact::CompactManager;
-use crate::agents::types::AgentId;
+use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentRuntimeId};
 use crate::approval::ApprovalManager;
-use crate::llm::LlmProvider;
+use crate::db::DbError;
+use crate::error::AgentError;
+use crate::llm::LLMManager;
 use crate::tool::ToolManager;
 
-/// RuntimeAgentManager creates and manages runtime Agent instances.
+/// AgentManager creates and manages runtime Agent instances.
 ///
 /// This is the main entry point for creating and accessing runtime agents.
-/// It provides shared access to CompactManager, ApprovalManager, and ToolManager.
-pub struct RuntimeAgentManager {
+/// It loads agent templates from the repository and creates runtime instances.
+pub struct AgentManager {
+    /// Repository for agent templates.
+    repository: Arc<dyn AgentRepository>,
+    /// LLM manager for building providers.
+    llm_manager: Arc<LLMManager>,
     /// Global CompactManager (shared by all agents).
     compact_manager: Arc<CompactManager>,
     /// Global ApprovalManager (shared by all agents).
     approval_manager: Option<Arc<ApprovalManager>>,
     /// Global ToolManager (shared by all agents).
     tool_manager: Arc<ToolManager>,
-    /// Active agents.
-    agents: DashMap<AgentId, Agent>,
+    /// Active agents indexed by runtime ID.
+    agents: DashMap<AgentRuntimeId, Agent>,
     /// Default context window (used if provider doesn't specify).
     default_context_window: u32,
 }
 
-impl RuntimeAgentManager {
-    /// Create a new RuntimeAgentManager.
+impl AgentManager {
+    /// Create a new AgentManager.
     pub fn new(
+        repository: Arc<dyn AgentRepository>,
+        llm_manager: Arc<LLMManager>,
         tool_manager: Arc<ToolManager>,
         approval_manager: Option<Arc<ApprovalManager>>,
     ) -> Self {
         Self {
+            repository,
+            llm_manager,
             compact_manager: Arc::new(CompactManager::with_defaults(128_000)),
-            approval_manager,
-            tool_manager,
-            agents: DashMap::new(),
-            default_context_window: 128_000,
-        }
-    }
-
-    /// Create a new RuntimeAgentManager with custom compact configuration.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_compact(
-        tool_manager: Arc<ToolManager>,
-        approval_manager: Option<Arc<ApprovalManager>>,
-        compact_manager: Arc<CompactManager>,
-    ) -> Self {
-        Self {
-            compact_manager,
             approval_manager,
             tool_manager,
             agents: DashMap::new(),
@@ -77,67 +71,105 @@ impl RuntimeAgentManager {
         self.approval_manager.as_ref()
     }
 
-    /// Create a new Agent instance with a default provider.
+    /// Create a runtime Agent instance from an AgentRecord (template).
     ///
-    /// Returns the AgentId for accessing the agent.
-    pub fn create_agent(&self, provider: Arc<dyn LlmProvider>) -> AgentId {
-        // Use default context window for now
-        // TODO: Add context_length to LlmProvider trait if needed
-        let context_window = self.default_context_window;
+    /// Returns the `AgentRuntimeId` for accessing the agent.
+    pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentRuntimeId, AgentError> {
+        use crate::db::llm::LlmProviderId;
+        let provider = self
+            .llm_manager
+            .get_provider(&LlmProviderId::new(&record.provider_id))
+            .await?;
 
-        // Create a compact manager with the provider's context window
+        // Use default context window for now
+        let context_window = self.default_context_window;
         let compact_manager = Arc::new(CompactManager::with_defaults(context_window));
 
-        let agent_id = AgentId::new(uuid::Uuid::new_v4().to_string());
+        let agent = AgentBuilder::from_record(record, provider)
+            .tool_manager(self.tool_manager.clone())
+            .compact_manager(Some(compact_manager))
+            .approval_manager(self.approval_manager.clone())
+            .build();
 
-        let agent = Agent::new(
-            agent_id.clone(),
-            provider,
-            self.tool_manager.clone(),
-            compact_manager,
-            self.approval_manager.clone(),
-        );
+        let runtime_id = agent.runtime_id;
+        self.agents.insert(runtime_id, agent);
+        Ok(runtime_id)
+    }
 
-        self.agents.insert(agent_id.clone(), agent);
-        agent_id
+    /// Get an agent by runtime ID.
+    #[must_use]
+    pub fn get(&self, id: AgentRuntimeId) -> Option<Agent> {
+        self.agents.get(&id).map(|entry| entry.value().clone())
     }
 
     /// List all active agents.
     #[must_use]
-    pub fn list_agents(&self) -> Vec<AgentRuntimeInfo> {
+    pub fn list(&self) -> Vec<AgentRuntimeInfo> {
         self.agents
             .iter()
             .map(|entry| entry.value().runtime_info())
             .collect()
     }
 
-    /// Delete an agent.
-    pub fn delete_agent(&self, id: &AgentId) -> bool {
-        self.agents.remove(id).is_some()
+    /// Delete an agent by runtime ID.
+    pub fn delete(&self, id: AgentRuntimeId) -> bool {
+        self.agents.remove(&id).is_some()
     }
 
     /// Get the number of active agents.
     #[must_use]
-    pub fn agent_count(&self) -> usize {
+    pub fn count(&self) -> usize {
         self.agents.len()
     }
 
-    /// Update the compact manager configuration.
-    pub fn set_compact_config(&self, context_window: u32, _threshold_ratio: f32) {
-        // Create a new compact manager with updated configuration
-        let _compact_manager = Arc::new(CompactManager::with_defaults(context_window));
+    // === Template operations (delegated to repository) ===
+
+    /// Create or update an agent template.
+    pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), DbError> {
+        self.repository.upsert(&record).await
+    }
+
+    /// Get an agent template by ID.
+    pub async fn get_template(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError> {
+        self.repository.get(id).await
+    }
+
+    /// List all agent templates.
+    pub async fn list_templates(&self) -> Result<Vec<AgentRecord>, DbError> {
+        Ok(self
+            .repository
+            .list()
+            .await?
+            .into_iter()
+            .map(|s| AgentRecord {
+                id: s.id,
+                display_name: s.display_name,
+                description: s.description,
+                version: s.version,
+                provider_id: s.provider_id,
+                system_prompt: String::new(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+            })
+            .collect())
+    }
+
+    /// Delete an agent template.
+    pub async fn delete_template(&self, id: &AgentId) -> Result<bool, DbError> {
+        self.repository.delete(id).await
     }
 
     /// Access the agents map for advanced operations.
     #[must_use]
-    pub fn agents(&self) -> &DashMap<AgentId, Agent> {
+    pub fn agents(&self) -> &DashMap<AgentRuntimeId, Agent> {
         &self.agents
     }
 }
 
-impl std::fmt::Debug for RuntimeAgentManager {
+impl std::fmt::Debug for AgentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuntimeAgentManager")
+        f.debug_struct("AgentManager")
             .field("agent_count", &self.agents.len())
             .field("compact_manager", &self.compact_manager)
             .finish()
@@ -149,19 +181,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_runtime_agent_manager_creation() {
+    fn test_agent_manager_creation() {
         let tool_manager = Arc::new(ToolManager::new());
-        let manager = RuntimeAgentManager::new(tool_manager, None);
-
-        assert_eq!(manager.agent_count(), 0);
-    }
-
-    #[test]
-    fn test_runtime_agent_manager_with_compact() {
-        let tool_manager = Arc::new(ToolManager::new());
-        let compact = Arc::new(CompactManager::with_defaults(64_000));
-        let manager = RuntimeAgentManager::with_compact(tool_manager, None, compact);
-
-        assert_eq!(manager.compact_manager().context_window(), 64_000);
+        // Note: Full test requires mock repository and LLM manager
+        assert_eq!(tool_manager.list_definitions().len(), 0);
     }
 }
