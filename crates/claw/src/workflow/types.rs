@@ -128,6 +128,64 @@ impl FromStr for JobId {
     }
 }
 
+/// The execution status of a workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowStatus {
+    /// Workflow is pending execution.
+    Pending,
+    /// Workflow is currently running.
+    Running,
+    /// Workflow completed successfully.
+    Succeeded,
+    /// Workflow failed.
+    Failed,
+    /// Workflow was cancelled.
+    Cancelled,
+}
+
+impl WorkflowStatus {
+    /// Returns the string representation of this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parses a workflow status from a string.
+    ///
+    /// # Errors
+    /// Returns an error if the string is not a valid status representation.
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("invalid workflow status: {s}")),
+        }
+    }
+}
+
+impl fmt::Display for WorkflowStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for WorkflowStatus {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::from_str(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +206,39 @@ mod tests {
     fn job_id_from_string() {
         let id = JobId::new("job-xyz".to_string());
         assert_eq!(id.as_ref(), "job-xyz");
+    }
+
+    #[test]
+    fn workflow_status_as_str() {
+        assert_eq!(WorkflowStatus::Pending.as_str(), "pending");
+        assert_eq!(WorkflowStatus::Running.as_str(), "running");
+        assert_eq!(WorkflowStatus::Succeeded.as_str(), "succeeded");
+        assert_eq!(WorkflowStatus::Failed.as_str(), "failed");
+        assert_eq!(WorkflowStatus::Cancelled.as_str(), "cancelled");
+    }
+
+    #[test]
+    fn workflow_status_from_str_valid() {
+        assert_eq!(WorkflowStatus::from_str("pending").unwrap(), WorkflowStatus::Pending);
+        assert_eq!(WorkflowStatus::from_str("running").unwrap(), WorkflowStatus::Running);
+        assert_eq!(WorkflowStatus::from_str("succeeded").unwrap(), WorkflowStatus::Succeeded);
+        assert_eq!(WorkflowStatus::from_str("failed").unwrap(), WorkflowStatus::Failed);
+        assert_eq!(WorkflowStatus::from_str("cancelled").unwrap(), WorkflowStatus::Cancelled);
+    }
+
+    #[test]
+    fn workflow_status_from_str_invalid() {
+        assert!(WorkflowStatus::from_str("invalid").is_err());
+        assert!(WorkflowStatus::from_str("PENDING").is_err());
+        assert!(WorkflowStatus::from_str("").is_err());
+    }
+
+    #[test]
+    fn workflow_status_display() {
+        assert_eq!(WorkflowStatus::Pending.to_string(), "pending");
+        assert_eq!(WorkflowStatus::Running.to_string(), "running");
+        assert_eq!(WorkflowStatus::Succeeded.to_string(), "succeeded");
+        assert_eq!(WorkflowStatus::Failed.to_string(), "failed");
+        assert_eq!(WorkflowStatus::Cancelled.to_string(), "cancelled");
     }
 }
