@@ -12,6 +12,8 @@ use claw::db::llm::{
 };
 use claw::llm::LlmStreamEvent;
 use futures_util::StreamExt;
+#[cfg(feature = "dev")]
+use owo_colors::OwoColorize;
 
 #[derive(Debug, Parser)]
 pub struct DevCli {
@@ -25,6 +27,35 @@ pub enum DevCommand {
     Provider(ProviderCommand),
     #[command(subcommand)]
     Llm(LlmCommand),
+    #[command(subcommand)]
+    Turn(TurnCommand),
+}
+
+/// Turn execution commands for testing agent/LLM turn flow.
+#[derive(Debug, Subcommand)]
+pub enum TurnCommand {
+    /// Test turn execution with configurable options.
+    Test {
+        /// Provider ID to use (defaults to default provider).
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Tool IDs to enable (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        tools: Vec<String>,
+
+        /// System prompt for the turn.
+        #[arg(long, default_value = "You are a helpful assistant.")]
+        system_prompt: String,
+
+        /// User message to send.
+        #[arg(long)]
+        message: String,
+
+        /// Enable verbose output (shows all messages and tool calls).
+        #[arg(short, long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,7 +162,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
-    if !matches!(first_arg.as_str(), "provider" | "llm") {
+    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn") {
         return Ok(false);
     }
 
@@ -144,6 +175,7 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
     match command {
         DevCommand::Provider(command) => run_provider_command(ctx, command).await,
         DevCommand::Llm(command) => run_llm_command(ctx, command).await,
+        DevCommand::Turn(command) => run_turn_command(ctx, command).await,
     }
 }
 
@@ -285,6 +317,121 @@ async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
     Ok(())
 }
 
+/// Run a turn execution command.
+///
+/// This function exercises the full turn execution flow including
+/// optional tool integration and hook support.
+#[cfg(feature = "dev")]
+async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<()> {
+    use claw::agents::turn::{TurnConfig, TurnInputBuilder, execute_turn};
+    use claw::llm::ChatMessage;
+
+    let TurnCommand::Test {
+        provider,
+        tools,
+        system_prompt,
+        message,
+        verbose,
+    } = command;
+
+    // Get provider from context via LLM manager
+    let provider = if let Some(id) = provider {
+        ctx.llm_manager()
+            .get_provider(&LlmProviderId::new(id))
+            .await?
+    } else {
+        ctx.llm_manager().get_default_provider().await?
+    };
+
+    // Build tool manager with requested tools
+    let tool_manager = std::sync::Arc::new(claw::tool::ToolManager::new());
+    // TODO: Register tools based on IDs when tools are implemented
+
+    // Build turn input
+    let input = TurnInputBuilder::default()
+        .provider(provider)
+        .messages(vec![ChatMessage::user(message)])
+        .system_prompt(system_prompt)
+        .tool_manager(tool_manager)
+        .tool_ids(tools)
+        .build();
+
+    // Execute turn with timing
+    let start = std::time::Instant::now();
+    let output = execute_turn(input, TurnConfig::default()).await?;
+    let duration = start.elapsed();
+
+    // Render output
+    println!();
+    println!("{}", "═".repeat(60).dimmed());
+    println!("{}", " Turn Execution Results ".bold().cyan());
+    println!("{}", "═".repeat(60).dimmed());
+    println!();
+
+    // Message history
+    println!("{}", "Messages:".bold());
+    for msg in &output.messages {
+        let role_str = match msg.role {
+            claw::llm::Role::User => "USER",
+            claw::llm::Role::Assistant => "ASSISTANT",
+            claw::llm::Role::System => "SYSTEM",
+            claw::llm::Role::Tool => "TOOL",
+        };
+        let role_colored = match msg.role {
+            claw::llm::Role::User => role_str.blue().to_string(),
+            claw::llm::Role::Assistant => role_str.green().to_string(),
+            claw::llm::Role::System => role_str.yellow().to_string(),
+            claw::llm::Role::Tool => role_str.magenta().to_string(),
+        };
+        let content = if verbose {
+            msg.content.clone()
+        } else {
+            // Truncate to 100 chars for non-verbose
+            if msg.content.len() > 100 {
+                format!("{}...", &msg.content[..100])
+            } else {
+                msg.content.clone()
+            }
+        };
+        println!("  {role_colored} {content}");
+
+        if verbose && let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                let args = tc.arguments.to_string();
+                println!("    {}({})", tc.name.cyan(), args.dimmed());
+            }
+        }
+    }
+
+    println!();
+
+    // Token usage table
+    println!("{}", "Token Usage:".bold());
+    println!(
+        "  {:<15} {}",
+        "Input Tokens".dimmed(),
+        output.token_usage.input_tokens
+    );
+    println!(
+        "  {:<15} {}",
+        "Output Tokens".dimmed(),
+        output.token_usage.output_tokens
+    );
+    println!(
+        "  {:<15} {}",
+        "Total Tokens".dimmed(),
+        output.token_usage.total_tokens
+    );
+    println!();
+
+    // Summary
+    println!("{}", "Summary:".bold());
+    println!("  Duration: {duration:?}");
+    println!("  Messages: {}", output.messages.len());
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -292,7 +439,7 @@ mod tests {
     use claw::db::llm::LlmProviderRecord;
     use claw::llm::LlmStreamEvent;
 
-    use super::{DevCli, DevCommand, LlmCommand, ProviderCommand};
+    use super::{DevCli, DevCommand, LlmCommand, ProviderCommand, TurnCommand};
     use crate::dev::{
         ProviderDisplayRecord, ProviderUpsertArgs, render_provider_output, render_stream_output,
     };
@@ -405,5 +552,62 @@ mod tests {
             output,
             "[Reasoning] step 1 -> step 2\n[Summary] final answer\n"
         );
+    }
+
+    #[test]
+    fn parses_turn_test_command_with_all_options() {
+        let cli = DevCli::parse_from([
+            "cli",
+            "turn",
+            "test",
+            "--provider",
+            "openai",
+            "--tools",
+            "echo,http",
+            "--system-prompt",
+            "Be helpful",
+            "--message",
+            "Hello!",
+            "--verbose",
+        ]);
+
+        match cli.command {
+            DevCommand::Turn(TurnCommand::Test {
+                provider,
+                tools,
+                system_prompt,
+                message,
+                verbose,
+            }) => {
+                assert_eq!(provider, Some("openai".to_string()));
+                assert_eq!(tools, vec!["echo".to_string(), "http".to_string()]);
+                assert_eq!(system_prompt, "Be helpful");
+                assert_eq!(message, "Hello!");
+                assert!(verbose);
+            }
+            _ => panic!("turn test command should parse"),
+        }
+    }
+
+    #[test]
+    fn parses_turn_test_command_with_defaults() {
+        let cli = DevCli::parse_from(["cli", "turn", "test", "--message", "Hi"]);
+
+        match cli.command {
+            DevCommand::Turn(TurnCommand::Test {
+                provider,
+                tools,
+                system_prompt,
+                message,
+                verbose,
+            }) => {
+                assert_eq!(provider, None);
+                assert!(tools.is_empty());
+                assert_eq!(system_prompt, "You are a helpful assistant.");
+                assert_eq!(message, "Hi");
+                assert!(!verbose);
+            }
+            _ => panic!("turn test command should parse"),
+        }
     }
 }
