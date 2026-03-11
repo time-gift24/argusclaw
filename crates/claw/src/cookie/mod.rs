@@ -8,8 +8,8 @@ pub use types::Cookie;
 
 /// Get cookies for a specific domain from Chrome CDP
 pub async fn get_cookies(
-    _cdp_ws_url: &str,
-    _domain: &str,
+    cdp_ws_url: &str,
+    domain: &str,
 ) -> CookieResult<Vec<Cookie>> {
     todo!("Implement in Task 2")
 }
