@@ -16,7 +16,7 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 TMP_DIR="${TMP_ROOT}/approval-test-${RUN_ID}"
 mkdir -p "${TMP_DIR}"
 DB_FILE="${TMP_DIR}/approval.sqlite"
-export APPROVAL_DATABASE_URL="sqlite:${DB_FILE}"
+export DATABASE_URL="sqlite:${DB_FILE}"
 
 CLI_BIN="${ROOT_DIR}/target/debug/cli"
 
