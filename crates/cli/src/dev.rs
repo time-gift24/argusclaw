@@ -495,7 +495,7 @@ async fn run_approval_command(_ctx: AppContext, command: ApprovalCommand) -> Res
                     println!("  ID:            {}", req.id);
                     println!("  Agent:         {}", req.agent_id);
                     println!("  Tool:          {}", req.tool_name);
-                    println!("  Action:        {}", req.action_summary);
+                    println!("  Action:        {}", req.action);
                     println!("  Risk Level:    {:?}", req.risk_level);
                     println!("  Timeout:       {}s", req.timeout_secs);
                     println!(
