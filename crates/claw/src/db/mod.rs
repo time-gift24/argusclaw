@@ -1,7 +1,13 @@
 pub mod llm;
 pub mod sqlite;
 
+#[cfg(feature = "dev")]
+pub mod approval;
+
 use thiserror::Error;
+
+#[cfg(feature = "dev")]
+pub use approval::ApprovalRepository;
 
 #[derive(Debug, Error)]
 pub enum DbError {

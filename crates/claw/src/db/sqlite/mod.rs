@@ -1,4 +1,6 @@
 mod agent;
+#[cfg(feature = "dev")]
+mod approval;
 mod llm;
 
 use std::path::Path;
@@ -10,6 +12,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use crate::db::DbError;
 
 pub use agent::SqliteAgentRepository;
+#[cfg(feature = "dev")]
+pub use approval::SqliteApprovalRepository;
 pub use llm::SqliteLlmProviderRepository;
 
 pub async fn connect(database: &str) -> Result<SqlitePool, DbError> {

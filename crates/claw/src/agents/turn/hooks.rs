@@ -80,10 +80,7 @@ pub trait HookHandler: Send + Sync {
     ///
     /// Can modify messages and tools by returning appropriate `HookAction`.
     /// Return `Block(reason)` to prevent the LLM call.
-    async fn on_before_call_llm(
-        &self,
-        _ctx: &BeforeCallLLMContext,
-    ) -> HookAction {
+    async fn on_before_call_llm(&self, _ctx: &BeforeCallLLMContext) -> HookAction {
         HookAction::Continue
     }
 
@@ -248,10 +245,7 @@ mod tests {
 
         #[async_trait]
         impl HookHandler for ModifyHandler {
-            async fn on_before_call_llm(
-                &self,
-                ctx: &BeforeCallLLMContext,
-            ) -> HookAction {
+            async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
                 let mut messages = ctx.messages.clone();
                 messages.push(ChatMessage::system("Be helpful"));
                 HookAction::ModifyMessages(messages)
@@ -279,10 +273,7 @@ mod tests {
 
         #[async_trait]
         impl HookHandler for BlockingHandler {
-            async fn on_before_call_llm(
-                &self,
-                _ctx: &BeforeCallLLMContext,
-            ) -> HookAction {
+            async fn on_before_call_llm(&self, _ctx: &BeforeCallLLMContext) -> HookAction {
                 HookAction::Block("Rate limit exceeded".to_string())
             }
         }
@@ -361,10 +352,7 @@ mod tests {
 
         #[async_trait]
         impl HookHandler for AddSystemHandler {
-            async fn on_before_call_llm(
-                &self,
-                ctx: &BeforeCallLLMContext,
-            ) -> HookAction {
+            async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
                 let mut messages = ctx.messages.clone();
                 messages.insert(0, ChatMessage::system("System prompt"));
                 HookAction::ModifyMessages(messages)
@@ -373,10 +361,7 @@ mod tests {
 
         #[async_trait]
         impl HookHandler for AddUserHandler {
-            async fn on_before_call_llm(
-                &self,
-                ctx: &BeforeCallLLMContext,
-            ) -> HookAction {
+            async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
                 let mut messages = ctx.messages.clone();
                 messages.push(ChatMessage::user("Additional question"));
                 HookAction::ModifyMessages(messages)
