@@ -1,26 +1,67 @@
-use std::env;
-
-#[cfg(feature = "dev")]
-mod dev;
+//! Production CLI entry point (argusclaw).
+//!
+//! This binary is minimal - it only includes provider and thread commands.
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use claw::AppContext;
 use tracing_subscriber::EnvFilter;
+
+use cli::provider::{ProviderCommand, run_provider_command};
+use cli::{db_path_to_url, resolve_db_path};
+
+/// ArgusClaw - AI Agent CLI Tool
+#[derive(Debug, Parser)]
+#[command(name = "argusclaw", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// LLM provider management
+    #[command(subcommand)]
+    Provider(ProviderCommand),
+    /// Thread management (placeholder)
+    Thread {
+        #[command(subcommand)]
+        command: ThreadCommand,
+    },
+}
+
+/// Thread commands (placeholder - not yet implemented)
+#[derive(Debug, Subcommand)]
+enum ThreadCommand {
+    /// Start a new thread
+    Start,
+    /// List all threads
+    List,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
 
-    let ctx = AppContext::init(resolve_database_target_for_startup()?).await?;
+    // Resolve database path for production CLI
+    let db_path = resolve_db_path(false);
+    let db_url = db_path_to_url(&db_path);
 
-    #[cfg(feature = "dev")]
-    if dev::try_run(ctx.clone()).await? {
-        return Ok(());
+    // Initialize app context
+    let ctx = AppContext::init(Some(db_url)).await?;
+
+    // Parse CLI
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Provider(cmd) => run_provider_command(ctx, cmd).await?,
+        Command::Thread { command } => match command {
+            ThreadCommand::Start | ThreadCommand::List => {
+                eprintln!("Thread commands are not yet implemented");
+                eprintln!("Use 'argusclaw-dev thread' for development testing");
+            }
+        },
     }
-
-    let provider_count = ctx.llm_manager().list_providers().await?.len();
-
-    tracing::info!(provider_count, "argusclaw initialized");
 
     Ok(())
 }
@@ -37,27 +78,4 @@ fn init_tracing() {
             .with_writer(std::io::stderr)
             .init();
     }
-}
-
-fn resolve_database_target_for_startup() -> Result<Option<String>> {
-    if let Ok(database_url) = env::var("DATABASE_URL") {
-        return Ok(Some(database_url));
-    }
-
-    #[cfg(feature = "dev")]
-    {
-        if let Some(first_arg) = env::args().nth(1)
-            && matches!(
-                first_arg.as_str(),
-                "provider" | "llm" | "turn" | "approval" | "workflow"
-            )
-        {
-            let tmp_dir = env::current_dir()?.join("tmp");
-            std::fs::create_dir_all(&tmp_dir)?;
-            let db_path = tmp_dir.join("cli-dev.sqlite");
-            return Ok(Some(db_path.display().to_string()));
-        }
-    }
-
-    Ok(None)
 }
