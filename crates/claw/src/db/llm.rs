@@ -102,6 +102,7 @@ pub struct LlmProviderSummary {
     pub base_url: String,
     pub model: String,
     pub is_default: bool,
+    pub extra_headers: HashMap<String, String>,
 }
 
 impl From<LlmProviderRecord> for LlmProviderSummary {
@@ -113,6 +114,7 @@ impl From<LlmProviderRecord> for LlmProviderSummary {
             base_url: record.base_url,
             model: record.model,
             is_default: record.is_default,
+            extra_headers: record.extra_headers,
         }
     }
 }
