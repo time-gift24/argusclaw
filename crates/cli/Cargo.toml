@@ -4,22 +4,32 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[[bin]]
+name = "argusclaw"
+path = "src/main.rs"
+
+[[bin]]
+name = "argusclaw-dev"
+path = "src/main-dev.rs"
+required-features = ["dev"]
+
 [dependencies]
 claw = { path = "../claw", features = ["openai-compatible"] }
 anyhow = "1"
 chrono = "0.4"
-clap = { version = "4", features = ["derive"], optional = true }
+dirs = "5"
+clap = { version = "4", features = ["derive"] }
 futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-toml = { version = "0.8", optional = true }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["claw/dev", "dep:clap", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:sqlx", "dep:toml"]
+dev = ["claw/dev", "dep:futures-util", "dep:owo-colors", "dep:serde", "dep:serde_json", "dep:sqlx"]

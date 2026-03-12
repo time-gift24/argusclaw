@@ -793,6 +793,7 @@ dependencies = [
  "chrono",
  "clap",
  "claw",
+ "dirs 5.0.1",
  "futures-util",
  "owo-colors",
  "serde",
