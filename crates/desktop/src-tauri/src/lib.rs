@@ -30,6 +30,19 @@ fn ensure_parent_dir(path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn format_graphql_errors(res: &async_graphql::Response) -> Result<String, String> {
+    if res.errors.is_empty() {
+        Ok(res.data.to_string())
+    } else {
+        Err(res
+            .errors
+            .iter()
+            .map(|e| e.message.clone())
+            .collect::<Vec<_>>()
+            .join(", "))
+    }
+}
+
 #[command]
 async fn query_workflow(state: State<'_, AppState>, id: String) -> Result<String, String> {
     let guard = state.schema.read().await;
@@ -38,15 +51,7 @@ async fn query_workflow(state: State<'_, AppState>, id: String) -> Result<String
         serde_json::from_str(&format!(r#"{{"id": "{}"}}"#, id)).map_err(|e| e.to_string())?;
     let request = Request::new(query).variables(variables);
     let res = guard.execute(request).await;
-    if !res.errors.is_empty() {
-        return Err(res
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-    Ok(res.data.to_string())
+    format_graphql_errors(&res)
 }
 
 #[command]
@@ -54,15 +59,7 @@ async fn query_workflows(state: State<'_, AppState>) -> Result<String, String> {
     let guard = state.schema.read().await;
     let query = "{ workflows { id name status } }";
     let res = guard.execute(query).await;
-    if !res.errors.is_empty() {
-        return Err(res
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-    Ok(res.data.to_string())
+    format_graphql_errors(&res)
 }
 
 #[command]
@@ -74,15 +71,7 @@ async fn create_workflow(state: State<'_, AppState>, name: String) -> Result<Str
         serde_json::from_str(&format!(r#"{{"name": "{}"}}"#, name)).map_err(|e| e.to_string())?;
     let request = Request::new(query).variables(variables);
     let res = guard.execute(request).await;
-    if !res.errors.is_empty() {
-        return Err(res
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-    Ok(res.data.to_string())
+    format_graphql_errors(&res)
 }
 
 #[command]
@@ -101,15 +90,7 @@ async fn add_stage(
     .map_err(|e| e.to_string())?;
     let request = Request::new(query).variables(variables);
     let res = guard.execute(request).await;
-    if !res.errors.is_empty() {
-        return Err(res
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-    Ok(res.data.to_string())
+    format_graphql_errors(&res)
 }
 
 #[command]
@@ -128,15 +109,7 @@ async fn add_job(
     .map_err(|e| e.to_string())?;
     let request = Request::new(query).variables(variables);
     let res = guard.execute(request).await;
-    if !res.errors.is_empty() {
-        return Err(res
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-    Ok(res.data.to_string())
+    format_graphql_errors(&res)
 }
 
 #[command]
@@ -154,15 +127,7 @@ async fn update_job_status(
     .map_err(|e| e.to_string())?;
     let request = Request::new(query).variables(variables);
     let res = guard.execute(request).await;
-    if !res.errors.is_empty() {
-        return Err(res
-            .errors
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join(", "));
-    }
-    Ok(res.data.to_string())
+    format_graphql_errors(&res)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

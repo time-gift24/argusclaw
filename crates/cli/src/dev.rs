@@ -337,6 +337,7 @@ pub struct ProviderDisplayRecord {
     pub base_url: String,
     pub model: String,
     pub is_default: bool,
+    pub extra_headers: std::collections::HashMap<String, String>,
 }
 
 impl From<LlmProviderSummary> for ProviderDisplayRecord {
@@ -348,6 +349,7 @@ impl From<LlmProviderSummary> for ProviderDisplayRecord {
             base_url: value.base_url,
             model: value.model,
             is_default: value.is_default,
+            extra_headers: value.extra_headers,
         }
     }
 }
@@ -361,6 +363,7 @@ impl From<LlmProviderRecord> for ProviderDisplayRecord {
             base_url: value.base_url,
             model: value.model,
             is_default: value.is_default,
+            extra_headers: value.extra_headers,
         }
     }
 }
@@ -409,14 +412,27 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
 }
 
 pub fn render_provider_output(record: &ProviderDisplayRecord) -> String {
+    let headers_str = if record.extra_headers.is_empty() {
+        String::new()
+    } else {
+        let headers: String = record
+            .extra_headers
+            .iter()
+            .map(|(k, v)| format!("  {k}: {v}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\nextra_headers:\n{headers}")
+    };
+
     format!(
-        "id: {}\ndisplay_name: {}\nkind: {}\nbase_url: {}\nmodel: {}\nis_default: {}",
+        "id: {}\ndisplay_name: {}\nkind: {}\nbase_url: {}\nmodel: {}\nis_default: {}{}",
         record.id,
         record.display_name,
         record.kind,
         record.base_url,
         record.model,
-        record.is_default
+        record.is_default,
+        headers_str
     )
 }
 
@@ -475,6 +491,28 @@ pub fn render_stream_output(events: &[LlmStreamEvent]) -> String {
     output
 }
 
+/// Validates that a header name is valid for HTTP headers.
+/// Header names must be ASCII and cannot contain spaces, control characters, or delimiters.
+fn validate_header_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(anyhow!("header name cannot be empty"));
+    }
+
+    for ch in name.chars() {
+        if !ch.is_ascii() {
+            return Err(anyhow!(
+                "header name must be ASCII, found non-ASCII character"
+            ));
+        }
+        // HTTP header names cannot contain these characters
+        if matches!(ch, '\r' | '\n' | ':' | ' ' | '\t' | '\0'..='\x1f') {
+            return Err(anyhow!("header name contains invalid character: {:?}", ch));
+        }
+    }
+
+    Ok(())
+}
+
 async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> Result<()> {
     match command {
         ProviderCommand::Import { file } => {
@@ -507,6 +545,7 @@ async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> Resu
             println!("{}", render_provider_output(&provider.into()));
         }
         ProviderCommand::SetHeader { id, name, value } => {
+            validate_header_name(&name)?;
             let provider_id = LlmProviderId::new(&id);
             let mut record = ctx.get_provider_record(&provider_id).await?;
             record.extra_headers.insert(name.clone(), value);
@@ -1362,6 +1401,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o-mini".to_string(),
             is_default: true,
+            extra_headers: std::collections::HashMap::new(),
         });
 
         assert!(output.contains("OpenAI"));
