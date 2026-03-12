@@ -6,13 +6,17 @@ use sqlx::SqlitePool;
 use crate::agents::AgentManager;
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
 use crate::db::sqlite::{
-    SqliteAgentRepository, SqliteLlmProviderRepository, connect, connect_path, migrate,
+    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect,
+    connect_path, migrate,
 };
 use crate::error::AgentError;
+use crate::job::JobRepository;
 use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
+use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -20,6 +24,8 @@ pub struct AppContext {
     llm_manager: Arc<LLMManager>,
     agent_manager: Arc<AgentManager>,
     tool_manager: Arc<ToolManager>,
+    job_repository: Arc<dyn JobRepository>,
+    shutdown: CancellationToken,
 }
 
 impl AppContext {
@@ -36,6 +42,9 @@ impl AppContext {
 
         let llm_repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
         let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let job_repository: Arc<dyn JobRepository> =
+            Arc::new(SqliteJobRepository::new(pool.clone()));
+
         let llm_manager = Arc::new(LLMManager::new(llm_repository));
         let tool_manager = Arc::new(ToolManager::new());
         let agent_manager = Arc::new(AgentManager::new(
@@ -45,11 +54,29 @@ impl AppContext {
             None,
         ));
 
+        // Create and start scheduler
+        let scheduler = Arc::new(Scheduler::new(
+            SchedulerConfig::default(),
+            job_repository.clone(),
+            agent_manager.clone(),
+        ));
+        let shutdown = scheduler.shutdown_token();
+
+        // Spawn scheduler as background task
+        tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move {
+                scheduler.run().await;
+            }
+        });
+
         Ok(Self {
             db_pool: pool,
             llm_manager,
             agent_manager,
             tool_manager,
+            job_repository,
+            shutdown,
         })
     }
 
@@ -67,6 +94,11 @@ impl AppContext {
             llm_manager,
             agent_manager,
             tool_manager,
+            job_repository: Arc::new(SqliteJobRepository::new(SqlitePool::connect_lazy_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(std::path::Path::new(":memory:")),
+            ))),
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -79,10 +111,12 @@ impl AppContext {
         tool_manager: Arc<ToolManager>,
     ) -> Self {
         Self {
-            db_pool: pool,
+            db_pool: pool.clone(),
             llm_manager,
             agent_manager,
             tool_manager,
+            job_repository: Arc::new(SqliteJobRepository::new(pool)),
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -104,6 +138,16 @@ impl AppContext {
     #[must_use]
     pub fn tool_manager(&self) -> Arc<ToolManager> {
         Arc::clone(&self.tool_manager)
+    }
+
+    #[must_use]
+    pub fn job_repository(&self) -> Arc<dyn JobRepository> {
+        Arc::clone(&self.job_repository)
+    }
+
+    /// Trigger graceful shutdown of the scheduler.
+    pub fn shutdown(&self) {
+        self.shutdown.cancel();
     }
 
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
