@@ -2,11 +2,42 @@
 //!
 //! This binary is minimal - it only includes provider and thread commands.
 
-use std::env;
-
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use claw::AppContext;
 use tracing_subscriber::EnvFilter;
+
+use cli::provider::{ProviderCommand, run_provider_command};
+use cli::{db_path_to_url, resolve_db_path};
+
+/// ArgusClaw - AI Agent CLI Tool
+#[derive(Debug, Parser)]
+#[command(name = "argusclaw", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// LLM provider management
+    #[command(subcommand)]
+    Provider(ProviderCommand),
+    /// Thread management (placeholder)
+    Thread {
+        #[command(subcommand)]
+        command: ThreadCommand,
+    },
+}
+
+/// Thread commands (placeholder - not yet implemented)
+#[derive(Debug, Subcommand)]
+enum ThreadCommand {
+    /// Start a new thread
+    Start,
+    /// List all threads
+    List,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,53 +50,20 @@ async fn main() -> Result<()> {
     // Initialize app context
     let ctx = AppContext::init(Some(db_url)).await?;
 
-    let provider_count = ctx.llm_manager().list_providers().await?.len();
+    // Parse CLI
+    let cli = Cli::parse();
 
-    tracing::info!(provider_count, "argusclaw initialized");
+    match cli.command {
+        Command::Provider(cmd) => run_provider_command(ctx, cmd).await?,
+        Command::Thread { command } => match command {
+            ThreadCommand::Start | ThreadCommand::List => {
+                eprintln!("Thread commands are not yet implemented");
+                eprintln!("Use 'argusclaw-dev thread' for development testing");
+            }
+        },
+    }
 
     Ok(())
-}
-
-/// Resolve database path based on CLI mode (production vs development).
-///
-/// # Production (argusclaw)
-/// - Default: `~/.argusclaw/sqlite.db`
-/// - Override: `ARGUSCLAW_DB` environment variable
-///
-/// # Development (argusclaw-dev)
-/// - Default: `./tmp/argusclaw-dev.db`
-/// - Override: `ARGUSCLAW_DEV_DB` environment variable
-fn resolve_db_path(is_dev: bool) -> std::path::PathBuf {
-    let (env_var, default_path) = if is_dev {
-        ("ARGUSCLAW_DEV_DB", {
-            let cwd = env::current_dir().expect("failed to resolve current working directory");
-            let tmp_dir = cwd.join("tmp");
-            std::fs::create_dir_all(&tmp_dir).expect("failed to create tmp directory");
-            tmp_dir.join("argusclaw-dev.db")
-        })
-    } else {
-        ("ARGUSCLAW_DB", {
-            let home = dirs::home_dir().expect("failed to resolve home directory");
-            let data_dir = home.join(".argusclaw");
-            std::fs::create_dir_all(&data_dir).expect("failed to create .argusclaw directory");
-            data_dir.join("sqlite.db")
-        })
-    };
-
-    if let Ok(value) = env::var(env_var) {
-        if let Some(stripped) = value.strip_prefix("sqlite:") {
-            std::path::PathBuf::from(stripped)
-        } else {
-            std::path::PathBuf::from(value)
-        }
-    } else {
-        default_path
-    }
-}
-
-/// Convert database path to connection URL format.
-fn db_path_to_url(path: &std::path::Path) -> String {
-    format!("sqlite:{}", path.display())
 }
 
 fn init_tracing() {
