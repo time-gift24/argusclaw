@@ -1,6 +1,7 @@
 // crates/desktop/src/components/chat/ChatPage.tsx
 
-import { AssistantRuntimeProvider, Thread } from "@assistant-ui/react";
+import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { Thread } from "@assistant-ui/react-ui";
 import { useMockRuntime } from "@/hooks/useMockRuntime";
 
 /**

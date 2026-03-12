@@ -1,7 +1,7 @@
 // crates/desktop/src/components/chat/markdown/MarkdownText.tsx
 
 import { memo, type ReactElement } from "react";
-import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
+import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -23,13 +23,12 @@ interface MarkdownTextProps {
  */
 export const MarkdownText = memo(function MarkdownText({ content }: MarkdownTextProps) {
   return (
-    <MarkdownTextPrimitive
-      content={content}
+    <ReactMarkdown
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
       components={{
         // 自定义代码块处理
-        pre: ({ children, ...props }) => {
+        pre: ({ children }) => {
           const codeElement = children as ReactElement<{
             className?: string;
             children?: string | string[];
@@ -61,6 +60,8 @@ export const MarkdownText = memo(function MarkdownText({ content }: MarkdownText
           );
         },
       }}
-    />
+    >
+      {content}
+    </ReactMarkdown>
   );
 });
