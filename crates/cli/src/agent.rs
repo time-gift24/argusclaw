@@ -4,14 +4,14 @@
 
 use std::io::{self, Write};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
+use claw::AppContext;
 use claw::agents::compact::KeepRecentCompactor;
 use claw::agents::thread::{ThreadBuilder, ThreadConfig, ThreadEvent};
 use claw::db::llm::LlmProviderId;
 use claw::llm::{ChatMessage, Role};
-use claw::AppContext;
 use tokio::io::AsyncBufReadExt;
 
 /// Agent subcommands.
@@ -75,7 +75,9 @@ async fn run_chat(
         .build();
 
     // Add system prompt
-    thread.messages_mut().push(ChatMessage::system(&system_prompt));
+    thread
+        .messages_mut()
+        .push(ChatMessage::system(&system_prompt));
 
     // Subscribe to events
     let mut event_rx = thread.subscribe();
@@ -115,7 +117,7 @@ async fn run_chat(
                         Ok(ThreadEvent::TurnCompleted { token_usage, .. }) => {
                             // Find and print the last assistant message
                             if let Some(content) = thread
-                                .messages()
+                                .messages
                                 .iter()
                                 .rev()
                                 .find(|m| m.role == Role::Assistant)

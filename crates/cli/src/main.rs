@@ -7,10 +7,9 @@ use clap::{Parser, Subcommand};
 use claw::AppContext;
 use tracing_subscriber::EnvFilter;
 
+use cli::agent::{AgentCommand, run_agent_command};
 use cli::provider::{ProviderCommand, run_provider_command};
 use cli::{db_path_to_url, resolve_db_path};
-
-use crate::agent::{AgentCommand, run_agent_command};
 
 /// ArgusClaw - AI Agent CLI Tool
 #[derive(Debug, Parser)]
