@@ -5,6 +5,7 @@
 //! - turn: Agent/LLM turn execution testing
 //! - approval: Approval flow testing
 //! - workflow: Workflow management testing
+//! - thread: Thread management testing
 
 pub mod approval;
 pub mod config;
@@ -51,6 +52,37 @@ pub enum DevCommand {
     /// 管理工作流、阶段和任务。
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// 管理对话线程 (开发测试)。
+    #[command(subcommand)]
+    Thread(ThreadCommand),
+}
+
+/// Thread commands for dev CLI (placeholder).
+#[derive(Debug, Subcommand)]
+pub enum ThreadCommand {
+    /// Start a new thread with a message.
+    Start {
+        /// Provider to use.
+        #[arg(long)]
+        provider: String,
+        /// Initial message.
+        #[arg(long)]
+        message: String,
+        /// System prompt.
+        #[arg(long)]
+        system: Option<String>,
+    },
+    /// List all threads.
+    List,
+    /// Continue an existing thread.
+    Continue {
+        /// Thread ID.
+        #[arg(long)]
+        id: String,
+        /// Message to send.
+        #[arg(long)]
+        message: String,
+    },
 }
 
 /// Run dev CLI.
@@ -61,7 +93,35 @@ pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
         DevCommand::Turn(cmd) => crate::dev::turn::run_turn_command(ctx, cmd).await,
         DevCommand::Approval(cmd) => crate::dev::approval::run_approval_command(cmd).await,
         DevCommand::Workflow(cmd) => crate::dev::workflow::run_workflow_command(ctx, cmd).await,
+        DevCommand::Thread(cmd) => run_thread_command(ctx, cmd).await,
     }
+}
+
+/// Run thread command (placeholder).
+async fn run_thread_command(_ctx: AppContext, command: ThreadCommand) -> Result<()> {
+    match command {
+        ThreadCommand::Start {
+            provider,
+            message,
+            system,
+        } => {
+            eprintln!("Thread start not yet implemented");
+            eprintln!("  Provider: {provider}");
+            eprintln!("  Message: {message}");
+            if let Some(sys) = system {
+                eprintln!("  System: {sys}");
+            }
+        }
+        ThreadCommand::List => {
+            eprintln!("Thread list not yet implemented");
+        }
+        ThreadCommand::Continue { id, message } => {
+            eprintln!("Thread continue not yet implemented");
+            eprintln!("  Thread ID: {id}");
+            eprintln!("  Message: {message}");
+        }
+    }
+    Ok(())
 }
 
 /// Try to run dev CLI if a dev command is detected.
@@ -71,7 +131,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     };
     if !matches!(
         first_arg.as_str(),
-        "provider" | "llm" | "turn" | "approval" | "workflow"
+        "provider" | "llm" | "turn" | "approval" | "workflow" | "thread"
     ) {
         return Ok(false);
     }
