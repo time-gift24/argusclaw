@@ -2,12 +2,9 @@
 use async_graphql::{Context, ID, InputObject, Object};
 use uuid::Uuid;
 
-use super::types::{Job, Stage, Workflow};
-use crate::agents::AgentId;
-use crate::workflow::{
-    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowRepository,
-    WorkflowStatus,
-};
+use super::types::{Job, Workflow};
+use crate::job::{JobRecord, JobRepository, JobType};
+use crate::workflow::{WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
 
 #[derive(InputObject)]
 pub struct CreateWorkflowInput {
@@ -15,17 +12,15 @@ pub struct CreateWorkflowInput {
 }
 
 #[derive(InputObject)]
-pub struct AddStageInput {
-    pub workflow_id: ID,
-    pub name: String,
-    pub sequence: i32,
-}
-
-#[derive(InputObject)]
 pub struct AddJobInput {
-    pub stage_id: ID,
+    pub group_id: Option<String>,
     pub agent_id: String,
     pub name: String,
+    pub prompt: String,
+    pub context: Option<String>,
+    pub job_type: Option<String>,
+    pub depends_on: Option<Vec<String>>,
+    pub cron_expr: Option<String>,
 }
 
 #[derive(InputObject)]
@@ -43,7 +38,7 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: CreateWorkflowInput,
     ) -> async_graphql::Result<Workflow> {
-        let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
+        let workflow_repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
         let id = WorkflowId::new(Uuid::new_v4().to_string());
         let record = WorkflowRecord {
             id: id.clone(),
@@ -51,69 +46,68 @@ impl MutationRoot {
             status: WorkflowStatus::Pending,
         };
 
-        repo.create_workflow(&record).await?;
+        workflow_repo.create_workflow(&record).await?;
 
         Ok(Workflow {
             id: id.to_string(),
             name: record.name,
             status: record.status.to_string(),
-            stages: Vec::new(),
+            jobs: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
         })
     }
 
-    async fn add_stage(
-        &self,
-        ctx: &Context<'_>,
-        input: AddStageInput,
-    ) -> async_graphql::Result<Stage> {
-        let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
-        let id = StageId::new(Uuid::new_v4().to_string());
-        let workflow_id = WorkflowId::new(input.workflow_id.to_string());
-
-        let record = StageRecord {
-            id: id.clone(),
-            workflow_id,
-            name: input.name,
-            sequence: input.sequence,
-            status: WorkflowStatus::Pending,
-        };
-
-        repo.create_stage(&record).await?;
-
-        Ok(Stage {
-            id: id.to_string(),
-            name: record.name,
-            sequence: record.sequence,
-            status: record.status.to_string(),
-            jobs: Vec::new(),
-        })
-    }
-
     async fn add_job(&self, ctx: &Context<'_>, input: AddJobInput) -> async_graphql::Result<Job> {
-        let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
-        let id = JobId::new(Uuid::new_v4().to_string());
-        let stage_id = StageId::new(input.stage_id.to_string());
-        let agent_id = AgentId::new(input.agent_id.clone());
+        let job_repo = ctx.data::<Box<dyn JobRepository>>()?;
+        let id = crate::workflow::JobId::new(Uuid::new_v4().to_string());
+        let agent_id = crate::agents::AgentId::new(input.agent_id.clone());
+
+        let job_type = input
+            .job_type
+            .as_deref()
+            .map(JobType::parse_str)
+            .transpose()
+            .map_err(async_graphql::Error::new)?;
+
+        let depends_on: Vec<crate::workflow::JobId> = input
+            .depends_on
+            .unwrap_or_default()
+            .into_iter()
+            .map(crate::workflow::JobId::new)
+            .collect();
 
         let record = JobRecord {
-            id: id.clone(),
-            stage_id,
-            agent_id,
+            id,
+            job_type: job_type.unwrap_or(JobType::Standalone),
             name: input.name,
             status: WorkflowStatus::Pending,
+            agent_id,
+            context: input.context,
+            prompt: input.prompt,
+            thread_id: None,
+            group_id: input.group_id,
+            depends_on,
+            cron_expr: input.cron_expr,
+            scheduled_at: None,
             started_at: None,
             finished_at: None,
         };
 
-        repo.create_job(&record).await?;
+        job_repo.create(&record).await?;
 
         Ok(Job {
-            id: id.to_string(),
+            id: record.id.to_string(),
+            job_type: record.job_type.to_string(),
             name: record.name,
             status: record.status.to_string(),
-            agent_id: Some(input.agent_id),
+            agent_id: input.agent_id,
+            context: record.context,
+            prompt: record.prompt,
+            thread_id: None,
+            group_id: record.group_id,
+            depends_on: record.depends_on.iter().map(|j| j.to_string()).collect(),
+            cron_expr: record.cron_expr,
             started_at: None,
             finished_at: None,
         })
@@ -124,17 +118,27 @@ impl MutationRoot {
         ctx: &Context<'_>,
         input: UpdateJobStatusInput,
     ) -> async_graphql::Result<Job> {
-        let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
-        let job_id = JobId::new(input.job_id.to_string());
-        let status = WorkflowStatus::parse_str(&input.status).map_err(async_graphql::Error::new)?;
+        let job_repo = ctx.data::<Box<dyn JobRepository>>()?;
+        let job_id = crate::workflow::JobId::new(input.job_id.to_string());
+        let status =
+            WorkflowStatus::parse_str(&input.status).map_err(async_graphql::Error::new)?;
 
-        repo.update_job_status(&job_id, status, None, None).await?;
+        job_repo
+            .update_status(&job_id, status, None, None)
+            .await?;
 
         Ok(Job {
             id: input.job_id.to_string(),
+            job_type: String::new(),
             name: String::new(),
             status: status.to_string(),
-            agent_id: None,
+            agent_id: String::new(),
+            context: None,
+            prompt: String::new(),
+            thread_id: None,
+            group_id: None,
+            depends_on: Vec::new(),
+            cron_expr: None,
             started_at: None,
             finished_at: None,
         })
