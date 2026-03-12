@@ -7,7 +7,6 @@ prek                                           # 静态检查基线
                                                # - git commit 时会自动运行检查，禁止跳过
                                                # - fmt 问题会自动修复，无需改动再次提交
                                                # - clippy 相关问题务必做修复
-
 RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 ```
 
