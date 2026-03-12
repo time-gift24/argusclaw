@@ -277,6 +277,27 @@ pub enum ProviderCommand {
         id: String,
     },
     GetDefault,
+    /// Set an extra header on a provider.
+    SetHeader {
+        /// Provider ID.
+        #[arg(long)]
+        id: String,
+        /// Header name.
+        #[arg(long)]
+        name: String,
+        /// Header value.
+        #[arg(long)]
+        value: String,
+    },
+    /// Remove an extra header from a provider.
+    RemoveHeader {
+        /// Provider ID.
+        #[arg(long)]
+        id: String,
+        /// Header name to remove.
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -484,6 +505,23 @@ async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> Resu
         ProviderCommand::GetDefault => {
             let provider = ctx.get_default_provider_record().await?;
             println!("{}", render_provider_output(&provider.into()));
+        }
+        ProviderCommand::SetHeader { id, name, value } => {
+            let provider_id = LlmProviderId::new(&id);
+            let mut record = ctx.get_provider_record(&provider_id).await?;
+            record.extra_headers.insert(name.clone(), value);
+            ctx.upsert_provider(record).await?;
+            println!("Set header `{name}` on provider `{id}`");
+        }
+        ProviderCommand::RemoveHeader { id, name } => {
+            let provider_id = LlmProviderId::new(&id);
+            let mut record = ctx.get_provider_record(&provider_id).await?;
+            if record.extra_headers.remove(&name).is_some() {
+                ctx.upsert_provider(record).await?;
+                println!("Removed header `{name}` from provider `{id}`");
+            } else {
+                println!("Header `{name}` not found on provider `{id}`");
+            }
         }
     }
 
