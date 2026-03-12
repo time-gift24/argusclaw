@@ -195,7 +195,7 @@ impl JobRepository for SqliteJobRepository {
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> Result<(), DbError> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE jobs
             SET status = ?1, started_at = ?2, finished_at = ?3, updated_at = datetime('now')
@@ -211,6 +211,12 @@ impl JobRepository for SqliteJobRepository {
         .map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::QueryFailed {
+                reason: format!("job {} not found or in terminal state", id),
+            });
+        }
 
         Ok(())
     }

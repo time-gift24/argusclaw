@@ -191,15 +191,20 @@ async fn test_update_status_prevents_terminal_transition() {
     .await
     .unwrap();
 
-    // Try to transition back to running (should be prevented by the SQL guard)
-    repo.update_status(
-        &job.id,
-        WorkflowStatus::Running,
-        Some("2024-01-01T10:10:00Z"),
-        None,
-    )
-    .await
-    .unwrap();
+    // Try to transition back to running (should fail - terminal state protection)
+    let result = repo
+        .update_status(
+            &job.id,
+            WorkflowStatus::Running,
+            Some("2024-01-01T10:10:00Z"),
+            None,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Should fail when trying to update from terminal state"
+    );
 
     // Verify status is still succeeded (not changed)
     let fetched = repo.get(&job.id).await.unwrap().unwrap();
