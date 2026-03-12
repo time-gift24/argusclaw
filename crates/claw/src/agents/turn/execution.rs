@@ -4,6 +4,8 @@
 //! with tool support. It handles the LLM -> Tool -> LLM cycle with parallel tool
 //! execution and hook integration.
 
+use std::sync::Arc;
+
 use futures_util::future::join_all;
 use tokio::time::{error::Elapsed, timeout};
 
@@ -119,6 +121,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                         tool_input: serde_json::Value::Null,
                         tool_result: None,
                         error: None,
+                        tool_manager: Some(Arc::clone(&tool_manager)),
                     };
                     // TurnEnd is observe-only, ignore errors
                     let _ = registry.fire_tool_event(&ctx).await;
@@ -153,7 +156,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                 // Execute tools in parallel
                 let tool_results = execute_tools_parallel(
                     tool_calls,
-                    &tool_manager,
+                    Arc::clone(&tool_manager),
                     hooks.as_ref().map(|v| v.as_ref()),
                     tool_timeout_secs,
                 )
@@ -214,13 +217,20 @@ struct ToolExecutionResult {
 /// Tool execution failures are captured as error messages, not propagated.
 async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
-    tool_manager: &ToolManager,
+    tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
 ) -> Vec<ToolExecutionResult> {
     let futures: Vec<_> = tool_calls
         .into_iter()
-        .map(|tool_call| execute_single_tool(tool_call, tool_manager, hooks, tool_timeout_secs))
+        .map(|tool_call| {
+            execute_single_tool(
+                tool_call,
+                Arc::clone(&tool_manager),
+                hooks,
+                tool_timeout_secs,
+            )
+        })
         .collect();
 
     join_all(futures).await
@@ -229,7 +239,7 @@ async fn execute_tools_parallel(
 /// Executes a single tool call with hooks and timeout.
 async fn execute_single_tool(
     tool_call: ToolCall,
-    tool_manager: &ToolManager,
+    tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
 ) -> ToolExecutionResult {
@@ -246,6 +256,7 @@ async fn execute_single_tool(
             tool_input: tool_input.clone(),
             tool_result: None,
             error: None,
+            tool_manager: Some(Arc::clone(&tool_manager)),
         };
         if let Err(reason) = registry.fire_tool_event(&ctx).await {
             // Hook blocked the tool call
@@ -259,6 +270,7 @@ async fn execute_single_tool(
                 tool_input,
                 tool_result: None,
                 error: Some(reason),
+                tool_manager: Some(Arc::clone(&tool_manager)),
             };
             let _ = registry.fire_tool_event(&after_ctx).await;
 
@@ -296,6 +308,7 @@ async fn execute_single_tool(
             tool_input,
             tool_result,
             error,
+            tool_manager: Some(Arc::clone(&tool_manager)),
         };
         let _ = registry.fire_tool_event(&ctx).await;
     }
