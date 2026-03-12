@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -90,6 +91,7 @@ pub struct LlmProviderRecord {
     pub api_key: SecretString,
     pub model: String,
     pub is_default: bool,
+    pub extra_headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

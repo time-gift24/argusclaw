@@ -356,6 +356,7 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
             api_key: SecretString::new(value.api_key),
             model: value.model,
             is_default: value.is_default,
+            extra_headers: std::collections::HashMap::new(),
         })
     }
 }
