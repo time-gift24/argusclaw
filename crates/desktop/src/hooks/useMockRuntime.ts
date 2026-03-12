@@ -1,13 +1,16 @@
 // crates/desktop/src/hooks/useMockRuntime.ts
 
 import { useState, useCallback } from "react";
-import { useExternalStoreRuntime } from "@assistant-ui/react";
-import type { ChatMessage, MockResponseKey } from "@/lib/chat-types";
+import {
+  useExternalStoreRuntime,
+  type ThreadMessageLike,
+  type AppendMessage,
+} from "@assistant-ui/react";
 
 /**
  * 预定义的 Mock 响应
  */
-const MOCK_RESPONSES: Record<MockResponseKey, string> = {
+const MOCK_RESPONSES = {
   default: `这是一个 Mock 响应示例。
 
 \`\`\`typescript
@@ -67,6 +70,11 @@ f(x) = \\int_{-\\infty}^{\\infty} \\hat{f}(\\xi) e^{2\\pi i \\xi x} d\\xi
 $$`,
 };
 
+interface MockMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 /**
  * 根据用户消息返回对应的 Mock 响应
  */
@@ -87,52 +95,50 @@ function getMockResponse(userMessage: string): string {
 }
 
 /**
+ * 将内部消息格式转换为 assistant-ui 的 ThreadMessageLike
+ */
+function convertMessage(message: MockMessage): ThreadMessageLike {
+  return {
+    role: message.role,
+    content: [{ type: "text", text: message.content }],
+  };
+}
+
+/**
  * Mock Runtime Hook
  * 提供 Mock 数据供 assistant-ui 使用
  */
 export function useMockRuntime() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [messages, setMessages] = useState<MockMessage[]>([]);
 
-  const sendMessage = useCallback(async (content: string) => {
-    // 创建用户消息
-    const userMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content,
-      createdAt: new Date(),
-    };
+  const onNew = useCallback(async (message: AppendMessage) => {
+    if (message.content[0]?.type !== "text") {
+      throw new Error("Only text messages are supported");
+    }
 
-    setMessages((prev) => [...prev, userMessage]);
+    const input = message.content[0].text;
+
+    // 添加用户消息
+    setMessages((prev) => [...prev, { role: "user", content: input }]);
+
     setIsRunning(true);
 
     // 模拟网络延迟
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     // 获取 Mock 响应
-    const aiResponse = getMockResponse(content);
+    const aiResponse = getMockResponse(input);
 
-    // 创建 AI 响应消息
-    const assistantMessage: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: aiResponse,
-      createdAt: new Date(),
-    };
-
-    setMessages((prev) => [...prev, assistantMessage]);
+    // 添加 AI 响应消息
+    setMessages((prev) => [...prev, { role: "assistant", content: aiResponse }]);
     setIsRunning(false);
   }, []);
 
-  const clear = useCallback(() => {
-    setMessages([]);
-  }, []);
-
   return useExternalStoreRuntime({
-    initialMessages: messages,
-    adapters: {
-      sendMessage,
-      clear,
-    },
+    isRunning,
+    messages,
+    convertMessage,
+    onNew,
   });
 }
