@@ -1,12 +1,13 @@
 //! Production CLI entry point (argusclaw).
 //!
-//! This binary is minimal - it only includes provider and thread commands.
+//! This binary is minimal - it only includes provider and agent commands.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use claw::AppContext;
 use tracing_subscriber::EnvFilter;
 
+use cli::agent::{AgentCommand, run_agent_command};
 use cli::provider::{ProviderCommand, run_provider_command};
 use cli::{db_path_to_url, resolve_db_path};
 
@@ -23,20 +24,9 @@ enum Command {
     /// LLM provider management
     #[command(subcommand)]
     Provider(ProviderCommand),
-    /// Thread management (placeholder)
-    Thread {
-        #[command(subcommand)]
-        command: ThreadCommand,
-    },
-}
-
-/// Thread commands (placeholder - not yet implemented)
-#[derive(Debug, Subcommand)]
-enum ThreadCommand {
-    /// Start a new thread
-    Start,
-    /// List all threads
-    List,
+    /// Agent commands for interactive conversations
+    #[command(subcommand)]
+    Agent(AgentCommand),
 }
 
 #[tokio::main]
@@ -55,12 +45,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Provider(cmd) => run_provider_command(ctx, cmd).await?,
-        Command::Thread { command } => match command {
-            ThreadCommand::Start | ThreadCommand::List => {
-                eprintln!("Thread commands are not yet implemented");
-                eprintln!("Use 'argusclaw-dev thread' for development testing");
-            }
-        },
+        Command::Agent(cmd) => run_agent_command(ctx, cmd).await?,
     }
 
     Ok(())

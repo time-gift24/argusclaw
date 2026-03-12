@@ -2,6 +2,7 @@
 pub mod approval;
 pub mod llm;
 pub mod sqlite;
+pub mod thread;
 #[cfg(feature = "dev")]
 pub mod workflow;
 
@@ -9,6 +10,7 @@ use thiserror::Error;
 
 #[cfg(feature = "dev")]
 pub use approval::ApprovalRepository;
+pub use thread::{MessageId, MessageRecord, ThreadRecord, ThreadRepository};
 
 #[cfg(feature = "dev")]
 pub use workflow::SqliteWorkflowRepository;

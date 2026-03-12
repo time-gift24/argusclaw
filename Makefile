@@ -32,7 +32,7 @@ run-dev:
 clean:
 	cargo clean
 
-install:
+install-tools:
 	cargo install sqlx-cli --no-default-features --features sqlite
 	cargo install prek
 	cargo install --locked cargo-deny && cargo deny init && cargo deny check

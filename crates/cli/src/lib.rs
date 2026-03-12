@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use claw::db::llm::LlmProviderSummary;
 use claw::llm::LlmStreamEvent;
 
+pub mod agent;
 pub mod provider;
 
 #[cfg(feature = "dev")]
