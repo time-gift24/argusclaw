@@ -120,12 +120,9 @@ impl MutationRoot {
     ) -> async_graphql::Result<Job> {
         let job_repo = ctx.data::<Box<dyn JobRepository>>()?;
         let job_id = crate::workflow::JobId::new(input.job_id.to_string());
-        let status =
-            WorkflowStatus::parse_str(&input.status).map_err(async_graphql::Error::new)?;
+        let status = WorkflowStatus::parse_str(&input.status).map_err(async_graphql::Error::new)?;
 
-        job_repo
-            .update_status(&job_id, status, None, None)
-            .await?;
+        job_repo.update_status(&job_id, status, None, None).await?;
 
         Ok(Job {
             id: input.job_id.to_string(),
