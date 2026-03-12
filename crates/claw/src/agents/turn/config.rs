@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 
-use super::hooks::HookRegistry;
 use crate::llm::{ChatMessage, LlmProvider};
+use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
 
 /// Turn execution configuration.
