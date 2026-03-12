@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use claw::db::llm::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
@@ -17,6 +19,8 @@ pub struct ProviderImportRecord {
     pub model: String,
     #[serde(default)]
     pub is_default: bool,
+    #[serde(default)]
+    pub extra_headers: HashMap<String, String>,
 }
 
 impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
@@ -31,6 +35,7 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
             api_key: SecretString::new(value.api_key),
             model: value.model,
             is_default: value.is_default,
+            extra_headers: value.extra_headers,
         })
     }
 }
@@ -64,5 +69,30 @@ mod tests {
         assert_eq!(config.providers.len(), 1);
         assert_eq!(config.providers[0].id, "openai");
         assert!(config.providers[0].is_default);
+    }
+
+    #[test]
+    fn parses_provider_with_extra_headers() {
+        let config: ProviderImportFile = toml::from_str(
+            r#"
+            [[providers]]
+            id = "deepseek"
+            display_name = "DeepSeek"
+            kind = "openai-compatible"
+            base_url = "https://api.deepseek.com/v1"
+            api_key = "sk-xxx"
+            model = "deepseek-chat"
+
+            [providers.extra_headers]
+            x-provider = "deepseek"
+            x-custom = "value"
+            "#,
+        )
+        .expect("provider import toml with headers should parse");
+
+        assert_eq!(config.providers.len(), 1);
+        let headers = &config.providers[0].extra_headers;
+        assert_eq!(headers.get("x-provider"), Some(&"deepseek".to_string()));
+        assert_eq!(headers.get("x-custom"), Some(&"value".to_string()));
     }
 }

@@ -1,13 +1,13 @@
 // crates/claw/src/api/mutation.rs
-use async_graphql::{Context, Object, ID, InputObject};
+use async_graphql::{Context, ID, InputObject, Object};
 use uuid::Uuid;
 
-use super::types::{Workflow, Stage, Job};
-use crate::workflow::{
-    WorkflowRepository, WorkflowId, StageId, JobId,
-    WorkflowRecord, StageRecord, JobRecord, WorkflowStatus,
-};
+use super::types::{Job, Stage, Workflow};
 use crate::agents::AgentId;
+use crate::workflow::{
+    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowRepository,
+    WorkflowStatus,
+};
 
 #[derive(InputObject)]
 pub struct CreateWorkflowInput {
@@ -38,7 +38,11 @@ pub struct MutationRoot;
 
 #[Object]
 impl MutationRoot {
-    async fn create_workflow(&self, ctx: &Context<'_>, input: CreateWorkflowInput) -> async_graphql::Result<Workflow> {
+    async fn create_workflow(
+        &self,
+        ctx: &Context<'_>,
+        input: CreateWorkflowInput,
+    ) -> async_graphql::Result<Workflow> {
         let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
         let id = WorkflowId::new(Uuid::new_v4().to_string());
         let record = WorkflowRecord {
@@ -59,7 +63,11 @@ impl MutationRoot {
         })
     }
 
-    async fn add_stage(&self, ctx: &Context<'_>, input: AddStageInput) -> async_graphql::Result<Stage> {
+    async fn add_stage(
+        &self,
+        ctx: &Context<'_>,
+        input: AddStageInput,
+    ) -> async_graphql::Result<Stage> {
         let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
         let id = StageId::new(Uuid::new_v4().to_string());
         let workflow_id = WorkflowId::new(input.workflow_id.to_string());
@@ -111,11 +119,14 @@ impl MutationRoot {
         })
     }
 
-    async fn update_job_status(&self, ctx: &Context<'_>, input: UpdateJobStatusInput) -> async_graphql::Result<Job> {
+    async fn update_job_status(
+        &self,
+        ctx: &Context<'_>,
+        input: UpdateJobStatusInput,
+    ) -> async_graphql::Result<Job> {
         let repo = ctx.data::<Box<dyn WorkflowRepository>>()?;
         let job_id = JobId::new(input.job_id.to_string());
-        let status = WorkflowStatus::parse_str(&input.status)
-            .map_err(async_graphql::Error::new)?;
+        let status = WorkflowStatus::parse_str(&input.status).map_err(async_graphql::Error::new)?;
 
         repo.update_job_status(&job_id, status, None, None).await?;
 

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
 };
@@ -14,6 +16,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         api_key: SecretString::new(format!("sk-{id}")),
         model: "gpt-4o-mini".to_string(),
         is_default,
+        extra_headers: HashMap::new(),
     }
 }
 
