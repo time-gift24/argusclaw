@@ -3,10 +3,10 @@
 ## 构建与测试
 
 ```bash
-cargo fmt                                                    # 格式化
+cargo fmt                                                       # 格式化
 cargo clippy --all --benches --tests --examples --all-features  # 检查 (零警告)
-cargo test                                                   # 单元测试
-cargo test --features integration                            # + Sqlite 测试
+cargo test                                                      # 单元测试
+cargo test --features integration                               # + Sqlite 测试
 RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 ```
 
