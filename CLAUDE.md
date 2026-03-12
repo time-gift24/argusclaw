@@ -16,6 +16,11 @@ RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 - KISS (Keep It Simple and Stupid，尽可能保持简单)
 - DRY (Don't Repeat Yourself, 禁止重复你自身)
 
+## 编码前检查
+- 务必使用 using-git-worktrees 去独立分支工作
+- 完成工作后无需提问直接发起 PR
+
+
 ## 代码风格
 
 - 跨模块导入使用 `crate::`；测试和模块内引用使用 `super::`
