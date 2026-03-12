@@ -46,6 +46,9 @@ mod manager;
 mod policy;
 mod types;
 
+mod approval_hook;
+
+pub use approval_hook::ApprovalHook;
 pub use error::ApprovalError;
 pub use manager::ApprovalManager;
 pub use policy::ApprovalPolicy;
