@@ -122,8 +122,3 @@
     @apply bg-background text-foreground;
     }
 }
-
-/* Streamdown */
-@source "../node_modules/streamdown/dist/*.js";
-@source "../node_modules/@streamdown/math/dist/*.js";
-@source "../node_modules/@streamdown/cjk/dist/*.js";
