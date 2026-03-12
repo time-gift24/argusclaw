@@ -33,268 +33,284 @@ pub struct DevCli {
     pub command: DevCommand,
 }
 
+/// 开发与测试命令，用于 LLM 提供商、Agent 和工作流。
 #[derive(Debug, Subcommand)]
 pub enum DevCommand {
+    /// 管理 LLM 提供商配置。
     #[command(subcommand)]
     Provider(ProviderCommand),
+    /// 测试 LLM 补全请求。
     #[command(subcommand)]
     Llm(LlmCommand),
+    /// 测试 Agent/LLM Turn 执行流程。
     #[command(subcommand)]
     Turn(TurnCommand),
+    /// 管理审批请求和响应。
     #[command(subcommand)]
     Approval(ApprovalCommand),
+    /// 管理工作流、阶段和任务。
     #[command(subcommand)]
     Workflow(WorkflowCommand),
 }
 
-/// Turn execution commands for testing agent/LLM turn flow.
+/// Turn 执行测试命令。
 #[derive(Debug, Subcommand)]
 pub enum TurnCommand {
-    /// Test turn execution with configurable options.
+    /// 测试 Turn 执行（可配置选项）。
     Test {
-        /// Provider ID to use (defaults to default provider).
+        /// 使用的提供商 ID（默认为默认提供商）。
         #[arg(long)]
         provider: Option<String>,
 
-        /// Tool IDs to enable (comma-separated).
+        /// 启用的工具 ID（逗号分隔）。
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
 
-        /// System prompt for the turn.
+        /// Turn 的系统提示词。
         #[arg(long, default_value = "You are a helpful assistant.")]
         system_prompt: String,
 
-        /// User message to send.
+        /// 发送的用户消息。
         #[arg(long)]
         message: String,
 
-        /// Enable verbose output (shows all messages and tool calls).
+        /// 启用详细输出（显示所有消息和工具调用）。
         #[arg(short, long)]
         verbose: bool,
     },
 }
 
-/// Thread commands for testing multi-turn conversation flow.
+/// Thread 测试命令，用于多轮对话流程。
 #[derive(Debug, Subcommand)]
 pub enum ThreadCommand {
-    /// Start interactive multi-turn conversation.
+    /// 启动交互式多轮对话。
     Chat {
-        /// Provider ID to use (defaults to default provider).
+        /// 使用的提供商 ID（默认为默认提供商）。
         #[arg(long)]
         provider: Option<String>,
 
-        /// Tool IDs to enable (comma-separated).
+        /// 启用的工具 ID（逗号分隔）。
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
 
-        /// System prompt for the conversation.
+        /// 对话的系统提示词。
         #[arg(long, default_value = "You are a helpful assistant.")]
         system_prompt: String,
 
-        /// Enable verbose output (shows all messages and tool calls).
+        /// 启用详细输出（显示所有消息和工具调用）。
         #[arg(short, long)]
         verbose: bool,
     },
 
-    /// Run automated multi-turn conversation test.
+    /// 运行自动化多轮对话测试。
     Test {
-        /// Provider ID to use (defaults to default provider).
+        /// 使用的提供商 ID（默认为默认提供商）。
         #[arg(long)]
         provider: Option<String>,
 
-        /// Tool IDs to enable (comma-separated).
+        /// 启用的工具 ID（逗号分隔）。
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
 
-        /// System prompt for the conversation.
+        /// 对话的系统提示词。
         #[arg(long, default_value = "You are a helpful assistant.")]
         system_prompt: String,
 
-        /// Number of turns to execute.
+        /// 执行的 Turn 数量。
         #[arg(long, default_value = "3")]
         turns: u32,
 
-        /// Enable verbose output.
+        /// 启用详细输出。
         #[arg(short, long)]
         verbose: bool,
     },
 }
 
-/// Approval commands for testing the approval flow.
+/// 审批流程测试命令。
 #[derive(Debug, Subcommand)]
 pub enum ApprovalCommand {
-    /// List pending approval requests.
+    /// 列出待处理的审批请求。
     List,
 
-    /// Submit a request and persist to database (for testing).
+    /// 提交请求并持久化到数据库（用于测试）。
     Submit {
-        /// Agent ID submitting the request.
+        /// 提交请求的 Agent ID。
         #[arg(long, default_value = "cli-test-agent")]
         agent: String,
 
-        /// Tool name to request approval for.
+        /// 请求审批的工具名称。
         #[arg(long, default_value = "shell_exec")]
         tool: String,
 
-        /// Action summary for the request.
+        /// 请求的操作摘要。
         #[arg(long, default_value = "Test action")]
         action: String,
 
-        /// Timeout in seconds.
+        /// 超时时间（秒）。
         #[arg(long, default_value = "60")]
         timeout: u64,
     },
 
-    /// Test approval flow with a simulated request.
+    /// 使用模拟请求测试审批流程。
     Test {
-        /// Agent ID submitting the request.
+        /// 提交请求的 Agent ID。
         #[arg(long, default_value = "cli-test-agent")]
         agent: String,
 
-        /// Tool name to request approval for.
+        /// 请求审批的工具名称。
         #[arg(long, default_value = "shell_exec")]
         tool: String,
 
-        /// Timeout in seconds.
+        /// 超时时间（秒）。
         #[arg(long, default_value = "10")]
         timeout: u64,
 
-        /// Auto-approve (simulate approval).
+        /// 自动批准（模拟批准）。
         #[arg(long)]
         approve: bool,
 
-        /// Auto-deny (simulate denial).
+        /// 自动拒绝（模拟拒绝）。
         #[arg(long)]
         deny: bool,
     },
 
-    /// Resolve a pending approval request.
+    /// 解决待处理的审批请求。
     Resolve {
-        /// Request ID (or prefix).
+        /// 请求 ID（或前缀）。
         #[arg(long)]
         id: String,
 
-        /// Decision: approve or deny.
+        /// 决定：批准或拒绝。
         #[arg(long)]
         approve: bool,
     },
 
-    /// Show current approval policy.
+    /// 显示当前审批策略。
     Policy,
 
-    /// Update approval policy.
+    /// 更新审批策略。
     SetPolicy {
-        /// Tools requiring approval (comma-separated).
+        /// 需要审批的工具（逗号分隔）。
         #[arg(long, value_delimiter = ',')]
         tools: Vec<String>,
 
-        /// Auto-approve all (disables approval).
+        /// 自动批准所有（禁用审批）。
         #[arg(long)]
         auto_approve: bool,
     },
 
-    /// Clear persisted test requests.
+    /// 清除持久化的测试请求。
     Clear,
 }
 
-/// Workflow commands for testing workflow execution.
+/// 工作流执行测试命令。
 #[derive(Debug, Subcommand)]
 pub enum WorkflowCommand {
-    /// Create a new workflow.
+    /// 创建新工作流。
     Create {
-        /// Workflow name.
+        /// 工作流名称。
         name: String,
     },
 
-    /// List all workflows.
+    /// 列出所有工作流。
     List,
 
-    /// Show workflow details with stages and jobs.
+    /// 显示工作流详情（包含阶段和任务）。
     Show {
-        /// Workflow ID.
+        /// 工作流 ID。
         id: String,
     },
 
-    /// Delete a workflow.
+    /// 删除工作流。
     Delete {
-        /// Workflow ID.
+        /// 工作流 ID。
         id: String,
     },
 
-    /// Add a stage to a workflow.
+    /// 向工作流添加阶段。
     AddStage {
-        /// Workflow ID.
+        /// 工作流 ID。
         #[arg(long)]
         workflow: String,
-        /// Stage name.
+        /// 阶段名称。
         name: String,
-        /// Stage sequence (order).
+        /// 阶段序号（顺序）。
         sequence: i32,
     },
 
-    /// Add a job to a stage.
+    /// 向阶段添加任务。
     AddJob {
-        /// Stage ID.
+        /// 阶段 ID。
         #[arg(long)]
         stage: String,
-        /// Agent ID.
+        /// Agent ID。
         #[arg(long)]
         agent: String,
-        /// Job name.
+        /// 任务名称。
         name: String,
     },
 
-    /// Update job status.
+    /// 更新任务状态。
     JobStatus {
-        /// Job ID.
+        /// 任务 ID。
         #[arg(long)]
         id: String,
-        /// New status.
+        /// 新状态。
         status: String,
     },
 
-    /// Show workflow status tree.
+    /// 显示工作流状态树。
     Status {
-        /// Workflow ID.
+        /// 工作流 ID。
         id: String,
     },
 }
 
+/// LLM 提供商管理命令。
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
+    /// 从 TOML 配置文件导入提供商。
     Import {
+        /// TOML 配置文件路径。
         #[arg(long)]
         file: String,
     },
+    /// 列出所有已配置的提供商。
     List,
+    /// 获取指定提供商的详情。
     Get {
+        /// 要查询的提供商 ID。
         #[arg(long)]
         id: String,
     },
+    /// 创建或更新提供商配置。
     Upsert(ProviderUpsertArgs),
+    /// 设置默认提供商。
     SetDefault {
+        /// 要设为默认的提供商 ID。
         #[arg(long)]
         id: String,
     },
+    /// 获取当前默认提供商。
     GetDefault,
-    /// Set an extra header on a provider.
+    /// 为提供商设置额外的请求头。
     SetHeader {
-        /// Provider ID.
+        /// 提供商 ID。
         #[arg(long)]
         id: String,
-        /// Header name.
+        /// 请求头名称。
         #[arg(long)]
         name: String,
-        /// Header value.
+        /// 请求头值。
         #[arg(long)]
         value: String,
     },
-    /// Remove an extra header from a provider.
+    /// 移除提供商的额外请求头。
     RemoveHeader {
-        /// Provider ID.
+        /// 提供商 ID。
         #[arg(long)]
         id: String,
-        /// Header name to remove.
+        /// 要移除的请求头名称。
         #[arg(long)]
         name: String,
     },
@@ -318,13 +334,18 @@ pub struct ProviderUpsertArgs {
     pub is_default: bool,
 }
 
+/// LLM 补全测试命令。
 #[derive(Debug, Subcommand)]
 pub enum LlmCommand {
+    /// 向 LLM 提供商发送补全请求。
     Complete {
+        /// 使用的提供商 ID（默认为默认提供商）。
         #[arg(long)]
         provider: Option<String>,
+        /// 启用流式输出。
         #[arg(long, default_value_t = false)]
         stream: bool,
+        /// 发送给 LLM 的提示词。
         prompt: String,
     },
 }
