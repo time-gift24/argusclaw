@@ -10,8 +10,8 @@
 
 use claw::agents::AgentId;
 use claw::agents::thread::ThreadId;
-use claw::db::sqlite::{connect, migrate};
 use claw::db::SqliteJobRepository;
+use claw::db::sqlite::{connect, migrate};
 use claw::job::repository::JobRepository;
 use claw::job::types::{JobRecord, JobType};
 use claw::workflow::{JobId, WorkflowStatus};
@@ -68,11 +68,26 @@ async fn test_create_and_get_standalone_job() {
     let fetched = fetched.unwrap();
     assert_eq!(fetched.id.as_ref(), "job-1", "ID should match");
     assert_eq!(fetched.name, "Test Job", "Name should match");
-    assert_eq!(fetched.job_type, JobType::Standalone, "Job type should be Standalone");
-    assert_eq!(fetched.status, WorkflowStatus::Pending, "Status should be Pending");
-    assert_eq!(fetched.agent_id.as_ref(), "agent-1", "Agent ID should match");
+    assert_eq!(
+        fetched.job_type,
+        JobType::Standalone,
+        "Job type should be Standalone"
+    );
+    assert_eq!(
+        fetched.status,
+        WorkflowStatus::Pending,
+        "Status should be Pending"
+    );
+    assert_eq!(
+        fetched.agent_id.as_ref(),
+        "agent-1",
+        "Agent ID should match"
+    );
     assert_eq!(fetched.prompt, "Do something", "Prompt should match");
-    assert!(fetched.thread_id.is_none(), "Thread ID should be None initially");
+    assert!(
+        fetched.thread_id.is_none(),
+        "Thread ID should be None initially"
+    );
     assert!(fetched.depends_on.is_empty(), "Depends on should be empty");
 }
 
@@ -86,7 +101,11 @@ async fn test_find_ready_jobs_no_dependencies() {
 
     let ready = repo.find_ready_jobs(10).await.unwrap();
     assert_eq!(ready.len(), 1, "One job should be ready");
-    assert_eq!(ready[0].id.as_ref(), "job-ready", "Ready job should be the one we created");
+    assert_eq!(
+        ready[0].id.as_ref(),
+        "job-ready",
+        "Ready job should be the one we created"
+    );
 }
 
 #[tokio::test]
@@ -123,7 +142,11 @@ async fn test_find_ready_jobs_respects_dependencies() {
     // Note: A is no longer "pending" so it won't appear in ready jobs
     let ready = repo.find_ready_jobs(10).await.unwrap();
     assert_eq!(ready.len(), 1, "Only pending jobs should be returned");
-    assert_eq!(ready[0].id.as_ref(), "job-b", "Job B should be ready after A succeeds");
+    assert_eq!(
+        ready[0].id.as_ref(),
+        "job-b",
+        "Job B should be ready after A succeeds"
+    );
 }
 
 #[tokio::test]
@@ -144,7 +167,11 @@ async fn test_find_ready_jobs_skips_cron_templates() {
     // Cron jobs should NOT appear in ready jobs (they are templates, not executable)
     let ready = repo.find_ready_jobs(10).await.unwrap();
     assert_eq!(ready.len(), 1, "Only standalone job should be ready");
-    assert_eq!(ready[0].id.as_ref(), "standalone-job", "Cron job should be excluded from ready jobs");
+    assert_eq!(
+        ready[0].id.as_ref(),
+        "standalone-job",
+        "Cron job should be excluded from ready jobs"
+    );
 }
 
 #[tokio::test]
@@ -204,16 +231,26 @@ async fn test_list_by_group() {
     let group_a_jobs = repo.list_by_group("group-a").await.unwrap();
     assert_eq!(group_a_jobs.len(), 2, "Should have 2 jobs in group-a");
     let names: Vec<_> = group_a_jobs.iter().map(|j| j.name.as_str()).collect();
-    assert!(names.contains(&"Job in Group A"), "Should contain job from group-a");
+    assert!(
+        names.contains(&"Job in Group A"),
+        "Should contain job from group-a"
+    );
 
     // Filter by group-b
     let group_b_jobs = repo.list_by_group("group-b").await.unwrap();
     assert_eq!(group_b_jobs.len(), 1, "Should have 1 job in group-b");
-    assert_eq!(group_b_jobs[0].name, "Job in Group B", "Should be job from group-b");
+    assert_eq!(
+        group_b_jobs[0].name, "Job in Group B",
+        "Should be job from group-b"
+    );
 
     // Filter by non-existent group
     let no_jobs = repo.list_by_group("non-existent").await.unwrap();
-    assert_eq!(no_jobs.len(), 0, "Should have no jobs in non-existent group");
+    assert_eq!(
+        no_jobs.len(),
+        0,
+        "Should have no jobs in non-existent group"
+    );
 }
 
 #[tokio::test]
@@ -236,10 +273,7 @@ async fn test_delete_job() {
     assert!(fetched.is_none(), "Job should be deleted");
 
     // Delete non-existent job should return false
-    let deleted = repo
-        .delete(&JobId::new("non-existent"))
-        .await
-        .unwrap();
+    let deleted = repo.delete(&JobId::new("non-existent")).await.unwrap();
     assert!(!deleted, "Delete should return false for non-existent job");
 }
 
@@ -252,7 +286,10 @@ async fn test_update_thread_id() {
 
     // Initially no thread
     let fetched = repo.get(&job.id).await.unwrap().unwrap();
-    assert!(fetched.thread_id.is_none(), "Thread ID should be None initially");
+    assert!(
+        fetched.thread_id.is_none(),
+        "Thread ID should be None initially"
+    );
 
     // Update thread ID using parse
     let thread_id = ThreadId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -287,11 +324,7 @@ async fn test_depends_on_json_serialization() {
 
     // Fetch and verify depends_on deserializes correctly
     let fetched = repo.get(&job.id).await.unwrap().unwrap();
-    assert_eq!(
-        fetched.depends_on.len(),
-        3,
-        "Should have 3 dependencies"
-    );
+    assert_eq!(fetched.depends_on.len(), 3, "Should have 3 dependencies");
     let dep_ids: Vec<_> = fetched.depends_on.iter().map(|id| id.as_ref()).collect();
     assert!(dep_ids.contains(&"dep-1"), "Should contain dep-1");
     assert!(dep_ids.contains(&"dep-2"), "Should contain dep-2");

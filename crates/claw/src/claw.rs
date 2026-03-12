@@ -6,8 +6,8 @@ use sqlx::SqlitePool;
 use crate::agents::AgentManager;
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
 use crate::db::sqlite::{
-    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect,
-    connect_path, migrate,
+    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
+    migrate,
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;

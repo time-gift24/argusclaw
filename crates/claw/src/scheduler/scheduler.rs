@@ -8,8 +8,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::thread::ThreadConfig;
 use crate::agents::AgentManager;
+use crate::agents::thread::ThreadConfig;
 use crate::job::repository::JobRepository;
 use crate::job::types::{JobRecord, JobType};
 use crate::workflow::{JobId, WorkflowStatus};
@@ -96,7 +96,8 @@ impl Scheduler {
 
     /// Remove completed JoinHandles from running_jobs.
     fn cleanup_finished(&self) {
-        self.running_jobs.retain(|_id, handle| !handle.is_finished());
+        self.running_jobs
+            .retain(|_id, handle| !handle.is_finished());
     }
 
     /// Check for due cron job templates and spawn new jobs.
@@ -114,7 +115,11 @@ impl Scheduler {
             let next_time = match self.next_cron_time(cron_expr) {
                 Ok(time) => time,
                 Err(e) => {
-                    tracing::error!("Failed to parse cron expression for job {}: {}", template.id, e);
+                    tracing::error!(
+                        "Failed to parse cron expression for job {}: {}",
+                        template.id,
+                        e
+                    );
                     continue;
                 }
             };
@@ -143,7 +148,11 @@ impl Scheduler {
             }
 
             // Update template's next scheduled time
-            if let Err(e) = self.job_repository.update_scheduled_at(&template.id, &next_time).await {
+            if let Err(e) = self
+                .job_repository
+                .update_scheduled_at(&template.id, &next_time)
+                .await
+            {
                 tracing::error!("Failed to update scheduled time for cron template: {}", e);
             }
         }
@@ -155,7 +164,12 @@ impl Scheduler {
     async fn dispatch(&self, job: JobRecord) -> Result<(), SchedulerError> {
         // Update status to Running
         self.job_repository
-            .update_status(&job.id, WorkflowStatus::Running, Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()), None)
+            .update_status(
+                &job.id,
+                WorkflowStatus::Running,
+                Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                None,
+            )
             .await
             .map_err(|e| SchedulerError::DispatchFailed {
                 job_id: job.id.as_ref().to_string(),
@@ -168,8 +182,14 @@ impl Scheduler {
                 job_id: job.id.as_ref().to_string(),
                 reason: format!("Agent template not found: {}", job.agent_id),
             };
-            let _ = self.job_repository
-                .update_status(&job.id, WorkflowStatus::Failed, None, Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+            let _ = self
+                .job_repository
+                .update_status(
+                    &job.id,
+                    WorkflowStatus::Failed,
+                    None,
+                    Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                )
                 .await;
             return Err(err);
         };
@@ -182,8 +202,14 @@ impl Scheduler {
                     job_id: job.id.as_ref().to_string(),
                     reason: e.to_string(),
                 };
-                let _ = self.job_repository
-                    .update_status(&job.id, WorkflowStatus::Failed, None, Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+                let _ = self
+                    .job_repository
+                    .update_status(
+                        &job.id,
+                        WorkflowStatus::Failed,
+                        None,
+                        Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                    )
                     .await;
                 return Err(err);
             }
@@ -199,15 +225,25 @@ impl Scheduler {
                     job_id: job.id.as_ref().to_string(),
                     reason: "Agent not found after creation".to_string(),
                 };
-                let _ = self.job_repository
-                    .update_status(&job.id, WorkflowStatus::Failed, None, Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+                let _ = self
+                    .job_repository
+                    .update_status(
+                        &job.id,
+                        WorkflowStatus::Failed,
+                        None,
+                        Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                    )
                     .await;
                 return Err(err);
             }
         };
 
         // Update job with thread_id
-        if let Err(e) = self.job_repository.update_thread_id(&job.id, &thread_id).await {
+        if let Err(e) = self
+            .job_repository
+            .update_thread_id(&job.id, &thread_id)
+            .await
+        {
             tracing::error!("Failed to update thread_id for job {}: {}", job.id, e);
         }
 
@@ -224,13 +260,23 @@ impl Scheduler {
                     match handle.wait_for_result().await {
                         Ok(_output) => {
                             let _ = job_repository
-                                .update_status(&job_id, WorkflowStatus::Succeeded, None, Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+                                .update_status(
+                                    &job_id,
+                                    WorkflowStatus::Succeeded,
+                                    None,
+                                    Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                                )
                                 .await;
                             tracing::info!("Job {} succeeded", job_id);
                         }
                         Err(e) => {
                             let _ = job_repository
-                                .update_status(&job_id, WorkflowStatus::Failed, None, Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()))
+                                .update_status(
+                                    &job_id,
+                                    WorkflowStatus::Failed,
+                                    None,
+                                    Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                                )
                                 .await;
                             tracing::error!("Job {} failed: {}", job_id, e);
                         }
