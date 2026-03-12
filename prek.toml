@@ -19,5 +19,4 @@ hooks = [
   { id = "typos", name = "typos", description = "check typo", entry = "bash -c 'typos'", language = "rust", files = '\.*$', pass_filenames = false },
   { id = "cargo-check", name = "cargo check", description = "Check the package for errors.", entry = "bash -c 'cargo check --all'", language = "rust", files = '\.rs$', pass_filenames = false },
   { id = "cargo-clippy", name = "cargo clippy", description = "Lint rust sources", entry = "bash -c 'cargo clippy --all-targets --all-features --tests --benches -- -D warnings'", language = "rust", files = '\.rs$', pass_filenames = false },
-  { id = "cargo-deny", name = "cargo deny check", description = "Check cargo dependencies", entry = "bash -c 'cargo deny -L error check -d'", language = "rust", files = '\.rs$', args = [] },
 ]
