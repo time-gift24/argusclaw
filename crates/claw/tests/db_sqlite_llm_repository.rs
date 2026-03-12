@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
 };
@@ -14,6 +16,25 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         api_key: SecretString::new(format!("sk-{id}")),
         model: "gpt-4o-mini".to_string(),
         is_default,
+        extra_headers: HashMap::new(),
+    }
+}
+
+fn build_record_with_headers(
+    id: &str,
+    display_name: &str,
+    is_default: bool,
+    headers: HashMap<String, String>,
+) -> LlmProviderRecord {
+    LlmProviderRecord {
+        id: LlmProviderId::new(id),
+        kind: LlmProviderKind::OpenAiCompatible,
+        display_name: display_name.to_string(),
+        base_url: format!("https://{id}.example.com/v1"),
+        api_key: SecretString::new(format!("sk-{id}")),
+        model: "gpt-4o-mini".to_string(),
+        is_default,
+        extra_headers: headers,
     }
 }
 
@@ -64,6 +85,36 @@ async fn sqlite_repository_round_trips_provider_records_and_encrypts_api_keys() 
             .expect("encrypted api key should be stored");
 
     assert_ne!(encrypted_api_key, b"sk-openai");
+}
+
+#[tokio::test]
+async fn sqlite_repository_round_trips_extra_headers() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let mut headers = HashMap::new();
+    headers.insert("x-provider".to_string(), "deepseek".to_string());
+    headers.insert("x-custom-header".to_string(), "custom-value".to_string());
+    let record = build_record_with_headers("deepseek", "DeepSeek", true, headers);
+
+    repository
+        .upsert_provider(&record)
+        .await
+        .expect("provider should be stored");
+
+    let stored = repository
+        .get_provider(&record.id)
+        .await
+        .expect("query should succeed")
+        .expect("provider should exist");
+
+    assert_eq!(stored.extra_headers.len(), 2);
+    assert_eq!(
+        stored.extra_headers.get("x-provider"),
+        Some(&"deepseek".to_string())
+    );
+    assert_eq!(
+        stored.extra_headers.get("x-custom-header"),
+        Some(&"custom-value".to_string())
+    );
 }
 
 #[tokio::test]

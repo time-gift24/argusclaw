@@ -1,7 +1,7 @@
 // crates/claw/src/api/query.rs
-use async_graphql::{Context, Object, ID};
-use super::types::{Workflow, Stage, Job};
-use crate::workflow::{WorkflowRepository, WorkflowId};
+use super::types::{Job, Stage, Workflow};
+use crate::workflow::{WorkflowId, WorkflowRepository};
+use async_graphql::{Context, ID, Object};
 
 pub struct QueryRoot;
 
@@ -24,14 +24,17 @@ impl QueryRoot {
                 name: stage.name,
                 sequence: stage.sequence,
                 status: stage.status.to_string(),
-                jobs: jobs.into_iter().map(|j| Job {
-                    id: j.id.to_string(),
-                    name: j.name,
-                    status: j.status.to_string(),
-                    agent_id: Some(j.agent_id.to_string()),
-                    started_at: j.started_at,
-                    finished_at: j.finished_at,
-                }).collect(),
+                jobs: jobs
+                    .into_iter()
+                    .map(|j| Job {
+                        id: j.id.to_string(),
+                        name: j.name,
+                        status: j.status.to_string(),
+                        agent_id: Some(j.agent_id.to_string()),
+                        started_at: j.started_at,
+                        finished_at: j.finished_at,
+                    })
+                    .collect(),
             });
         }
 
@@ -61,14 +64,17 @@ impl QueryRoot {
                     name: stage.name,
                     sequence: stage.sequence,
                     status: stage.status.to_string(),
-                    jobs: jobs.into_iter().map(|j| Job {
-                        id: j.id.to_string(),
-                        name: j.name,
-                        status: j.status.to_string(),
-                        agent_id: Some(j.agent_id.to_string()),
-                        started_at: j.started_at,
-                        finished_at: j.finished_at,
-                    }).collect(),
+                    jobs: jobs
+                        .into_iter()
+                        .map(|j| Job {
+                            id: j.id.to_string(),
+                            name: j.name,
+                            status: j.status.to_string(),
+                            agent_id: Some(j.agent_id.to_string()),
+                            started_at: j.started_at,
+                            finished_at: j.finished_at,
+                        })
+                        .collect(),
                 });
             }
 
