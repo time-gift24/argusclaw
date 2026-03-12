@@ -6,7 +6,8 @@
 - **语言**: TypeScript
 - **构建工具**: Vite
 - **样式**: Tailwind CSS v4
-- **Markdown 渲染**: Streamdown + 插件 (code, mermaid, math, cjk)
+- **聊天 UI**: assistant-ui + 自定义 Markdown 渲染
+- **Markdown 渲染**: @assistant-ui/react-markdown + Shiki + KaTeX + Mermaid
 - **UI 组件**: shadcn (基于 class-variance-authority, clsx, tailwind-merge)
 - **桌面框架**: Tauri
 - **图标**: @hugeicons/react + @hugeicons/core-free-icons
@@ -20,49 +21,30 @@ pnpm build        # 生产构建
 pnpm tauri build  # Tauri 生产构建
 ```
 
-## Streamdown 配置
-
-### Tailwind CSS v4
-
-在 `src/index.css` 中添加 `@source` 指令：
-
-```css
-@source "../node_modules/streamdown/dist/*.js";
-@source "../node_modules/@streamdown/code/dist/*.js";
-@source "../node_modules/@streamdown/mermaid/dist/*.js";
-@source "../node_modules/@streamdown/math/dist/*.js";
-@source "../node_modules/@streamdown/cjk/dist/*.js";
-```
+## assistant-ui 配置
 
 ### 基本用法
 
 ```tsx
-import { Streamdown } from 'streamdown';
-import { code } from '@streamdown/code';
-import { mermaid } from '@streamdown/mermaid';
-import { math } from '@streamdown/math';
-import { cjk } from '@streamdown/cjk';
+import { AssistantRuntimeProvider, Thread } from "@assistant-ui/react";
+import { useMockRuntime } from "@/hooks/useMockRuntime";
 
-<Streamdown plugins={{ code, mermaid, math, cjk }}>
-  {markdownContent}
-</Streamdown>
+export function ChatPage() {
+  const runtime = useMockRuntime();
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <Thread />
+    </AssistantRuntimeProvider>
+  );
+}
 ```
 
-### 静态模式 (用于博客/文档)
+### 自定义 Markdown 渲染
 
-```tsx
-<Streamdown mode="static" plugins={{ code }}>
-  {content}
-</Streamdown>
-```
-
-### 关键配置
-
-- `mode`: `"streaming"` | `"static"` — 渲染模式
-- `plugins`: 插件对象 — 功能扩展
-- `caret`: `"block" | "circle"` — 光标样式
-- `isAnimating`: 配合流式输出使用
-- `linkSafety`: 链接安全确认 (默认启用)
+聊天消息使用自定义 Markdown 渲染器，位于 `src/components/chat/markdown/`：
+- `MarkdownText.tsx` - 主渲染器，集成 GFM、数学公式
+- `CodeBlock.tsx` - Shiki 代码高亮
+- `MermaidBlock.tsx` - Mermaid 图表渲染
 
 ## 性能优化
 
