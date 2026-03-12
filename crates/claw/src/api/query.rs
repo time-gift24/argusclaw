@@ -16,7 +16,7 @@ impl QueryRoot {
         let record = workflow_repo.get_workflow(&workflow_id).await?;
         let Some(wf) = record else { return Ok(None) };
 
-        let jobs = job_repo.list_by_group(&id.to_string()).await?;
+        let jobs = job_repo.list_by_group(id.as_ref()).await?;
 
         Ok(Some(Workflow {
             id: wf.id.to_string(),
