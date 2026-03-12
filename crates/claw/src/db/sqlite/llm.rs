@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -48,6 +49,16 @@ impl SqliteLlmProviderRepository {
                     reason: e.to_string(),
                 })?;
 
+        let extra_headers_json: String =
+            row.try_get("extra_headers")
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
+        let extra_headers: HashMap<String, String> = serde_json::from_str(&extra_headers_json)
+            .map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to parse extra_headers: {e}"),
+            })?;
+
         Ok(LlmProviderRecord {
             id: LlmProviderId::new(row.try_get::<String, _>("id").map_err(|e| {
                 DbError::QueryFailed {
@@ -78,6 +89,7 @@ impl SqliteLlmProviderRepository {
                     reason: e.to_string(),
                 })?
                 != 0,
+            extra_headers,
         })
     }
 }
@@ -86,6 +98,10 @@ impl SqliteLlmProviderRepository {
 impl LlmProviderRepository for SqliteLlmProviderRepository {
     async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError> {
         let encrypted_secret = self.cipher.encrypt(record.api_key.expose_secret())?;
+        let extra_headers_json =
+            serde_json::to_string(&record.extra_headers).map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to serialize extra_headers: {e}"),
+            })?;
         let mut transaction = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
@@ -101,8 +117,8 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         }
 
         sqlx::query(
-            "insert into llm_providers (id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "insert into llm_providers (id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              on conflict(id) do update set
                  kind = excluded.kind,
                  display_name = excluded.display_name,
@@ -111,6 +127,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                  encrypted_api_key = excluded.encrypted_api_key,
                  api_key_nonce = excluded.api_key_nonce,
                  is_default = excluded.is_default,
+                 extra_headers = excluded.extra_headers,
                  updated_at = CURRENT_TIMESTAMP",
         )
         .bind(record.id.as_ref())
@@ -121,6 +138,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         .bind(encrypted_secret.ciphertext)
         .bind(encrypted_secret.nonce)
         .bind(i64::from(record.is_default))
+        .bind(&extra_headers_json)
         .execute(&mut *transaction)
         .await
         .map_err(|e| DbError::QueryFailed {
@@ -186,7 +204,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default
+            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
              where id = ?1",
         )
@@ -203,7 +221,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError> {
         let rows = sqlx::query(
-            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default
+            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
              order by display_name asc",
         )
@@ -220,7 +238,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default
+            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
              where is_default = 1
              limit 1",

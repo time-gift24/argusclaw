@@ -1,12 +1,12 @@
 // crates/claw/src/api/mod.rs
-pub mod types;
-pub mod query;
 pub mod mutation;
+pub mod query;
+pub mod types;
 
-use async_graphql::Schema;
-use query::QueryRoot;
-use mutation::MutationRoot;
 use crate::workflow::WorkflowRepository;
+use async_graphql::Schema;
+use mutation::MutationRoot;
+use query::QueryRoot;
 
 pub type WorkflowSchema = Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>;
 

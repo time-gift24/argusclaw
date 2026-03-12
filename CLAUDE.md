@@ -3,14 +3,15 @@
 ## 构建与测试
 
 ```bash
-cargo fmt                                                    # 格式化
-cargo clippy --all --benches --tests --examples --all-features  # 检查 (零警告)
-cargo test                                                   # 单元测试
-cargo test --features integration                            # + Sqlite 测试
+prek                                           # 静态检查基线
+                                               # - git commit 时会自动运行检查，禁止跳过
+                                               # - fmt 问题会自动修复，无需改动再次提交
+                                               # - clippy 相关问题务必做修复
+cargo deny check                               # 发起 PR 前使用，检测下静态基线
 RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 ```
 
-## 设计原则(非常重要)
+## 设计与检视原则(非常重要)
 - YAGNI（You Ain't Gonna Need It，你不会需要它）
 - KISS (Keep It Simple and Stupid，尽可能保持简单)
 - DRY (Don't Repeat Yourself, 禁止重复你自身)
@@ -35,6 +36,9 @@ RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
 所有 I/O 使用 tokio 异步。使用 Arc<T> 共享状态，RwLock 并发访问。
 
 ## 项目结构
+
+cli 和 desktop 都依赖同一个 claw 启动项 AppContext，及 cli 和 desktop 只能看到 AppContext 一个结构体 (极其重要)
+
 
 ```text
 crates/
@@ -101,6 +105,13 @@ crates/
 ## 数据库
 
 - 默认 `DATABASE_URL` 为 `~/.argusclaw/sqlite.db`
+- 使用 `sqlx::migrate!()` 宏，迁移在**编译时嵌入**到二进制文件中
+
+### 迁移规范
+
+- 文件位于 `crates/claw/migrations/` 目录
+- **使用 sqlx-cli 创建迁移**：`sqlx migrate add <name>`（在 `crates/claw` 目录下执行）
+- **并发开发注意**：多个 feature 分支并发开发时，rebase origin/main 后必须检查迁移文件时间戳顺序，必要时重新命名以保障时序正确
 
 ## 工具模块
 

@@ -131,11 +131,16 @@ impl LLMManager {
             LlmProviderKind::OpenAiCompatible => {
                 #[cfg(feature = "openai-compatible")]
                 {
-                    let config = crate::llm::providers::OpenAiCompatibleConfig::new(
+                    let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
                         record.base_url,
                         record.api_key.expose_secret().to_string(),
                         record.model,
                     );
+
+                    for (name, value) in &record.extra_headers {
+                        config = config.with_extra_header(name, value);
+                    }
+
                     let factory_config =
                         crate::llm::providers::OpenAiCompatibleFactoryConfig::new(config);
 

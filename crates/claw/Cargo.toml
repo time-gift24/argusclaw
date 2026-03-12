@@ -2,6 +2,8 @@
 name = "claw"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+
 
 [package.metadata.third_party.ironclaw_llm]
 source = "https://github.com/nearai/ironclaw"
@@ -20,7 +22,7 @@ dirs = "6"
 futures-core = "0.3"
 futures-util = "0.3"
 mac_address = "1.1"
-rand = "0.8"
+rand = "0.10.0"
 ring = "0.17"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +41,6 @@ dev = []
 openai-compatible = ["dep:eventsource-stream", "dep:reqwest"]
 
 [dev-dependencies]
-mockall = "0.13"
+mockall = "0.14"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
