@@ -1,7 +1,8 @@
-use std::env;
+//! Production CLI entry point (argusclaw).
+//!
+//! This binary is minimal - it only includes provider and thread commands.
 
-#[cfg(feature = "dev")]
-mod dev;
+use std::env;
 
 use anyhow::Result;
 use claw::AppContext;
@@ -11,18 +12,60 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> Result<()> {
     init_tracing();
 
-    let ctx = AppContext::init(resolve_database_target_for_startup()?).await?;
+    // Resolve database path for production CLI
+    let db_path = resolve_db_path(false);
+    let db_url = db_path_to_url(&db_path);
 
-    #[cfg(feature = "dev")]
-    if dev::try_run(ctx.clone()).await? {
-        return Ok(());
-    }
+    // Initialize app context
+    let ctx = AppContext::init(Some(db_url)).await?;
 
     let provider_count = ctx.llm_manager().list_providers().await?.len();
 
     tracing::info!(provider_count, "argusclaw initialized");
 
     Ok(())
+}
+
+/// Resolve database path based on CLI mode (production vs development).
+///
+/// # Production (argusclaw)
+/// - Default: `~/.argusclaw/sqlite.db`
+/// - Override: `ARGUSCLAW_DB` environment variable
+///
+/// # Development (argusclaw-dev)
+/// - Default: `./tmp/argusclaw-dev.db`
+/// - Override: `ARGUSCLAW_DEV_DB` environment variable
+fn resolve_db_path(is_dev: bool) -> std::path::PathBuf {
+    let (env_var, default_path) = if is_dev {
+        ("ARGUSCLAW_DEV_DB", {
+            let cwd = env::current_dir().expect("failed to resolve current working directory");
+            let tmp_dir = cwd.join("tmp");
+            std::fs::create_dir_all(&tmp_dir).expect("failed to create tmp directory");
+            tmp_dir.join("argusclaw-dev.db")
+        })
+    } else {
+        ("ARGUSCLAW_DB", {
+            let home = dirs::home_dir().expect("failed to resolve home directory");
+            let data_dir = home.join(".argusclaw");
+            std::fs::create_dir_all(&data_dir).expect("failed to create .argusclaw directory");
+            data_dir.join("sqlite.db")
+        })
+    };
+
+    if let Ok(value) = env::var(env_var) {
+        if let Some(stripped) = value.strip_prefix("sqlite:") {
+            std::path::PathBuf::from(stripped)
+        } else {
+            std::path::PathBuf::from(value)
+        }
+    } else {
+        default_path
+    }
+}
+
+/// Convert database path to connection URL format.
+fn db_path_to_url(path: &std::path::Path) -> String {
+    format!("sqlite:{}", path.display())
 }
 
 fn init_tracing() {
@@ -37,27 +80,4 @@ fn init_tracing() {
             .with_writer(std::io::stderr)
             .init();
     }
-}
-
-fn resolve_database_target_for_startup() -> Result<Option<String>> {
-    if let Ok(database_url) = env::var("DATABASE_URL") {
-        return Ok(Some(database_url));
-    }
-
-    #[cfg(feature = "dev")]
-    {
-        if let Some(first_arg) = env::args().nth(1)
-            && matches!(
-                first_arg.as_str(),
-                "provider" | "llm" | "turn" | "approval" | "workflow"
-            )
-        {
-            let tmp_dir = env::current_dir()?.join("tmp");
-            std::fs::create_dir_all(&tmp_dir)?;
-            let db_path = tmp_dir.join("cli-dev.sqlite");
-            return Ok(Some(db_path.display().to_string()));
-        }
-    }
-
-    Ok(None)
 }

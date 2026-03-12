@@ -46,13 +46,11 @@ impl LLMManager {
         self.build_provider(record)
     }
 
-    #[cfg(feature = "dev")]
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
         self.repository.upsert_provider(&record).await?;
         Ok(())
     }
 
-    #[cfg(feature = "dev")]
     pub async fn import_providers(
         &self,
         records: Vec<LlmProviderRecord>,
@@ -64,7 +62,6 @@ impl LLMManager {
         Ok(())
     }
 
-    #[cfg(feature = "dev")]
     pub async fn get_provider_record(
         &self,
         id: &LlmProviderId,
@@ -75,7 +72,6 @@ impl LLMManager {
             .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })
     }
 
-    #[cfg(feature = "dev")]
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
         self.repository
             .get_default_provider()
@@ -83,7 +79,6 @@ impl LLMManager {
             .ok_or(AgentError::DefaultProviderNotConfigured)
     }
 
-    #[cfg(feature = "dev")]
     pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), AgentError> {
         self.repository.set_default_provider(id).await?;
         Ok(())
