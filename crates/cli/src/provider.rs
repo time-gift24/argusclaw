@@ -3,15 +3,19 @@
 //! This module contains the provider management commands that are common
 //! to both the production and development CLI binaries.
 
-use std::collections::HashMap;
-use std::path::Path;
-
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 use claw::AppContext;
 use claw::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
+use std::collections::HashMap;
+
+#[cfg(feature = "dev")]
+use anyhow::Context;
+
+#[cfg(feature = "dev")]
+use std::path::Path;
 
 #[cfg(feature = "dev")]
 use crate::dev::config;
