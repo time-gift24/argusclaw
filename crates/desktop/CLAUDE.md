@@ -7,7 +7,7 @@
 - **构建工具**: Vite
 - **样式**: Tailwind CSS v4
 - **聊天 UI**: assistant-ui + 自定义 Markdown 渲染
-- **Markdown 渲染**: @assistant-ui/react-markdown + Shiki + KaTeX + Mermaid
+- **Markdown 渲染**: react-markdown + Shiki + KaTeX + Mermaid
 - **UI 组件**: shadcn (基于 class-variance-authority, clsx, tailwind-merge)
 - **桌面框架**: Tauri
 - **图标**: @hugeicons/react + @hugeicons/core-free-icons
@@ -26,7 +26,8 @@ pnpm tauri build  # Tauri 生产构建
 ### 基本用法
 
 ```tsx
-import { AssistantRuntimeProvider, Thread } from "@assistant-ui/react";
+import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { Thread } from "@assistant-ui/react-ui";
 import { useMockRuntime } from "@/hooks/useMockRuntime";
 
 export function ChatPage() {
@@ -61,10 +62,20 @@ export function ChatPage() {
 ```text
 crates/desktop/
 ├── src/
-│   ├── main.tsx        # 入口
-│   ├── App.tsx         # 根组件
-│   ├── index.css       # 全局样式 (含 Tailwind)
-│   └── vite-env.d.ts  # Vite 类型
+│   ├── main.tsx              # 入口
+│   ├── App.tsx               # 根组件
+│   ├── index.css             # 全局样式 (含 Tailwind)
+│   ├── vite-env.d.ts         # Vite 类型
+│   ├── hooks/
+│   │   └── useMockRuntime.ts # Mock runtime for assistant-ui
+│   └── components/
+│       └── chat/
+│           ├── ChatPage.tsx      # 聊天页面
+│           └── markdown/
+│               ├── index.ts      # 导出
+│               ├── MarkdownText.tsx  # Markdown 渲染器
+│               ├── CodeBlock.tsx     # Shiki 代码高亮
+│               └── MermaidBlock.tsx  # Mermaid 图表
 ├── src-tauri/          # Rust 后端
 ├── components.json     # shadcn 配置
 ├── vite.config.ts      # Vite 配置
