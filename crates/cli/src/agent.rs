@@ -11,8 +11,10 @@ use claw::AppContext;
 use claw::agents::compact::KeepRecentCompactor;
 use claw::agents::thread::{ThreadBuilder, ThreadConfig, ThreadEvent};
 use claw::db::llm::LlmProviderId;
-use claw::llm::{ChatMessage, Role};
+use claw::llm::ChatMessage;
 use tokio::io::AsyncBufReadExt;
+
+use super::{StreamRenderState, finish_stream_output, render_stream_event};
 
 /// Agent subcommands.
 #[derive(Debug, Subcommand)]
@@ -106,35 +108,36 @@ async fn run_chat(
                 // Send message
                 thread.send_message(input).await;
 
+                // Stream rendering state
+                let mut stream_state = StreamRenderState::default();
+                print!("Assistant: ");
+                io::stdout().flush()?;
+
                 // Process events until Idle
                 loop {
                     match event_rx.recv().await {
                         Ok(ThreadEvent::Processing { event, .. }) => {
-                            if verbose {
-                                println!("  [stream: {:?}]", event);
+                            // Render stream events in real-time
+                            if let Some(output) = render_stream_event(&mut stream_state, &event) {
+                                print!("{}", output);
+                                io::stdout().flush()?;
                             }
                         }
                         Ok(ThreadEvent::TurnCompleted { token_usage, .. }) => {
-                            // Find and print the last assistant message
-                            if let Some(content) = thread
-                                .messages
-                                .iter()
-                                .rev()
-                                .find(|m| m.role == Role::Assistant)
-                                .map(|m| m.content.clone())
-                            {
-                                println!("Assistant: {}", content);
+                            // Finish stream output with newline
+                            if let Some(suffix) = finish_stream_output(&stream_state) {
+                                print!("{}", suffix);
                             }
 
                             if verbose {
-                                println!(
+                                eprintln!(
                                     "  [tokens: {} in / {} out]",
                                     token_usage.input_tokens, token_usage.output_tokens
                                 );
                             }
                         }
                         Ok(ThreadEvent::TurnFailed { error, .. }) => {
-                            println!("Error: {}", error);
+                            eprintln!("Error: {}", error);
                         }
                         Ok(ThreadEvent::Idle { .. }) => {
                             // Turn finished, ready for next input
@@ -144,16 +147,16 @@ async fn run_chat(
                             new_token_count, ..
                         }) => {
                             if verbose {
-                                println!("  [compacted: new token count = {}]", new_token_count);
+                                eprintln!("  [compacted: new token count = {}]", new_token_count);
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            println!("Channel closed unexpectedly");
+                            eprintln!("Channel closed unexpectedly");
                             break;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             if verbose {
-                                println!("  [warning: {} events lagged]", n);
+                                eprintln!("  [warning: {} events lagged]", n);
                             }
                         }
                     }
