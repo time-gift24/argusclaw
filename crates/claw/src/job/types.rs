@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents::AgentId;
 use crate::agents::thread::ThreadId;
+use crate::agents::turn::TokenUsage;
 use crate::workflow::{JobId, WorkflowStatus};
 
 /// The kind of job: standalone one-off, part of a workflow, or recurring cron.
@@ -136,6 +137,30 @@ impl From<JobStatus> for WorkflowStatus {
             JobStatus::TimedOut => Self::Failed, // TimedOut maps to Failed
         }
     }
+}
+
+/// Request to execute a job via JobBackend.
+#[derive(Debug, Clone)]
+pub struct JobRequest {
+    /// Agent template to use.
+    pub agent_id: AgentId,
+    /// The task prompt for the agent.
+    pub prompt: String,
+    /// Optional context information.
+    pub context: Option<String>,
+    /// Timeout in seconds.
+    pub timeout_secs: u64,
+    /// Which backend to use.
+    pub backend: JobBackendKind,
+}
+
+/// Result from a completed job.
+#[derive(Debug, Clone)]
+pub struct JobResult {
+    /// Summary from the subagent (self-summarized, bounded size).
+    pub summary: String,
+    /// Token usage statistics.
+    pub token_usage: TokenUsage,
 }
 
 /// Full job record stored in database.
@@ -290,5 +315,48 @@ mod tests {
         assert_eq!(record.prompt, "do something");
         assert!(record.depends_on.is_empty());
         assert!(record.thread_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod job_request_result_tests {
+    use super::*;
+
+    #[test]
+    fn job_request_new() {
+        let req = JobRequest {
+            agent_id: AgentId::new("test-agent"),
+            prompt: "Do something".to_string(),
+            context: Some("background info".to_string()),
+            timeout_secs: 300,
+            backend: JobBackendKind::InMemory,
+        };
+        assert_eq!(req.agent_id.as_ref(), "test-agent");
+        assert_eq!(req.prompt, "Do something");
+        assert_eq!(req.context, Some("background info".to_string()));
+        assert_eq!(req.timeout_secs, 300);
+        assert_eq!(req.backend, JobBackendKind::InMemory);
+    }
+
+    #[test]
+    fn job_result_new() {
+        let result = JobResult {
+            summary: "Task completed".to_string(),
+            token_usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+            },
+        };
+        assert_eq!(result.summary, "Task completed");
+        assert_eq!(result.token_usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn token_usage_default() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
     }
 }
