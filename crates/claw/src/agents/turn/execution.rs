@@ -261,6 +261,8 @@ async fn execute_single_tool(
     thread_id: Option<crate::agents::thread::ThreadId>,
     turn_number: u32,
 ) -> ToolExecutionResult {
+    use crate::agents::thread::ThreadEvent;
+
     let tool_call_id = tool_call.id.clone();
     let tool_name = tool_call.name.clone();
     let tool_input = tool_call.arguments.clone();
@@ -306,6 +308,19 @@ async fn execute_single_tool(
         }
     }
 
+    // Send ToolStarted event
+    if let Some(ref sender) = thread_event_sender
+        && let Some(tid) = thread_id
+    {
+        let _ = sender.send(ThreadEvent::ToolStarted {
+            thread_id: tid,
+            turn_number,
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            arguments: tool_input.clone(),
+        });
+    }
+
     // Execute the tool with timeout
     let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
     let execute_future = tool_manager.execute(&tool_name, tool_input.clone());
@@ -318,6 +333,23 @@ async fn execute_single_tool(
             tool_timeout_secs
         )),
     };
+
+    // Send ToolCompleted event
+    if let Some(ref sender) = thread_event_sender
+        && let Some(tid) = thread_id
+    {
+        let event_result = match &result {
+            Ok(value) => Ok(value.clone()),
+            Err(e) => Err(e.clone()),
+        };
+        let _ = sender.send(ThreadEvent::ToolCompleted {
+            thread_id: tid,
+            turn_number,
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            result: event_result,
+        });
+    }
 
     // Fire AfterToolCall hook
     if let Some(registry) = hooks {

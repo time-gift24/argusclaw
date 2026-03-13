@@ -67,6 +67,22 @@ pub enum ThreadEvent {
         turn_number: u32,
         event: LlmStreamEvent,
     },
+    /// Tool execution started.
+    ToolStarted {
+        thread_id: ThreadId,
+        turn_number: u32,
+        tool_call_id: String,
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
+    /// Tool execution completed.
+    ToolCompleted {
+        thread_id: ThreadId,
+        turn_number: u32,
+        tool_call_id: String,
+        tool_name: String,
+        result: Result<serde_json::Value, String>,
+    },
     /// Turn completed successfully.
     TurnCompleted {
         thread_id: ThreadId,
