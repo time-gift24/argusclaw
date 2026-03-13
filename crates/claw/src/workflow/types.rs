@@ -3,7 +3,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::agents::AgentId;
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a workflow.
@@ -40,47 +39,6 @@ impl fmt::Display for WorkflowId {
 /// This implementation is intentionally infallible to match the behavior of `WorkflowId::new()`.
 /// If validation is needed in the future, use `WorkflowId::try_from_str()` instead.
 impl FromStr for WorkflowId {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::new(s))
-    }
-}
-
-/// Unique identifier for a workflow stage.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StageId(String);
-
-impl StageId {
-    /// Creates a new stage ID.
-    ///
-    /// # Panics
-    /// Panics in debug mode if `id` is empty.
-    #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        debug_assert!(!id.is_empty(), "StageId cannot be empty");
-        Self(id)
-    }
-}
-
-impl AsRef<str> for StageId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for StageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_ref())
-    }
-}
-
-/// Parses a stage ID from a string.
-///
-/// This implementation is intentionally infallible to match the behavior of `StageId::new()`.
-/// If validation is needed in the future, use `StageId::try_from_str()` instead.
-impl FromStr for StageId {
     type Err = std::convert::Infallible;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -213,58 +171,6 @@ impl WorkflowRecord {
     }
 }
 
-/// Stage record stored in database.
-pub struct StageRecord {
-    pub id: StageId,
-    pub workflow_id: WorkflowId,
-    pub name: String,
-    pub sequence: i32,
-    pub status: WorkflowStatus,
-}
-
-#[cfg(test)]
-impl StageRecord {
-    /// Creates a test stage record.
-    #[must_use]
-    pub fn for_test(id: &str, workflow_id: &str, name: &str, sequence: i32) -> Self {
-        Self {
-            id: StageId::new(id),
-            workflow_id: WorkflowId::new(workflow_id),
-            name: name.to_string(),
-            sequence,
-            status: WorkflowStatus::Pending,
-        }
-    }
-}
-
-/// Job record stored in database.
-pub struct JobRecord {
-    pub id: JobId,
-    pub stage_id: StageId,
-    pub agent_id: AgentId,
-    pub name: String,
-    pub status: WorkflowStatus,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-}
-
-#[cfg(test)]
-impl JobRecord {
-    /// Creates a test job record.
-    #[must_use]
-    pub fn for_test(id: &str, stage_id: &str, agent_id: &str, name: &str) -> Self {
-        Self {
-            id: JobId::new(id),
-            stage_id: StageId::new(stage_id),
-            agent_id: AgentId::new(agent_id),
-            name: name.to_string(),
-            status: WorkflowStatus::Pending,
-            started_at: None,
-            finished_at: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,12 +179,6 @@ mod tests {
     fn workflow_id_from_str() {
         let id = WorkflowId::from_str("workflow-123").unwrap();
         assert_eq!(id.as_ref(), "workflow-123");
-    }
-
-    #[test]
-    fn stage_id_display() {
-        let id = StageId::new("stage-abc");
-        assert_eq!(id.to_string(), "stage-abc");
     }
 
     #[test]

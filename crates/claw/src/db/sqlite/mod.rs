@@ -1,6 +1,7 @@
 mod agent;
 #[cfg(feature = "dev")]
 mod approval;
+mod job;
 mod llm;
 mod thread;
 
@@ -15,6 +16,7 @@ use crate::db::DbError;
 pub use agent::SqliteAgentRepository;
 #[cfg(feature = "dev")]
 pub use approval::SqliteApprovalRepository;
+pub use job::SqliteJobRepository;
 pub use llm::SqliteLlmProviderRepository;
 pub use thread::SqliteThreadRepository;
 
