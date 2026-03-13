@@ -7,9 +7,9 @@ use clap::Subcommand;
 use claw::AppContext;
 use claw::agents::AgentId;
 use claw::db::SqliteWorkflowRepository;
+use claw::job::{JobRecord, JobRepository, JobType};
 use claw::workflow::{
-    JobId, JobRecord, StageId, StageRecord, WorkflowId, WorkflowRecord, WorkflowRepository,
-    WorkflowStatus,
+    JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus,
 };
 use owo_colors::OwoColorize;
 
@@ -23,7 +23,7 @@ pub enum WorkflowCommand {
     },
     /// 列出所有工作流。
     List,
-    /// 显示工作流详情（包含阶段和任务）。
+    /// 显示工作流详情（包含任务）。
     Show {
         /// 工作流 ID。
         id: String,
@@ -33,26 +33,25 @@ pub enum WorkflowCommand {
         /// 工作流 ID。
         id: String,
     },
-    /// 向工作流添加阶段。
-    AddStage {
-        /// 工作流 ID。
+    /// 向工作流添加任务。
+    AddJob {
+        /// 工作流 ID (作为 group_id)。
         #[arg(long)]
         workflow: String,
-        /// 阶段名称。
-        name: String,
-        /// 阶段序号（顺序）。
-        sequence: i32,
-    },
-    /// 向阶段添加任务。
-    AddJob {
-        /// 阶段 ID。
-        #[arg(long)]
-        stage: String,
         /// Agent ID。
         #[arg(long)]
         agent: String,
         /// 任务名称。
         name: String,
+        /// 任务描述/提示词。
+        #[arg(long)]
+        prompt: String,
+        /// 上下文（可选）。
+        #[arg(long)]
+        context: Option<String>,
+        /// 依赖的其他任务 ID（可选，多个用逗号分隔）。
+        #[arg(long)]
+        depends_on: Option<String>,
     },
     /// 更新任务状态。
     JobStatus {
@@ -95,7 +94,7 @@ fn resolve_workflow_dev_database_url(
 }
 
 /// Create dev workflow repository.
-async fn create_dev_workflow_repository() -> Result<(SqliteWorkflowRepository, String)> {
+async fn create_dev_workflow_repositories() -> Result<(SqliteWorkflowRepository, Box<dyn JobRepository>, String)> {
     let env_database_url = std::env::var("WORKFLOW_DATABASE_URL").ok();
     let database_url = resolve_workflow_dev_database_url(env_database_url.as_deref(), None)?;
     let pool = claw::db::sqlite::connect(&database_url)
@@ -114,7 +113,10 @@ async fn create_dev_workflow_repository() -> Result<(SqliteWorkflowRepository, S
         )
     })?;
 
-    Ok((SqliteWorkflowRepository::new(pool), database_url))
+    let workflow_repo = SqliteWorkflowRepository::new(pool.clone());
+    let job_repo: Box<dyn JobRepository> = Box::new(claw::db::SqliteJobRepository::new(pool));
+
+    Ok((workflow_repo, job_repo, database_url))
 }
 
 /// Format workflow status with Unicode symbol and color.
@@ -129,10 +131,8 @@ fn format_workflow_status(status: WorkflowStatus) -> String {
 }
 
 /// Run a workflow command.
-///
-/// This function tests the workflow module functionality independently.
 pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Result<()> {
-    let (repo, database_url) = create_dev_workflow_repository().await?;
+    let (workflow_repo, job_repo, database_url) = create_dev_workflow_repositories().await?;
 
     match command {
         WorkflowCommand::Create { name } => {
@@ -143,7 +143,7 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
                 status: WorkflowStatus::Pending,
             };
 
-            repo.create_workflow(&workflow).await?;
+            workflow_repo.create_workflow(&workflow).await?;
 
             println!("Workflow created:");
             println!();
@@ -154,7 +154,7 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
         }
 
         WorkflowCommand::List => {
-            let workflows = repo.list_workflows().await?;
+            let workflows = workflow_repo.list_workflows().await?;
             if workflows.is_empty() {
                 println!("No workflows found.");
             } else {
@@ -170,7 +170,7 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
 
         WorkflowCommand::Show { id } => {
             let workflow_id = WorkflowId::new(id.clone());
-            let workflow = repo.get_workflow(&workflow_id).await?;
+            let workflow = workflow_repo.get_workflow(&workflow_id).await?;
 
             match workflow {
                 Some(wf) => {
@@ -181,26 +181,12 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
                     println!("  Status: {}", wf.status);
                     println!();
 
-                    // Show stages
-                    let stages = repo.list_stages_by_workflow(&wf.id).await?;
-                    if !stages.is_empty() {
-                        println!("  Stages:");
-                        for stage in stages {
-                            println!("    [{}] {} ({})", stage.sequence, stage.id, stage.name);
-                            println!("      Status: {}", stage.status);
-
-                            // Show jobs for this stage
-                            let jobs = repo.list_jobs_by_stage(&stage.id).await?;
-                            if !jobs.is_empty() {
-                                println!("      Jobs:");
-                                for job in jobs {
-                                    println!(
-                                        "        - {} (Agent: {}, Status: {})",
-                                        job.name, job.agent_id, job.status
-                                    );
-                                }
-                            }
-                            println!();
+                    // Show jobs for this workflow (group)
+                    let jobs = job_repo.list_by_group(&id).await?;
+                    if !jobs.is_empty() {
+                        println!("  Jobs:");
+                        for job in jobs {
+                            println!("    - {} (Agent: {}, Status: {})", job.name, job.agent_id, job.status);
                         }
                     }
                 }
@@ -212,7 +198,7 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
 
         WorkflowCommand::Delete { id } => {
             let workflow_id = WorkflowId::new(id.clone());
-            let deleted = repo.delete_workflow(&workflow_id).await?;
+            let deleted = workflow_repo.delete_workflow(&workflow_id).await?;
 
             if deleted {
                 println!("Workflow {} deleted.", id);
@@ -221,66 +207,57 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
             }
         }
 
-        WorkflowCommand::AddStage {
+        WorkflowCommand::AddJob {
             workflow,
+            agent,
             name,
-            sequence,
+            prompt,
+            context,
+            depends_on,
         } => {
             let workflow_id = WorkflowId::new(workflow.clone());
-            let wf_record = repo.get_workflow(&workflow_id).await?;
-
-            match wf_record {
-                Some(_) => {
-                    let stage_id = StageId::new(uuid::Uuid::new_v4().to_string());
-                    let stage = StageRecord {
-                        id: stage_id.clone(),
-                        workflow_id,
-                        name: name.clone(),
-                        sequence,
-                        status: WorkflowStatus::Pending,
-                    };
-
-                    repo.create_stage(&stage).await?;
-
-                    println!("Stage added:");
-                    println!();
-                    println!("  ID:        {}", stage_id);
-                    println!("  Workflow:  {}", workflow);
-                    println!("  Name:      {}", name);
-                    println!("  Sequence:  {}", sequence);
-                }
-                None => {
-                    return Err(anyhow!("Workflow not found: {}", workflow));
-                }
-            }
-        }
-
-        WorkflowCommand::AddJob { stage, agent, name } => {
-            let stage_id = StageId::new(stage.clone());
-            let agent_id = AgentId::new(agent.clone());
-
-            // Verify stage exists by trying to list jobs (empty list is ok)
-            let _jobs = repo.list_jobs_by_stage(&stage_id).await?;
+            // Verify workflow exists
+            let _wf = workflow_repo.get_workflow(&workflow_id).await?
+                .ok_or_else(|| anyhow!("Workflow not found: {}", workflow))?;
 
             let job_id = JobId::new(uuid::Uuid::new_v4().to_string());
+            let agent_id = AgentId::new(agent.clone());
+
+            // Parse depends_on
+            let depends_on_ids: Vec<JobId> = depends_on
+                .map(|s| {
+                    s.split(',')
+                        .map(|id| JobId::new(id.trim()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             let job = JobRecord {
                 id: job_id.clone(),
-                stage_id: stage_id.clone(),
-                agent_id,
+                job_type: JobType::Workflow,
                 name: name.clone(),
                 status: WorkflowStatus::Pending,
+                agent_id,
+                context,
+                prompt: prompt.clone(),
+                thread_id: None,
+                group_id: Some(workflow.clone()),
+                depends_on: depends_on_ids,
+                cron_expr: None,
+                scheduled_at: None,
                 started_at: None,
                 finished_at: None,
             };
 
-            repo.create_job(&job).await?;
+            job_repo.create(&job).await?;
 
             println!("Job added:");
             println!();
             println!("  ID:      {}", job_id);
-            println!("  Stage:   {}", stage);
+            println!("  Workflow: {}", workflow);
             println!("  Agent:   {}", agent);
             println!("  Name:    {}", name);
+            println!("  Prompt:  {}", prompt);
         }
 
         WorkflowCommand::JobStatus { id, status } => {
@@ -288,57 +265,44 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
             let new_status =
                 WorkflowStatus::parse_str(&status).map_err(|e| anyhow!("Invalid status: {}", e))?;
 
-            repo.update_job_status(&job_id, new_status, None, None)
-                .await?;
+            job_repo.update_status(&job_id, new_status, None, None).await?;
 
             println!("Job {} status updated to {}", id, new_status);
         }
 
         WorkflowCommand::Status { id } => {
             let workflow_id = WorkflowId::new(id.clone());
-            let workflow = repo.get_workflow(&workflow_id).await?;
+            let workflow = workflow_repo.get_workflow(&workflow_id).await?;
 
             match workflow {
                 Some(wf) => {
                     // Print workflow name and status: "name (status)"
                     println!("{} ({})", wf.name, format_workflow_status(wf.status));
 
-                    let stages = repo.list_stages_by_workflow(&wf.id).await?;
-                    if stages.is_empty() {
-                        println!("  (no stages)");
+                    let jobs = job_repo.list_by_group(&id).await?;
+                    if jobs.is_empty() {
+                        println!("  (no jobs)");
                     } else {
-                        for (stage_idx, stage) in stages.iter().enumerate() {
-                            let is_last_stage = stage_idx == stages.len() - 1;
+                        for (job_idx, job) in jobs.iter().enumerate() {
+                            let is_last_job = job_idx == jobs.len() - 1;
+                            let job_branch = if is_last_job { "└─ " } else { "├─ " };
 
-                            // Stage line: use ├─ for non-last, └─ for last
-                            let stage_branch = if is_last_stage { "└─ " } else { "├─ " };
+                            // Show dependency indicator if any
+                            let dep_str = if job.depends_on.is_empty() {
+                                String::new()
+                            } else {
+                                let dep_ids: Vec<&str> = job.depends_on.iter().map(AsRef::as_ref).collect();
+                                format!(" (deps: {})", dep_ids.join(", "))
+                            };
+
                             println!(
-                                "{}{} ({})",
-                                stage_branch,
-                                stage.name,
-                                format_workflow_status(stage.status)
+                                "{}{} ({}){} {}",
+                                "  ",
+                                job_branch,
+                                job.name,
+                                dep_str,
+                                format_workflow_status(job.status)
                             );
-
-                            // Jobs under this stage
-                            let jobs = repo.list_jobs_by_stage(&stage.id).await?;
-                            for (job_idx, job) in jobs.iter().enumerate() {
-                                let is_last_job = job_idx == jobs.len() - 1;
-
-                                // Prefix: │  for non-last stages,    for last stage
-                                let stage_prefix = if is_last_stage { "   " } else { "│  " };
-
-                                // Branch: ├─ for non-last jobs, └─ for last job
-                                let job_branch = if is_last_job { "└─ " } else { "├─ " };
-
-                                println!(
-                                    "{}{}{} ({}) {}",
-                                    stage_prefix,
-                                    job_branch,
-                                    job.name,
-                                    job.agent_id.as_ref().dimmed(),
-                                    format_workflow_status(job.status)
-                                );
-                            }
                         }
                     }
 
@@ -375,49 +339,35 @@ mod tests {
     }
 
     #[test]
-    fn parses_workflow_add_stage_command() {
-        let cli = DevCli::parse_from([
-            "cli",
-            "workflow",
-            "add-stage",
-            "--workflow",
-            "wf-123",
-            "stage-1",
-            "10",
-        ]);
-
-        match cli.command {
-            DevCommand::Workflow(WorkflowCommand::AddStage {
-                workflow,
-                name,
-                sequence,
-            }) => {
-                assert_eq!(workflow, "wf-123");
-                assert_eq!(name, "stage-1");
-                assert_eq!(sequence, 10);
-            }
-            _ => panic!("workflow add-stage command should parse"),
-        }
-    }
-
-    #[test]
     fn parses_workflow_add_job_command() {
         let cli = DevCli::parse_from([
             "cli",
             "workflow",
             "add-job",
-            "--stage",
-            "stage-456",
+            "--workflow",
+            "wf-123",
             "--agent",
-            "agent-789",
-            "job-1",
+            "agent-456",
+            "--prompt",
+            "do something",
+            "my-job",
         ]);
 
         match cli.command {
-            DevCommand::Workflow(WorkflowCommand::AddJob { stage, agent, name }) => {
-                assert_eq!(stage, "stage-456");
-                assert_eq!(agent, "agent-789");
-                assert_eq!(name, "job-1");
+            DevCommand::Workflow(WorkflowCommand::AddJob {
+                workflow,
+                agent,
+                name,
+                prompt,
+                context,
+                depends_on,
+            }) => {
+                assert_eq!(workflow, "wf-123");
+                assert_eq!(agent, "agent-456");
+                assert_eq!(name, "my-job");
+                assert_eq!(prompt, "do something");
+                assert!(context.is_none());
+                assert!(depends_on.is_none());
             }
             _ => panic!("workflow add-job command should parse"),
         }
@@ -443,13 +393,13 @@ mod tests {
             "job-status",
             "--id",
             "job-xyz",
-            "in_progress",
+            "succeeded",
         ]);
 
         match cli.command {
             DevCommand::Workflow(WorkflowCommand::JobStatus { id, status }) => {
                 assert_eq!(id, "job-xyz");
-                assert_eq!(status, "in_progress");
+                assert_eq!(status, "succeeded");
             }
             _ => panic!("workflow job-status command should parse"),
         }

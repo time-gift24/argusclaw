@@ -81,9 +81,19 @@ crates/
 │   │   │       └── openai_compatible.rs # OpenAI 兼容提供商工厂和实现
 │   │   ├── tool/                     # Agent/LLM 工具注册表
 │   │   │   └── mod.rs                # NamedTool trait、ToolManager、ToolError
-│   │   ├── workflow/                 # Workflow 领域模型
+│   │   ├── job/                      # Job 调度领域模型
 │   │   │   ├── mod.rs                # 模块入口
-│   │   │   ├── types.rs              # WorkflowId, StageId, JobId, WorkflowStatus
+│   │   │   ├── types.rs              # JobId, JobType, JobRecord
+│   │   │   ├── error.rs              # JobError
+│   │   │   └── repository.rs         # JobRepository trait
+│   │   ├── scheduler/                 # Scheduler 运行时
+│   │   │   ├── mod.rs                # 模块入口
+│   │   │   ├── config.rs             # SchedulerConfig
+│   │   │   ├── error.rs              # SchedulerError
+│   │   │   └── scheduler.rs          # Scheduler 核心实现
+│   │   ├── workflow/                 # Workflow 领域模型（轻量分组）
+│   │   │   ├── mod.rs                # 模块入口
+│   │   │   ├── types.rs              # WorkflowId, JobId, WorkflowStatus
 │   │   │   └── repository.rs         # WorkflowRepository trait
 │   │   └── api/                      # GraphQL API 层
 │   │       ├── mod.rs                # Schema 构建器
@@ -141,15 +151,29 @@ crates/
 
 ## Workflow 模块
 
-- 领域模型：Workflow → Stage → Job 三层结构，状态为 WorkflowStatus
-- `WorkflowRepository` trait：定义 CRUD 操作
-- 状态：Pending、Running、Completed、Failed
+- 领域模型：Workflow 作为轻量分组，Job 通过 depends_on 表达依赖关系
+- `WorkflowRepository` trait：定义 Workflow CRUD 操作
+- 状态：Pending、Running、Succeeded、Failed、Cancelled
+
+## Job 模块
+
+- 通用 Job 模型：standalone（独立）、workflow（流水线）、cron（定时）
+- `JobRepository` trait：定义 Job CRUD 操作
+- `JobType` 枚举：Standalone、Workflow、Cron
+- `depends_on`：JSON 数组存储 Job 依赖关系
+
+## Scheduler 模块
+
+- 轮询模式调度：固定间隔检查 pending jobs
+- 依赖检查：确保 depends_on 全部 succeeded 才调度
+- Cron 支持：定时创建 standalone job
+- 并发控制：max_concurrent_jobs 限制
 
 ## API 模块
 
 - 使用 async-graphql 实现 GraphQL schema
 - Query：workflow、workflows
-- Mutation：create_workflow、add_stage、add_job、update_job_status
+- Mutation：create_workflow、add_job、update_job_status
 - 通过 Tauri Commands 暴露给前端
 
 ## Thread 模块
