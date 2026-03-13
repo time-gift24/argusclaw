@@ -1,7 +1,6 @@
 import { BellIcon, MenuIcon } from 'lucide-react'
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
-import { Button } from '@/components/ui/button'
 import {
   NavigationMenu,
   NavigationMenuItem,
@@ -66,8 +65,8 @@ const Navbar = ({ navigationData }: { navigationData: NavigationItem }) => {
                   <AvatarFallback>JD</AvatarFallback>
                 </Avatar>
                 <div className='hidden flex-col items-start gap-0.5 lg:flex'>
-                  <span className='text-lg font-semibold'>John Doe</span>
-                  <span className='text-muted-foreground text-sm font-normal'>UI/UX Designer</span>
+                  <span className='text-sm font-semibold'> 用户 </span>
+                  <span className='text-muted-foreground text-xs font-normal'>UI/UX Designer</span>
                 </div>
               </span>
             }

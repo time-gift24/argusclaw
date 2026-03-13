@@ -1,3 +1,5 @@
+'use client'
+
 // SVG Imports
 import LogoSvg from '@/assets/svg/logo'
 
