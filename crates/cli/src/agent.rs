@@ -3,6 +3,7 @@
 //! This is a production command, not behind the `dev` feature.
 
 use std::io::{self, Write};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
@@ -10,8 +11,11 @@ use clap::Subcommand;
 use claw::AppContext;
 use claw::agents::compact::KeepRecentCompactor;
 use claw::agents::thread::{ThreadBuilder, ThreadConfig, ThreadEvent};
+use claw::approval::{ApprovalDecision, ApprovalHook, ApprovalManager, ApprovalPolicy};
 use claw::db::llm::LlmProviderId;
 use claw::llm::ChatMessage;
+use claw::protocol::{HookEvent, HookRegistry};
+use claw::tool::{GlobTool, GrepTool, ReadTool, ShellTool};
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -32,6 +36,14 @@ pub enum AgentCommand {
         /// Enable verbose output (shows token usage).
         #[arg(short, long)]
         verbose: bool,
+
+        /// Tools that require approval (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        approval_tools: Vec<String>,
+
+        /// Auto-approve all tool calls (skip approval prompts).
+        #[arg(long)]
+        auto_approve: bool,
     },
 }
 
@@ -42,7 +54,19 @@ pub async fn run_agent_command(ctx: AppContext, command: AgentCommand) -> Result
             provider,
             system_prompt,
             verbose,
-        } => run_chat(ctx, provider, system_prompt, verbose).await,
+            approval_tools,
+            auto_approve,
+        } => {
+            run_chat(
+                ctx,
+                provider,
+                system_prompt,
+                verbose,
+                approval_tools,
+                auto_approve,
+            )
+            .await
+        }
     }
 }
 
@@ -51,6 +75,8 @@ async fn run_chat(
     provider: Option<String>,
     system_prompt: String,
     verbose: bool,
+    approval_tools: Vec<String>,
+    auto_approve: bool,
 ) -> Result<()> {
     // Get provider
     let llm_provider = if let Some(id) = provider {
@@ -67,13 +93,46 @@ async fn run_chat(
             })?
     };
 
+    // Setup approval system if needed
+    let has_approval_tools = !approval_tools.is_empty();
+    let approval_manager = if has_approval_tools {
+        // Create policy with specified tools requiring approval
+        let policy = ApprovalPolicy {
+            require_approval: approval_tools.clone(),
+            timeout_secs: 60,
+            auto_approve: false,
+            auto_approve_autonomous: auto_approve,
+        };
+        Some(Arc::new(ApprovalManager::new(policy.clone())))
+    } else {
+        None
+    };
+
+    // Create hook registry
+    let hooks = Arc::new(HookRegistry::new());
+
+    // Register approval hook if needed
+    if let Some(manager) = &approval_manager {
+        let policy = manager.policy();
+        let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), "cli-agent");
+        hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
+    }
+
+    // Register default tools
+    let tool_manager = ctx.tool_manager();
+    tool_manager.register(Arc::new(ShellTool::new()));
+    tool_manager.register(Arc::new(ReadTool::new()));
+    tool_manager.register(Arc::new(GrepTool::new()));
+    tool_manager.register(Arc::new(GlobTool::new()));
+
     // Create Thread
-    let compactor = std::sync::Arc::new(KeepRecentCompactor::with_defaults());
+    let compactor = Arc::new(KeepRecentCompactor::with_defaults());
     let mut thread = ThreadBuilder::new()
         .provider(llm_provider)
-        .tool_manager(ctx.tool_manager())
+        .tool_manager(Arc::clone(&tool_manager))
         .compactor(compactor)
         .config(ThreadConfig::default())
+        .hooks(hooks)
         .build();
 
     // Add system prompt
@@ -88,6 +147,13 @@ async fn run_chat(
     println!("{}", "─".repeat(50));
     println!("Interactive Agent Chat");
     println!("Type 'quit' or 'exit' to leave.");
+    println!("Available tools: {}", tool_manager.list_ids().join(", "));
+    if has_approval_tools {
+        println!("Approval required for: {}", approval_tools.join(", "));
+        if auto_approve {
+            println!("Auto-approve mode: ON");
+        }
+    }
     println!("{}", "─".repeat(50));
 
     // Interactive loop
@@ -148,6 +214,80 @@ async fn run_chat(
                         }) => {
                             if verbose {
                                 eprintln!("  [compacted: new token count = {}]", new_token_count);
+                            }
+                        }
+                        Ok(ThreadEvent::WaitingForApproval { request, .. }) => {
+                            eprintln!(
+                                "\n⏳ Waiting for approval: {} ({})",
+                                request.tool_name, request.action
+                            );
+                            eprintln!("   Risk level: {:?}", request.risk_level);
+                            eprintln!("   Timeout: {}s", request.timeout_secs);
+
+                            // If auto_approve is set, automatically approve
+                            if auto_approve {
+                                eprintln!("   ⚡ Auto-approving...");
+                                if let Some(manager) = &approval_manager {
+                                    let request_id = request.id;
+                                    let manager_clone = Arc::clone(manager);
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(100))
+                                            .await;
+                                        let _ = manager_clone.resolve(
+                                            request_id,
+                                            ApprovalDecision::Approved,
+                                            Some("auto-approve".to_string()),
+                                        );
+                                    });
+                                }
+                            } else {
+                                // Prompt user for approval
+                                eprint!("   Approve? [y/n/timeout] (default: y): ");
+                                io::stderr().flush()?;
+
+                                let mut response = String::new();
+                                match io::stdin().read_line(&mut response) {
+                                    Ok(_) => {
+                                        let response = response.trim().to_lowercase();
+                                        let decision = match response.as_str() {
+                                            "n" | "no" | "deny" => ApprovalDecision::Denied,
+                                            "t" | "timeout" => ApprovalDecision::TimedOut,
+                                            _ => ApprovalDecision::Approved, // default to approved
+                                        };
+
+                                        // Resolve the approval
+                                        if let Some(manager) = &approval_manager {
+                                            let _ = manager.resolve(
+                                                request.id,
+                                                decision,
+                                                Some("cli-user".to_string()),
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("   Failed to read input: {}. Denying...", e);
+                                        if let Some(manager) = &approval_manager {
+                                            let _ = manager.resolve(
+                                                request.id,
+                                                ApprovalDecision::Denied,
+                                                Some("cli-error".to_string()),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(ThreadEvent::ApprovalResolved { response, .. }) => {
+                            match response.decision {
+                                ApprovalDecision::Approved => {
+                                    eprintln!("✅ Approval: APPROVED");
+                                }
+                                ApprovalDecision::Denied => {
+                                    eprintln!("❌ Approval: DENIED");
+                                }
+                                ApprovalDecision::TimedOut => {
+                                    eprintln!("⏰ Approval: TIMED OUT");
+                                }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {

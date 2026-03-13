@@ -193,3 +193,33 @@ crates/
 - `subscribe()`：订阅 Thread 事件（CLI、Tauri）
 - `ThreadRepository` trait：持久化抽象（upsert_thread、get_messages、delete_messages_before 等）
 - `SqliteThreadRepository`：SQLite 实现，支持 CASCADE 删除
+
+## Approval 模块
+
+工具执行前的审批确认系统，通过 Hook 机制集成到 Turn 执行流程。
+
+### 核心组件
+
+- `ApprovalPolicy`：定义哪些工具需要审批、超时时间、自动批准策略
+- `ApprovalRequest`：审批请求，包含 agent_id、tool_name、action_summary、risk_level
+- `ApprovalResponse`：审批响应，包含 decision (Approved/Denied/TimedOut)
+- `ApprovalManager`：管理审批请求的生命周期，提供 `request_approval()` 和 `resolve()` 方法
+- `ApprovalHook`：实现 `HookHandler` trait，在 `BeforeToolCall` 事件中拦截需要审批的工具
+
+### 工作流程
+
+1. `ApprovalHook` 在 `BeforeToolCall` 时检查 `ApprovalPolicy`
+2. 如果工具需要审批，创建 `ApprovalRequest` 并发送 `ThreadEvent::WaitingForApproval`
+3. 等待用户或系统响应（批准/拒绝/超时）
+4. 发送 `ThreadEvent::ApprovalResolved` 并返回 `HookAction::Continue` 或 `Block`
+
+### CLI 集成
+
+- `--approval-tools`：指定需要审批的工具列表（逗号分隔）
+- `--auto-approve`：自动批准所有审批请求（用于测试）
+
+### 内置工具
+
+- `ShellTool`：执行 shell 命令，`RiskLevel::Critical`，默认需要审批
+  - 参数：`command`（必需）、`timeout`（可选，默认 120s）、`cwd`（可选）
+  - 返回：`stdout`、`stderr`、`exit_code`
