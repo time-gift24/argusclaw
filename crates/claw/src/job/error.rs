@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::agents::thread::ThreadError;
 use crate::db::DbError;
 
 /// Errors that can occur in the job module.
@@ -40,6 +41,9 @@ pub enum JobError {
 
     #[error("job result already consumed")]
     AlreadyConsumed,
+
+    #[error("thread error: {0}")]
+    ThreadError(#[from] ThreadError),
 }
 
 #[cfg(test)]
