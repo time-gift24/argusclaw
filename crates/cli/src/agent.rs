@@ -189,6 +189,40 @@ async fn run_chat(
                                 io::stdout().flush()?;
                             }
                         }
+                        Ok(ThreadEvent::ToolStarted {
+                            tool_name,
+                            tool_call_id,
+                            arguments,
+                            ..
+                        }) => {
+                            // Show tool execution started
+                            eprintln!("\n🔧 Tool: {} ({})", tool_name, tool_call_id);
+                            if verbose {
+                                eprintln!("   Args: {:?}", arguments);
+                            }
+                        }
+                        Ok(ThreadEvent::ToolCompleted { result, .. }) => {
+                            // Show tool execution result
+                            match result {
+                                Ok(value) => {
+                                    let result_str = format!("{:?}", value);
+                                    if verbose {
+                                        eprintln!("   ✅ Result: {}", result_str);
+                                    } else {
+                                        // Truncate for non-verbose mode
+                                        let truncated = if result_str.len() > 100 {
+                                            format!("{}...", &result_str[..100])
+                                        } else {
+                                            result_str
+                                        };
+                                        eprintln!("   ✅ {}", truncated);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("   ❌ Error: {}", e);
+                                }
+                            }
+                        }
                         Ok(ThreadEvent::TurnCompleted { token_usage, .. }) => {
                             // Finish stream output with newline
                             if let Some(suffix) = finish_stream_output(&stream_state) {
