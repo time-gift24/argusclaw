@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
+use crate::agents::thread::ThreadId;
 use crate::llm::{ChatMessage, ToolDefinition};
 use crate::tool::ToolManager;
 
@@ -74,6 +76,12 @@ pub struct ToolHookContext {
     pub error: Option<String>,
     /// Tool manager for accessing tool metadata (e.g., risk level).
     pub tool_manager: Option<Arc<ToolManager>>,
+    /// Thread event sender for broadcasting approval events.
+    pub thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
+    /// Thread ID for event context.
+    pub thread_id: Option<ThreadId>,
+    /// Turn number for event context.
+    pub turn_number: Option<u32>,
 }
 
 /// Hook handler trait for intercepting Turn events.
@@ -316,6 +324,9 @@ mod tests {
             tool_result: None,
             error: None,
             tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
         };
         let result = registry.fire_tool_event(&ctx).await;
         assert!(result.is_err());
@@ -344,6 +355,9 @@ mod tests {
             tool_result: Some(serde_json::json!({"result": "ok"})),
             error: None,
             tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
         };
         // AfterToolCall is observe-only, Block should be swallowed
         let result = registry.fire_tool_event(&ctx).await;

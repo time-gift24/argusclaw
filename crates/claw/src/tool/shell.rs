@@ -29,9 +29,7 @@
 
 use async_trait::async_trait;
 use serde_json::json;
-use std::sync::Arc;
 use tokio::process::Command;
-use tracing::{info, warn};
 
 use crate::llm::ToolDefinition;
 use crate::protocol::RiskLevel;
@@ -189,7 +187,12 @@ mod tests {
         let tool = ShellTool::new();
         let def = tool.definition();
         assert_eq!(def.name, "shell");
-        assert!(def.parameters["required"].as_array().unwrap().contains(&json!("command")));
+        assert!(
+            def.parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("command"))
+        );
     }
 
     #[tokio::test]

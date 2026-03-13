@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
+use tokio::sync::broadcast;
 
+use crate::agents::thread::ThreadId;
 use crate::llm::{ChatMessage, LlmProvider};
 use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
@@ -77,6 +79,12 @@ pub struct TurnInput {
     /// Optional hook registry for lifecycle events.
     #[builder(default, setter(strip_option))]
     pub hooks: Option<Arc<HookRegistry>>,
+    /// Thread event sender for broadcasting approval events.
+    #[builder(default, setter(strip_option))]
+    pub thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
+    /// Thread ID for event context.
+    #[builder(default, setter(strip_option))]
+    pub thread_id: Option<ThreadId>,
 }
 
 impl std::fmt::Debug for TurnInput {
@@ -88,6 +96,8 @@ impl std::fmt::Debug for TurnInput {
             .field("tool_manager", &"ToolManager")
             .field("tool_ids", &self.tool_ids)
             .field("hooks", &self.hooks.is_some())
+            .field("thread_event_sender", &self.thread_event_sender.is_some())
+            .field("thread_id", &self.thread_id)
             .finish()
     }
 }
@@ -114,6 +124,8 @@ impl TurnInputBuilder {
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
             tool_ids: self.tool_ids.unwrap_or_default(),
             hooks: self.hooks.flatten(),
+            thread_event_sender: self.thread_event_sender.flatten(),
+            thread_id: self.thread_id.flatten(),
         }
     }
 }

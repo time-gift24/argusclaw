@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agents::turn::TokenUsage;
+use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::llm::LlmStreamEvent;
 
 /// Information about a Thread for listing and display.
@@ -84,6 +85,18 @@ pub enum ThreadEvent {
     Compacted {
         thread_id: ThreadId,
         new_token_count: u32,
+    },
+    /// Waiting for approval - tool execution paused for human confirmation.
+    WaitingForApproval {
+        thread_id: ThreadId,
+        turn_number: u32,
+        request: ApprovalRequest,
+    },
+    /// Approval resolved (approved/denied/timeout).
+    ApprovalResolved {
+        thread_id: ThreadId,
+        turn_number: u32,
+        response: ApprovalResponse,
     },
 }
 

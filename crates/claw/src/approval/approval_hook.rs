@@ -4,6 +4,7 @@
 //! - Checks if a tool requires approval based on the current policy
 //! - If so, creates an approval request and waits for approval/denied/timeout
 //! - Returns `HookAction::Continue` or `Block(reason)` based on the decision
+//! - Sends ThreadEvents (WaitingForApproval, ApprovalResolved) to notify frontend
 //!
 //! # Example
 //!
@@ -22,9 +23,13 @@
 //! ```
 
 use async_trait::async_trait;
+use chrono::Utc;
 use std::sync::Arc;
 
-use crate::approval::{ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest};
+use crate::agents::thread::ThreadEvent;
+use crate::approval::{
+    ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+};
 use crate::protocol::{HookAction, HookEvent, HookHandler, RiskLevel, ToolHookContext};
 
 /// Approval hook that integrates with Turn execution through the hook system.
@@ -85,8 +90,36 @@ impl HookHandler for ApprovalHook {
             risk_level,
         );
 
+        // Send WaitingForApproval event to thread subscribers
+        if let (Some(sender), Some(thread_id), Some(turn_number)) =
+            (&ctx.thread_event_sender, ctx.thread_id, ctx.turn_number)
+        {
+            let _ = sender.send(ThreadEvent::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request: req.clone(),
+            });
+        }
+
         // Request approval (this blocks until approved/denied/timeout)
-        let decision = self.approval_manager.request_approval(req).await;
+        let decision = self.approval_manager.request_approval(req.clone()).await;
+
+        // Send ApprovalResolved event to thread subscribers
+        if let (Some(sender), Some(thread_id), Some(turn_number)) =
+            (&ctx.thread_event_sender, ctx.thread_id, ctx.turn_number)
+        {
+            let response = ApprovalResponse {
+                request_id: req.id,
+                decision,
+                decided_at: Utc::now(),
+                decided_by: None,
+            };
+            let _ = sender.send(ThreadEvent::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            });
+        }
 
         // Return appropriate action based on decision
         match decision {
@@ -131,6 +164,9 @@ mod tests {
             tool_result: None,
             error: None,
             tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
         };
 
         let action = hook.on_tool_event(&ctx).await;
@@ -151,6 +187,9 @@ mod tests {
             tool_result: None,
             error: None,
             tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
         };
 
         let action = hook.on_tool_event(&ctx).await;
