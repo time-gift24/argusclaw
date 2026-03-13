@@ -290,6 +290,69 @@ async fn run_chat(
                                 }
                             }
                         }
+                        // Subagent dispatch events
+                        Ok(ThreadEvent::WaitingForSubagent {
+                            job_id, message, ..
+                        }) => {
+                            if verbose {
+                                eprintln!("  [subagent {} waiting: {}]", job_id, message);
+                            }
+                        }
+                        Ok(ThreadEvent::SubagentProgress {
+                            job_id,
+                            elapsed_secs,
+                            message,
+                            ..
+                        }) => {
+                            if verbose {
+                                eprintln!(
+                                    "  [subagent {} progress: {}s - {}]",
+                                    job_id, elapsed_secs, message
+                                );
+                            }
+                        }
+                        Ok(ThreadEvent::SubagentCompleted {
+                            job_id, summary, ..
+                        }) => {
+                            if verbose {
+                                eprintln!("  [subagent {} completed: {}]", job_id, summary);
+                            }
+                        }
+                        Ok(ThreadEvent::SubagentFailed { job_id, error, .. }) => {
+                            eprintln!("  [subagent {} failed: {}]", job_id, error);
+                        }
+                        Ok(ThreadEvent::SubagentTimedOut {
+                            job_id,
+                            timeout_secs,
+                            ..
+                        }) => {
+                            eprintln!("  [subagent {} timed out after {}s]", job_id, timeout_secs);
+                        }
+                        Ok(ThreadEvent::OrchestratedJobDispatched {
+                            job_id,
+                            task,
+                            message,
+                            ..
+                        }) => {
+                            if verbose {
+                                eprintln!(
+                                    "  [orchestrated job {} dispatched: {} - {}]",
+                                    job_id, task, message
+                                );
+                            }
+                        }
+                        Ok(ThreadEvent::OrchestrationConfirmationRequired {
+                            confirmation_id,
+                            task,
+                            message,
+                            ..
+                        }) => {
+                            eprintln!(
+                                "\n⏳ Orchestration confirmation required [{}]: {}",
+                                confirmation_id, task
+                            );
+                            eprintln!("   {}", message);
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             eprintln!("Channel closed unexpectedly");
                             break;
