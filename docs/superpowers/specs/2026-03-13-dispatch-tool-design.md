@@ -285,20 +285,22 @@ impl DispatchTool {
 
     async fn handle_orchestrate_mode(
         &self,
+        thread_id: ThreadId,
         task: String,
         context: Option<String>,
         summary_hint: Option<String>,
     ) -> Result<Value, ToolError> {
         let job = JobRequest {
-            agent_id: self.subagent_template_id(),
+            agent_id: self.config.subagent_template_id.clone(),
             prompt: self.build_prompt(task.clone(), context, summary_hint),
-            timeout_secs: 3600,
+            timeout_secs: self.config.orchestrate_timeout_secs,
             backend: JobBackendKind::Persistent,
         };
 
         let job_id = self.job_backend.submit(job).await?;
 
         let _ = self.thread_event_sender.send(ThreadEvent::OrchestratedJobDispatched {
+            thread_id,
             job_id,
             task,
             message: "编排任务已派发，主 agent 不再跟踪。您可以继续对话。".into(),
@@ -498,6 +500,9 @@ pub enum JobError {
 
     #[error("Too many concurrent jobs (max: {0})")]
     ConcurrencyLimit(usize),
+
+    #[error("Job result already consumed")]
+    AlreadyConsumed,
 
     #[error("Repository error: {0}")]
     Repository(#[from] sqlx::Error),
