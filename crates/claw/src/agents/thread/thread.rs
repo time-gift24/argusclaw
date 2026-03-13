@@ -383,10 +383,34 @@ impl Thread {
 
                         // Execute each tool
                         for tc in &valid_tool_calls {
-                            match tool_manager.execute(&tc.name, tc.arguments.clone()).await {
-                                Ok(result) => {
+                            // Send ToolStarted event
+                            let _ = event_sender.send(ThreadEvent::ToolStarted {
+                                thread_id,
+                                turn_number,
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            });
+
+                            let result = tool_manager.execute(&tc.name, tc.arguments.clone()).await;
+
+                            // Send ToolCompleted event (convert ToolError to String)
+                            let event_result = match &result {
+                                Ok(value) => Ok(value.clone()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = event_sender.send(ThreadEvent::ToolCompleted {
+                                thread_id,
+                                turn_number,
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                result: event_result,
+                            });
+
+                            match result {
+                                Ok(value) => {
                                     let content =
-                                        serde_json::to_string(&result).unwrap_or_else(|e| {
+                                        serde_json::to_string(&value).unwrap_or_else(|e| {
                                             format!("{{\"error\": \"Failed to serialize: {}\"}}", e)
                                         });
                                     current_messages.push(ChatMessage::tool_result(
