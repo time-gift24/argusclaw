@@ -1,13 +1,16 @@
 //! Thread implementation.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use derive_builder::Builder;
 use futures_util::StreamExt;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::agents::compact::Compactor;
-use crate::agents::turn::{TokenUsage, TurnError, TurnInputBuilder, TurnOutput};
+use crate::agents::turn::{
+    BeforeCallLLMContext, TokenUsage, TurnConfig, TurnError, TurnInputBuilder, TurnOutput,
+    ensure_max_tool_calls_hint, execute_tools_parallel,
+};
 use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCompletionRequest};
 use crate::protocol::HookRegistry;
@@ -81,6 +84,18 @@ pub struct Thread {
     #[builder(default)]
     pub(super) token_count: u32,
 
+    /// Shared message history visible to background turn tasks.
+    #[builder(default)]
+    pub(super) shared_messages: Arc<Mutex<Vec<ChatMessage>>>,
+
+    /// Shared token count visible to background turn tasks.
+    #[builder(default)]
+    pub(super) shared_token_count: Arc<Mutex<u32>>,
+
+    /// Whether local state has unflushed mutations.
+    #[builder(default)]
+    pub(super) local_state_dirty: bool,
+
     /// Turn count (internal).
     #[builder(default)]
     pub(super) turn_count: u32,
@@ -118,9 +133,12 @@ impl ThreadBuilder {
     pub fn build(self) -> Thread {
         let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
+        let messages = self.messages.unwrap_or_default();
+        let token_count = self.token_count.unwrap_or_default();
+
         Thread {
             id: self.id.unwrap_or_default(),
-            messages: self.messages.unwrap_or_default(),
+            messages: messages.clone(),
             provider: self.provider.expect("provider is required"),
             tool_manager: self
                 .tool_manager
@@ -129,7 +147,10 @@ impl ThreadBuilder {
             approval_manager: self.approval_manager.flatten(),
             hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
-            token_count: 0,
+            token_count,
+            shared_messages: Arc::new(Mutex::new(messages)),
+            shared_token_count: Arc::new(Mutex::new(token_count)),
+            local_state_dirty: false,
             turn_count: 0,
             event_sender,
         }
@@ -161,6 +182,9 @@ impl Thread {
             hooks: None,
             config,
             token_count: 0,
+            shared_messages: Arc::new(Mutex::new(Vec::new())),
+            shared_token_count: Arc::new(Mutex::new(0)),
+            local_state_dirty: false,
             turn_count: 0,
             event_sender,
         }
@@ -175,8 +199,8 @@ impl Thread {
     pub fn info(&self) -> ThreadInfo {
         ThreadInfo {
             id: self.id,
-            message_count: self.messages.len(),
-            token_count: self.token_count,
+            message_count: self.history().len(),
+            token_count: self.token_count(),
             turn_count: self.turn_count,
         }
     }
@@ -194,13 +218,25 @@ impl Thread {
     }
 
     /// Get message history (read-only).
-    pub fn history(&self) -> &[ChatMessage] {
-        &self.messages
+    pub fn history(&self) -> Vec<ChatMessage> {
+        if self.local_state_dirty {
+            return self.messages.clone();
+        }
+        self.shared_messages
+            .lock()
+            .expect("thread shared_messages lock poisoned")
+            .clone()
     }
 
     /// Get current token count.
     pub fn token_count(&self) -> u32 {
-        self.token_count
+        if self.local_state_dirty {
+            return self.token_count;
+        }
+        *self
+            .shared_token_count
+            .lock()
+            .expect("thread shared_token_count lock poisoned")
     }
 
     /// Get turn count.
@@ -215,12 +251,21 @@ impl Thread {
 
     /// Get mutable access to messages (for Compactor).
     pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
+        if !self.local_state_dirty {
+            self.sync_from_shared();
+        }
+        self.local_state_dirty = true;
         &mut self.messages
     }
 
     /// Set the token count (for Compactor).
     pub fn set_token_count(&mut self, count: u32) {
         self.token_count = count;
+        self.local_state_dirty = true;
+        *self
+            .shared_token_count
+            .lock()
+            .expect("thread shared_token_count lock poisoned") = count;
     }
 
     /// Recalculate token count from messages.
@@ -230,12 +275,20 @@ impl Thread {
             .iter()
             .map(|m| Self::estimate_tokens(&m.content))
             .sum();
+        self.local_state_dirty = true;
+        *self
+            .shared_token_count
+            .lock()
+            .expect("thread shared_token_count lock poisoned") = self.token_count;
     }
 
     /// Send user message and execute Turn.
     ///
     /// Returns a handle for receiving streaming events and the final result.
     pub async fn send_message(&mut self, user_input: String) -> TurnStreamHandle {
+        if !self.local_state_dirty {
+            self.sync_from_shared();
+        }
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
@@ -244,6 +297,7 @@ impl Thread {
         }
 
         self.messages.push(ChatMessage::user(user_input));
+        self.sync_to_shared();
         self.execute_turn_streaming().await
     }
 
@@ -251,6 +305,8 @@ impl Thread {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id;
+
+        let initial_messages = self.messages.clone();
 
         // Resolve tool definitions
         let tools: Vec<crate::llm::ToolDefinition> = self
@@ -262,18 +318,50 @@ impl Thread {
             .collect();
 
         // Build request
-        let request = ToolCompletionRequest::new(self.messages.clone(), tools);
-
         let (llm_event_tx, llm_event_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (result_tx, result_rx) = oneshot::channel();
 
         let provider = self.provider.clone();
         let event_sender = self.event_sender.clone();
-        let messages = self.messages.clone();
+        let shared_messages = self.shared_messages.clone();
+        let shared_token_count = self.shared_token_count.clone();
+        let hooks = self.hooks.clone();
         let tool_manager = self.tool_manager.clone();
         let config = self.config.turn_config.clone();
+        let tool_ids = self.tool_manager.list_ids();
 
         tokio::spawn(async move {
+            let mut current_messages = initial_messages.clone();
+            ensure_max_tool_calls_hint(&mut current_messages, &tools, config.max_tool_calls);
+
+            if let Some(ref registry) = hooks {
+                let ctx = BeforeCallLLMContext {
+                    messages: current_messages.clone(),
+                    tools: tools.clone(),
+                    iteration: 0,
+                };
+                let result = registry.fire_before_call_llm(&ctx).await;
+                match result {
+                    Ok(modifications) => {
+                        if let Some(modified_messages) = modifications.messages {
+                            current_messages = modified_messages;
+                        }
+                    }
+                    Err(reason) => {
+                        let _ = event_sender.send(ThreadEvent::TurnFailed {
+                            thread_id,
+                            turn_number,
+                            error: reason.clone(),
+                        });
+                        let _ = event_sender.send(ThreadEvent::Idle { thread_id });
+                        let _ = result_tx.send(Err(TurnError::LlmCallBlocked { reason }));
+                        return;
+                    }
+                }
+            }
+
+            let request = ToolCompletionRequest::new(current_messages.clone(), tools.clone());
+
             // Try streaming API first, fall back to non-streaming if not supported
             let stream_result = provider.stream_complete_with_tools(request).await;
 
@@ -355,9 +443,6 @@ impl Thread {
                     let final_messages = if finish_reason == FinishReason::ToolUse
                         && !final_tool_calls.is_empty()
                     {
-                        // Execute tools
-                        let mut current_messages = messages;
-
                         // Convert accumulated tool calls to ToolCall structs
                         let valid_tool_calls: Vec<crate::llm::ToolCall> = final_tool_calls
                             .into_iter()
@@ -371,7 +456,6 @@ impl Thread {
                             })
                             .collect();
 
-                        // Add assistant message with tool calls
                         current_messages.push(ChatMessage::assistant_with_tool_calls(
                             if accumulated_content.is_empty() {
                                 None
@@ -381,58 +465,60 @@ impl Thread {
                             valid_tool_calls.clone(),
                         ));
 
-                        // Execute each tool
-                        for tc in &valid_tool_calls {
-                            // Send ToolStarted event
-                            let _ = event_sender.send(ThreadEvent::ToolStarted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            });
+                        let tool_results = execute_tools_parallel(
+                            valid_tool_calls,
+                            tool_manager.clone(),
+                            hooks.as_deref(),
+                            config.tool_timeout_secs.unwrap_or(120),
+                            Some(event_sender.clone()),
+                            Some(thread_id),
+                            turn_number,
+                        )
+                        .await;
 
-                            let result = tool_manager.execute(&tc.name, tc.arguments.clone()).await;
-
-                            // Send ToolCompleted event (convert ToolError to String)
-                            let event_result = match &result {
-                                Ok(value) => Ok(value.clone()),
-                                Err(e) => Err(e.to_string()),
-                            };
-                            let _ = event_sender.send(ThreadEvent::ToolCompleted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                result: event_result,
-                            });
-
-                            match result {
-                                Ok(value) => {
-                                    let content =
-                                        serde_json::to_string(&value).unwrap_or_else(|e| {
-                                            format!("{{\"error\": \"Failed to serialize: {}\"}}", e)
-                                        });
-                                    current_messages.push(ChatMessage::tool_result(
-                                        tc.id.clone(),
-                                        tc.name.clone(),
-                                        content,
-                                    ));
-                                }
-                                Err(e) => {
-                                    current_messages.push(ChatMessage::tool_result(
-                                        tc.id.clone(),
-                                        tc.name.clone(),
-                                        format!("{{\"error\": \"{}\"}}", e),
-                                    ));
-                                }
-                            }
+                        for result in tool_results {
+                            current_messages.push(ChatMessage::tool_result(
+                                result.tool_call_id,
+                                result.name,
+                                result.content,
+                            ));
                         }
 
-                        current_messages
+                        let follow_up_config = decrement_remaining_iterations(config.clone());
+                        let mut turn_input = TurnInputBuilder::new()
+                            .provider(provider.clone())
+                            .messages(current_messages)
+                            .tool_manager(tool_manager)
+                            .tool_ids(tool_ids.clone())
+                            .thread_event_sender(event_sender.clone())
+                            .thread_id(thread_id);
+                        if let Some(ref hook_registry) = hooks {
+                            turn_input = turn_input.hooks(hook_registry.clone());
+                        }
+                        let turn_input = turn_input.build();
+
+                        match crate::agents::turn::execute_turn(turn_input, follow_up_config).await
+                        {
+                            Ok(output) => {
+                                token_usage.input_tokens += output.token_usage.input_tokens;
+                                token_usage.output_tokens += output.token_usage.output_tokens;
+                                token_usage.total_tokens += output.token_usage.total_tokens;
+                                output.messages
+                            }
+                            Err(e) => {
+                                let _ = event_sender.send(ThreadEvent::TurnFailed {
+                                    thread_id,
+                                    turn_number,
+                                    error: e.to_string(),
+                                });
+                                let _ = event_sender.send(ThreadEvent::Idle { thread_id });
+                                let _ = result_tx.send(Err(e));
+                                return;
+                            }
+                        }
                     } else {
                         // No tool calls - just add assistant message
-                        let mut final_messages = messages;
+                        let mut final_messages = current_messages;
                         if !accumulated_content.is_empty() {
                             final_messages.push(ChatMessage::assistant(accumulated_content));
                         }
@@ -440,6 +526,7 @@ impl Thread {
                     };
 
                     token_usage.total_tokens = token_usage.input_tokens + token_usage.output_tokens;
+                    replace_thread_state(&shared_messages, &shared_token_count, &final_messages);
 
                     let _ = event_sender.send(ThreadEvent::TurnCompleted {
                         thread_id,
@@ -460,20 +547,27 @@ impl Thread {
                         );
 
                         // Use the non-streaming execute_turn
-                        let tool_ids = tool_manager.list_ids();
-                        let turn_input = TurnInputBuilder::new()
+                        let mut turn_input = TurnInputBuilder::new()
                             .provider(provider)
-                            .messages(messages)
+                            .messages(initial_messages)
                             .tool_manager(tool_manager)
                             .tool_ids(tool_ids)
                             .thread_event_sender(event_sender.clone())
-                            .thread_id(thread_id)
-                            .build();
+                            .thread_id(thread_id);
+                        if let Some(hook_registry) = hooks {
+                            turn_input = turn_input.hooks(hook_registry);
+                        }
+                        let turn_input = turn_input.build();
 
                         let result = crate::agents::turn::execute_turn(turn_input, config).await;
 
                         match result {
                             Ok(output) => {
+                                replace_thread_state(
+                                    &shared_messages,
+                                    &shared_token_count,
+                                    &output.messages,
+                                );
                                 let _ = event_sender.send(ThreadEvent::TurnCompleted {
                                     thread_id,
                                     turn_number,
@@ -517,6 +611,52 @@ impl Thread {
     fn estimate_tokens(content: &str) -> u32 {
         (content.len() / 4).max(1) as u32
     }
+
+    fn sync_from_shared(&mut self) {
+        self.messages = self
+            .shared_messages
+            .lock()
+            .expect("thread shared_messages lock poisoned")
+            .clone();
+        self.token_count = *self
+            .shared_token_count
+            .lock()
+            .expect("thread shared_token_count lock poisoned");
+        self.local_state_dirty = false;
+    }
+
+    fn sync_to_shared(&mut self) {
+        *self
+            .shared_messages
+            .lock()
+            .expect("thread shared_messages lock poisoned") = self.messages.clone();
+        *self
+            .shared_token_count
+            .lock()
+            .expect("thread shared_token_count lock poisoned") = self.token_count;
+        self.local_state_dirty = false;
+    }
+}
+
+fn replace_thread_state(
+    shared_messages: &Arc<Mutex<Vec<ChatMessage>>>,
+    shared_token_count: &Arc<Mutex<u32>>,
+    messages: &[ChatMessage],
+) {
+    *shared_messages
+        .lock()
+        .expect("thread messages lock poisoned") = messages.to_vec();
+    *shared_token_count
+        .lock()
+        .expect("thread token_count lock poisoned") = messages
+        .iter()
+        .map(|message| Thread::estimate_tokens(&message.content))
+        .sum();
+}
+
+fn decrement_remaining_iterations(mut config: TurnConfig) -> TurnConfig {
+    config.max_iterations = config.max_iterations.map(|value| value.saturating_sub(1));
+    config
 }
 
 // ---------------------------------------------------------------------------

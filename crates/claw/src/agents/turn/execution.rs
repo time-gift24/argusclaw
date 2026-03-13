@@ -16,6 +16,34 @@ use crate::tool::ToolManager;
 use super::hooks::{BeforeCallLLMContext, HookEvent, HookRegistry, ToolHookContext};
 use super::{TokenUsage, TurnConfig, TurnError, TurnInput, TurnOutput};
 
+pub(crate) fn ensure_max_tool_calls_hint(
+    messages: &mut Vec<ChatMessage>,
+    tools: &[ToolDefinition],
+    max_tool_calls: Option<u32>,
+) {
+    let Some(max) = max_tool_calls else {
+        return;
+    };
+    if tools.is_empty() {
+        return;
+    }
+
+    let system_content = format!(
+        "IMPORTANT: You can only call at most {} tool(s) per response. \
+        If you need to call multiple tools, please proceed step by step - \
+        call tools one at a time and wait for the results before calling the next tool.",
+        max
+    );
+
+    let already_present = messages.iter().any(|message| {
+        message.role == crate::llm::Role::System && message.content == system_content
+    });
+
+    if !already_present {
+        messages.insert(0, ChatMessage::system(system_content));
+    }
+}
+
 /// Executes a single turn in a conversation.
 ///
 /// This function runs the main LLM loop:
@@ -48,22 +76,9 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
         .collect();
 
     let max_iterations = config.max_iterations.unwrap_or(50);
-    let max_tool_calls = config.max_tool_calls;
     let tool_timeout_secs = config.tool_timeout_secs.unwrap_or(120);
 
-    // Add system message about max_tool_calls if configured and tools are available
-    if let Some(max) = max_tool_calls
-        && !tools.is_empty()
-    {
-        let system_content = format!(
-            "IMPORTANT: You can only call at most {} tool(s) per response. \
-            If you need to call multiple tools, please proceed step by step - \
-            call tools one at a time and wait for the results before calling the next tool.",
-            max
-        );
-        // Prepend system message to messages
-        messages.insert(0, ChatMessage::system(system_content));
-    }
+    ensure_max_tool_calls_hint(&mut messages, &tools, config.max_tool_calls);
 
     let mut token_usage = TokenUsage::default();
 
@@ -210,10 +225,10 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
 }
 
 /// Result of a tool execution.
-struct ToolExecutionResult {
-    tool_call_id: String,
-    name: String,
-    content: String,
+pub(crate) struct ToolExecutionResult {
+    pub(crate) tool_call_id: String,
+    pub(crate) name: String,
+    pub(crate) content: String,
 }
 
 /// Executes multiple tool calls in parallel.
@@ -224,7 +239,7 @@ struct ToolExecutionResult {
 /// 3. AfterToolCall hook (observe-only)
 ///
 /// Tool execution failures are captured as error messages, not propagated.
-async fn execute_tools_parallel(
+pub(crate) async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,

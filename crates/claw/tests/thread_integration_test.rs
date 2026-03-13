@@ -6,19 +6,23 @@
 //! - Context compaction
 //! - Event broadcasting
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
+use futures_core::Stream;
 use rust_decimal::Decimal;
 
 use claw::agents::compact::{Compactor, KeepRecentCompactor, KeepTokensCompactor};
 use claw::agents::thread::{ThreadBuilder, ThreadConfigBuilder};
 use claw::llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
+    LlmProvider, LlmStreamEvent, Role, ToolCallDelta, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
-use claw::tool::ToolManager;
+use claw::tool::{NamedTool, ToolError, ToolManager};
 
 // ============================================================================
 // Mock Provider
@@ -69,6 +73,147 @@ impl LlmProvider for SequentialMockProvider {
             .unwrap_or_else(|| panic!("No more responses configured for call {}", count));
         *count += 1;
         Ok(response)
+    }
+}
+
+struct EchoTool;
+
+#[async_trait]
+impl NamedTool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echoes input back".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                }
+            }),
+        }
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        Ok(args)
+    }
+}
+
+struct MockStream {
+    events: Vec<LlmStreamEvent>,
+    index: usize,
+}
+
+impl MockStream {
+    fn new(events: Vec<LlmStreamEvent>) -> Self {
+        Self { events, index: 0 }
+    }
+}
+
+impl Stream for MockStream {
+    type Item = Result<LlmStreamEvent, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.index >= self.events.len() {
+            return Poll::Ready(None);
+        }
+
+        let item = self.events[self.index].clone();
+        self.index += 1;
+        Poll::Ready(Some(Ok(item)))
+    }
+}
+
+struct StreamingToolLoopProvider {
+    stream_calls: Mutex<usize>,
+    tool_completion_calls: Mutex<usize>,
+}
+
+impl StreamingToolLoopProvider {
+    fn new() -> Self {
+        Self {
+            stream_calls: Mutex::new(0),
+            tool_completion_calls: Mutex::new(0),
+        }
+    }
+
+    fn stream_call_count(&self) -> usize {
+        *self.stream_calls.lock().unwrap()
+    }
+
+    fn tool_completion_call_count(&self) -> usize {
+        *self.tool_completion_calls.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for StreamingToolLoopProvider {
+    fn model_name(&self) -> &str {
+        "streaming-mock"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    fn context_window(&self) -> u32 {
+        100_000
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        unreachable!("complete is not used in this test")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut calls = self.tool_completion_calls.lock().unwrap();
+        let response = match *calls {
+            0 => ToolCompletionResponse {
+                content: Some("Done after tool".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![],
+                input_tokens: 25,
+                output_tokens: 10,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            n => panic!("unexpected complete_with_tools call {n}"),
+        };
+        *calls += 1;
+        Ok(response)
+    }
+
+    async fn stream_complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        let mut calls = self.stream_calls.lock().unwrap();
+        let events = match *calls {
+            0 => vec![
+                LlmStreamEvent::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    id: Some("call_1".to_string()),
+                    name: Some("echo".to_string()),
+                    arguments_delta: Some(r#"{"message":"hello"}"#.to_string()),
+                }),
+                LlmStreamEvent::Usage {
+                    input_tokens: 20,
+                    output_tokens: 5,
+                },
+                LlmStreamEvent::Finished {
+                    finish_reason: FinishReason::ToolUse,
+                },
+            ],
+            n => panic!("unexpected stream call {n}"),
+        };
+        *calls += 1;
+        Ok(Box::pin(MockStream::new(events)))
     }
 }
 
@@ -125,6 +270,10 @@ async fn test_thread_single_turn() {
     // Wait for completion
     let result = handle.wait_for_result().await;
     assert!(result.is_ok());
+    assert_eq!(thread.history().len(), 2);
+    assert_eq!(thread.history()[1].role, Role::Assistant);
+    assert_eq!(thread.history()[1].content, "Hello! How can I help?");
+    assert!(thread.token_count() > 0);
 }
 
 #[tokio::test]
@@ -188,6 +337,42 @@ async fn test_thread_with_initial_history() {
 
     // History should have grown
     assert!(thread.history().len() > 3);
+    assert_eq!(thread.history().last().unwrap().role, Role::Assistant);
+}
+
+#[tokio::test]
+async fn test_thread_streaming_tool_use_runs_until_model_stops() {
+    let provider = Arc::new(StreamingToolLoopProvider::new());
+    let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+    let tool_manager = Arc::new(ToolManager::new());
+    tool_manager.register(Arc::new(EchoTool));
+
+    let mut thread = ThreadBuilder::new()
+        .provider(provider.clone())
+        .tool_manager(tool_manager)
+        .compactor(compactor)
+        .build();
+
+    let handle = thread.send_message("Need tool".to_string()).await;
+    let output = handle.wait_for_result().await.expect("turn should succeed");
+
+    assert_eq!(provider.stream_call_count(), 1);
+    assert_eq!(provider.tool_completion_call_count(), 1);
+    assert!(
+        output
+            .messages
+            .iter()
+            .any(|msg| msg.role == Role::Tool && msg.tool_call_id.as_deref() == Some("call_1"))
+    );
+    assert_eq!(
+        output.messages.last().map(|msg| msg.content.as_str()),
+        Some("Done after tool")
+    );
+    assert_eq!(thread.history().len(), output.messages.len());
+    assert_eq!(
+        thread.history().last().map(|msg| msg.content.as_str()),
+        Some("Done after tool")
+    );
 }
 
 #[tokio::test]
