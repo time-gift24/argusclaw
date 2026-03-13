@@ -1,12 +1,12 @@
 {
   "$schema": "https://ui.shadcn.com/schema.json",
   "style": "base-mira",
-  "rsc": false,
+  "rsc": true,
   "tsx": true,
   "tailwind": {
     "config": "",
-    "css": "src/index.css",
-    "baseColor": "zinc",
+    "css": "app/globals.css",
+    "baseColor": "neutral",
     "cssVariables": true,
     "prefix": ""
   },
@@ -21,13 +21,5 @@
   },
   "menuColor": "default",
   "menuAccent": "subtle",
-  "registries": {
-    "@ssblocks": {
-      "url": "https://cli-mirror-demo.vercel.app/api/r/ss-blocks/{name}",
-      "params": {
-        "email": "${EMAIL}",
-        "license_key": "${LICENSE_KEY}"
-      }
-    }
-  }
+  "registries": {}
 }
