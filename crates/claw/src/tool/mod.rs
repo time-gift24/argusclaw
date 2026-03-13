@@ -1,5 +1,10 @@
 //! Tool module: defines NamedTool trait and ToolError for agent/LLM tool management.
 
+mod glob;
+mod grep;
+mod read;
+mod shell;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,6 +12,11 @@ use dashmap::DashMap;
 
 use crate::llm::ToolDefinition;
 use crate::protocol::RiskLevel;
+
+pub use glob::GlobTool;
+pub use grep::GrepTool;
+pub use read::ReadTool;
+pub use shell::ShellTool;
 
 /// Error type for tool operations.
 #[derive(Debug, thiserror::Error)]

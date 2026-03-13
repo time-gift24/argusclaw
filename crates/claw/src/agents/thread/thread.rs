@@ -10,6 +10,7 @@ use crate::agents::compact::Compactor;
 use crate::agents::turn::{TokenUsage, TurnError, TurnInputBuilder, TurnOutput};
 use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCompletionRequest};
+use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
 
 use super::{ThreadConfig, ThreadError, ThreadEvent, ThreadId, ThreadInfo, ThreadState};
@@ -68,6 +69,10 @@ pub struct Thread {
     #[builder(default, setter(strip_option))]
     pub approval_manager: Option<Arc<ApprovalManager>>,
 
+    /// Hook registry for lifecycle events (optional).
+    #[builder(default, setter(strip_option))]
+    pub hooks: Option<Arc<HookRegistry>>,
+
     /// Thread configuration.
     #[builder(default)]
     pub config: ThreadConfig,
@@ -122,6 +127,7 @@ impl ThreadBuilder {
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
             compactor: self.compactor.expect("compactor is required"),
             approval_manager: self.approval_manager.flatten(),
+            hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
@@ -152,6 +158,7 @@ impl Thread {
             tool_manager,
             compactor,
             approval_manager,
+            hooks: None,
             config,
             token_count: 0,
             turn_count: 0,
@@ -435,6 +442,8 @@ impl Thread {
                             .messages(messages)
                             .tool_manager(tool_manager)
                             .tool_ids(tool_ids)
+                            .thread_event_sender(event_sender.clone())
+                            .thread_id(thread_id)
                             .build();
 
                         let result = crate::agents::turn::execute_turn(turn_input, config).await;
