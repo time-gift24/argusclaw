@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::DbError;
-use crate::workflow::{
-    WorkflowId, WorkflowRecord, WorkflowStatus, WorkflowRepository,
-};
+use crate::workflow::{WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
 
 /// SQLite-backed workflow repository (for lightweight grouping only).
 pub struct SqliteWorkflowRepository {
@@ -52,7 +50,9 @@ impl WorkflowRepository for SqliteWorkflowRepository {
             .bind(Self::status_as_str(workflow.status))
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -63,7 +63,9 @@ impl WorkflowRepository for SqliteWorkflowRepository {
             .bind(id.as_ref())
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         row.map(Self::map_workflow).transpose()
     }
@@ -79,7 +81,9 @@ impl WorkflowRepository for SqliteWorkflowRepository {
             .bind(id.as_ref())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         if result.rows_affected() == 0 {
             return Err(DbError::QueryFailed {
@@ -95,7 +99,9 @@ impl WorkflowRepository for SqliteWorkflowRepository {
         let rows = sqlx::query("SELECT id, name, status FROM workflows ORDER BY name")
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         rows.into_iter().map(Self::map_workflow).collect()
     }
@@ -106,7 +112,9 @@ impl WorkflowRepository for SqliteWorkflowRepository {
             .bind(id.as_ref())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
