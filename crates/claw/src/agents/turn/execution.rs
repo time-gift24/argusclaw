@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use futures_util::future::join_all;
+use tokio::sync::broadcast;
 use tokio::time::{error::Elapsed, timeout};
 
 use crate::llm::{ChatMessage, FinishReason, ToolCall, ToolCompletionRequest, ToolDefinition};
@@ -36,6 +37,8 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
     let tool_manager = input.tool_manager;
     let tool_ids = input.tool_ids;
     let hooks = input.hooks;
+    let thread_event_sender = input.thread_event_sender;
+    let thread_id = input.thread_id;
 
     // Resolve tool definitions from tool_manager
     let tools: Vec<ToolDefinition> = tool_ids
@@ -122,6 +125,9 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                         tool_result: None,
                         error: None,
                         tool_manager: Some(Arc::clone(&tool_manager)),
+                        thread_event_sender: thread_event_sender.clone(),
+                        thread_id,
+                        turn_number: Some(iteration),
                     };
                     // TurnEnd is observe-only, ignore errors
                     let _ = registry.fire_tool_event(&ctx).await;
@@ -159,6 +165,9 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                     Arc::clone(&tool_manager),
                     hooks.as_ref().map(|v| v.as_ref()),
                     tool_timeout_secs,
+                    thread_event_sender.clone(),
+                    thread_id,
+                    iteration,
                 )
                 .await;
 
@@ -220,6 +229,9 @@ async fn execute_tools_parallel(
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
+    thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
+    thread_id: Option<crate::agents::thread::ThreadId>,
+    turn_number: u32,
 ) -> Vec<ToolExecutionResult> {
     let futures: Vec<_> = tool_calls
         .into_iter()
@@ -229,6 +241,9 @@ async fn execute_tools_parallel(
                 Arc::clone(&tool_manager),
                 hooks,
                 tool_timeout_secs,
+                thread_event_sender.clone(),
+                thread_id,
+                turn_number,
             )
         })
         .collect();
@@ -242,6 +257,9 @@ async fn execute_single_tool(
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
+    thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
+    thread_id: Option<crate::agents::thread::ThreadId>,
+    turn_number: u32,
 ) -> ToolExecutionResult {
     let tool_call_id = tool_call.id.clone();
     let tool_name = tool_call.name.clone();
@@ -257,6 +275,9 @@ async fn execute_single_tool(
             tool_result: None,
             error: None,
             tool_manager: Some(Arc::clone(&tool_manager)),
+            thread_event_sender: thread_event_sender.clone(),
+            thread_id,
+            turn_number: Some(turn_number),
         };
         if let Err(reason) = registry.fire_tool_event(&ctx).await {
             // Hook blocked the tool call
@@ -271,6 +292,9 @@ async fn execute_single_tool(
                 tool_result: None,
                 error: Some(reason),
                 tool_manager: Some(Arc::clone(&tool_manager)),
+                thread_event_sender: thread_event_sender.clone(),
+                thread_id,
+                turn_number: Some(turn_number),
             };
             let _ = registry.fire_tool_event(&after_ctx).await;
 
@@ -309,6 +333,9 @@ async fn execute_single_tool(
             tool_result,
             error,
             tool_manager: Some(Arc::clone(&tool_manager)),
+            thread_event_sender: thread_event_sender.clone(),
+            thread_id,
+            turn_number: Some(turn_number),
         };
         let _ = registry.fire_tool_event(&ctx).await;
     }

@@ -438,3 +438,122 @@ async fn test_safe_tool_bypasses_approval() {
         output.messages
     );
 }
+
+#[tokio::test]
+async fn test_approval_events_broadcast_to_thread() {
+    use tokio::sync::broadcast;
+
+    // Create policy that requires approval for dangerous_tool
+    let policy = ApprovalPolicy {
+        require_approval: vec!["dangerous_tool".to_string()],
+        timeout_secs: 60,
+        auto_approve: false,
+        auto_approve_autonomous: false,
+    };
+
+    let approval_manager = Arc::new(ApprovalManager::new(policy.clone()));
+
+    // Create broadcast channel for thread events
+    let (thread_event_tx, mut thread_event_rx) =
+        broadcast::channel::<claw::agents::thread::ThreadEvent>(16);
+
+    // Create hook registry and register approval hook
+    let hooks = Arc::new(HookRegistry::new());
+    let approval_hook = ApprovalHook::new(Arc::clone(&approval_manager), policy, "test-agent");
+    hooks.register(HookEvent::BeforeToolCall, Arc::new(approval_hook));
+
+    // Create tool manager and register dangerous tool
+    let tool_manager = Arc::new(ToolManager::new());
+    tool_manager.register(Arc::new(DangerousTool));
+
+    // Create provider that will call dangerous tool
+    let responses = vec![
+        ToolCompletionResponse {
+            content: Some("I'll use the dangerous tool.".to_string()),
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "dangerous_tool".to_string(),
+                arguments: serde_json::json!({"action": "test action"}),
+            }],
+            finish_reason: FinishReason::ToolUse,
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+        ToolCompletionResponse {
+            content: Some("Done!".to_string()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            finish_reason: FinishReason::Stop,
+            input_tokens: 50,
+            output_tokens: 20,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+    ];
+    let provider = Arc::new(SequentialMockProvider::new(responses));
+
+    // Create turn input with thread event sender and thread_id
+    let thread_id = claw::agents::thread::ThreadId::new();
+    let input = TurnInputBuilder::new()
+        .provider(provider)
+        .messages(vec![ChatMessage::user("Use the dangerous tool")])
+        .tool_manager(tool_manager)
+        .tool_ids(vec!["dangerous_tool".to_string()])
+        .hooks(hooks)
+        .thread_event_sender(thread_event_tx)
+        .thread_id(thread_id)
+        .build();
+
+    // Spawn a task to approve after a short delay
+    let manager_clone = Arc::clone(&approval_manager);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let pending = manager_clone.list_pending();
+        if !pending.is_empty() {
+            let _ = manager_clone.resolve(
+                pending[0].id,
+                ApprovalDecision::Approved,
+                Some("test-approver".to_string()),
+            );
+        }
+    });
+
+    // Execute turn
+    let config = TurnConfig::default();
+    let result = execute_turn(input, config).await;
+
+    // Should succeed
+    assert!(result.is_ok(), "Turn should complete with approved tool");
+    let _output = result.unwrap();
+
+    // Verify we received WaitingForApproval event
+    let event = thread_event_rx.recv().await;
+    match event {
+        Ok(claw::agents::thread::ThreadEvent::WaitingForApproval { .. }) => {
+            // Good - received WaitingForApproval
+        }
+        Ok(other) => {
+            panic!("Expected WaitingForApproval event, got: {:?}", other);
+        }
+        Err(e) => {
+            panic!("Failed to receive WaitingForApproval event: {:?}", e);
+        }
+    }
+
+    // Verify we received ApprovalResolved event
+    let event = thread_event_rx.recv().await;
+    match event {
+        Ok(claw::agents::thread::ThreadEvent::ApprovalResolved { .. }) => {
+            // Good - received ApprovalResolved
+        }
+        Ok(other) => {
+            panic!("Expected ApprovalResolved event, got: {:?}", other);
+        }
+        Err(e) => {
+            panic!("Failed to receive ApprovalResolved event: {:?}", e);
+        }
+    }
+}
