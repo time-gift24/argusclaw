@@ -8,9 +8,7 @@ use claw::AppContext;
 use claw::agents::AgentId;
 use claw::db::SqliteWorkflowRepository;
 use claw::job::{JobRecord, JobRepository, JobType};
-use claw::workflow::{
-    JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus,
-};
+use claw::workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
 use owo_colors::OwoColorize;
 
 /// 工作流执行测试命令。
@@ -94,7 +92,8 @@ fn resolve_workflow_dev_database_url(
 }
 
 /// Create dev workflow repository.
-async fn create_dev_workflow_repositories() -> Result<(SqliteWorkflowRepository, Box<dyn JobRepository>, String)> {
+async fn create_dev_workflow_repositories()
+-> Result<(SqliteWorkflowRepository, Box<dyn JobRepository>, String)> {
     let env_database_url = std::env::var("WORKFLOW_DATABASE_URL").ok();
     let database_url = resolve_workflow_dev_database_url(env_database_url.as_deref(), None)?;
     let pool = claw::db::sqlite::connect(&database_url)
@@ -186,7 +185,10 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
                     if !jobs.is_empty() {
                         println!("  Jobs:");
                         for job in jobs {
-                            println!("    - {} (Agent: {}, Status: {})", job.name, job.agent_id, job.status);
+                            println!(
+                                "    - {} (Agent: {}, Status: {})",
+                                job.name, job.agent_id, job.status
+                            );
                         }
                     }
                 }
@@ -217,7 +219,9 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
         } => {
             let workflow_id = WorkflowId::new(workflow.clone());
             // Verify workflow exists
-            let _wf = workflow_repo.get_workflow(&workflow_id).await?
+            let _wf = workflow_repo
+                .get_workflow(&workflow_id)
+                .await?
                 .ok_or_else(|| anyhow!("Workflow not found: {}", workflow))?;
 
             let job_id = JobId::new(uuid::Uuid::new_v4().to_string());
@@ -225,11 +229,7 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
 
             // Parse depends_on
             let depends_on_ids: Vec<JobId> = depends_on
-                .map(|s| {
-                    s.split(',')
-                        .map(|id| JobId::new(id.trim()))
-                        .collect()
-                })
+                .map(|s| s.split(',').map(|id| JobId::new(id.trim())).collect())
                 .unwrap_or_default();
 
             let job = JobRecord {
@@ -265,7 +265,9 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
             let new_status =
                 WorkflowStatus::parse_str(&status).map_err(|e| anyhow!("Invalid status: {}", e))?;
 
-            job_repo.update_status(&job_id, new_status, None, None).await?;
+            job_repo
+                .update_status(&job_id, new_status, None, None)
+                .await?;
 
             println!("Job {} status updated to {}", id, new_status);
         }
@@ -291,13 +293,13 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
                             let dep_str = if job.depends_on.is_empty() {
                                 String::new()
                             } else {
-                                let dep_ids: Vec<&str> = job.depends_on.iter().map(AsRef::as_ref).collect();
+                                let dep_ids: Vec<&str> =
+                                    job.depends_on.iter().map(AsRef::as_ref).collect();
                                 format!(" (deps: {})", dep_ids.join(", "))
                             };
 
                             println!(
-                                "{}{} ({}){} {}",
-                                "  ",
+                                "  {} ({}){} {}",
                                 job_branch,
                                 job.name,
                                 dep_str,
