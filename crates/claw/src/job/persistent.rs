@@ -1,8 +1,10 @@
 //! PersistentJobBackend - wraps JobRepository for persistent job execution.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 use super::backend::JobBackend;
@@ -11,6 +13,24 @@ use super::repository::JobRepository;
 use super::types::{JobRecord, JobRequest, JobResult, JobStatus, JobType};
 use crate::agents::AgentManager;
 use crate::workflow::{JobId, WorkflowStatus};
+
+/// Configuration for PersistentJobBackend.
+#[derive(Debug, Clone)]
+pub struct PersistentBackendConfig {
+    /// Maximum time to wait for job completion in seconds.
+    pub max_wait_secs: u64,
+    /// Polling interval in seconds.
+    pub poll_interval_secs: u64,
+}
+
+impl Default for PersistentBackendConfig {
+    fn default() -> Self {
+        Self {
+            max_wait_secs: 3600,
+            poll_interval_secs: 1,
+        }
+    }
+}
 
 /// Persistent job backend using JobRepository.
 ///
@@ -21,6 +41,7 @@ pub struct PersistentJobBackend {
     job_repository: Arc<dyn JobRepository>,
     #[allow(dead_code)] // Will be used in future for direct agent spawning
     agent_manager: Arc<AgentManager>,
+    config: PersistentBackendConfig,
 }
 
 impl PersistentJobBackend {
@@ -30,6 +51,21 @@ impl PersistentJobBackend {
         Self {
             job_repository,
             agent_manager,
+            config: PersistentBackendConfig::default(),
+        }
+    }
+
+    /// Create a new PersistentJobBackend with custom config.
+    #[must_use]
+    pub fn with_config(
+        job_repository: Arc<dyn JobRepository>,
+        agent_manager: Arc<AgentManager>,
+        config: PersistentBackendConfig,
+    ) -> Self {
+        Self {
+            job_repository,
+            agent_manager,
+            config,
         }
     }
 }
@@ -67,35 +103,42 @@ impl JobBackend for PersistentJobBackend {
     }
 
     async fn wait(&self, job_id: &JobId) -> Result<JobResult, JobError> {
-        // Poll for job completion (the Scheduler will execute it)
-        loop {
-            let record = self
-                .job_repository
-                .get(job_id)
-                .await
-                .map_err(|e| JobError::ExecutionFailed {
-                    reason: e.to_string(),
-                })?
-                .ok_or_else(|| JobError::NotFound {
-                    id: job_id.as_ref().to_string(),
-                })?;
+        let max_wait = Duration::from_secs(self.config.max_wait_secs);
+        let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
 
-            if record.status.is_terminal() {
-                return match record.status {
-                    WorkflowStatus::Succeeded => Ok(JobResult {
-                        summary: "Job completed".to_string(),
-                        token_usage: Default::default(),
-                    }),
-                    WorkflowStatus::Failed => Err(JobError::ExecutionFailed {
-                        reason: "Job failed".to_string(),
-                    }),
-                    WorkflowStatus::Cancelled => Err(JobError::Cancelled),
-                    _ => unreachable!("terminal status check"),
-                };
+        // Poll for job completion with timeout
+        timeout(max_wait, async {
+            loop {
+                let record = self
+                    .job_repository
+                    .get(job_id)
+                    .await
+                    .map_err(|e| JobError::ExecutionFailed {
+                        reason: e.to_string(),
+                    })?
+                    .ok_or_else(|| JobError::NotFound {
+                        id: job_id.as_ref().to_string(),
+                    })?;
+
+                if record.status.is_terminal() {
+                    return match record.status {
+                        WorkflowStatus::Succeeded => Ok(JobResult {
+                            summary: "Job completed".to_string(),
+                            token_usage: Default::default(),
+                        }),
+                        WorkflowStatus::Failed => Err(JobError::ExecutionFailed {
+                            reason: "Job failed".to_string(),
+                        }),
+                        WorkflowStatus::Cancelled => Err(JobError::Cancelled),
+                        _ => unreachable!("terminal status check"),
+                    };
+                }
+
+                tokio::time::sleep(poll_interval).await;
             }
-
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
+        })
+        .await
+        .map_err(|_| JobError::Timeout)?
     }
 
     async fn cancel(&self, job_id: &JobId) -> Result<(), JobError> {

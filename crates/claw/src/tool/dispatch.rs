@@ -29,6 +29,8 @@ pub struct DispatchToolConfig {
     pub orchestrate_timeout_secs: u64,
     /// Template agent ID for subagent creation.
     pub subagent_template_id: AgentId,
+    /// Maximum concurrent jobs for in-memory backend.
+    pub max_concurrent_jobs: usize,
 }
 
 impl Default for DispatchToolConfig {
@@ -38,6 +40,7 @@ impl Default for DispatchToolConfig {
             progress_notify_interval_secs: 60,
             orchestrate_timeout_secs: 3600,
             subagent_template_id: AgentId::new("subagent"),
+            max_concurrent_jobs: 10,
         }
     }
 }
@@ -88,7 +91,7 @@ impl DispatchTool {
         let backend_config = InMemoryBackendConfig {
             default_timeout_secs: config.default_timeout_secs,
             progress_notify_interval_secs: config.progress_notify_interval_secs,
-            max_concurrent_jobs: 10,
+            max_concurrent_jobs: config.max_concurrent_jobs,
         };
         let backend = Arc::new(InMemoryJobBackend::with_config(
             agent_manager.clone(),
@@ -416,11 +419,13 @@ mod tests {
             progress_notify_interval_secs: 30,
             orchestrate_timeout_secs: 7200,
             subagent_template_id: AgentId::new("custom_agent"),
+            max_concurrent_jobs: 5,
         };
         assert_eq!(config.default_timeout_secs, 600);
         assert_eq!(config.progress_notify_interval_secs, 30);
         assert_eq!(config.orchestrate_timeout_secs, 7200);
         assert_eq!(config.subagent_template_id.as_ref(), "custom_agent");
+        assert_eq!(config.max_concurrent_jobs, 5);
     }
 
     #[test]

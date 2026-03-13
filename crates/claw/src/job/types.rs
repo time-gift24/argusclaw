@@ -154,6 +154,18 @@ pub struct JobRequest {
     pub backend: JobBackendKind,
 }
 
+impl Default for JobRequest {
+    fn default() -> Self {
+        Self {
+            agent_id: AgentId::new("default"),
+            prompt: String::new(),
+            context: None,
+            timeout_secs: 300,
+            backend: JobBackendKind::InMemory,
+        }
+    }
+}
+
 /// Result from a completed job.
 #[derive(Debug, Clone)]
 pub struct JobResult {
