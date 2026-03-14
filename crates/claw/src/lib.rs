@@ -11,7 +11,7 @@ pub mod scheduler;
 pub mod tool;
 pub mod workflow;
 
-pub use claw::AppContext;
+pub use claw::{AppContext, AppContextInit};
 pub use error::AgentError;
 pub use protocol::RiskLevel;
 pub use tool::{NamedTool, ToolError, ToolManager};

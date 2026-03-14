@@ -14,7 +14,8 @@
       {
         "title": "argusclaw",
         "width": 1200,
-        "height": 900
+        "height": 900,
+        "devtools": true
       }
     ],
     "security": {

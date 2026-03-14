@@ -35,7 +35,7 @@ function ClaudeDialog() {
 
   const handleSend = async () => {
     if (!input.trim() || isRunning) return;
-
+    console.log(input);
     const messageContent = input;
     setInput("");
 

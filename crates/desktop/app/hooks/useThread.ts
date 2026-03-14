@@ -61,6 +61,8 @@ export interface UseThreadReturn {
 // Check if running in Tauri environment
 const isTauriEnv = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+console.log("[useThread] Module loaded, isTauriEnv:", isTauriEnv);
+
 /**
  * Hook for managing a Thread conversation with the backend.
  */
@@ -68,6 +70,8 @@ export function useThread({
   threadId,
   autoSubscribe = true,
 }: UseThreadOptions): UseThreadReturn {
+  console.log("[useThread] Hook called with threadId:", threadId, "autoSubscribe:", autoSubscribe);
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,10 +81,12 @@ export function useThread({
 
   // Process incoming thread events
   const handleThreadEvent = useCallback((event: ThreadEvent) => {
+    console.log("[useThread] Received event:", event.type, event);
     switch (event.type) {
       case "processing":
         if (event.event) {
           const streamEvent = event.event;
+          console.log("[useThread] Stream event:", streamEvent.type, streamEvent.delta);
           if (streamEvent.type === "contentDelta" && streamEvent.delta) {
             currentContentRef.current += streamEvent.delta;
             setMessages((prev) => {
@@ -103,20 +109,22 @@ export function useThread({
         break;
 
       case "toolStarted":
-        console.log(`Tool started: ${event.toolName}`, event.arguments);
+        console.log(`[useThread] Tool started: ${event.toolName}`, event.arguments);
         break;
 
       case "toolCompleted":
-        console.log(`Tool completed: ${event.toolName}`, event.result);
+        console.log(`[useThread] Tool completed: ${event.toolName}`, event.result);
         break;
 
       case "turnCompleted":
+        console.log("[useThread] Turn completed");
         setIsRunning(false);
         currentContentRef.current = "";
         currentReasoningRef.current = "";
         break;
 
       case "turnFailed":
+        console.log("[useThread] Turn failed:", event.error);
         setIsRunning(false);
         setError(event.error || "Turn failed");
         currentContentRef.current = "";
@@ -124,45 +132,51 @@ export function useThread({
         break;
 
       case "idle":
+        console.log("[useThread] Thread idle");
         setIsRunning(false);
         break;
 
       case "compacted":
-        console.log(`Thread compacted, new token count: ${event.newTokenCount}`);
+        console.log(`[useThread] Thread compacted, new token count: ${event.newTokenCount}`);
         break;
     }
   }, []);
 
   // Subscribe to thread events
   const subscribe = useCallback(async () => {
+    console.log("[useThread] subscribe() called, threadId:", threadId);
     if (unlistenRef.current) {
       unlistenRef.current();
       unlistenRef.current = null;
     }
 
     if (!isTauriEnv) {
-      console.log("Not in Tauri environment, skipping subscription");
+      console.log("[useThread] Not in Tauri environment, skipping subscription");
       return;
     }
 
     try {
+      console.log("[useThread] Calling invoke subscribe_thread with threadId:", threadId);
       await invoke("subscribe_thread", { threadId });
+      console.log("[useThread] subscribe_thread succeeded, setting up listener");
       unlistenRef.current = await listen<string>("thread:event", (event) => {
         try {
-          console.log(event)
+          console.log("[useThread] Raw event payload:", event.payload);
           const threadEvent: ThreadEvent = JSON.parse(event.payload);
           handleThreadEvent(threadEvent);
         } catch (e) {
-          console.error("Failed to parse thread event:", e);
+          console.error("[useThread] Failed to parse thread event:", e);
         }
       });
+      console.log("[useThread] Listener setup complete");
     } catch (e) {
-        console.error("Failed to subscribe:", e);
+        console.error("[useThread] Failed to subscribe:", e);
     }
   }, [threadId, handleThreadEvent]);
 
   // Auto-subscribe on mount
   useEffect(() => {
+    console.log("[useThread] useEffect - autoSubscribe:", autoSubscribe);
     if (autoSubscribe) {
       subscribe();
     }
@@ -176,13 +190,14 @@ export function useThread({
   // Send a message to the thread
   const sendMessage = useCallback(
     async (content: string) => {
+      console.log("[useThread] sendMessage called with:", content);
       setError(null);
       setIsRunning(true);
       setMessages((prev) => [...prev, { role: "user", content }]);
 
       if (!isTauriEnv) {
         // Mock response for development
-        console.log("Not in Tauri environment, simulating response...");
+        console.log("[useThread] Not in Tauri environment, simulating response...");
         setTimeout(() => {
           setMessages((prev) => [
             ...prev,
@@ -197,8 +212,11 @@ export function useThread({
       }
 
       try {
+        console.log("[useThread] Calling invoke send_message with threadId:", threadId, "message:", content);
         await invoke("send_message", { threadId, message: content });
+        console.log("[useThread] send_message succeeded");
       } catch (e) {
+        console.error("[useThread] Failed to send message:", e);
         setError(`Failed to send message: ${e}`);
         setIsRunning(false);
       }

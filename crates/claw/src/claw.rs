@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::{env, path::Path, path::PathBuf};
 
 use sqlx::SqlitePool;
+use tokio::sync::RwLock;
 
 use crate::agents::thread::{ThreadConfig, ThreadEvent, ThreadId};
 use crate::agents::{AgentManager, AgentRuntimeId};
@@ -19,6 +20,26 @@ use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use tokio_util::sync::CancellationToken;
 
+/// Result of AppContext initialization with default session info.
+#[derive(Clone)]
+pub struct AppContextInit {
+    /// The initialized AppContext.
+    pub context: AppContext,
+    /// The default ArgusAgent runtime ID.
+    pub agent_runtime_id: AgentRuntimeId,
+    /// The default thread ID.
+    pub thread_id: ThreadId,
+}
+
+/// Active thread information.
+#[derive(Debug, Clone)]
+pub struct ActiveThread {
+    /// Thread ID.
+    pub thread_id: ThreadId,
+    /// Agent runtime ID that owns this thread.
+    pub agent_runtime_id: AgentRuntimeId,
+}
+
 #[derive(Clone)]
 pub struct AppContext {
     db_pool: SqlitePool,
@@ -27,9 +48,49 @@ pub struct AppContext {
     tool_manager: Arc<ToolManager>,
     job_repository: Arc<dyn JobRepository>,
     shutdown: CancellationToken,
+    /// Active threads indexed by thread_id.
+    active_threads: Arc<RwLock<Vec<ActiveThread>>>,
 }
 
 impl AppContext {
+    /// Initialize AppContext with default ArgusAgent and thread.
+    ///
+    /// This is the recommended way to initialize AppContext for desktop/CLI usage.
+    /// Returns the context along with default IDs for immediate use.
+    pub async fn init_with_defaults(
+        database_target: Option<String>,
+    ) -> Result<AppContextInit, AgentError> {
+        let context = Self::init(database_target).await?;
+
+        // Initialize ArgusAgent
+        let agent_runtime_id = context.init_argus_agent().await?;
+        tracing::info!(
+            "ArgusAgent initialized with runtime_id: {}",
+            agent_runtime_id
+        );
+
+        // Create default thread with a deterministic ID
+        // Using nil UUID + 1 for the default thread
+        let thread_id = ThreadId::parse("00000000-0000-0000-0000-000000000001")
+            .expect("default thread ID should be valid UUID");
+        context.get_or_create_thread(agent_runtime_id, thread_id, None)?;
+        tracing::info!("Default thread created with id: {}", thread_id);
+
+        // Track as active thread
+        context
+            .add_active_thread(ActiveThread {
+                thread_id,
+                agent_runtime_id,
+            })
+            .await;
+
+        Ok(AppContextInit {
+            context,
+            agent_runtime_id,
+            thread_id,
+        })
+    }
+
     pub async fn init(database_target: Option<String>) -> Result<Self, AgentError> {
         let database_target = resolve_database_target(database_target)?;
         let pool = match &database_target {
@@ -78,6 +139,7 @@ impl AppContext {
             tool_manager,
             job_repository,
             shutdown,
+            active_threads: Arc::new(RwLock::new(Vec::new())),
         })
     }
 
@@ -100,6 +162,7 @@ impl AppContext {
                     .filename(std::path::Path::new(":memory:")),
             ))),
             shutdown: CancellationToken::new(),
+            active_threads: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -118,6 +181,7 @@ impl AppContext {
             tool_manager,
             job_repository: Arc::new(SqliteJobRepository::new(pool)),
             shutdown: CancellationToken::new(),
+            active_threads: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -259,6 +323,44 @@ impl AppContext {
     ) -> Result<Vec<crate::llm::ChatMessage>, AgentError> {
         self.agent_manager
             .get_thread_messages(agent_runtime_id, thread_id)
+    }
+
+    // === Active Thread Management ===
+
+    /// Add a thread to the active threads list.
+    pub async fn add_active_thread(&self, thread: ActiveThread) {
+        let mut threads = self.active_threads.write().await;
+        // Check if already exists
+        if !threads.iter().any(|t| t.thread_id == thread.thread_id) {
+            threads.push(thread);
+        }
+    }
+
+    /// Remove a thread from the active threads list.
+    pub async fn remove_active_thread(&self, thread_id: ThreadId) {
+        let mut threads = self.active_threads.write().await;
+        threads.retain(|t| t.thread_id != thread_id);
+    }
+
+    /// Get all active threads.
+    pub async fn get_active_threads(&self) -> Vec<ActiveThread> {
+        self.active_threads.read().await.clone()
+    }
+
+    /// Get the default (first) active thread if any.
+    pub async fn get_default_thread(&self) -> Option<ActiveThread> {
+        self.active_threads.read().await.first().cloned()
+    }
+
+    /// Subscribe to a thread's events.
+    ///
+    /// If the thread doesn't exist, it will be created.
+    pub fn subscribe_thread(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+    ) -> Result<tokio::sync::broadcast::Receiver<ThreadEvent>, AgentError> {
+        self.agent_manager.subscribe(agent_runtime_id, thread_id)
     }
 }
 

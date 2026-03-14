@@ -6,6 +6,15 @@ use tauri::State;
 
 use crate::tauri_context::{ChatMessageData, TauriContext};
 
+/// Get the default thread ID.
+///
+/// Returns the default thread ID that was created during initialization.
+/// The frontend should use this ID for the default conversation.
+#[tauri::command]
+pub fn get_default_thread_id(tauri_ctx: State<'_, Arc<TauriContext>>) -> String {
+    tauri_ctx.default_thread_id().to_string()
+}
+
 /// Subscribe to thread events.
 ///
 /// Starts streaming events from the specified thread to the frontend

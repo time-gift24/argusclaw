@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
-use tokio::sync::OnceCell;
 
 use claw::agents::thread::{ThreadEvent, ThreadId};
 use claw::agents::AgentRuntimeId;
@@ -20,36 +19,37 @@ pub struct TauriContext {
     app_context: Arc<claw::AppContext>,
     /// Tauri app handle for emitting events.
     app_handle: AppHandle,
-    /// ArgusAgent's runtime ID (initialized once).
-    argus_agent_id: OnceCell<AgentRuntimeId>,
+    /// Default ArgusAgent runtime ID.
+    default_agent_runtime_id: AgentRuntimeId,
+    /// Default thread ID.
+    default_thread_id: ThreadId,
 }
 
 impl TauriContext {
-    /// Create a new TauriContext.
-    pub fn new(app_context: Arc<claw::AppContext>, app_handle: AppHandle) -> Self {
+    /// Create a new TauriContext with pre-initialized defaults.
+    pub fn new(
+        app_context: Arc<claw::AppContext>,
+        app_handle: AppHandle,
+        default_agent_runtime_id: AgentRuntimeId,
+        default_thread_id: ThreadId,
+    ) -> Self {
         Self {
             app_context,
             app_handle,
-            argus_agent_id: OnceCell::new(),
+            default_agent_runtime_id,
+            default_thread_id,
         }
     }
 
-    /// Get or initialize the ArgusAgent.
-    async fn get_argus_agent_id(&self) -> Result<AgentRuntimeId, String> {
-        if let Some(id) = self.argus_agent_id.get() {
-            return Ok(*id);
-        }
+    /// Get the default agent runtime ID.
+    #[allow(dead_code)]
+    pub fn default_agent_runtime_id(&self) -> AgentRuntimeId {
+        self.default_agent_runtime_id
+    }
 
-        // Initialize ArgusAgent
-        let id = self
-            .app_context
-            .init_argus_agent()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let _ = self.argus_agent_id.set(id);
-        tracing::info!("ArgusAgent initialized with runtime_id: {}", id);
-        Ok(id)
+    /// Get the default thread ID.
+    pub fn default_thread_id(&self) -> ThreadId {
+        self.default_thread_id
     }
 
     /// Subscribe to a thread's events.
@@ -57,13 +57,12 @@ impl TauriContext {
     /// This spawns a background task that forwards ThreadEvent to the frontend
     /// via Tauri events.
     pub async fn subscribe_thread(&self, thread_id: &str) -> Result<(), String> {
-        let agent_runtime_id = self.get_argus_agent_id().await?;
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
         // Get or create thread and subscribe to events
         let mut event_rx = self
             .app_context
-            .get_or_create_thread(agent_runtime_id, thread_id, None)
+            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
             .map_err(|e| e.to_string())?;
 
         let app_handle = self.app_handle.clone();
@@ -91,18 +90,17 @@ impl TauriContext {
     /// This is non-blocking - it returns immediately and the response
     /// comes through the event stream.
     pub async fn send_message(&self, thread_id: &str, message: String) -> Result<(), String> {
-        let agent_runtime_id = self.get_argus_agent_id().await?;
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
         // Ensure thread exists
         let _ = self
             .app_context
-            .get_or_create_thread(agent_runtime_id, thread_id, None)
+            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
             .map_err(|e| e.to_string())?;
 
         // Send message (non-blocking)
         self.app_context
-            .send_message(agent_runtime_id, thread_id, message)
+            .send_message(self.default_agent_runtime_id, thread_id, message)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -111,18 +109,17 @@ impl TauriContext {
 
     /// Get messages from a thread.
     pub async fn get_messages(&self, thread_id: &str) -> Result<Vec<ChatMessageData>, String> {
-        let agent_runtime_id = self.get_argus_agent_id().await?;
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
         // Ensure thread exists
         let _ = self
             .app_context
-            .get_or_create_thread(agent_runtime_id, thread_id, None)
+            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
             .map_err(|e| e.to_string())?;
 
         let messages = self
             .app_context
-            .get_thread_messages(agent_runtime_id, thread_id)
+            .get_thread_messages(self.default_agent_runtime_id, thread_id)
             .map_err(|e| e.to_string())?;
 
         Ok(messages.into_iter().map(ChatMessageData::from).collect())
@@ -130,11 +127,10 @@ impl TauriContext {
 
     /// Create a new thread with a specific ID.
     pub async fn create_thread(&self, thread_id: &str) -> Result<(), String> {
-        let agent_runtime_id = self.get_argus_agent_id().await?;
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
         self.app_context
-            .get_or_create_thread(agent_runtime_id, thread_id, None)
+            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
             .map_err(|e| e.to_string())?;
 
         Ok(())
