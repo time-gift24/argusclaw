@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::agents::AgentRuntimeId;
+use crate::agents::thread::ThreadId;
 use crate::db::DbError;
 use crate::llm::LlmError;
 use crate::tool::ToolError;
@@ -33,12 +35,12 @@ pub enum AgentError {
     #[error("provider kind `{kind}` is not supported by this build")]
     UnsupportedProviderKind { kind: String },
 
-    #[error("default agent not initialized")]
-    DefaultAgentNotInitialized,
+    #[error("argus agent not found in database")]
+    ArgusAgentNotFound,
 
-    #[error("thread not found")]
-    ThreadNotFound,
+    #[error("agent not found: {0}")]
+    AgentNotFound(AgentRuntimeId),
 
-    #[error("thread creation failed")]
-    ThreadCreationFailed,
+    #[error("thread not found: {id}")]
+    ThreadNotFound { id: ThreadId },
 }

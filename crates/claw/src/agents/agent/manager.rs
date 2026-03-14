@@ -1,8 +1,10 @@
 //! AgentManager - manages global managers and creates runtime Agent instances.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
+use tokio::sync::broadcast;
 
 use super::runtime::{Agent, AgentBuilder};
 use crate::agents::compact::CompactorManager;
@@ -10,8 +12,9 @@ use crate::agents::thread::{ThreadConfig, ThreadEvent, ThreadId};
 use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentRuntimeId};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
+use crate::db::llm::LlmProviderId;
 use crate::error::AgentError;
-use crate::llm::{LlmProvider, LLMManager};
+use crate::llm::{ChatMessage, LLMManager, LlmProvider};
 use crate::tool::ToolManager;
 
 /// AgentManager creates and manages runtime Agent instances.
@@ -31,8 +34,8 @@ pub struct AgentManager {
     tool_manager: Arc<ToolManager>,
     /// Active agents indexed by runtime ID.
     agents: DashMap<AgentRuntimeId, Agent>,
-    /// Default agent for simple use cases (desktop/chat).
-    default_agent: OnceLock<Agent>,
+    /// ArgusAgent's RuntimeId (cached after initialization).
+    argus_agent_id: OnceLock<AgentRuntimeId>,
 }
 
 impl AgentManager {
@@ -50,82 +53,7 @@ impl AgentManager {
             approval_manager,
             tool_manager,
             agents: DashMap::new(),
-            default_agent: OnceLock::new(),
-        }
-    }
-
-    /// Initialize the default agent with a provider.
-    ///
-    /// This is used for simple use cases where a single agent is sufficient.
-    pub fn init_default_agent(&self, provider: Arc<dyn LlmProvider>) {
-        let agent = AgentBuilder::new()
-            .template_id(AgentId::new("default"))
-            .system_prompt(String::new())
-            .provider(provider)
-            .tool_manager(self.tool_manager.clone())
-            .compactor_manager(self.compactor_manager.clone())
-            .approval_manager(self.approval_manager.clone())
-            .build();
-        let _ = self.default_agent.set(agent);
-    }
-
-    /// Check if default agent needs initialization.
-    ///
-    /// Returns true if the default agent needs to be initialized.
-    #[must_use]
-    pub fn needs_default_agent(&self) -> bool {
-        self.default_agent.get().is_none()
-    }
-
-    /// Get or create a thread in the default agent.
-    ///
-    /// Creates a new thread if one doesn't exist with the given ID.
-    /// Returns the thread's event receiver for subscribing to updates.
-    pub fn get_or_create_thread(
-        &self,
-        thread_id: ThreadId,
-        config: ThreadConfig,
-    ) -> Result<tokio::sync::broadcast::Receiver<ThreadEvent>, AgentError> {
-        let agent = self.default_agent.get().ok_or(AgentError::DefaultAgentNotInitialized)?;
-
-        // Create thread with specific ID (or get existing)
-        agent.create_thread_with_id(thread_id, config);
-
-        // Get the thread and return its event receiver
-        if let Some(thread) = agent.get_thread_mut(&thread_id) {
-            Ok(thread.subscribe())
-        } else {
-            Err(AgentError::ThreadCreationFailed)
-        }
-    }
-
-    /// Send a message to a thread in the default agent.
-    pub async fn send_message(
-        &self,
-        thread_id: ThreadId,
-        message: String,
-    ) -> Result<(), AgentError> {
-        let agent = self.default_agent.get().ok_or(AgentError::DefaultAgentNotInitialized)?;
-
-        if let Some(mut thread) = agent.get_thread_mut(&thread_id) {
-            thread.send_message(message).await;
-            Ok(())
-        } else {
-            Err(AgentError::ThreadNotFound)
-        }
-    }
-
-    /// Get thread messages from the default agent.
-    pub fn get_thread_messages(
-        &self,
-        thread_id: ThreadId,
-    ) -> Result<Vec<crate::llm::ChatMessage>, AgentError> {
-        let agent = self.default_agent.get().ok_or(AgentError::DefaultAgentNotInitialized)?;
-
-        if let Some(thread) = agent.get_thread_mut(&thread_id) {
-            Ok(thread.history().to_vec())
-        } else {
-            Err(AgentError::ThreadNotFound)
+            argus_agent_id: OnceLock::new(),
         }
     }
 
@@ -147,15 +75,67 @@ impl AgentManager {
         self.approval_manager.as_ref()
     }
 
+    /// Initialize and load the ArgusAgent.
+    ///
+    /// This should be called once during application startup.
+    /// Returns the ArgusAgent's RuntimeId for subsequent operations.
+    pub async fn init_argus_agent(&self) -> Result<AgentRuntimeId, AgentError> {
+        // Return cached ID if already initialized
+        if let Some(id) = self.argus_agent_id.get() {
+            return Ok(*id);
+        }
+
+        // Load the ArgusAgent template from database
+        let record = self
+            .repository
+            .get(&AgentId::new("argus"))
+            .await?
+            .ok_or(AgentError::ArgusAgentNotFound)?;
+
+        // Get provider - use default if not specified
+        let provider = if record.provider_id.is_empty() {
+            self.llm_manager.get_default_provider().await?
+        } else {
+            self.llm_manager
+                .get_provider(&LlmProviderId::new(&record.provider_id))
+                .await?
+        };
+
+        // Build the ArgusAgent
+        let agent = AgentBuilder::from_record(&record, provider)
+            .tool_manager(self.tool_manager.clone())
+            .compactor_manager(self.compactor_manager.clone())
+            .approval_manager(self.approval_manager.clone())
+            .build();
+
+        let runtime_id = agent.runtime_id();
+        self.agents.insert(runtime_id, agent);
+
+        // Cache the ArgusAgent's runtime ID
+        let _ = self.argus_agent_id.set(runtime_id);
+
+        tracing::info!("ArgusAgent initialized with runtime_id: {}", runtime_id);
+        Ok(runtime_id)
+    }
+
+    /// Get the ArgusAgent's RuntimeId (if initialized).
+    #[must_use]
+    pub fn argus_agent_id(&self) -> Option<AgentRuntimeId> {
+        self.argus_agent_id.get().copied()
+    }
+
     /// Create a runtime Agent instance from an AgentRecord (template).
     ///
     /// Returns the `AgentRuntimeId` for accessing the agent.
     pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentRuntimeId, AgentError> {
-        use crate::db::llm::LlmProviderId;
-        let provider = self
-            .llm_manager
-            .get_provider(&LlmProviderId::new(&record.provider_id))
-            .await?;
+        // Get provider - use default if not specified
+        let provider = if record.provider_id.is_empty() {
+            self.llm_manager.get_default_provider().await?
+        } else {
+            self.llm_manager
+                .get_provider(&LlmProviderId::new(&record.provider_id))
+                .await?
+        };
 
         let agent = AgentBuilder::from_record(record, provider)
             .tool_manager(self.tool_manager.clone())
@@ -183,6 +163,101 @@ impl AgentManager {
     #[must_use]
     pub fn count(&self) -> usize {
         self.agents.len()
+    }
+
+    // === Thread operations ===
+
+    /// Get or create a thread for a specific agent.
+    ///
+    /// Returns a broadcast receiver for thread events.
+    pub fn get_or_create_thread(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+        config: ThreadConfig,
+    ) -> Result<broadcast::Receiver<ThreadEvent>, AgentError> {
+        let agent = self
+            .agents
+            .get(&agent_runtime_id)
+            .ok_or(AgentError::AgentNotFound(agent_runtime_id))?
+            .value()
+            .clone();
+
+        Ok(agent.get_or_create_thread(thread_id, config))
+    }
+
+    /// Switch the LLM provider for a specific thread.
+    pub fn switch_thread_provider(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+        provider: Arc<dyn LlmProvider>,
+    ) -> Result<(), AgentError> {
+        let agent = self
+            .agents
+            .get(&agent_runtime_id)
+            .ok_or(AgentError::AgentNotFound(agent_runtime_id))?
+            .value()
+            .clone();
+
+        agent.switch_thread_provider(&thread_id, provider)
+    }
+
+    /// Send a message to a thread.
+    ///
+    /// Returns a broadcast receiver for thread events.
+    pub async fn send_message(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+        message: String,
+    ) -> Result<broadcast::Receiver<ThreadEvent>, AgentError> {
+        let agent = self
+            .agents
+            .get(&agent_runtime_id)
+            .ok_or(AgentError::AgentNotFound(agent_runtime_id))?
+            .value()
+            .clone();
+
+        agent
+            .send_message_to_thread(&thread_id, message)
+            .ok_or(AgentError::ThreadNotFound { id: thread_id })
+    }
+
+    /// Get messages from a thread.
+    pub fn get_thread_messages(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<ChatMessage>, AgentError> {
+        let agent = self
+            .agents
+            .get(&agent_runtime_id)
+            .ok_or(AgentError::AgentNotFound(agent_runtime_id))?
+            .value()
+            .clone();
+
+        agent
+            .get_thread_messages(&thread_id)
+            .ok_or(AgentError::ThreadNotFound { id: thread_id })
+    }
+
+    /// Subscribe to events from a thread.
+    pub fn subscribe(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+    ) -> Result<broadcast::Receiver<ThreadEvent>, AgentError> {
+        let agent = self
+            .agents
+            .get(&agent_runtime_id)
+            .ok_or(AgentError::AgentNotFound(agent_runtime_id))?
+            .value()
+            .clone();
+
+        agent
+            .subscribe(&thread_id)
+            .ok_or(AgentError::ThreadNotFound { id: thread_id })
     }
 
     // === Template operations (delegated to repository) ===

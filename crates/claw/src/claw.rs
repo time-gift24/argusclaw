@@ -2,10 +2,9 @@ use std::sync::Arc;
 use std::{env, path::Path, path::PathBuf};
 
 use sqlx::SqlitePool;
-use tokio::sync::broadcast;
 
 use crate::agents::thread::{ThreadConfig, ThreadEvent, ThreadId};
-use crate::agents::AgentManager;
+use crate::agents::{AgentManager, AgentRuntimeId};
 use crate::db::llm::{LlmProviderId, LlmProviderRecord};
 use crate::db::sqlite::{
     SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
@@ -13,7 +12,7 @@ use crate::db::sqlite::{
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;
-use crate::llm::{ChatMessage, LLMManager};
+use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
 use crate::scheduler::{Scheduler, SchedulerConfig};
@@ -196,41 +195,70 @@ impl AppContext {
         self.llm_manager.stream_text(provider_id, prompt).await
     }
 
-    /// Initialize the default agent with the default provider.
+    // === ArgusAgent API ===
+
+    /// Initialize the ArgusAgent and return its RuntimeId.
     ///
-    /// This must be called before using thread-related methods.
-    pub async fn init_default_agent(&self) -> Result<(), AgentError> {
-        let provider = self.llm_manager.get_default_provider().await?;
-        self.agent_manager.init_default_agent(provider);
-        Ok(())
+    /// The ArgusAgent is the default assistant for ArgusClaw.
+    /// If the agent record has no provider_id, the default provider is used.
+    pub async fn init_argus_agent(&self) -> Result<AgentRuntimeId, AgentError> {
+        self.agent_manager.init_argus_agent().await
     }
 
-    /// Get or create a thread with the given ID.
+    /// Get the ArgusAgent's RuntimeId if initialized.
+    #[must_use]
+    pub fn argus_agent_id(&self) -> Option<AgentRuntimeId> {
+        self.agent_manager.argus_agent_id()
+    }
+
+    /// Get or create a thread for the agent.
     ///
     /// Returns a broadcast receiver for thread events.
-    /// Initializes the default agent if not already done.
-    pub async fn get_or_create_thread(
+    pub fn get_or_create_thread(
         &self,
+        agent_runtime_id: AgentRuntimeId,
         thread_id: ThreadId,
         config: Option<ThreadConfig>,
-    ) -> Result<broadcast::Receiver<ThreadEvent>, AgentError> {
-        // Try to initialize default agent if not done
-        if self.agent_manager.needs_default_agent() {
-            let provider = self.llm_manager.get_default_provider().await?;
-            self.agent_manager.init_default_agent(provider);
-        }
+    ) -> Result<tokio::sync::broadcast::Receiver<ThreadEvent>, AgentError> {
+        self.agent_manager.get_or_create_thread(
+            agent_runtime_id,
+            thread_id,
+            config.unwrap_or_default(),
+        )
+    }
+
+    /// Switch the LLM provider for a thread.
+    pub async fn switch_thread_provider(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+        provider_id: LlmProviderId,
+    ) -> Result<(), AgentError> {
+        let provider = self.llm_manager.get_provider(&provider_id).await?;
         self.agent_manager
-            .get_or_create_thread(thread_id, config.unwrap_or_default())
+            .switch_thread_provider(agent_runtime_id, thread_id, provider)
     }
 
     /// Send a message to a thread.
-    pub async fn send_message(&self, thread_id: ThreadId, message: String) -> Result<(), AgentError> {
-        self.agent_manager.send_message(thread_id, message).await
+    pub async fn send_message(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+        message: String,
+    ) -> Result<tokio::sync::broadcast::Receiver<ThreadEvent>, AgentError> {
+        self.agent_manager
+            .send_message(agent_runtime_id, thread_id, message)
+            .await
     }
 
-    /// Get messages from a thread.
-    pub fn get_thread_messages(&self, thread_id: ThreadId) -> Result<Vec<ChatMessage>, AgentError> {
-        self.agent_manager.get_thread_messages(thread_id)
+    /// Get the message history for a thread.
+    pub fn get_thread_messages(
+        &self,
+        agent_runtime_id: AgentRuntimeId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<crate::llm::ChatMessage>, AgentError> {
+        self.agent_manager
+            .get_thread_messages(agent_runtime_id, thread_id)
     }
 }
 

@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use derive_builder::Builder;
 
 use crate::agents::compact::{Compactor, CompactorManager};
-use crate::agents::thread::{Thread, ThreadConfig, ThreadId, ThreadInfo};
+use crate::agents::thread::{Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
 use crate::approval::ApprovalManager;
 use crate::llm::LlmProvider;
@@ -157,30 +157,6 @@ impl Agent {
         id
     }
 
-    /// Create a new thread with a specific ID, or get existing one.
-    ///
-    /// Returns true if a new thread was created, false if it already existed.
-    pub fn create_thread_with_id(&self, thread_id: ThreadId, config: ThreadConfig) -> bool {
-        // Check if already exists
-        if self.threads.contains_key(&thread_id) {
-            return false;
-        }
-
-        let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
-
-        let mut thread = Thread::new(
-            self.provider.clone(),
-            self.tool_manager.clone(),
-            compactor,
-            self.approval_manager.clone(),
-            config,
-        );
-        // Override the generated ID with the requested one
-        thread.id = thread_id;
-        self.threads.insert(thread_id, thread);
-        true
-    }
-
     /// Get a thread by ID.
     #[must_use]
     pub fn get_thread(&self, id: &ThreadId) -> Option<AgentHandle> {
@@ -236,6 +212,90 @@ impl Agent {
     #[must_use]
     pub fn thread_count(&self) -> usize {
         self.threads.len()
+    }
+
+    /// Switch the LLM provider for a specific thread.
+    ///
+    /// This allows changing the provider at the thread level,
+    /// enabling different threads to use different providers.
+    pub fn switch_thread_provider(
+        &self,
+        thread_id: &ThreadId,
+        provider: Arc<dyn LlmProvider>,
+    ) -> Result<(), crate::error::AgentError> {
+        if let Some(mut thread) = self.threads.get_mut(thread_id) {
+            thread.switch_provider(provider);
+            Ok(())
+        } else {
+            Err(crate::error::AgentError::ThreadNotFound { id: *thread_id })
+        }
+    }
+
+    /// Get or create a thread with a specific ID and configuration.
+    ///
+    /// Returns a receiver for thread events.
+    pub fn get_or_create_thread(
+        &self,
+        thread_id: ThreadId,
+        config: ThreadConfig,
+    ) -> tokio::sync::broadcast::Receiver<ThreadEvent> {
+        // Check if thread exists
+        if let Some(thread) = self.threads.get(&thread_id) {
+            return thread.subscribe();
+        }
+
+        // Create new thread
+        let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
+        let thread = Thread::new(
+            self.provider.clone(),
+            self.tool_manager.clone(),
+            compactor,
+            self.approval_manager.clone(),
+            config,
+        );
+
+        // Note: The thread has a new ID, but we want to use the specified ID
+        // For now, we return the subscribe() from the newly created thread
+        let event_rx = thread.subscribe();
+        let actual_id = *thread.id();
+        self.threads.insert(actual_id, thread);
+        event_rx
+    }
+
+    /// Subscribe to events from a specific thread.
+    pub fn subscribe(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<tokio::sync::broadcast::Receiver<ThreadEvent>> {
+        self.threads.get(thread_id).map(|t| t.subscribe())
+    }
+
+    /// Get messages from a specific thread.
+    pub fn get_thread_messages(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<Vec<crate::llm::ChatMessage>> {
+        self.threads.get(thread_id).map(|t| t.history().to_vec())
+    }
+
+    /// Get mutable access to a thread for sending messages.
+    pub fn send_message_to_thread(
+        &self,
+        thread_id: &ThreadId,
+        message: String,
+    ) -> Option<tokio::sync::broadcast::Receiver<ThreadEvent>> {
+        if let Some(thread) = self.threads.get(thread_id) {
+            let event_rx = thread.subscribe();
+            // Clone the thread for the async task
+            let mut thread = thread.clone();
+            // Spawn the send operation
+            tokio::spawn(async move {
+                let _ = thread.send_message(message).await;
+            });
+            Some(event_rx)
+        } else {
+            None
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::agents::compact::Compactor;
 use crate::agents::turn::{
-    execute_turn_streaming, TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent,
+    TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming,
 };
 use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
@@ -100,6 +100,24 @@ impl std::fmt::Debug for Thread {
             .field("turn_count", &self.turn_count)
             .field("config", &self.config)
             .finish()
+    }
+}
+
+impl Clone for Thread {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            messages: self.messages.clone(),
+            provider: self.provider.clone(),
+            tool_manager: self.tool_manager.clone(),
+            compactor: self.compactor.clone(),
+            approval_manager: self.approval_manager.clone(),
+            hooks: self.hooks.clone(),
+            config: self.config.clone(),
+            token_count: self.token_count,
+            turn_count: self.turn_count,
+            event_sender: self.event_sender.clone(),
+        }
     }
 }
 
@@ -212,6 +230,16 @@ impl Thread {
     /// Get the LLM provider.
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
         &self.provider
+    }
+
+    /// Switch to a different LLM provider.
+    ///
+    /// This allows changing the provider at runtime, useful for:
+    /// - Switching models mid-conversation
+    /// - Fallback to a different provider
+    /// - User-initiated provider changes
+    pub fn switch_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        self.provider = provider;
     }
 
     /// Get mutable access to messages (for Compactor).
