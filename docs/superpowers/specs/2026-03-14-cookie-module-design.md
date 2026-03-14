@@ -65,13 +65,28 @@ pub struct Cookie {
     pub same_site: Option<String>,
     pub expires: Option<DateTime<Utc>>,
 }
+```
 
-/// Cookie 唯一标识
-#[derive(Hash, Eq, PartialEq)]
+### CookieKey
+
+```rust
+/// Cookie 唯一标识，用于 HashMap 索引
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct CookieKey {
     name: String,
     domain: String,
     path: String,
+}
+
+impl CookieKey {
+    /// 从 Cookie 创建 Key
+    pub fn from_cookie(cookie: &Cookie) -> Self {
+        Self {
+            name: cookie.name.clone(),
+            domain: cookie.domain.clone(),
+            path: cookie.path.clone(),
+        }
+    }
 }
 ```
 
@@ -141,6 +156,8 @@ pub struct CookieManager {
     chrome: Arc<ChromeConnection>,
     store: Arc<RwLock<CookieStore>>,
     event_tx: broadcast::Sender<CookieEvent>,
+    /// 用于优雅关闭监听任务
+    shutdown: CancellationToken,
 }
 
 impl CookieManager {
@@ -155,6 +172,37 @@ impl CookieManager {
 
     /// 订阅 Cookie 变化事件
     pub fn subscribe(&self) -> broadcast::Receiver<CookieEvent>;
+
+    /// 关闭连接，停止监听任务
+    pub async fn shutdown(&self);
+}
+```
+
+## AppContext 集成
+
+```rust
+// crates/claw/src/claw.rs
+pub struct AppContext {
+    // ... existing fields ...
+
+    /// Cookie 管理器（可选，需启用 cookie feature）
+    #[cfg(feature = "cookie")]
+    cookie_manager: Option<Arc<CookieManager>>,
+}
+
+#[cfg(feature = "cookie")]
+impl AppContext {
+    /// 初始化 Cookie 管理（需 Chrome 已启动调试端口）
+    pub async fn init_cookie_manager(&mut self, port: u16) -> Result<(), CookieError> {
+        let manager = CookieManager::connect(port).await?;
+        self.cookie_manager = Some(Arc::new(manager));
+        Ok(())
+    }
+
+    /// 获取 Cookie 管理器
+    pub fn cookie_manager(&self) -> Option<&Arc<CookieManager>> {
+        self.cookie_manager.as_ref()
+    }
 }
 ```
 
@@ -163,11 +211,12 @@ impl CookieManager {
 ```
 1. CookieManager::connect()
    └─> ChromeConnection::connect()
+   └─> 初始化 CancellationToken
    └─> 启动 start_listener() 后台任务
 
 2. start_listener()
    └─> chrome.enable_network()
-   └─> 循环监听 CDP 事件
+   └─> 循环监听 CDP 事件（可被 shutdown 取消）
        ├─> Network.responseReceived
        │   └─> 解析 Set-Cookie header
        │   └─> store.insert()
@@ -177,6 +226,10 @@ impl CookieManager {
            └─> 解析 Cookie header
            └─> store.insert()
            └─> event_tx.send(CookieEvent::Added)
+
+3. shutdown() 调用时
+   └─> cancellation_token.cancel()
+   └─> 监听任务退出
 ```
 
 ## 错误处理
@@ -206,6 +259,10 @@ pub enum CookieError {
 ### GetCookiesTool
 
 ```rust
+use crate::llm::ToolDefinition;
+use crate::protocol::RiskLevel;
+use crate::tool::{NamedTool, ToolError};
+
 pub struct GetCookiesTool {
     cookie_manager: Arc<CookieManager>,
 }
@@ -232,9 +289,17 @@ impl NamedTool for GetCookiesTool {
         }
     }
 
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
+
     async fn execute(&self, args: Value) -> Result<Value, ToolError> {
-        let domain = args["domain"].as_str()
-            .ok_or_else(|| ToolError::MissingParameter("domain"))?;
+        let domain = args["domain"].as_str().ok_or_else(|| {
+            ToolError::ExecutionFailed {
+                tool_name: "get_cookies".to_string(),
+                reason: "Missing required parameter: domain".to_string(),
+            }
+        })?;
 
         let cookies = self.cookie_manager.get_cookies(domain).await;
 
@@ -254,11 +319,93 @@ impl NamedTool for GetCookiesTool {
 ```toml
 # crates/claw/Cargo.toml
 [dependencies]
+# chromiumoxide 版本需在实现时验证兼容性（预期 0.7+）
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"], optional = true }
+tokio-util = { version = "0.7", optional = true }  # for CancellationToken
 
 [features]
-cookie = ["chromiumoxide"]
+cookie = ["chromiumoxide", "tokio-util"]
 ```
+
+## 测试策略
+
+### 单元测试
+
+```rust
+// crates/claw/src/cookie/store.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cookie_key_from_cookie() {
+        let cookie = Cookie {
+            name: "session".into(),
+            value: "abc123".into(),
+            domain: "example.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: false,
+            same_site: Some("Lax".into()),
+            expires: None,
+        };
+        let key = CookieKey::from_cookie(&cookie);
+        assert_eq!(key.name, "session");
+        assert_eq!(key.domain, "example.com");
+    }
+
+    #[test]
+    fn test_store_insert_and_get() {
+        let mut store = CookieStore::new();
+        let cookie = test_cookie("a", "example.com");
+        store.insert(cookie);
+
+        let cookies = store.get_by_domain("example.com");
+        assert_eq!(cookies.len(), 1);
+    }
+
+    #[test]
+    fn test_store_update() {
+        let mut store = CookieStore::new();
+        store.insert(test_cookie("a", "example.com"));
+        let updated = Cookie { value: "new".into(), ..test_cookie("a", "example.com") };
+        let is_update = store.insert(updated);
+
+        assert!(is_update);
+        assert_eq!(store.get_by_domain("example.com")[0].value, "new");
+    }
+}
+```
+
+### 集成测试
+
+```rust
+// crates/claw/tests/cookie_integration_test.rs
+// 需要运行 Chrome: --remote-debugging-port=9222
+
+#[tokio::test]
+#[ignore = "requires Chrome running with debugging port"]
+async fn test_connect_to_chrome() {
+    let manager = CookieManager::connect(9222).await;
+    assert!(manager.is_ok());
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome running with debugging port"]
+async fn test_cookie_events() {
+    let manager = CookieManager::connect(9222).await.unwrap();
+    let mut rx = manager.subscribe();
+
+    // 触发 Chrome 访问网页产生 Cookie...
+    // 验证事件接收
+}
+```
+
+### CI 策略
+
+- 单元测试：始终运行
+- 集成测试：仅本地运行或标记 `#[ignore]`
+- CI 中使用 `--skip cookie_integration` 跳过需要 Chrome 的测试
 
 ## 使用方式
 
@@ -292,6 +439,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cookies = manager.get_cookies("example.com").await;
     println!("{:?}", cookies);
 
+    // 优雅关闭
+    manager.shutdown().await;
+
     Ok(())
 }
 ```
@@ -307,3 +457,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [ ] DeleteCookiesTool：删除 Cookie
 - [ ] 支持多 Tab 隔离
 - [ ] 支持 Firefox ( Marionette Protocol )
+- [ ] Chrome 断线重连机制
