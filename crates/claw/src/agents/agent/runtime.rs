@@ -6,7 +6,9 @@ use dashmap::DashMap;
 use derive_builder::Builder;
 
 use crate::agents::compact::{Compactor, CompactorManager};
-use crate::agents::thread::{Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadInfo};
+use crate::agents::thread::{
+    Thread, ThreadBuilder, ThreadConfig, ThreadEvent, ThreadId, ThreadInfo,
+};
 use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
 use crate::approval::ApprovalManager;
 use crate::llm::LlmProvider;
@@ -244,21 +246,25 @@ impl Agent {
             return thread.subscribe();
         }
 
-        // Create new thread
+        // Create new thread with the specified ID using ThreadBuilder
         let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
-        let thread = Thread::new(
-            self.provider.clone(),
-            self.tool_manager.clone(),
-            compactor,
-            self.approval_manager.clone(),
-            config,
-        );
 
-        // Note: The thread has a new ID, but we want to use the specified ID
-        // For now, we return the subscribe() from the newly created thread
+        let mut builder = ThreadBuilder::new()
+            .id(thread_id)
+            .provider(self.provider.clone())
+            .tool_manager(self.tool_manager.clone())
+            .compactor(compactor)
+            .config(config);
+
+        // Conditionally set approval_manager if present
+        if let Some(am) = self.approval_manager.clone() {
+            builder = builder.approval_manager(am);
+        }
+
+        let thread = builder.build();
+
         let event_rx = thread.subscribe();
-        let actual_id = *thread.id();
-        self.threads.insert(actual_id, thread);
+        self.threads.insert(thread_id, thread);
         event_rx
     }
 

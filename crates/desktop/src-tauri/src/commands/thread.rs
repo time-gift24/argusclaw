@@ -4,15 +4,20 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use crate::tauri_context::{ChatMessageData, TauriContext};
+use crate::tauri_context::{ChatMessageData, DefaultThreadInfo, TauriContext};
 
-/// Get the default thread ID.
+/// Get the default thread info from AppContext.
 ///
-/// Returns the default thread ID that was created during initialization.
-/// The frontend should use this ID for the default conversation.
+/// Returns the default thread ID and agent runtime ID that was created during initialization.
+/// The frontend should use these IDs for the default conversation.
 #[tauri::command]
-pub fn get_default_thread_id(tauri_ctx: State<'_, Arc<TauriContext>>) -> String {
-    tauri_ctx.default_thread_id().to_string()
+pub async fn get_default_thread_id(
+    tauri_ctx: State<'_, Arc<TauriContext>>,
+) -> Result<DefaultThreadInfo, String> {
+    tauri_ctx
+        .get_default_thread()
+        .await
+        .ok_or("no default thread available".to_string())
 }
 
 /// Subscribe to thread events.

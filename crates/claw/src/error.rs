@@ -45,4 +45,7 @@ pub enum AgentError {
 
     #[error("thread not found: {id}")]
     ThreadNotFound { id: ThreadId },
+
+    #[error("failed to parse agent runtime id")]
+    AgentRuntimeIdParseError(String),
 }

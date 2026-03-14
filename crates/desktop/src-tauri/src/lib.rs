@@ -38,12 +38,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
-            // Create TauriContext with pre-initialized IDs
+            // Create TauriContext - just a thin forwarding layer
             let tauri_ctx = Arc::new(TauriContext::new(
                 Arc::new(init_result.context),
                 app.handle().clone(),
-                init_result.agent_runtime_id,
-                init_result.thread_id,
             ));
 
             // Manage the TauriContext

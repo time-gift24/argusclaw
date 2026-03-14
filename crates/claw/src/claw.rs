@@ -303,13 +303,16 @@ impl AppContext {
             .switch_thread_provider(agent_runtime_id, thread_id, provider)
     }
 
-    /// Send a message to a thread.
+    /// Send a message to a thread (non-blocking).
+    ///
+    /// The response comes through the event stream.
+    /// Use `subscribe_thread` to receive events.
     pub async fn send_message(
         &self,
         agent_runtime_id: AgentRuntimeId,
         thread_id: ThreadId,
         message: String,
-    ) -> Result<tokio::sync::broadcast::Receiver<ThreadEvent>, AgentError> {
+    ) -> Result<(), AgentError> {
         self.agent_manager
             .send_message(agent_runtime_id, thread_id, message)
             .await

@@ -203,15 +203,15 @@ impl AgentManager {
         agent.switch_thread_provider(&thread_id, provider)
     }
 
-    /// Send a message to a thread.
+    /// Send a message to a thread (non-blocking).
     ///
-    /// Returns a broadcast receiver for thread events.
+    /// The response comes through the event stream (subscribe to receive events).
     pub async fn send_message(
         &self,
         agent_runtime_id: AgentRuntimeId,
         thread_id: ThreadId,
         message: String,
-    ) -> Result<broadcast::Receiver<ThreadEvent>, AgentError> {
+    ) -> Result<(), AgentError> {
         let agent = self
             .agents
             .get(&agent_runtime_id)
@@ -221,7 +221,9 @@ impl AgentManager {
 
         agent
             .send_message_to_thread(&thread_id, message)
-            .ok_or(AgentError::ThreadNotFound { id: thread_id })
+            .ok_or(AgentError::ThreadNotFound { id: thread_id })?;
+
+        Ok(())
     }
 
     /// Get messages from a thread.

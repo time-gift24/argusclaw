@@ -1,7 +1,8 @@
 //! TauriContext - bridges Tauri IPC with Claw AppContext.
 //!
-//! This module provides the integration layer between the Tauri frontend
-//! and the backend Claw AppContext, handling Thread operations and event streaming.
+//! This module provides a thin data forwarding layer between the Tauri frontend
+//! and the backend Claw AppContext. All state (including default IDs) comes
+//! from AppContext, not stored here.
 
 use std::sync::Arc;
 
@@ -13,71 +14,63 @@ use claw::llm::ChatMessage;
 
 /// Wrapper that combines AppContext with Tauri's AppHandle.
 ///
-/// This provides methods for Thread operations that can emit events to the frontend.
+/// This is a pure forwarding layer - no state is stored here.
+/// All IDs come from AppContext APIs.
 pub struct TauriContext {
     /// Reference to the Claw AppContext.
     app_context: Arc<claw::AppContext>,
     /// Tauri app handle for emitting events.
     app_handle: AppHandle,
-    /// Default ArgusAgent runtime ID.
-    default_agent_runtime_id: AgentRuntimeId,
-    /// Default thread ID.
-    default_thread_id: ThreadId,
 }
 
 impl TauriContext {
-    /// Create a new TauriContext with pre-initialized defaults.
-    pub fn new(
-        app_context: Arc<claw::AppContext>,
-        app_handle: AppHandle,
-        default_agent_runtime_id: AgentRuntimeId,
-        default_thread_id: ThreadId,
-    ) -> Self {
+    /// Create a new TauriContext.
+    pub fn new(app_context: Arc<claw::AppContext>, app_handle: AppHandle) -> Self {
         Self {
             app_context,
             app_handle,
-            default_agent_runtime_id,
-            default_thread_id,
         }
     }
 
-    /// Get the default agent runtime ID.
-    #[allow(dead_code)]
-    pub fn default_agent_runtime_id(&self) -> AgentRuntimeId {
-        self.default_agent_runtime_id
-    }
-
-    /// Get the default thread ID.
-    pub fn default_thread_id(&self) -> ThreadId {
-        self.default_thread_id
+    /// Get the default thread info from AppContext.
+    pub async fn get_default_thread(&self) -> Option<DefaultThreadInfo> {
+        self.app_context
+            .get_default_thread()
+            .await
+            .map(|t| DefaultThreadInfo {
+                thread_id: t.thread_id.to_string(),
+                agent_runtime_id: t.agent_runtime_id.to_string(),
+            })
     }
 
     /// Subscribe to a thread's events.
-    ///
-    /// This spawns a background task that forwards ThreadEvent to the frontend
-    /// via Tauri events.
     pub async fn subscribe_thread(&self, thread_id: &str) -> Result<(), String> {
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
-        // Get or create thread and subscribe to events
+        let default_thread = self
+            .get_default_thread()
+            .await
+            .ok_or("no default thread available")?;
+
+        let agent_runtime_id = default_thread
+            .agent_runtime_id
+            .parse::<AgentRuntimeId>()
+            .map_err(|e| e.to_string())?;
+
         let mut event_rx = self
             .app_context
-            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
+            .get_or_create_thread(agent_runtime_id, thread_id, None)
             .map_err(|e| e.to_string())?;
 
         let app_handle = self.app_handle.clone();
         let thread_id_str = thread_id.to_string();
 
-        // Spawn background task to forward events
         tokio::spawn(async move {
             while let Ok(event) = event_rx.recv().await {
-                // Serialize event to JSON for Tauri
                 let event_json = serde_json::to_string(&ThreadEventData::from(event.clone()));
                 if let Ok(json) = event_json {
                     let _ = app_handle.emit("thread:event", json);
                 }
-
-                // Log for debugging
                 tracing::debug!("Thread {} event: {:?}", thread_id_str, event);
             }
         });
@@ -85,22 +78,22 @@ impl TauriContext {
         Ok(())
     }
 
-    /// Send a message to a thread.
-    ///
-    /// This is non-blocking - it returns immediately and the response
-    /// comes through the event stream.
+    /// Send a message to a thread (non-blocking).
     pub async fn send_message(&self, thread_id: &str, message: String) -> Result<(), String> {
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
-        // Ensure thread exists
-        let _ = self
-            .app_context
-            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
+        let default_thread = self
+            .get_default_thread()
+            .await
+            .ok_or("no default thread available")?;
+
+        let agent_runtime_id = default_thread
+            .agent_runtime_id
+            .parse::<AgentRuntimeId>()
             .map_err(|e| e.to_string())?;
 
-        // Send message (non-blocking)
         self.app_context
-            .send_message(self.default_agent_runtime_id, thread_id, message)
+            .send_message(agent_runtime_id, thread_id, message)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -111,15 +104,19 @@ impl TauriContext {
     pub async fn get_messages(&self, thread_id: &str) -> Result<Vec<ChatMessageData>, String> {
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
-        // Ensure thread exists
-        let _ = self
-            .app_context
-            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
+        let default_thread = self
+            .get_default_thread()
+            .await
+            .ok_or("no default thread available")?;
+
+        let agent_runtime_id = default_thread
+            .agent_runtime_id
+            .parse::<AgentRuntimeId>()
             .map_err(|e| e.to_string())?;
 
         let messages = self
             .app_context
-            .get_thread_messages(self.default_agent_runtime_id, thread_id)
+            .get_thread_messages(agent_runtime_id, thread_id)
             .map_err(|e| e.to_string())?;
 
         Ok(messages.into_iter().map(ChatMessageData::from).collect())
@@ -129,12 +126,29 @@ impl TauriContext {
     pub async fn create_thread(&self, thread_id: &str) -> Result<(), String> {
         let thread_id = ThreadId::parse(thread_id).map_err(|e| e.to_string())?;
 
+        let default_thread = self
+            .get_default_thread()
+            .await
+            .ok_or("no default thread available")?;
+
+        let agent_runtime_id = default_thread
+            .agent_runtime_id
+            .parse::<AgentRuntimeId>()
+            .map_err(|e| e.to_string())?;
+
         self.app_context
-            .get_or_create_thread(self.default_agent_runtime_id, thread_id, None)
+            .get_or_create_thread(agent_runtime_id, thread_id, None)
             .map_err(|e| e.to_string())?;
 
         Ok(())
     }
+}
+
+/// Default thread info returned from AppContext.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DefaultThreadInfo {
+    pub thread_id: String,
+    pub agent_runtime_id: String,
 }
 
 /// Serializable thread event data for frontend.
@@ -246,7 +260,7 @@ impl From<ThreadEvent> for ThreadEventData {
                 new_token_count,
             },
             ThreadEvent::WaitingForApproval { .. } => {
-                // Skip approval events for now - not needed for basic integration
+                // Skip approval events for now
                 ThreadEventData::Idle {
                     thread_id: String::new(),
                 }

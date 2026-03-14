@@ -23,6 +23,11 @@ impl AgentRuntimeId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Parse from a string representation.
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(s).map(Self)
+    }
 }
 
 impl Default for AgentRuntimeId {
@@ -34,6 +39,14 @@ impl Default for AgentRuntimeId {
 impl fmt::Display for AgentRuntimeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for AgentRuntimeId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 
