@@ -6,17 +6,271 @@
 
 use std::sync::Arc;
 
-use futures_util::future::join_all;
+use futures_util::{future::join_all, StreamExt};
 use tokio::sync::broadcast;
 use tokio::time::{error::Elapsed, timeout};
 
-use crate::llm::{ChatMessage, FinishReason, ToolCall, ToolCompletionRequest, ToolDefinition};
+use crate::llm::{
+    ChatMessage, FinishReason, LlmStreamEvent, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
+};
 use crate::tool::ToolManager;
 
 use super::hooks::{BeforeCallLLMContext, HookEvent, HookRegistry, ToolHookContext};
-use super::{TokenUsage, TurnConfig, TurnError, TurnInput, TurnOutput};
+use super::{TokenUsage, TurnConfig, TurnError, TurnInput, TurnOutput, TurnStreamEvent};
 
-/// Executes a single turn in a conversation.
+/// Execution mode for turn processing.
+#[derive(Debug, Clone, Copy)]
+pub enum ExecutionMode {
+    /// Non-streaming mode (wait for complete response).
+    NonStreaming,
+    /// Streaming mode (emit real-time events).
+    Streaming,
+}
+
+/// Prepares tool definitions and optionally adds max_tool_calls system prompt.
+///
+/// This function:
+/// 1. Resolves tool definitions from the tool manager
+/// 2. Prepends a system message about max_tool_calls if configured
+fn prepare_tools(
+    messages: &mut Vec<ChatMessage>,
+    tool_manager: &Arc<ToolManager>,
+    tool_ids: &[String],
+    max_tool_calls: Option<u32>,
+) -> Vec<ToolDefinition> {
+    // Resolve tool definitions from tool_manager
+    let tools: Vec<ToolDefinition> = tool_ids
+        .iter()
+        .filter_map(|id| tool_manager.get(id))
+        .map(|tool| tool.definition())
+        .collect();
+
+    // Add system message about max_tool_calls if configured and tools are available
+    if let Some(max) = max_tool_calls
+        && !tools.is_empty()
+    {
+        let system_content = format!(
+            "IMPORTANT: You can only call at most {} tool(s) per response. \
+            If you need to call multiple tools, please proceed step by step - \
+            call tools one at a time and wait for the results before calling the next tool.",
+            max
+        );
+        // Prepend system message to messages
+        messages.insert(0, ChatMessage::system(system_content));
+    }
+
+    tools
+}
+
+/// Result of processing an LLM response's finish_reason.
+enum NextAction {
+    /// Turn is complete, return the output.
+    Return(TurnOutput),
+    /// Continue with tool execution.
+    ContinueWithTools {
+        tool_calls: Vec<ToolCall>,
+        #[allow(dead_code)]
+        content: Option<String>,
+    },
+    /// Context length exceeded.
+    LengthExceeded,
+}
+
+/// Processes the LLM response and determines the next action.
+fn process_finish_reason(
+    response: ToolCompletionResponse,
+    messages: &mut Vec<ChatMessage>,
+    token_usage: &mut TokenUsage,
+    max_tool_calls: Option<u32>,
+) -> NextAction {
+    // Track token usage
+    token_usage.input_tokens += response.input_tokens;
+    token_usage.output_tokens += response.output_tokens;
+    token_usage.total_tokens += response.input_tokens + response.output_tokens;
+
+    match response.finish_reason {
+        FinishReason::Stop => {
+            // Add assistant message to history
+            if let Some(content) = &response.content
+                && !content.is_empty()
+            {
+                messages.push(ChatMessage::assistant(content.clone()));
+            }
+
+            NextAction::Return(TurnOutput {
+                messages: std::mem::take(messages),
+                token_usage: token_usage.clone(),
+            })
+        }
+        FinishReason::ToolUse => {
+            // Limit tool calls based on max_tool_calls config
+            let tool_calls: Vec<ToolCall> = match max_tool_calls {
+                Some(max) if response.tool_calls.len() > max as usize => {
+                    tracing::debug!(
+                        requested = response.tool_calls.len(),
+                        max_allowed = max,
+                        "Limiting tool calls per iteration"
+                    );
+                    response.tool_calls.into_iter().take(max as usize).collect()
+                }
+                _ => response.tool_calls,
+            };
+
+            // Add assistant message with tool_calls to history
+            let assistant_msg =
+                ChatMessage::assistant_with_tool_calls(response.content.clone(), tool_calls.clone());
+            messages.push(assistant_msg);
+
+            NextAction::ContinueWithTools {
+                tool_calls,
+                content: response.content,
+            }
+        }
+        FinishReason::Length => NextAction::LengthExceeded,
+        FinishReason::ContentFilter | FinishReason::Unknown => {
+            // For content filter or unknown reasons, return what we have
+            if let Some(content) = &response.content
+                && !content.is_empty()
+            {
+                messages.push(ChatMessage::assistant(content.clone()));
+            }
+
+            NextAction::Return(TurnOutput {
+                messages: std::mem::take(messages),
+                token_usage: token_usage.clone(),
+            })
+        }
+    }
+}
+
+/// Calls the LLM in streaming mode, accumulating the response.
+///
+/// Falls back to non-streaming if the provider doesn't support streaming.
+async fn call_llm_streaming(
+    provider: &Arc<dyn crate::llm::LlmProvider>,
+    request: ToolCompletionRequest,
+    stream_sender: Option<&broadcast::Sender<TurnStreamEvent>>,
+) -> Result<ToolCompletionResponse, TurnError> {
+    match provider.stream_complete_with_tools(request.clone()).await {
+        Ok(mut stream) => {
+            let mut accumulator = StreamingAccumulator::new();
+            while let Some(event_result) = stream.next().await {
+                let event = event_result.map_err(TurnError::LlmFailed)?;
+                // Forward to stream_sender
+                if let Some(sender) = stream_sender {
+                    let _ = sender.send(TurnStreamEvent::LlmEvent(event.clone()));
+                }
+                accumulator.process(event);
+            }
+            Ok(accumulator.into_response())
+        }
+        Err(crate::llm::LlmError::UnsupportedCapability { .. }) => {
+            // Fallback to non-streaming
+            tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
+            provider
+                .complete_with_tools(request)
+                .await
+                .map_err(TurnError::LlmFailed)
+        }
+        Err(e) => Err(TurnError::LlmFailed(e)),
+    }
+}
+
+/// Accumulates streaming events into a complete response.
+struct StreamingAccumulator {
+    content: String,
+    reasoning_content: String,
+    tool_calls: Vec<(Option<String>, Option<String>, String)>,
+    input_tokens: u32,
+    output_tokens: u32,
+    finish_reason: FinishReason,
+}
+
+impl StreamingAccumulator {
+    fn new() -> Self {
+        Self {
+            content: String::new(),
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            finish_reason: FinishReason::Stop,
+        }
+    }
+
+    fn process(&mut self, event: LlmStreamEvent) {
+        match event {
+            LlmStreamEvent::ReasoningDelta { delta } => {
+                self.reasoning_content.push_str(&delta);
+            }
+            LlmStreamEvent::ContentDelta { delta } => {
+                self.content.push_str(&delta);
+            }
+            LlmStreamEvent::ToolCallDelta(tc) => {
+                // Ensure we have enough slots
+                while self.tool_calls.len() <= tc.index {
+                    self.tool_calls.push((None, None, String::new()));
+                }
+                if let Some(id) = tc.id {
+                    self.tool_calls[tc.index].0 = Some(id);
+                }
+                if let Some(name) = tc.name {
+                    self.tool_calls[tc.index].1 = Some(name);
+                }
+                if let Some(args_delta) = tc.arguments_delta {
+                    self.tool_calls[tc.index].2.push_str(&args_delta);
+                }
+            }
+            LlmStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                self.input_tokens = input_tokens;
+                self.output_tokens = output_tokens;
+            }
+            LlmStreamEvent::Finished { finish_reason } => {
+                self.finish_reason = finish_reason;
+            }
+        }
+    }
+
+    fn into_response(self) -> ToolCompletionResponse {
+        // Convert accumulated tool calls to ToolCall structs
+        let tool_calls: Vec<ToolCall> = self
+            .tool_calls
+            .into_iter()
+            .filter_map(|(id, name, args)| {
+                Some(ToolCall {
+                    id: id?,
+                    name: name?,
+                    arguments: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+
+        ToolCompletionResponse {
+            content: if self.content.is_empty() {
+                None
+            } else {
+                Some(self.content)
+            },
+            reasoning_content: if self.reasoning_content.is_empty() {
+                None
+            } else {
+                Some(self.reasoning_content)
+            },
+            tool_calls,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            finish_reason: self.finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
+    }
+}
+
+/// Executes a single turn in a conversation (non-streaming).
 ///
 /// This function runs the main LLM loop:
 /// 1. Sends messages to the LLM with available tools
@@ -32,6 +286,34 @@ use super::{TokenUsage, TurnConfig, TurnError, TurnInput, TurnOutput};
 /// - Max iterations exceeded
 /// - Tool call blocked by hooks
 pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOutput, TurnError> {
+    execute_turn_with_mode(input, config, ExecutionMode::NonStreaming).await
+}
+
+/// Executes a single turn in a conversation (streaming).
+///
+/// Same as `execute_turn` but emits real-time events through the `stream_sender`
+/// in `TurnInput`. If the provider doesn't support streaming, falls back to
+/// non-streaming mode.
+///
+/// # Errors
+///
+/// Returns `TurnError` for the same conditions as `execute_turn`.
+pub async fn execute_turn_streaming(
+    input: TurnInput,
+    config: TurnConfig,
+) -> Result<TurnOutput, TurnError> {
+    execute_turn_with_mode(input, config, ExecutionMode::Streaming).await
+}
+
+/// Unified turn execution with configurable mode.
+///
+/// This is the core implementation that both `execute_turn` and `execute_turn_streaming`
+/// delegate to.
+async fn execute_turn_with_mode(
+    input: TurnInput,
+    config: TurnConfig,
+    mode: ExecutionMode,
+) -> Result<TurnOutput, TurnError> {
     let mut messages = input.messages;
     let provider = input.provider;
     let tool_manager = input.tool_manager;
@@ -39,31 +321,13 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
     let hooks = input.hooks;
     let thread_event_sender = input.thread_event_sender;
     let thread_id = input.thread_id;
+    let stream_sender = input.stream_sender;
 
-    // Resolve tool definitions from tool_manager
-    let tools: Vec<ToolDefinition> = tool_ids
-        .iter()
-        .filter_map(|id| tool_manager.get(id))
-        .map(|tool| tool.definition())
-        .collect();
+    // Prepare tools and system message
+    let tools = prepare_tools(&mut messages, &tool_manager, &tool_ids, config.max_tool_calls);
 
     let max_iterations = config.max_iterations.unwrap_or(50);
-    let max_tool_calls = config.max_tool_calls;
     let tool_timeout_secs = config.tool_timeout_secs.unwrap_or(120);
-
-    // Add system message about max_tool_calls if configured and tools are available
-    if let Some(max) = max_tool_calls
-        && !tools.is_empty()
-    {
-        let system_content = format!(
-            "IMPORTANT: You can only call at most {} tool(s) per response. \
-            If you need to call multiple tools, please proceed step by step - \
-            call tools one at a time and wait for the results before calling the next tool.",
-            max
-        );
-        // Prepend system message to messages
-        messages.insert(0, ChatMessage::system(system_content));
-    }
 
     let mut token_usage = TokenUsage::default();
 
@@ -86,35 +350,27 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
             }
             if let Some(_modified_tools) = result.tools {
                 // TODO: Apply tool modifications for this iteration
-                // Note: tools modification affects this iteration only
-                // The original tools are used for subsequent iterations
-                // unless the hook modifies them again
             }
         }
 
         // Build the request with current messages and tools
         let request = ToolCompletionRequest::new(messages.clone(), tools.clone());
 
-        // Call the LLM
-        let response = provider
-            .complete_with_tools(request)
-            .await
-            .map_err(TurnError::LlmFailed)?;
+        // Call the LLM based on mode
+        let response = match mode {
+            ExecutionMode::Streaming => {
+                call_llm_streaming(&provider, request, stream_sender.as_ref()).await?
+            }
+            ExecutionMode::NonStreaming => provider
+                .complete_with_tools(request)
+                .await
+                .map_err(TurnError::LlmFailed)?,
+        };
 
-        // Track token usage
-        token_usage.input_tokens += response.input_tokens;
-        token_usage.output_tokens += response.output_tokens;
-        token_usage.total_tokens += response.input_tokens + response.output_tokens;
-
-        match response.finish_reason {
-            FinishReason::Stop => {
-                // Add assistant message to history
-                if let Some(content) = &response.content
-                    && !content.is_empty()
-                {
-                    messages.push(ChatMessage::assistant(content.clone()));
-                }
-
+        // Process response
+        match process_finish_reason(response, &mut messages, &mut token_usage, config.max_tool_calls)
+        {
+            NextAction::Return(output) => {
                 // Fire TurnEnd hook
                 if let Some(ref registry) = hooks {
                     let ctx = ToolHookContext {
@@ -133,33 +389,10 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                     let _ = registry.fire_tool_event(&ctx).await;
                 }
 
-                return Ok(TurnOutput {
-                    messages,
-                    token_usage,
-                });
+                return Ok(output);
             }
-            FinishReason::ToolUse => {
-                // Limit tool calls based on max_tool_calls config
-                let tool_calls: Vec<ToolCall> = match config.max_tool_calls {
-                    Some(max) if response.tool_calls.len() > max as usize => {
-                        tracing::debug!(
-                            requested = response.tool_calls.len(),
-                            max_allowed = max,
-                            "Limiting tool calls per iteration"
-                        );
-                        response.tool_calls.into_iter().take(max as usize).collect()
-                    }
-                    _ => response.tool_calls,
-                };
-
-                // Add assistant message with tool_calls to history
-                let assistant_msg = ChatMessage::assistant_with_tool_calls(
-                    response.content.clone(),
-                    tool_calls.clone(),
-                );
-                messages.push(assistant_msg);
-
-                // Execute tools in parallel
+            NextAction::ContinueWithTools { tool_calls, .. } => {
+                // Execute tools in parallel with streaming support
                 let tool_results = execute_tools_parallel(
                     tool_calls,
                     Arc::clone(&tool_manager),
@@ -168,6 +401,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
                     thread_event_sender.clone(),
                     thread_id,
                     iteration,
+                    stream_sender.clone(),
                 )
                 .await;
 
@@ -182,25 +416,10 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
 
                 // Continue the loop with updated messages
             }
-            FinishReason::Length => {
-                // Context length exceeded - for now, return an error
-                // In the future, this could be handled with continuation
+            NextAction::LengthExceeded => {
                 return Err(TurnError::ContextLengthExceeded(
                     (token_usage.input_tokens + token_usage.output_tokens) as usize,
                 ));
-            }
-            FinishReason::ContentFilter | FinishReason::Unknown => {
-                // For content filter or unknown reasons, return what we have
-                if let Some(content) = &response.content
-                    && !content.is_empty()
-                {
-                    messages.push(ChatMessage::assistant(content.clone()));
-                }
-
-                return Ok(TurnOutput {
-                    messages,
-                    token_usage,
-                });
             }
         }
     }
@@ -232,6 +451,7 @@ async fn execute_tools_parallel(
     thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
     thread_id: Option<crate::agents::thread::ThreadId>,
     turn_number: u32,
+    stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 ) -> Vec<ToolExecutionResult> {
     let futures: Vec<_> = tool_calls
         .into_iter()
@@ -244,6 +464,7 @@ async fn execute_tools_parallel(
                 thread_event_sender.clone(),
                 thread_id,
                 turn_number,
+                stream_sender.clone(),
             )
         })
         .collect();
@@ -260,6 +481,7 @@ async fn execute_single_tool(
     thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
     thread_id: Option<crate::agents::thread::ThreadId>,
     turn_number: u32,
+    stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 ) -> ToolExecutionResult {
     use crate::agents::thread::ThreadEvent;
 
@@ -308,13 +530,20 @@ async fn execute_single_tool(
         }
     }
 
-    // Send ToolStarted event
+    // Send ToolStarted events
     if let Some(ref sender) = thread_event_sender
         && let Some(tid) = thread_id
     {
         let _ = sender.send(ThreadEvent::ToolStarted {
             thread_id: tid,
             turn_number,
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            arguments: tool_input.clone(),
+        });
+    }
+    if let Some(ref sender) = stream_sender {
+        let _ = sender.send(TurnStreamEvent::ToolStarted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
             arguments: tool_input.clone(),
@@ -334,7 +563,7 @@ async fn execute_single_tool(
         )),
     };
 
-    // Send ToolCompleted event
+    // Send ToolCompleted events
     if let Some(ref sender) = thread_event_sender
         && let Some(tid) = thread_id
     {
@@ -345,6 +574,17 @@ async fn execute_single_tool(
         let _ = sender.send(ThreadEvent::ToolCompleted {
             thread_id: tid,
             turn_number,
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            result: event_result,
+        });
+    }
+    if let Some(ref sender) = stream_sender {
+        let event_result = match &result {
+            Ok(value) => Ok(value.clone()),
+            Err(e) => Err(e.clone()),
+        };
+        let _ = sender.send(TurnStreamEvent::ToolCompleted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
             result: event_result,

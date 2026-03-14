@@ -9,7 +9,7 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 
 use crate::agents::thread::ThreadId;
-use crate::llm::{ChatMessage, LlmProvider};
+use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
 
@@ -52,6 +52,34 @@ impl Default for TurnConfig {
     }
 }
 
+/// Streaming execution events emitted during turn execution.
+///
+/// These events are sent through the `stream_sender` when using
+/// `execute_turn_streaming` for real-time UI updates.
+#[derive(Debug, Clone)]
+pub enum TurnStreamEvent {
+    /// LLM stream event (content delta, reasoning, tool call delta).
+    LlmEvent(LlmStreamEvent),
+    /// Tool execution started.
+    ToolStarted {
+        /// Tool call ID.
+        tool_call_id: String,
+        /// Tool name.
+        tool_name: String,
+        /// Tool arguments.
+        arguments: serde_json::Value,
+    },
+    /// Tool execution completed.
+    ToolCompleted {
+        /// Tool call ID.
+        tool_call_id: String,
+        /// Tool name.
+        tool_name: String,
+        /// Tool result (Ok for success, Err for failure).
+        result: Result<serde_json::Value, String>,
+    },
+}
+
 /// Input for a Turn execution.
 ///
 /// Contains all the data needed to execute a single turn in a conversation,
@@ -85,6 +113,9 @@ pub struct TurnInput {
     /// Thread ID for event context.
     #[builder(default, setter(strip_option))]
     pub thread_id: Option<ThreadId>,
+    /// Stream event sender for real-time updates during streaming execution.
+    #[builder(default, setter(strip_option))]
+    pub stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 }
 
 impl std::fmt::Debug for TurnInput {
@@ -98,6 +129,7 @@ impl std::fmt::Debug for TurnInput {
             .field("hooks", &self.hooks.is_some())
             .field("thread_event_sender", &self.thread_event_sender.is_some())
             .field("thread_id", &self.thread_id)
+            .field("stream_sender", &self.stream_sender.is_some())
             .finish()
     }
 }
@@ -126,6 +158,7 @@ impl TurnInputBuilder {
             hooks: self.hooks.flatten(),
             thread_event_sender: self.thread_event_sender.flatten(),
             thread_id: self.thread_id.flatten(),
+            stream_sender: self.stream_sender.flatten(),
         }
     }
 }
