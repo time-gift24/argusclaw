@@ -16,9 +16,9 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 TMP_DIR="${TMP_ROOT}/approval-test-${RUN_ID}"
 mkdir -p "${TMP_DIR}"
 DB_FILE="${TMP_DIR}/approval.sqlite"
-export DATABASE_URL="sqlite:${DB_FILE}"
+export APPROVAL_DATABASE_URL="sqlite:${DB_FILE}"
 
-CLI_BIN="${ROOT_DIR}/target/debug/cli"
+CLI_BIN="${ROOT_DIR}/target/debug/argusclaw-dev"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
