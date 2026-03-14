@@ -279,58 +279,62 @@ impl Thread {
         let event_sender = self.event_sender.clone();
         let config = self.config.turn_config.clone();
 
-        // Spawn task to execute turn and forward events
+        // Spawn task to execute turn and forward events concurrently
         tokio::spawn(async move {
-            // Execute turn in streaming mode
-            let result = execute_turn_streaming(turn_input, config).await;
+            // Clone event_sender for the forwarder task
+            let forwarder_event_sender = event_sender.clone();
 
-            // Forward TurnStreamEvent to ThreadEvent and llm_events channel
-            while let Ok(event) = stream_rx.recv().await {
-                match event {
-                    TurnStreamEvent::LlmEvent(llm_event) => {
-                        // Send to ThreadEvent::Processing
-                        let _ = event_sender.send(ThreadEvent::Processing {
-                            thread_id,
-                            turn_number,
-                            event: llm_event.clone(),
-                        });
-                        // Send to llm_events channel
-                        let _ = llm_event_tx.send(llm_event);
-                    }
-                    TurnStreamEvent::ToolStarted {
-                        tool_call_id,
-                        tool_name,
-                        arguments,
-                    } => {
-                        // ThreadEvent::ToolStarted is already sent by execute_single_tool
-                        // via thread_event_sender, so we don't need to resend here
-                        let _ = event_sender.send(ThreadEvent::ToolStarted {
-                            thread_id,
-                            turn_number,
+            // 1. Start event forwarding task (runs concurrently with turn execution)
+            let forwarder = tokio::spawn(async move {
+                while let Ok(event) = stream_rx.recv().await {
+                    match event {
+                        TurnStreamEvent::LlmEvent(llm_event) => {
+                            // Send to ThreadEvent::Processing
+                            let _ = forwarder_event_sender.send(ThreadEvent::Processing {
+                                thread_id,
+                                turn_number,
+                                event: llm_event.clone(),
+                            });
+                            // Send to llm_events channel
+                            let _ = llm_event_tx.send(llm_event);
+                        }
+                        TurnStreamEvent::ToolStarted {
                             tool_call_id,
                             tool_name,
                             arguments,
-                        });
-                    }
-                    TurnStreamEvent::ToolCompleted {
-                        tool_call_id,
-                        tool_name,
-                        result: tool_result,
-                    } => {
-                        // ThreadEvent::ToolCompleted is already sent by execute_single_tool
-                        // via thread_event_sender, so we don't need to resend here
-                        let _ = event_sender.send(ThreadEvent::ToolCompleted {
-                            thread_id,
-                            turn_number,
+                        } => {
+                            let _ = forwarder_event_sender.send(ThreadEvent::ToolStarted {
+                                thread_id,
+                                turn_number,
+                                tool_call_id,
+                                tool_name,
+                                arguments,
+                            });
+                        }
+                        TurnStreamEvent::ToolCompleted {
                             tool_call_id,
                             tool_name,
                             result: tool_result,
-                        });
+                        } => {
+                            let _ = forwarder_event_sender.send(ThreadEvent::ToolCompleted {
+                                thread_id,
+                                turn_number,
+                                tool_call_id,
+                                tool_name,
+                                result: tool_result,
+                            });
+                        }
                     }
                 }
-            }
+            });
 
-            // Send final events based on result
+            // 2. Execute turn (events are forwarded concurrently by the forwarder task)
+            let result = execute_turn_streaming(turn_input, config).await;
+
+            // 3. Wait for event forwarding to complete (channel closes after stream_tx is dropped)
+            let _ = forwarder.await;
+
+            // 4. Send final events based on result
             match &result {
                 Ok(output) => {
                     let _ = event_sender.send(ThreadEvent::TurnCompleted {
