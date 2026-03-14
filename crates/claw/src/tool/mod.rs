@@ -1,5 +1,6 @@
 //! Tool module: defines NamedTool trait and ToolError for agent/LLM tool management.
 
+mod dispatch;
 mod glob;
 mod grep;
 mod read;
@@ -13,6 +14,7 @@ use dashmap::DashMap;
 use crate::llm::ToolDefinition;
 use crate::protocol::RiskLevel;
 
+pub use dispatch::{DispatchTool, DispatchToolConfig};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use read::ReadTool;

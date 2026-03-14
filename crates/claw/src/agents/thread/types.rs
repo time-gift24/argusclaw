@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::agents::turn::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::llm::LlmStreamEvent;
+use crate::workflow::JobId;
 
 /// Information about a Thread for listing and display.
 #[derive(Debug, Clone)]
@@ -113,6 +114,53 @@ pub enum ThreadEvent {
         thread_id: ThreadId,
         turn_number: u32,
         response: ApprovalResponse,
+    },
+
+    // === Subagent dispatch events ===
+    /// Waiting for subagent to complete.
+    WaitingForSubagent {
+        thread_id: ThreadId,
+        job_id: JobId,
+        message: String,
+    },
+    /// Subagent progress update.
+    SubagentProgress {
+        thread_id: ThreadId,
+        job_id: JobId,
+        elapsed_secs: u64,
+        message: String,
+    },
+    /// Subagent completed successfully.
+    SubagentCompleted {
+        thread_id: ThreadId,
+        job_id: JobId,
+        summary: String,
+    },
+    /// Subagent failed.
+    SubagentFailed {
+        thread_id: ThreadId,
+        job_id: JobId,
+        error: String,
+    },
+    /// Subagent timed out.
+    SubagentTimedOut {
+        thread_id: ThreadId,
+        job_id: JobId,
+        timeout_secs: u64,
+    },
+    /// Orchestrate mode job dispatched (main agent no longer tracking).
+    OrchestratedJobDispatched {
+        thread_id: ThreadId,
+        job_id: JobId,
+        task: String,
+        message: String,
+    },
+    /// Orchestrate mode requires user confirmation.
+    OrchestrationConfirmationRequired {
+        thread_id: ThreadId,
+        confirmation_id: String,
+        task: String,
+        message: String,
     },
 }
 
