@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use futures_util::StreamExt;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::agents::compact::Compactor;
-use crate::agents::turn::{TokenUsage, TurnError, TurnInputBuilder, TurnOutput};
+use crate::agents::turn::{
+    execute_turn_streaming, TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent,
+};
 use crate::approval::ApprovalManager;
-use crate::llm::{ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCompletionRequest};
+use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
 
@@ -252,257 +253,102 @@ impl Thread {
         let turn_number = self.turn_count;
         let thread_id = self.id;
 
-        // Resolve tool definitions
-        let tools: Vec<crate::llm::ToolDefinition> = self
-            .tool_manager
-            .list_ids()
-            .iter()
-            .filter_map(|id| self.tool_manager.get(id))
-            .map(|tool| tool.definition())
-            .collect();
-
-        // Build request
-        let request = ToolCompletionRequest::new(self.messages.clone(), tools);
-
+        // Create channels for streaming events and result
+        let (stream_tx, mut stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (llm_event_tx, llm_event_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (result_tx, result_rx) = oneshot::channel();
 
-        let provider = self.provider.clone();
+        // Build TurnInput with stream_sender
+        let tool_ids = self.tool_manager.list_ids();
+        let mut turn_input_builder = TurnInputBuilder::new()
+            .provider(self.provider.clone())
+            .messages(self.messages.clone())
+            .tool_manager(self.tool_manager.clone())
+            .tool_ids(tool_ids)
+            .thread_event_sender(self.event_sender.clone())
+            .thread_id(thread_id)
+            .stream_sender(stream_tx);
+
+        // Set hooks if present (need to use into_option pattern for strip_option)
+        if let Some(hooks) = self.hooks.clone() {
+            turn_input_builder = turn_input_builder.hooks(hooks);
+        }
+
+        let turn_input = turn_input_builder.build();
+
         let event_sender = self.event_sender.clone();
-        let messages = self.messages.clone();
-        let tool_manager = self.tool_manager.clone();
         let config = self.config.turn_config.clone();
 
+        // Spawn task to execute turn and forward events
         tokio::spawn(async move {
-            // Try streaming API first, fall back to non-streaming if not supported
-            let stream_result = provider.stream_complete_with_tools(request).await;
+            // Execute turn in streaming mode
+            let result = execute_turn_streaming(turn_input, config).await;
 
-            match stream_result {
-                Ok(mut stream) => {
-                    // Process stream events
-                    let mut accumulated_content = String::new();
-                    let mut accumulated_reasoning = String::new();
-                    let mut token_usage = TokenUsage::default();
-                    let mut finish_reason = FinishReason::Stop;
-                    let mut final_tool_calls: Vec<(Option<String>, Option<String>, String)> =
-                        Vec::new();
-
-                    while let Some(event_result) = stream.next().await {
-                        match event_result {
-                            Ok(event) => {
-                                // Send Processing event to thread subscribers
-                                let _ = event_sender.send(ThreadEvent::Processing {
-                                    thread_id,
-                                    turn_number,
-                                    event: event.clone(),
-                                });
-
-                                // Also send to llm_events channel
-                                let _ = llm_event_tx.send(event.clone());
-
-                                // Accumulate event data
-                                match &event {
-                                    LlmStreamEvent::ReasoningDelta { delta } => {
-                                        accumulated_reasoning.push_str(delta);
-                                    }
-                                    LlmStreamEvent::ContentDelta { delta } => {
-                                        accumulated_content.push_str(delta);
-                                    }
-                                    LlmStreamEvent::ToolCallDelta(tc) => {
-                                        // Ensure we have enough slots
-                                        while final_tool_calls.len() <= tc.index {
-                                            final_tool_calls.push((None, None, String::new()));
-                                        }
-                                        if let Some(id) = &tc.id {
-                                            final_tool_calls[tc.index].0 = Some(id.clone());
-                                        }
-                                        if let Some(name) = &tc.name {
-                                            final_tool_calls[tc.index].1 = Some(name.clone());
-                                        }
-                                        if let Some(args_delta) = &tc.arguments_delta {
-                                            final_tool_calls[tc.index].2.push_str(args_delta);
-                                        }
-                                    }
-                                    LlmStreamEvent::Usage {
-                                        input_tokens,
-                                        output_tokens,
-                                    } => {
-                                        token_usage.input_tokens = *input_tokens;
-                                        token_usage.output_tokens = *output_tokens;
-                                        token_usage.total_tokens = input_tokens + output_tokens;
-                                    }
-                                    LlmStreamEvent::Finished {
-                                        finish_reason: reason,
-                                    } => {
-                                        finish_reason = *reason;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let _ = event_sender.send(ThreadEvent::TurnFailed {
-                                    thread_id,
-                                    turn_number,
-                                    error: e.to_string(),
-                                });
-                                let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-                                let _ = result_tx.send(Err(TurnError::LlmFailed(e)));
-                                return;
-                            }
-                        }
-                    }
-
-                    // Build final messages
-                    let final_messages = if finish_reason == FinishReason::ToolUse
-                        && !final_tool_calls.is_empty()
-                    {
-                        // Execute tools
-                        let mut current_messages = messages;
-
-                        // Convert accumulated tool calls to ToolCall structs
-                        let valid_tool_calls: Vec<crate::llm::ToolCall> = final_tool_calls
-                            .into_iter()
-                            .filter_map(|(id, name, args)| {
-                                Some(crate::llm::ToolCall {
-                                    id: id?,
-                                    name: name?,
-                                    arguments: serde_json::from_str(&args)
-                                        .unwrap_or(serde_json::Value::Null),
-                                })
-                            })
-                            .collect();
-
-                        // Add assistant message with tool calls
-                        current_messages.push(ChatMessage::assistant_with_tool_calls(
-                            if accumulated_content.is_empty() {
-                                None
-                            } else {
-                                Some(accumulated_content)
-                            },
-                            valid_tool_calls.clone(),
-                        ));
-
-                        // Execute each tool
-                        for tc in &valid_tool_calls {
-                            // Send ToolStarted event
-                            let _ = event_sender.send(ThreadEvent::ToolStarted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            });
-
-                            let result = tool_manager.execute(&tc.name, tc.arguments.clone()).await;
-
-                            // Send ToolCompleted event (convert ToolError to String)
-                            let event_result = match &result {
-                                Ok(value) => Ok(value.clone()),
-                                Err(e) => Err(e.to_string()),
-                            };
-                            let _ = event_sender.send(ThreadEvent::ToolCompleted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                result: event_result,
-                            });
-
-                            match result {
-                                Ok(value) => {
-                                    let content =
-                                        serde_json::to_string(&value).unwrap_or_else(|e| {
-                                            format!("{{\"error\": \"Failed to serialize: {}\"}}", e)
-                                        });
-                                    current_messages.push(ChatMessage::tool_result(
-                                        tc.id.clone(),
-                                        tc.name.clone(),
-                                        content,
-                                    ));
-                                }
-                                Err(e) => {
-                                    current_messages.push(ChatMessage::tool_result(
-                                        tc.id.clone(),
-                                        tc.name.clone(),
-                                        format!("{{\"error\": \"{}\"}}", e),
-                                    ));
-                                }
-                            }
-                        }
-
-                        current_messages
-                    } else {
-                        // No tool calls - just add assistant message
-                        let mut final_messages = messages;
-                        if !accumulated_content.is_empty() {
-                            final_messages.push(ChatMessage::assistant(accumulated_content));
-                        }
-                        final_messages
-                    };
-
-                    token_usage.total_tokens = token_usage.input_tokens + token_usage.output_tokens;
-
-                    let _ = event_sender.send(ThreadEvent::TurnCompleted {
-                        thread_id,
-                        turn_number,
-                        token_usage: token_usage.clone(),
-                    });
-                    let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-                    let _ = result_tx.send(Ok(TurnOutput {
-                        messages: final_messages,
-                        token_usage,
-                    }));
-                }
-                Err(e) => {
-                    // Provider doesn't support streaming, use non-streaming as fallback
-                    if matches!(e, crate::llm::LlmError::UnsupportedCapability { .. }) {
-                        tracing::debug!(
-                            "Provider doesn't support streaming, using non-streaming fallback"
-                        );
-
-                        // Use the non-streaming execute_turn
-                        let tool_ids = tool_manager.list_ids();
-                        let turn_input = TurnInputBuilder::new()
-                            .provider(provider)
-                            .messages(messages)
-                            .tool_manager(tool_manager)
-                            .tool_ids(tool_ids)
-                            .thread_event_sender(event_sender.clone())
-                            .thread_id(thread_id)
-                            .build();
-
-                        let result = crate::agents::turn::execute_turn(turn_input, config).await;
-
-                        match result {
-                            Ok(output) => {
-                                let _ = event_sender.send(ThreadEvent::TurnCompleted {
-                                    thread_id,
-                                    turn_number,
-                                    token_usage: output.token_usage.clone(),
-                                });
-                                let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-                                let _ = result_tx.send(Ok(output));
-                            }
-                            Err(e) => {
-                                let _ = event_sender.send(ThreadEvent::TurnFailed {
-                                    thread_id,
-                                    turn_number,
-                                    error: e.to_string(),
-                                });
-                                let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-                                let _ = result_tx.send(Err(e));
-                            }
-                        }
-                    } else {
-                        let _ = event_sender.send(ThreadEvent::TurnFailed {
+            // Forward TurnStreamEvent to ThreadEvent and llm_events channel
+            while let Ok(event) = stream_rx.recv().await {
+                match event {
+                    TurnStreamEvent::LlmEvent(llm_event) => {
+                        // Send to ThreadEvent::Processing
+                        let _ = event_sender.send(ThreadEvent::Processing {
                             thread_id,
                             turn_number,
-                            error: e.to_string(),
+                            event: llm_event.clone(),
                         });
-                        let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-                        let _ = result_tx.send(Err(TurnError::LlmFailed(e)));
+                        // Send to llm_events channel
+                        let _ = llm_event_tx.send(llm_event);
+                    }
+                    TurnStreamEvent::ToolStarted {
+                        tool_call_id,
+                        tool_name,
+                        arguments,
+                    } => {
+                        // ThreadEvent::ToolStarted is already sent by execute_single_tool
+                        // via thread_event_sender, so we don't need to resend here
+                        let _ = event_sender.send(ThreadEvent::ToolStarted {
+                            thread_id,
+                            turn_number,
+                            tool_call_id,
+                            tool_name,
+                            arguments,
+                        });
+                    }
+                    TurnStreamEvent::ToolCompleted {
+                        tool_call_id,
+                        tool_name,
+                        result: tool_result,
+                    } => {
+                        // ThreadEvent::ToolCompleted is already sent by execute_single_tool
+                        // via thread_event_sender, so we don't need to resend here
+                        let _ = event_sender.send(ThreadEvent::ToolCompleted {
+                            thread_id,
+                            turn_number,
+                            tool_call_id,
+                            tool_name,
+                            result: tool_result,
+                        });
                     }
                 }
             }
+
+            // Send final events based on result
+            match &result {
+                Ok(output) => {
+                    let _ = event_sender.send(ThreadEvent::TurnCompleted {
+                        thread_id,
+                        turn_number,
+                        token_usage: output.token_usage.clone(),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_sender.send(ThreadEvent::TurnFailed {
+                        thread_id,
+                        turn_number,
+                        error: e.to_string(),
+                    });
+                }
+            }
+            let _ = event_sender.send(ThreadEvent::Idle { thread_id });
+            let _ = result_tx.send(result);
         });
 
         TurnStreamHandle {
