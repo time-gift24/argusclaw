@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::agents::compact::Compactor;
 use crate::agents::turn::{
-    execute_turn_streaming, TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent,
+    TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming,
 };
 use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};

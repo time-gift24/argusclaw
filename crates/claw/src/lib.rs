@@ -2,6 +2,7 @@ pub mod agents;
 pub mod api;
 pub mod approval;
 pub mod claw;
+pub mod cookie;
 pub mod db;
 pub mod error;
 pub mod job;

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use futures_util::{future::join_all, StreamExt};
+use futures_util::{StreamExt, future::join_all};
 use tokio::sync::broadcast;
 use tokio::time::{error::Elapsed, timeout};
 
@@ -118,8 +118,10 @@ fn process_finish_reason(
             };
 
             // Add assistant message with tool_calls to history
-            let assistant_msg =
-                ChatMessage::assistant_with_tool_calls(response.content.clone(), tool_calls.clone());
+            let assistant_msg = ChatMessage::assistant_with_tool_calls(
+                response.content.clone(),
+                tool_calls.clone(),
+            );
             messages.push(assistant_msg);
 
             NextAction::ContinueWithTools {
@@ -324,7 +326,12 @@ async fn execute_turn_with_mode(
     let stream_sender = input.stream_sender;
 
     // Prepare tools and system message
-    let tools = prepare_tools(&mut messages, &tool_manager, &tool_ids, config.max_tool_calls);
+    let tools = prepare_tools(
+        &mut messages,
+        &tool_manager,
+        &tool_ids,
+        config.max_tool_calls,
+    );
 
     let max_iterations = config.max_iterations.unwrap_or(50);
     let tool_timeout_secs = config.tool_timeout_secs.unwrap_or(120);
@@ -368,8 +375,12 @@ async fn execute_turn_with_mode(
         };
 
         // Process response
-        match process_finish_reason(response, &mut messages, &mut token_usage, config.max_tool_calls)
-        {
+        match process_finish_reason(
+            response,
+            &mut messages,
+            &mut token_usage,
+            config.max_tool_calls,
+        ) {
             NextAction::Return(output) => {
                 // Fire TurnEnd hook
                 if let Some(ref registry) = hooks {
@@ -443,6 +454,7 @@ struct ToolExecutionResult {
 /// 3. AfterToolCall hook (observe-only)
 ///
 /// Tool execution failures are captured as error messages, not propagated.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
     tool_manager: Arc<ToolManager>,
@@ -473,6 +485,7 @@ async fn execute_tools_parallel(
 }
 
 /// Executes a single tool call with hooks and timeout.
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool(
     tool_call: ToolCall,
     tool_manager: Arc<ToolManager>,
