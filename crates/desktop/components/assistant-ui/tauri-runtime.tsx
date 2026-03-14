@@ -79,8 +79,6 @@ export function TauriRuntimeProvider({
     onNew,
     onEdit,
     onCancel,
-    // Show error in UI if present
-    isDisabled: !!error,
     // Identity conversion since we already use ThreadMessageLike format
     convertMessage: (msg) => msg,
   });

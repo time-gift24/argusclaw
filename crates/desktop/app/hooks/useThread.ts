@@ -58,18 +58,11 @@ export interface UseThreadReturn {
   error: string | null;
 }
 
+// Check if running in Tauri environment
+const isTauriEnv = typeof window !== "undefined" && "__TAURI__" in window;
+
 /**
  * Hook for managing a Thread conversation with the backend.
- *
- * @example
- * ```tsx
- * const { messages, isRunning, sendMessage } = useThread({ threadId: "default" });
- *
- * // Send a message
- * await sendMessage("Hello!");
- *
- * // Messages are automatically updated as events come in
- * ```
  */
 export function useThread({
   threadId,
@@ -89,10 +82,7 @@ export function useThread({
         if (event.event) {
           const streamEvent = event.event;
           if (streamEvent.type === "contentDelta" && streamEvent.delta) {
-            // Accumulate content delta
             currentContentRef.current += streamEvent.delta;
-
-            // Update the last assistant message or create a new one
             setMessages((prev) => {
               const lastMsg = prev[prev.length - 1];
               if (lastMsg?.role === "assistant") {
@@ -106,35 +96,27 @@ export function useThread({
                 { role: "assistant", content: streamEvent.delta! },
               ];
             });
-          } else if (
-            streamEvent.type === "reasoningDelta" &&
-            streamEvent.delta
-          ) {
-            // Accumulate reasoning delta (for future display)
+          } else if (streamEvent.type === "reasoningDelta" && streamEvent.delta) {
             currentReasoningRef.current += streamEvent.delta;
           }
         }
         break;
 
       case "toolStarted":
-        // Tool execution started - could show a loading indicator
         console.log(`Tool started: ${event.toolName}`, event.arguments);
         break;
 
       case "toolCompleted":
-        // Tool execution completed - could show the result
         console.log(`Tool completed: ${event.toolName}`, event.result);
         break;
 
       case "turnCompleted":
-        // Turn completed successfully
         setIsRunning(false);
         currentContentRef.current = "";
         currentReasoningRef.current = "";
         break;
 
       case "turnFailed":
-        // Turn failed
         setIsRunning(false);
         setError(event.error || "Turn failed");
         currentContentRef.current = "";
@@ -142,12 +124,10 @@ export function useThread({
         break;
 
       case "idle":
-        // Thread is idle
         setIsRunning(false);
         break;
 
       case "compacted":
-        // Context was compacted
         console.log(`Thread compacted, new token count: ${event.newTokenCount}`);
         break;
     }
@@ -155,17 +135,18 @@ export function useThread({
 
   // Subscribe to thread events
   const subscribe = useCallback(async () => {
-    // Unsubscribe from previous listener if exists
     if (unlistenRef.current) {
       unlistenRef.current();
       unlistenRef.current = null;
     }
 
-    try {
-      // Subscribe to thread events via Tauri IPC
-      await invoke("subscribe_thread", { threadId });
+    if (!isTauriEnv) {
+      console.log("Not in Tauri environment, skipping subscription");
+      return;
+    }
 
-      // Listen for thread events
+    try {
+      await invoke("subscribe_thread", { threadId });
       unlistenRef.current = await listen<string>("thread:event", (event) => {
         try {
           const threadEvent: ThreadEvent = JSON.parse(event.payload);
@@ -175,7 +156,7 @@ export function useThread({
         }
       });
     } catch (e) {
-      setError(`Failed to subscribe: ${e}`);
+        console.error("Failed to subscribe:", e);
     }
   }, [threadId, handleThreadEvent]);
 
@@ -184,7 +165,6 @@ export function useThread({
     if (autoSubscribe) {
       subscribe();
     }
-
     return () => {
       if (unlistenRef.current) {
         unlistenRef.current();
@@ -197,15 +177,25 @@ export function useThread({
     async (content: string) => {
       setError(null);
       setIsRunning(true);
+      setMessages((prev) => [...prev, { role: "user", content }]);
 
-      // Add user message to local state
-      setMessages((prev) => [
-        ...prev,
-        { role: "user", content },
-      ]);
+      if (!isTauriEnv) {
+        // Mock response for development
+        console.log("Not in Tauri environment, simulating response...");
+        setTimeout(() => {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: "This is a mock response. Please run in Tauri to connect to the backend.",
+            },
+          ]);
+          setIsRunning(false);
+        }, 1000);
+        return;
+      }
 
       try {
-        // Send message to backend (non-blocking)
         await invoke("send_message", { threadId, message: content });
       } catch (e) {
         setError(`Failed to send message: ${e}`);
@@ -215,11 +205,5 @@ export function useThread({
     [threadId],
   );
 
-  return {
-    messages,
-    isRunning,
-    sendMessage,
-    subscribe,
-    error,
-  };
+  return { messages, isRunning, sendMessage, subscribe, error };
 }
