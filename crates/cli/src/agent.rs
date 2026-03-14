@@ -37,9 +37,13 @@ pub enum AgentCommand {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Tools that require approval (comma-separated).
-        #[arg(long, value_delimiter = ',')]
+        /// Tools that require approval (comma-separated, default: shell).
+        #[arg(long, value_delimiter = ',', default_value = "shell")]
         approval_tools: Vec<String>,
+
+        /// Tools to skip approval (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        muted_tools: Vec<String>,
 
         /// Auto-approve all tool calls (skip approval prompts).
         #[arg(long)]
@@ -55,6 +59,7 @@ pub async fn run_agent_command(ctx: AppContext, command: AgentCommand) -> Result
             system_prompt,
             verbose,
             approval_tools,
+            muted_tools,
             auto_approve,
         } => {
             run_chat(
@@ -63,6 +68,7 @@ pub async fn run_agent_command(ctx: AppContext, command: AgentCommand) -> Result
                 system_prompt,
                 verbose,
                 approval_tools,
+                muted_tools,
                 auto_approve,
             )
             .await
@@ -76,6 +82,7 @@ async fn run_chat(
     system_prompt: String,
     verbose: bool,
     approval_tools: Vec<String>,
+    muted_tools: Vec<String>,
     auto_approve: bool,
 ) -> Result<()> {
     // Get provider
@@ -93,12 +100,18 @@ async fn run_chat(
             })?
     };
 
+    // Filter out muted tools from approval list
+    let effective_approval_tools: Vec<String> = approval_tools
+        .into_iter()
+        .filter(|t| !muted_tools.contains(t))
+        .collect();
+
     // Setup approval system if needed
-    let has_approval_tools = !approval_tools.is_empty();
+    let has_approval_tools = !effective_approval_tools.is_empty();
     let approval_manager = if has_approval_tools {
         // Create policy with specified tools requiring approval
         let policy = ApprovalPolicy {
-            require_approval: approval_tools.clone(),
+            require_approval: effective_approval_tools.clone(),
             timeout_secs: 60,
             auto_approve: false,
             auto_approve_autonomous: auto_approve,
@@ -149,7 +162,7 @@ async fn run_chat(
     println!("Type 'quit' or 'exit' to leave.");
     println!("Available tools: {}", tool_manager.list_ids().join(", "));
     if has_approval_tools {
-        println!("Approval required for: {}", approval_tools.join(", "));
+        println!("Approval required for: {}", effective_approval_tools.join(", "));
         if auto_approve {
             println!("Auto-approve mode: ON");
         }
