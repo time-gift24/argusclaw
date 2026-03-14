@@ -18,6 +18,9 @@ use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "cookie")]
+use crate::cookie::CookieManager;
+
 #[derive(Clone)]
 pub struct AppContext {
     db_pool: SqlitePool,
@@ -26,6 +29,8 @@ pub struct AppContext {
     tool_manager: Arc<ToolManager>,
     job_repository: Arc<dyn JobRepository>,
     shutdown: CancellationToken,
+    #[cfg(feature = "cookie")]
+    cookie_manager: Option<Arc<CookieManager>>,
 }
 
 impl AppContext {
@@ -62,6 +67,9 @@ impl AppContext {
         ));
         let shutdown = scheduler.shutdown_token();
 
+        #[cfg(feature = "cookie")]
+        let cookie_manager: Option<Arc<CookieManager>> = None;
+
         // Spawn scheduler as background task
         tokio::spawn({
             let scheduler = scheduler.clone();
@@ -77,6 +85,8 @@ impl AppContext {
             tool_manager,
             job_repository,
             shutdown,
+            #[cfg(feature = "cookie")]
+            cookie_manager,
         })
     }
 
@@ -99,6 +109,8 @@ impl AppContext {
                     .filename(std::path::Path::new(":memory:")),
             ))),
             shutdown: CancellationToken::new(),
+            #[cfg(feature = "cookie")]
+            cookie_manager: None,
         }
     }
 
@@ -117,6 +129,8 @@ impl AppContext {
             tool_manager,
             job_repository: Arc::new(SqliteJobRepository::new(pool)),
             shutdown: CancellationToken::new(),
+            #[cfg(feature = "cookie")]
+            cookie_manager: None,
         }
     }
 
@@ -148,6 +162,26 @@ impl AppContext {
     /// Trigger graceful shutdown of the scheduler.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
+    }
+
+    /// Initialize cookie manager (requires running Chrome).
+    #[cfg(feature = "cookie")]
+    pub async fn init_cookie_manager(&mut self, port: u16) -> Result<(), AgentError> {
+        let manager =
+            CookieManager::connect(port)
+                .await
+                .map_err(|e| AgentError::CookieInitFailed {
+                    reason: e.to_string(),
+                })?;
+        self.cookie_manager = Some(Arc::new(manager));
+        Ok(())
+    }
+
+    /// Get cookie manager.
+    #[cfg(feature = "cookie")]
+    #[must_use]
+    pub fn cookie_manager(&self) -> Option<&Arc<CookieManager>> {
+        self.cookie_manager.as_ref()
     }
 
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {

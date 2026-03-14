@@ -162,7 +162,10 @@ async fn run_chat(
     println!("Type 'quit' or 'exit' to leave.");
     println!("Available tools: {}", tool_manager.list_ids().join(", "));
     if has_approval_tools {
-        println!("Approval required for: {}", effective_approval_tools.join(", "));
+        println!(
+            "Approval required for: {}",
+            effective_approval_tools.join(", ")
+        );
         if auto_approve {
             println!("Auto-approve mode: ON");
         }
