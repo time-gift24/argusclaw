@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   PieChart,
   Brain,
@@ -9,29 +9,15 @@ import {
   Send,
   ChevronDown,
   Square,
+  AlertCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useThread } from "@/app/hooks/useThread";
 
-// Types
-type MessageRole = "user" | "assistant";
+// Default thread ID for the conversation
+const DEFAULT_THREAD_ID = "default-thread";
 
-interface Message {
-  id: string;
-  role: MessageRole;
-  content: string;
-  timestamp: Date;
-}
-
-// Mock data
-const MOCK_MESSAGES: Message[] = [
-  {
-    id: "1",
-    role: "assistant",
-    content: "Hi! I'm Claude, an AI assistant created by Anthropic. How can I help you today?",
-    timestamp: new Date(),
-  },
-];
-
+// Mock tools (for UI display)
 const MOCK_TOOLS = [
   { id: "1", name: "Web Search", icon: PieChart },
   { id: "2", name: "Thinking", icon: Brain },
@@ -39,33 +25,25 @@ const MOCK_TOOLS = [
 
 function ClaudeDialog() {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>(MOCK_MESSAGES);
-  const [isRunning, setIsRunning] = useState(false);
   const [showTools, setShowTools] = useState(false);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  // Use the Thread hook for managing conversation
+  const { messages, isRunning, sendMessage, error } = useThread({
+    threadId: DEFAULT_THREAD_ID,
+    autoSubscribe: true,
+  });
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: input,
-      timestamp: new Date(),
-    };
-    setMessages((prev) => [...prev, userMessage]);
+  const handleSend = async () => {
+    if (!input.trim() || isRunning) return;
+
+    const messageContent = input;
     setInput("");
-    setIsRunning(true);
 
-    setTimeout(() => {
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "This is a mock response. In a real implementation, this would come from the LLM.",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
-      setIsRunning(false);
-    }, 1500);
+    try {
+      await sendMessage(messageContent);
+    } catch (err) {
+      console.error("Failed to send message:", err);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -77,13 +55,27 @@ function ClaudeDialog() {
 
   return (
     <div className="flex h-full flex-col bg-background">
+      {/* Error Banner */}
+      {error && (
+        <div className="flex items-center gap-2 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          <AlertCircle className="h-4 w-4" />
+          <span>{error}</span>
+        </div>
+      )}
+
       {/* Messages Area - 居中显示 */}
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto flex h-full max-w-2xl flex-col justify-end px-4 py-8">
           <div className="space-y-6">
-            {messages.map((message) => (
+            {messages.length === 0 && (
+              <div className="text-center text-muted-foreground">
+                <p>Start a conversation with Claude</p>
+              </div>
+            )}
+
+            {messages.map((message, index) => (
               <div
-                key={message.id}
+                key={index}
                 className={cn(
                   "flex gap-4",
                   message.role === "user" && "flex-row-reverse"
@@ -101,12 +93,12 @@ function ClaudeDialog() {
                     message.role === "user" ? "bg-muted" : "bg-transparent"
                   )}
                 >
-                  <p className="text-sm">{message.content}</p>
+                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
                 </div>
               </div>
             ))}
 
-            {isRunning && (
+            {isRunning && messages[messages.length - 1]?.role !== "assistant" && (
               <div className="flex gap-4">
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
                   C
@@ -131,8 +123,9 @@ function ClaudeDialog() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="How can I help you today?"
-              className="min-h-[60px] max-h-[200px] w-full resize-none bg-transparent px-4 py-4 text-sm outline-none placeholder:text-muted-foreground"
+              className="min-h-[60px] max-h-[200px] w-full resize-none bg-transparent px-4 py-4 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
               rows={1}
+              disabled={isRunning}
             />
 
             {/* Action Bar */}
@@ -178,8 +171,8 @@ function ClaudeDialog() {
                 {isRunning ? (
                   <button
                     type="button"
-                    onClick={() => setIsRunning(false)}
-                    className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted/80"
+                    disabled
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground"
                   >
                     <Square className="size-3 fill-current" />
                   </button>

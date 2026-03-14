@@ -32,4 +32,13 @@ pub enum AgentError {
 
     #[error("provider kind `{kind}` is not supported by this build")]
     UnsupportedProviderKind { kind: String },
+
+    #[error("default agent not initialized")]
+    DefaultAgentNotInitialized,
+
+    #[error("thread not found")]
+    ThreadNotFound,
+
+    #[error("thread creation failed")]
+    ThreadCreationFailed,
 }

@@ -157,6 +157,30 @@ impl Agent {
         id
     }
 
+    /// Create a new thread with a specific ID, or get existing one.
+    ///
+    /// Returns true if a new thread was created, false if it already existed.
+    pub fn create_thread_with_id(&self, thread_id: ThreadId, config: ThreadConfig) -> bool {
+        // Check if already exists
+        if self.threads.contains_key(&thread_id) {
+            return false;
+        }
+
+        let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
+
+        let mut thread = Thread::new(
+            self.provider.clone(),
+            self.tool_manager.clone(),
+            compactor,
+            self.approval_manager.clone(),
+            config,
+        );
+        // Override the generated ID with the requested one
+        thread.id = thread_id;
+        self.threads.insert(thread_id, thread);
+        true
+    }
+
     /// Get a thread by ID.
     #[must_use]
     pub fn get_thread(&self, id: &ThreadId) -> Option<AgentHandle> {
