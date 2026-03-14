@@ -59,7 +59,7 @@ export interface UseThreadReturn {
 }
 
 // Check if running in Tauri environment
-const isTauriEnv = typeof window !== "undefined" && "__TAURI__" in window;
+const isTauriEnv = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 /**
  * Hook for managing a Thread conversation with the backend.
