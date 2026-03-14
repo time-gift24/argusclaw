@@ -33,10 +33,10 @@ export function Thread() {
     <ThreadPrimitive.Root
       className="flex h-full flex-col bg-background text-sm"
       style={{
-    "--thread-max-width": "48rem",
-    "--accent-color": "#c96442",
-    "--accent-foreground": "#ffffff",
-      }}
+        "--thread-max-width": "48rem",
+        "--accent-color": "#c96442",
+        "--accent-foreground": "#ffffff",
+      } as React.CSSProperties}
     >
       <ThreadPrimitive.Viewport
         turnAnchor="top"
@@ -74,7 +74,7 @@ function ThreadWelcome() {
           </div>
         </div>
       </div>
-      
+
     </div>
   );
 }
@@ -83,7 +83,7 @@ function Composer() {
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone className="flex w-full flex-col rounded-2xl border border-input bg-background px-1 pt-2 outline-none transition-shadow has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-ring/20 data-[dragging=true]:border-ring data-[dragging=true]:border-dashed data-[dragging=true]:bg-accent/50">
-        
+
         <ComposerPrimitive.Input
           placeholder="Send a message..."
           className="mb-1 max-h-32 min-h-14 w-full resize-none bg-transparent px-4 pt-2 pb-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-0"
@@ -162,7 +162,7 @@ function UserMessage() {
       className="mx-auto grid w-full max-w-[var(--thread-max-width)] auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-3"
       data-role="user"
     >
-      
+
 
       <div className="relative col-start-2 min-w-0">
         <div className="rounded-2xl bg-muted px-4 py-2.5 break-words text-foreground">
@@ -173,7 +173,7 @@ function UserMessage() {
         </div>
       </div>
 
-      
+
     </MessagePrimitive.Root>
   );
 }
@@ -221,7 +221,7 @@ function AssistantMessage() {
       className="relative mx-auto w-full max-w-[var(--thread-max-width)] py-3"
       data-role="assistant"
     >
-      
+
       <div className="break-words px-2 leading-relaxed text-foreground">
         <MessagePrimitive.Parts
           components={{
@@ -241,10 +241,10 @@ function AssistantMessage() {
       </div>
 
       <div className="mt-1 ml-2 flex min-h-6 items-center">
-        
+
         <AssistantActionBar />
       </div>
-      
+
     </MessagePrimitive.Root>
   );
 }
@@ -286,7 +286,7 @@ function AssistantActionBar() {
           <RefreshCwIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Reload>
-      
+
     </ActionBarPrimitive.Root>
   );
 }

@@ -78,10 +78,17 @@ function Source({
   ...props
 }: SourceProps) {
   return (
-    <Badge variant={variant} size={size} className={cn(
-              "cursor-pointer outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
-              className,
-            )} render={<a data-slot="source" target={target} rel={rel} {...(props as ComponentProps<"a">)} />}></Badge>
+    <Badge
+      variant={variant}
+      size={size}
+      asChild
+      className={cn(
+        "cursor-pointer outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
+        className,
+      )}
+    >
+      <a data-slot="source" target={target} rel={rel} {...(props as ComponentProps<"a">)} />
+    </Badge>
   );
 }
 
