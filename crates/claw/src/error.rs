@@ -29,7 +29,9 @@ pub enum AgentError {
     #[error("provider `{id}` was not found")]
     ProviderNotFound { id: String },
 
-    #[error("no default provider is configured")]
+    #[error(
+        "no default provider is configured. Run `argusclaw provider set-default --id <provider-id>` to set one, or create a provider with `--default` flag"
+    )]
     DefaultProviderNotConfigured,
 
     #[error("provider kind `{kind}` is not supported by this build")]

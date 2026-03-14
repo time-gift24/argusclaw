@@ -92,7 +92,8 @@ async fn list_returns_summaries() {
         .unwrap();
 
     let summaries = repo.list().await.unwrap();
-    assert_eq!(summaries.len(), 2);
+    // Note: Migration inserts ArgusAgent, so we check for at least our test items
+    assert!(summaries.len() >= 2);
 
     let ids: Vec<&str> = summaries.iter().map(|s| s.id.as_ref()).collect();
     assert!(ids.contains(&"list-1"));

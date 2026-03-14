@@ -45,12 +45,16 @@ impl SqliteAgentRepository {
         let temperature: Option<f32> =
             Self::get::<Option<i64>>(&row, "temperature")?.map(|t| t as f32 / 100.0);
 
+        // Handle nullable provider_id - NULL becomes empty string
+        let provider_id: String =
+            Self::get::<Option<String>>(&row, "provider_id")?.unwrap_or_default();
+
         Ok(AgentRecord {
             id: AgentId::new(Self::get::<String>(&row, "id")?),
             display_name: Self::get::<String>(&row, "display_name")?,
             description: Self::get::<String>(&row, "description")?,
             version: Self::get::<String>(&row, "version")?,
-            provider_id: Self::get::<String>(&row, "provider_id")?,
+            provider_id,
             system_prompt: Self::get::<String>(&row, "system_prompt")?,
             tool_names,
             max_tokens: Self::get::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
@@ -59,12 +63,16 @@ impl SqliteAgentRepository {
     }
 
     fn map_summary(row: sqlx::sqlite::SqliteRow) -> Result<AgentSummary, DbError> {
+        // Handle nullable provider_id - NULL becomes empty string
+        let provider_id: String =
+            Self::get::<Option<String>>(&row, "provider_id")?.unwrap_or_default();
+
         Ok(AgentSummary {
             id: AgentId::new(Self::get::<String>(&row, "id")?),
             display_name: Self::get::<String>(&row, "display_name")?,
             description: Self::get::<String>(&row, "description")?,
             version: Self::get::<String>(&row, "version")?,
-            provider_id: Self::get::<String>(&row, "provider_id")?,
+            provider_id,
         })
     }
 }
