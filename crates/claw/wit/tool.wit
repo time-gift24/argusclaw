@@ -1,0 +1,109 @@
+package argusclaw:tool@0.1.0;
+
+/// Log levels for host logging capability.
+enum log-level {
+    debug,
+    info,
+    warn,
+    error,
+}
+
+/// HTTP methods supported by the host.
+enum http-method {
+    get,
+    post,
+    put,
+    delete,
+    patch,
+    head,
+    options,
+}
+
+/// HTTP request structure.
+record http-request {
+    method: http-method,
+    url: string,
+    headers: list<tuple<string, string>>,
+    body: option<string>,
+    timeout-ms: option<u32>,
+}
+
+/// HTTP response structure.
+record http-response {
+    status: u16,
+    headers: list<tuple<string, string>>,
+    body: option<string>,
+}
+
+/// Tool execution request.
+record request {
+    /// JSON-encoded parameters for the tool.
+    params-json: string,
+    /// Workspace root path (if available).
+    workspace-root: option<string>,
+}
+
+/// Tool execution response.
+record response {
+    /// JSON-encoded result or error.
+    result-json: string,
+    /// Whether the execution succeeded.
+    success: bool,
+    /// Error message if success is false.
+    error-message: option<string>,
+}
+
+/// Host-provided capabilities for WASM tools.
+/// All capabilities are opt-in and must be explicitly granted.
+interface host {
+    /// Log a message at the specified level.
+    log: func(level: log-level, message: string);
+
+    /// Get current timestamp in milliseconds since Unix epoch.
+    now-millis: func() -> u64;
+
+    /// Read a file from the workspace.
+    /// Returns none if the file doesn't exist or access is denied.
+    workspace-read: func(path: string) -> option<string>;
+
+    /// Make an HTTP request.
+    /// Returns an error if HTTP capability is not granted or URL is not in allowlist.
+    http-request: func(req: http-request) -> result<http-response, string>;
+
+    /// Invoke another registered tool by name/alias.
+    /// Returns an error if tool-invoke capability is not granted.
+    tool-invoke: func(alias: string, params-json: string) -> result<string, string>;
+
+    /// Check if a secret exists with the given name.
+    /// Returns false if secret capability is not granted.
+    secret-exists: func(name: string) -> bool;
+
+    /// Get the value of a secret (for credential injection).
+    /// Returns none if secret capability is not granted or secret doesn't exist.
+    /// Note: Secrets should be injected by the host, not directly exposed to WASM.
+    secret-get: func(name: string) -> option<string>;
+}
+
+/// Tool interface that WASM tools must implement.
+interface tool {
+    /// Execute the tool with the given request.
+    execute: func(req: request) -> response;
+
+    /// Return the JSON schema for the tool's parameters.
+    schema: func() -> string;
+
+    /// Return a human-readable description of the tool.
+    description: func() -> string;
+
+    /// Return the tool's name/identifier.
+    name: func() -> string;
+}
+
+/// World definition combining host and tool interfaces.
+world tool-world {
+    /// Import host capabilities (provided by the runtime).
+    import host;
+
+    /// Export tool interface (implemented by WASM tools).
+    export tool;
+}
