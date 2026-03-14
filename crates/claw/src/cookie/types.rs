@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 
 /// Single Cookie entry.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cookie {
     pub name: String,
     pub value: String,
