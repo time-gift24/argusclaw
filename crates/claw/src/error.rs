@@ -32,4 +32,8 @@ pub enum AgentError {
 
     #[error("provider kind `{kind}` is not supported by this build")]
     UnsupportedProviderKind { kind: String },
+
+    #[cfg(feature = "cookie")]
+    #[error("Failed to initialize cookie manager: {reason}")]
+    CookieInitFailed { reason: String },
 }
