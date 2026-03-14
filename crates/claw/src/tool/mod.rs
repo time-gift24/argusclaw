@@ -5,6 +5,9 @@ mod grep;
 mod read;
 mod shell;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

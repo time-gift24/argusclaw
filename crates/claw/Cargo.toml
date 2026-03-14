@@ -38,11 +38,15 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 eventsource-stream = { version = "0.2", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"], optional = true }
+wasmtime = { version = "29", optional = true }
+wasmtime-wasi = { version = "29", optional = true }
+anyhow = { version = "1", optional = true }
 
 [features]
 default = []
 dev = []
 openai-compatible = ["dep:eventsource-stream", "dep:reqwest"]
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:anyhow"]
 
 [dev-dependencies]
 mockall = "0.14"
