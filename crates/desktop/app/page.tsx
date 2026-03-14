@@ -4,7 +4,7 @@ import { TauriRuntimeProvider } from "@/components/assistant-ui/tauri-runtime";
 export default function Page() {
   return (
     <main className="flex h-svh flex-col">
-      <TauriRuntimeProvider threadId="default">
+      <TauriRuntimeProvider>
         <Thread />
       </TauriRuntimeProvider>
     </main>

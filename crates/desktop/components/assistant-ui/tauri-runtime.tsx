@@ -9,6 +9,9 @@ import {
 } from "@assistant-ui/react";
 import { useThread } from "@/app/hooks/useThread";
 
+// Default thread ID as a valid UUID (deterministic for "default" thread)
+const DEFAULT_THREAD_ID = "00000000-0000-0000-0000-000000000001";
+
 interface TauriRuntimeProviderProps {
   children: ReactNode;
   threadId?: string;
@@ -16,7 +19,7 @@ interface TauriRuntimeProviderProps {
 
 export function TauriRuntimeProvider({
   children,
-  threadId = "default",
+  threadId = DEFAULT_THREAD_ID,
 }: TauriRuntimeProviderProps) {
   const { messages, isRunning, sendMessage, error } = useThread({
     threadId,

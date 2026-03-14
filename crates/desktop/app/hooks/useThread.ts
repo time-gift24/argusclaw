@@ -149,6 +149,7 @@ export function useThread({
       await invoke("subscribe_thread", { threadId });
       unlistenRef.current = await listen<string>("thread:event", (event) => {
         try {
+          console.log(event)
           const threadEvent: ThreadEvent = JSON.parse(event.payload);
           handleThreadEvent(threadEvent);
         } catch (e) {
