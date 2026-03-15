@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use claw::{AppContext, LlmProviderId, ChatMessage};
 use claw::turn::{TurnConfig, TurnInputBuilder, execute_turn};
+use claw::{AppContext, ChatMessage, LlmProviderId};
 use owo_colors::OwoColorize;
 
 /// Turn 执行测试命令。
@@ -56,8 +56,7 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
 
     // Get provider from context via LLM manager
     let provider = if let Some(id) = provider {
-        ctx.get_provider(&LlmProviderId::new(id))
-            .await?
+        ctx.get_provider(&LlmProviderId::new(id)).await?
     } else {
         ctx.get_default_provider().await?
     };

@@ -249,13 +249,14 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             let mut count = self.call_count.lock().unwrap();
             let responses = self.responses.lock().unwrap();
-            let response = responses
-                .get(*count)
-                .cloned()
-                .ok_or_else(|| LlmError::RequestFailed {
-                    provider: "mock".to_string(),
-                    reason: format!("No response for call {}", count),
-                })?;
+            let response =
+                responses
+                    .get(*count)
+                    .cloned()
+                    .ok_or_else(|| LlmError::RequestFailed {
+                        provider: "mock".to_string(),
+                        reason: format!("No response for call {}", count),
+                    })?;
             *count += 1;
             Ok(response)
         }
@@ -406,7 +407,9 @@ mod tests {
         let tool_manager = Arc::new(ToolManager::new());
         tool_manager.register(Arc::new(DangerousTool));
 
-        let provider = Arc::new(SequentialMockProvider::new(create_approval_responses_blocked()));
+        let provider = Arc::new(SequentialMockProvider::new(
+            create_approval_responses_blocked(),
+        ));
 
         let input = TurnInputBuilder::new()
             .provider(provider)
@@ -414,7 +417,8 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["dangerous_tool".to_string()])
             .hooks(hooks)
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         let manager_clone = Arc::clone(&approval_manager);
         tokio::spawn(async move {
@@ -467,7 +471,9 @@ mod tests {
         let tool_manager = Arc::new(ToolManager::new());
         tool_manager.register(Arc::new(DangerousTool));
 
-        let provider = Arc::new(SequentialMockProvider::new(create_approval_responses_allowed()));
+        let provider = Arc::new(SequentialMockProvider::new(
+            create_approval_responses_allowed(),
+        ));
 
         let input = TurnInputBuilder::new()
             .provider(provider)
@@ -475,7 +481,8 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["dangerous_tool".to_string()])
             .hooks(hooks)
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         let manager_clone = Arc::clone(&approval_manager);
         tokio::spawn(async move {
@@ -559,7 +566,8 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["safe_tool".to_string()])
             .hooks(hooks)
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         let config = TurnConfig::default();
         let result = execute_turn(input, config).await;
@@ -599,8 +607,7 @@ mod tests {
 
         let approval_manager = Arc::new(ApprovalManager::new(policy.clone()));
 
-        let (thread_event_tx, mut thread_event_rx) =
-            broadcast::channel::<ThreadEvent>(16);
+        let (thread_event_tx, mut thread_event_rx) = broadcast::channel::<ThreadEvent>(16);
 
         let hooks = Arc::new(crate::protocol::HookRegistry::new());
         let approval_hook = ApprovalHook::new(Arc::clone(&approval_manager), policy, "test-agent");
@@ -609,7 +616,9 @@ mod tests {
         let tool_manager = Arc::new(ToolManager::new());
         tool_manager.register(Arc::new(DangerousTool));
 
-        let provider = Arc::new(SequentialMockProvider::new(create_approval_responses_allowed()));
+        let provider = Arc::new(SequentialMockProvider::new(
+            create_approval_responses_allowed(),
+        ));
 
         let thread_id = crate::protocol::ThreadId::new();
         let input = TurnInputBuilder::new()
@@ -620,7 +629,8 @@ mod tests {
             .hooks(hooks)
             .thread_event_sender(thread_event_tx)
             .thread_id(thread_id)
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         let manager_clone = Arc::clone(&approval_manager);
         tokio::spawn(async move {

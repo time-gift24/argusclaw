@@ -9,8 +9,8 @@
 //! - Thread ID association
 
 use claw::{
-    connect, migrate, AgentId, JobId, JobRecord, JobRepository, JobType, SqliteJobRepository,
-    ThreadId, WorkflowStatus,
+    AgentId, JobId, JobRecord, JobRepository, JobType, SqliteJobRepository, ThreadId,
+    WorkflowStatus, connect, migrate,
 };
 
 async fn setup() -> SqliteJobRepository {

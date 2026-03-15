@@ -1,3 +1,7 @@
+// Allow unused code in internal modules during transition
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+
 // === 内部模块 (不对外暴露) ===
 pub(crate) mod agents;
 pub(crate) mod api;
@@ -9,9 +13,9 @@ pub(crate) mod tool;
 pub(crate) mod workflow;
 
 // === 公开模块 ===
-pub mod claw;      // AppContext
-pub mod error;     // AgentError
-pub mod protocol;  // 稳定 DTO
+pub mod claw; // AppContext
+pub mod error; // AgentError
+pub mod protocol; // 稳定 DTO
 
 // approval: dev feature 下公开，否则 crate 内部
 #[cfg(feature = "dev")]
@@ -35,10 +39,10 @@ pub use protocol::{
 };
 
 // LLM Provider Types (DTO)
+pub use db::DbError;
 pub use db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
-pub use db::DbError;
 
 // Tool Types
 pub use tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
@@ -49,21 +53,21 @@ pub use agents::turn;
 #[cfg(feature = "dev")]
 pub use agents::{AgentRecord, AgentRepository};
 #[cfg(feature = "dev")]
+pub use approval::{ApprovalManager, ApprovalPolicy};
+#[cfg(feature = "dev")]
+pub use db::llm::LlmProviderRepository;
+#[cfg(feature = "dev")]
 pub use db::sqlite::{
-    self, connect, migrate, SqliteAgentRepository, SqliteLlmProviderRepository,
-    SqliteThreadRepository,
+    self, SqliteAgentRepository, SqliteLlmProviderRepository, SqliteThreadRepository, connect,
+    migrate,
 };
 #[cfg(feature = "dev")]
 pub use db::thread::{MessageRecord, ThreadRecord, ThreadRepository};
 #[cfg(feature = "dev")]
-pub use db::llm::LlmProviderRepository;
-#[cfg(feature = "dev")]
 pub use db::{ApprovalRepository, SqliteJobRepository, SqliteWorkflowRepository};
-#[cfg(feature = "dev")]
-pub use llm::{ChatMessage, LlmEventStream, LlmProvider, LLMManager, Role};
 #[cfg(feature = "dev")]
 pub use job::{JobRecord, JobRepository, JobType};
 #[cfg(feature = "dev")]
-pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
+pub use llm::{ChatMessage, LLMManager, LlmEventStream, LlmProvider, Role};
 #[cfg(feature = "dev")]
-pub use approval::{ApprovalManager, ApprovalPolicy};
+pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};

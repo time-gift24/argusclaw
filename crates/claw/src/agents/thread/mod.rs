@@ -38,10 +38,11 @@ mod error;
 mod thread;
 mod types;
 
-pub use config::{ThreadConfig, ThreadConfigBuilder};
+pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
-pub use thread::{Thread, ThreadBuilder, TurnStreamHandle};
+pub use thread::{Thread, ThreadBuilder};
 pub use types::{ThreadInfo, ThreadState};
 
-// Re-export protocol types that were previously defined here
-pub use crate::protocol::{ThreadEvent, ThreadId};
+// Re-export ThreadConfigBuilder for internal use (tests)
+#[cfg(test)]
+pub use config::ThreadConfigBuilder;

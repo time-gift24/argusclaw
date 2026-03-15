@@ -11,9 +11,9 @@ use crate::db::sqlite::{
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;
-use crate::llm::{LlmProvider, LLMManager};
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
+use crate::llm::{LLMManager, LlmProvider};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use tokio_util::sync::CancellationToken;

@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use claw::AppContext;
-use claw::{AgentId, SqliteWorkflowRepository, JobRecord, JobRepository, JobType};
+use claw::{AgentId, JobRecord, JobRepository, JobType, SqliteWorkflowRepository};
 use claw::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
 use owo_colors::OwoColorize;
 
