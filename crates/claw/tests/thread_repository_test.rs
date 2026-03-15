@@ -1,3 +1,5 @@
+#![cfg(feature = "dev")]
+
 //! Integration tests for SqliteThreadRepository.
 
 use claw::{

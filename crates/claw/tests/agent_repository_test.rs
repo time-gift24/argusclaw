@@ -1,3 +1,5 @@
+#![cfg(feature = "dev")]
+
 //! Integration tests for SqliteAgentRepository.
 
 use claw::{AgentId, AgentRecord, AgentRepository, SqliteAgentRepository, connect, migrate};

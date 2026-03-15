@@ -1,3 +1,5 @@
+#![cfg(feature = "dev")]
+
 use std::collections::HashMap;
 
 use claw::{

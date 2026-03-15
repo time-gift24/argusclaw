@@ -9,6 +9,7 @@ use thiserror::Error;
 
 #[cfg(feature = "dev")]
 pub use approval::ApprovalRepository;
+#[allow(unused_imports)]
 pub use sqlite::SqliteJobRepository;
 
 #[cfg(feature = "dev")]

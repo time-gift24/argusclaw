@@ -1,3 +1,5 @@
+#![cfg(feature = "dev")]
+
 //! Integration tests for the JobRepository.
 //!
 //! These tests verify:
