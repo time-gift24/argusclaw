@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use claw::db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
+use claw::{
+    migrate, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
+    SecretString, SqliteLlmProviderRepository,
 };
-use claw::db::sqlite::{SqliteLlmProviderRepository, migrate};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 

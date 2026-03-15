@@ -4,8 +4,7 @@ use std::io::{self, Write};
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use claw::AppContext;
-use claw::db::llm::LlmProviderId;
+use claw::{AppContext, LlmProviderId};
 use futures_util::StreamExt;
 
 use crate::{StreamRenderState, finish_stream_output, render_stream_event};

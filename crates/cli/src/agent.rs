@@ -8,10 +8,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
-use claw::agents::{AgentBuilder, AgentId, ThreadConfig};
-use claw::{AppContext, ApprovalDecision, ThreadEvent};
-use claw::db::llm::LlmProviderId;
-use claw::tool::{GlobTool, GrepTool, ReadTool, ShellTool};
+use claw::{AgentBuilder, AgentId, ThreadConfig, AppContext, ApprovalDecision, ThreadEvent};
+use claw::{LlmProviderId, GlobTool, GrepTool, ReadTool, ShellTool};
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -83,13 +81,11 @@ async fn run_chat(
 ) -> Result<()> {
     // Get provider
     let llm_provider = if let Some(id) = provider {
-        ctx.llm_manager()
-            .get_provider(&LlmProviderId::new(&id))
+        ctx.get_provider(&LlmProviderId::new(&id))
             .await
             .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?
     } else {
-        ctx.llm_manager()
-            .get_default_provider()
+        ctx.get_default_provider()
             .await
             .map_err(|_| {
                 anyhow!("No default provider configured. Use --provider or configure a default.")

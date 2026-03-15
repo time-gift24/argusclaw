@@ -1,11 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use claw::db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
+use claw::{
+    connect, migrate, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
+    SecretString, SqliteLlmProviderRepository, LLMManager,
 };
-use claw::db::sqlite::{SqliteLlmProviderRepository, migrate};
-use claw::llm::LLMManager;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 
