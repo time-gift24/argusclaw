@@ -1,11 +1,6 @@
 //! Thread core types.
 
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-use crate::agents::turn::TokenUsage;
-use crate::approval::{ApprovalRequest, ApprovalResponse};
-use crate::llm::LlmStreamEvent;
+use crate::protocol::ThreadId;
 
 /// Information about a Thread for listing and display.
 #[derive(Debug, Clone)]
@@ -20,34 +15,6 @@ pub struct ThreadInfo {
     pub turn_count: u32,
 }
 
-/// Unique identifier for a Thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ThreadId(pub Uuid);
-
-impl ThreadId {
-    /// Create a new unique ThreadId.
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    /// Parse a ThreadId from a string representation.
-    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
-        Ok(Self(Uuid::parse_str(s)?))
-    }
-}
-
-impl Default for ThreadId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ThreadId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 /// Thread state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadState {
@@ -58,92 +25,9 @@ pub enum ThreadState {
     Processing,
 }
 
-/// Thread event broadcast to subscribers (CLI, Tauri).
-#[derive(Debug, Clone)]
-pub enum ThreadEvent {
-    /// Turn is processing, streaming LLM/tool events.
-    Processing {
-        thread_id: ThreadId,
-        turn_number: u32,
-        event: LlmStreamEvent,
-    },
-    /// Tool execution started.
-    ToolStarted {
-        thread_id: ThreadId,
-        turn_number: u32,
-        tool_call_id: String,
-        tool_name: String,
-        arguments: serde_json::Value,
-    },
-    /// Tool execution completed.
-    ToolCompleted {
-        thread_id: ThreadId,
-        turn_number: u32,
-        tool_call_id: String,
-        tool_name: String,
-        result: Result<serde_json::Value, String>,
-    },
-    /// Turn completed successfully.
-    TurnCompleted {
-        thread_id: ThreadId,
-        turn_number: u32,
-        token_usage: TokenUsage,
-    },
-    /// Turn failed.
-    TurnFailed {
-        thread_id: ThreadId,
-        turn_number: u32,
-        error: String,
-    },
-    /// Thread entered idle state.
-    Idle { thread_id: ThreadId },
-    /// Context was compacted.
-    Compacted {
-        thread_id: ThreadId,
-        new_token_count: u32,
-    },
-    /// Waiting for approval - tool execution paused for human confirmation.
-    WaitingForApproval {
-        thread_id: ThreadId,
-        turn_number: u32,
-        request: ApprovalRequest,
-    },
-    /// Approval resolved (approved/denied/timeout).
-    ApprovalResolved {
-        thread_id: ThreadId,
-        turn_number: u32,
-        response: ApprovalResponse,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn thread_id_new_creates_unique_ids() {
-        let id1 = ThreadId::new();
-        let id2 = ThreadId::new();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn thread_id_default_creates_new_id() {
-        let id = ThreadId::default();
-        assert!(!id.0.is_nil());
-    }
-
-    #[test]
-    fn thread_id_display() {
-        let id = ThreadId::new();
-        let display = format!("{}", id);
-        assert!(!display.is_empty());
-        assert_eq!(display.len(), 36); // UUID format: 8-4-4-4-12
-    }
 
     #[test]
     fn thread_state_default_is_idle() {
@@ -155,13 +39,5 @@ mod tests {
         assert_eq!(ThreadState::Idle, ThreadState::Idle);
         assert_eq!(ThreadState::Processing, ThreadState::Processing);
         assert_ne!(ThreadState::Idle, ThreadState::Processing);
-    }
-
-    #[test]
-    fn thread_id_serde_roundtrip() {
-        let id = ThreadId::new();
-        let json = serde_json::to_string(&id).unwrap();
-        let back: ThreadId = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, back);
     }
 }

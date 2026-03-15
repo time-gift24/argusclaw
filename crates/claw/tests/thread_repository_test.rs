@@ -1,6 +1,6 @@
 //! Integration tests for SqliteThreadRepository.
 
-use claw::agents::thread::ThreadId;
+use claw::ThreadId;
 use claw::db::sqlite::{SqliteThreadRepository, connect, migrate};
 use claw::db::thread::{MessageRecord, ThreadRecord, ThreadRepository};
 

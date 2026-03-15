@@ -448,8 +448,8 @@ async fn execute_tools_parallel(
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
-    thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
-    thread_id: Option<crate::agents::thread::ThreadId>,
+    thread_event_sender: Option<broadcast::Sender<crate::protocol::ThreadEvent>>,
+    thread_id: Option<crate::protocol::ThreadId>,
     turn_number: u32,
     stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 ) -> Vec<ToolExecutionResult> {
@@ -478,12 +478,12 @@ async fn execute_single_tool(
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
-    thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
-    thread_id: Option<crate::agents::thread::ThreadId>,
+    thread_event_sender: Option<broadcast::Sender<crate::protocol::ThreadEvent>>,
+    thread_id: Option<crate::protocol::ThreadId>,
     turn_number: u32,
     stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 ) -> ToolExecutionResult {
-    use crate::agents::thread::ThreadEvent;
+    use crate::protocol::ThreadEvent;
 
     let tool_call_id = tool_call.id.clone();
     let tool_name = tool_call.name.clone();

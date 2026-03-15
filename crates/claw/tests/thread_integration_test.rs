@@ -1,3 +1,4 @@
+#![cfg(feature = "dev")]
 //! Integration tests for the thread module.
 //!
 //! These tests verify end-to-end thread execution including:

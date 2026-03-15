@@ -9,7 +9,7 @@
 //! - Thread ID association
 
 use claw::agents::AgentId;
-use claw::agents::thread::ThreadId;
+use claw::ThreadId;
 use claw::db::SqliteJobRepository;
 use claw::db::sqlite::{connect, migrate};
 use claw::job::repository::JobRepository;

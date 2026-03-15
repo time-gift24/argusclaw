@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use crate::agents::thread::ThreadId;
+use super::{ThreadEvent, ThreadId};
 use crate::llm::{ChatMessage, ToolDefinition};
 use crate::tool::ToolManager;
 
@@ -77,7 +77,7 @@ pub struct ToolHookContext {
     /// Tool manager for accessing tool metadata (e.g., risk level).
     pub tool_manager: Option<Arc<ToolManager>>,
     /// Thread event sender for broadcasting approval events.
-    pub thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
+    pub thread_event_sender: Option<broadcast::Sender<ThreadEvent>>,
     /// Thread ID for event context.
     pub thread_id: Option<ThreadId>,
     /// Turn number for event context.

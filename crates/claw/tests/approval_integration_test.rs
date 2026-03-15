@@ -1,3 +1,4 @@
+#![cfg(feature = "dev")]
 //! Integration test for Approval flow with ShellTool.
 //!
 //! This test verifies the complete approval flow:
@@ -455,7 +456,7 @@ async fn test_approval_events_broadcast_to_thread() {
 
     // Create broadcast channel for thread events
     let (thread_event_tx, mut thread_event_rx) =
-        broadcast::channel::<claw::agents::thread::ThreadEvent>(16);
+        broadcast::channel::<claw::ThreadEvent>(16);
 
     // Create hook registry and register approval hook
     let hooks = Arc::new(HookRegistry::new());
@@ -496,7 +497,7 @@ async fn test_approval_events_broadcast_to_thread() {
     let provider = Arc::new(SequentialMockProvider::new(responses));
 
     // Create turn input with thread event sender and thread_id
-    let thread_id = claw::agents::thread::ThreadId::new();
+    let thread_id = claw::ThreadId::new();
     let input = TurnInputBuilder::new()
         .provider(provider)
         .messages(vec![ChatMessage::user("Use the dangerous tool")])
@@ -532,7 +533,7 @@ async fn test_approval_events_broadcast_to_thread() {
     // Verify we received WaitingForApproval event
     let event = thread_event_rx.recv().await;
     match event {
-        Ok(claw::agents::thread::ThreadEvent::WaitingForApproval { .. }) => {
+        Ok(claw::ThreadEvent::WaitingForApproval { .. }) => {
             // Good - received WaitingForApproval
         }
         Ok(other) => {
@@ -546,7 +547,7 @@ async fn test_approval_events_broadcast_to_thread() {
     // Verify we received ApprovalResolved event
     let event = thread_event_rx.recv().await;
     match event {
-        Ok(claw::agents::thread::ThreadEvent::ApprovalResolved { .. }) => {
+        Ok(claw::ThreadEvent::ApprovalResolved { .. }) => {
             // Good - received ApprovalResolved
         }
         Ok(other) => {

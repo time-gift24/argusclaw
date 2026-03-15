@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::agents::AgentId;
-use crate::agents::thread::ThreadId;
+use crate::protocol::ThreadId;
 use crate::db::DbError;
 use crate::job::repository::JobRepository;
 use crate::job::types::{JobRecord, JobType};

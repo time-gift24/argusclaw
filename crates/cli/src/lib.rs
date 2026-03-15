@@ -5,7 +5,7 @@ use std::env;
 use std::path::PathBuf;
 
 use claw::db::llm::LlmProviderSummary;
-use claw::llm::LlmStreamEvent;
+use claw::LlmStreamEvent;
 
 pub mod agent;
 pub mod provider;

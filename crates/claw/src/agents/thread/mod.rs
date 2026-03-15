@@ -41,4 +41,7 @@ mod types;
 pub use config::{ThreadConfig, ThreadConfigBuilder};
 pub use error::{CompactError, ThreadError};
 pub use thread::{Thread, ThreadBuilder, TurnStreamHandle};
-pub use types::{ThreadEvent, ThreadId, ThreadInfo, ThreadState};
+pub use types::{ThreadInfo, ThreadState};
+
+// Re-export protocol types that were previously defined here
+pub use crate::protocol::{ThreadEvent, ThreadId};

@@ -4,12 +4,16 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use derive_builder::Builder;
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::agents::compact::{Compactor, CompactorManager};
-use crate::agents::thread::{Thread, ThreadConfig, ThreadId, ThreadInfo};
+use crate::agents::thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
-use crate::approval::ApprovalManager;
-use crate::llm::LlmProvider;
+use crate::approval::{ApprovalHook, ApprovalManager, ApprovalPolicy};
+use crate::error::AgentError;
+use crate::llm::{ChatMessage, LlmProvider};
+use crate::protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadEvent, ThreadId};
 use crate::tool::ToolManager;
 
 /// Runtime information about an agent.
@@ -62,10 +66,19 @@ pub struct Agent {
     pub compactor_manager: Arc<CompactorManager>,
     /// Approval manager.
     #[builder(default)]
-    pub approval_manager: Option<Arc<ApprovalManager>>,
-    /// Active threads.
+    approval_manager: Option<Arc<ApprovalManager>>,
+    /// Hook registry shared across all threads.
     #[builder(default)]
-    threads: DashMap<ThreadId, Thread>,
+    hooks: Option<Arc<HookRegistry>>,
+    /// Tools that require approval (comma-separated names).
+    #[builder(default)]
+    approval_tools: Vec<String>,
+    /// Auto-approve all approval requests.
+    #[builder(default)]
+    auto_approve: bool,
+    /// Active threads, protected by async Mutex for safe concurrent access.
+    #[builder(default)]
+    threads: DashMap<ThreadId, Arc<tokio::sync::Mutex<Thread>>>,
 }
 
 impl AgentBuilder {
@@ -87,6 +100,37 @@ impl AgentBuilder {
     /// Build the Agent.
     #[must_use]
     pub fn build(self) -> Agent {
+        let approval_tools = self.approval_tools.unwrap_or_default();
+        let auto_approve = self.auto_approve.unwrap_or(false);
+
+        // Build approval infrastructure if tools are specified
+        let has_approval_tools = !approval_tools.is_empty();
+        let approval_manager = if has_approval_tools {
+            let policy = ApprovalPolicy {
+                require_approval: approval_tools.clone(),
+                timeout_secs: 60,
+                auto_approve: false,
+                auto_approve_autonomous: auto_approve,
+            };
+            Some(Arc::new(ApprovalManager::new(policy)))
+        } else {
+            self.approval_manager.flatten()
+        };
+
+        // Build hook registry
+        let hooks = if let Some(existing) = self.hooks.flatten() {
+            existing
+        } else {
+            Arc::new(HookRegistry::new())
+        };
+
+        // Register approval hook if needed
+        if let Some(manager) = &approval_manager {
+            let policy = manager.policy();
+            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), "agent");
+            hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
+        }
+
         Agent {
             template_id: self.template_id.expect("template_id is required"),
             runtime_id: self.runtime_id.unwrap_or_default(),
@@ -98,7 +142,10 @@ impl AgentBuilder {
             compactor_manager: self
                 .compactor_manager
                 .unwrap_or_else(|| Arc::new(CompactorManager::with_defaults())),
-            approval_manager: self.approval_manager.flatten(),
+            approval_manager,
+            hooks: Some(hooks),
+            approval_tools,
+            auto_approve,
             threads: DashMap::new(),
         }
     }
@@ -145,15 +192,31 @@ impl Agent {
     pub fn create_thread(&self, config: ThreadConfig) -> ThreadId {
         let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
 
-        let thread = Thread::new(
-            self.provider.clone(),
-            self.tool_manager.clone(),
-            compactor,
-            self.approval_manager.clone(),
-            config,
-        );
+        let mut builder = ThreadBuilder::new()
+            .provider(self.provider.clone())
+            .tool_manager(self.tool_manager.clone())
+            .compactor(compactor)
+            .config(config);
+
+        if let Some(hooks) = &self.hooks {
+            builder = builder.hooks(Arc::clone(hooks));
+        }
+
+        if let Some(manager) = &self.approval_manager {
+            builder = builder.approval_manager(Arc::clone(manager));
+        }
+
+        let mut thread = builder.build();
+
+        // Add system prompt as first message
+        if !self.system_prompt.is_empty() {
+            thread
+                .messages_mut()
+                .push(ChatMessage::system(&self.system_prompt));
+        }
+
         let id = *thread.id();
-        self.threads.insert(id, thread);
+        self.threads.insert(id, Arc::new(tokio::sync::Mutex::new(thread)));
         id
     }
 
@@ -166,21 +229,48 @@ impl Agent {
         })
     }
 
-    /// Get mutable reference to a thread by ID.
-    #[must_use]
-    pub fn get_thread_mut(
+    /// Send a message to a thread and execute a Turn.
+    pub async fn send_message(
         &self,
-        id: &ThreadId,
-    ) -> Option<dashmap::mapref::one::RefMut<'_, ThreadId, Thread>> {
-        self.threads.get_mut(id)
+        thread_id: &ThreadId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        let thread_arc = self
+            .threads
+            .get(thread_id)
+            .map(|entry| entry.value().clone())
+            .ok_or(AgentError::ThreadNotFound { id: *thread_id })?;
+        let mut thread = thread_arc.lock().await;
+        thread.send_message(message).await;
+        Ok(())
     }
 
-    /// Send a message to a thread.
-    pub fn send_message(&self, thread_id: &ThreadId, _message: String) -> Option<AgentHandle> {
-        self.threads.get(thread_id).map(|_entry| AgentHandle {
-            id: *thread_id,
-            runtime_id: self.runtime_id,
-        })
+    /// Subscribe to thread events.
+    pub async fn subscribe(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<broadcast::Receiver<ThreadEvent>> {
+        let thread_arc = self.threads.get(thread_id)?.value().clone();
+        Some(thread_arc.lock().await.subscribe())
+    }
+
+    /// Resolve an approval request.
+    pub fn resolve_approval(
+        &self,
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        resolved_by: Option<String>,
+    ) -> Result<(), AgentError> {
+        let manager = self
+            .approval_manager
+            .as_ref()
+            .ok_or(AgentError::ApprovalNotConfigured)?;
+        manager
+            .resolve(request_id, decision, resolved_by)
+            .map_err(|e| AgentError::ApprovalFailed {
+                reason: e.to_string(),
+            })?;
+        Ok(())
     }
 
     /// List all threads in this agent.
@@ -188,7 +278,7 @@ impl Agent {
     pub fn list_threads(&self) -> Vec<ThreadInfo> {
         self.threads
             .iter()
-            .map(|entry| entry.value().info())
+            .filter_map(|entry| entry.value().try_lock().ok().map(|t| t.info()))
             .collect()
     }
 
@@ -213,6 +303,12 @@ impl Agent {
     pub fn thread_count(&self) -> usize {
         self.threads.len()
     }
+
+    /// Whether auto-approve is enabled.
+    #[must_use]
+    pub fn auto_approve(&self) -> bool {
+        self.auto_approve
+    }
 }
 
 impl Clone for Agent {
@@ -225,6 +321,9 @@ impl Clone for Agent {
             tool_manager: self.tool_manager.clone(),
             compactor_manager: self.compactor_manager.clone(),
             approval_manager: self.approval_manager.clone(),
+            hooks: self.hooks.clone(),
+            approval_tools: self.approval_tools.clone(),
+            auto_approve: self.auto_approve,
             threads: DashMap::new(),
         }
     }
