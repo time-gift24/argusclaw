@@ -25,8 +25,8 @@
     "@ss-blocks": {
       "url": "https://cli-mirror-demo.vercel.app/api/r/ss-blocks/{name}",
       "params": {
-        "email": "${EMAIL}",
-        "license_key": "${LICENSE_KEY}"
+        "email": "${SS_BLOCK_EMAIL}",
+        "license_key": "${SS_BLOCK_KEY}"
       }
     }
 }
