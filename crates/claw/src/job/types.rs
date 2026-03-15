@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::agents::AgentId;
-use crate::agents::thread::ThreadId;
+use crate::protocol::ThreadId;
 use crate::workflow::{JobId, WorkflowStatus};
 
 /// The kind of job: standalone one-off, part of a workflow, or recurring cron.

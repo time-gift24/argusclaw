@@ -38,7 +38,11 @@ mod error;
 mod thread;
 mod types;
 
-pub use config::{ThreadConfig, ThreadConfigBuilder};
+pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
-pub use thread::{Thread, ThreadBuilder, TurnStreamHandle};
-pub use types::{ThreadEvent, ThreadId, ThreadInfo, ThreadState};
+pub use thread::{Thread, ThreadBuilder};
+pub use types::{ThreadInfo, ThreadState};
+
+// Re-export ThreadConfigBuilder for internal use (tests)
+#[cfg(test)]
+pub use config::ThreadConfigBuilder;

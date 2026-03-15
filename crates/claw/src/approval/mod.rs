@@ -49,12 +49,15 @@ mod types;
 mod approval_hook;
 
 pub use approval_hook::ApprovalHook;
+#[allow(unused_imports)]
 pub use error::ApprovalError;
 pub use manager::ApprovalManager;
 pub use policy::ApprovalPolicy;
+#[allow(unused_imports)]
 pub use types::{
     ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_ACTION_LEN,
     MAX_PENDING_PER_AGENT, MAX_TIMEOUT_SECS, MAX_TOOL_NAME_LEN, MIN_TIMEOUT_SECS,
 };
 // Re-export RiskLevel from protocol for backward compatibility
+#[allow(unused_imports)]
 pub use crate::protocol::RiskLevel;

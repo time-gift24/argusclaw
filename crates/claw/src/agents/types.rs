@@ -5,37 +5,12 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::db::DbError;
 
 /// Unique identifier for an agent template.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(String);
-
-/// Unique runtime identifier for an Agent instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentRuntimeId(pub Uuid);
-
-impl AgentRuntimeId {
-    /// Create a new runtime ID.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for AgentRuntimeId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for AgentRuntimeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 impl AgentId {
     /// Creates a new agent ID.
@@ -107,28 +82,6 @@ impl AgentRecord {
     }
 }
 
-/// Summary for listing (excludes large fields like system_prompt).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentSummary {
-    pub id: AgentId,
-    pub display_name: String,
-    pub description: String,
-    pub version: String,
-    pub provider_id: String,
-}
-
-impl From<AgentRecord> for AgentSummary {
-    fn from(record: AgentRecord) -> Self {
-        Self {
-            id: record.id,
-            display_name: record.display_name,
-            description: record.description,
-            version: record.version,
-            provider_id: record.provider_id,
-        }
-    }
-}
-
 /// Repository trait for agent persistence.
 #[async_trait]
 pub trait AgentRepository: Send + Sync {
@@ -138,8 +91,8 @@ pub trait AgentRepository: Send + Sync {
     /// Get an agent by ID.
     async fn get(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError>;
 
-    /// List all agents (summaries only).
-    async fn list(&self) -> Result<Vec<AgentSummary>, DbError>;
+    /// List all agents.
+    async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;
 
     /// Delete an agent. Returns true if a row was deleted.
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;

@@ -2,21 +2,27 @@ use std::sync::Arc;
 use std::{env, path::Path, path::PathBuf};
 
 use sqlx::SqlitePool;
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-use crate::agents::AgentManager;
-use crate::db::llm::{LlmProviderId, LlmProviderRecord};
+#[cfg(feature = "dev")]
+use crate::agents::Agent;
+use crate::agents::thread::ThreadInfo;
+use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
+use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
 use crate::db::sqlite::{
     SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
     migrate,
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;
-use crate::llm::LLMManager;
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
+use crate::llm::{LLMManager, LlmProvider};
+use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -120,16 +126,19 @@ impl AppContext {
         }
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn db_pool(&self) -> &SqlitePool {
         &self.db_pool
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn llm_manager(&self) -> Arc<LLMManager> {
         Arc::clone(&self.llm_manager)
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn agent_manager(&self) -> Arc<AgentManager> {
         Arc::clone(&self.agent_manager)
@@ -140,6 +149,7 @@ impl AppContext {
         Arc::clone(&self.tool_manager)
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn job_repository(&self) -> Arc<dyn JobRepository> {
         Arc::clone(&self.job_repository)
@@ -175,6 +185,113 @@ impl AppContext {
     pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), AgentError> {
         self.llm_manager.set_default_provider(id).await
     }
+
+    /// 获取 LLM Provider 实例
+    pub async fn get_provider(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        self.llm_manager.get_provider(id).await
+    }
+
+    /// 获取默认 LLM Provider
+    pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        self.llm_manager.get_default_provider().await
+    }
+
+    /// 列出所有 provider 摘要
+    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
+        self.llm_manager.list_providers().await
+    }
+
+    // === Agent Use-Case Methods ===
+
+    /// Create a runtime Agent from an AgentRecord template.
+    ///
+    /// The agent must have a valid `provider_id` that references an existing LLM provider.
+    pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentId, AgentError> {
+        self.agent_manager.create_agent(record).await
+    }
+
+    /// Create a runtime Agent with approval configuration.
+    ///
+    /// This is a convenience method for creating agents that need approval tools.
+    /// The agent must have a valid `provider_id` that references an existing LLM provider.
+    pub async fn create_agent_with_approval(
+        &self,
+        record: &AgentRecord,
+        approval_tools: Vec<String>,
+        auto_approve: bool,
+    ) -> Result<AgentId, AgentError> {
+        self.agent_manager
+            .create_agent_with_approval(record, approval_tools, auto_approve)
+            .await
+    }
+
+    /// Get an existing Agent by ID (dev only).
+    ///
+    /// Returns `None` if the agent doesn't exist or hasn't been created yet.
+    #[cfg(feature = "dev")]
+    #[must_use]
+    pub fn get_agent(&self, id: &AgentId) -> Option<Agent> {
+        self.agent_manager.get(id)
+    }
+
+    /// List all active runtime agents.
+    #[must_use]
+    pub fn list_active_agents(&self) -> Vec<crate::agents::AgentRuntimeInfo> {
+        self.agent_manager.list_agents()
+    }
+
+    /// Create a new thread in an agent.
+    pub fn create_thread(
+        &self,
+        agent_id: &AgentId,
+        config: ThreadConfig,
+    ) -> Result<ThreadId, AgentError> {
+        self.agent_manager.create_thread(agent_id, config)
+    }
+
+    /// List all threads in an agent.
+    #[must_use]
+    pub fn list_threads(&self, agent_id: &AgentId) -> Option<Vec<ThreadInfo>> {
+        self.agent_manager.list_threads(agent_id)
+    }
+
+    /// Send a message to a thread.
+    pub async fn send_message(
+        &self,
+        agent_id: &AgentId,
+        thread_id: &ThreadId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        self.agent_manager
+            .send_message(agent_id, thread_id, message)
+            .await
+    }
+
+    /// Subscribe to thread events.
+    pub async fn subscribe(
+        &self,
+        agent_id: &AgentId,
+        thread_id: &ThreadId,
+    ) -> Option<broadcast::Receiver<ThreadEvent>> {
+        self.agent_manager.subscribe(agent_id, thread_id).await
+    }
+
+    /// Resolve an approval request.
+    pub fn resolve_approval(
+        &self,
+        agent_id: &AgentId,
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        resolved_by: Option<String>,
+    ) -> Result<(), AgentError> {
+        self.agent_manager
+            .resolve_approval(agent_id, request_id, decision, resolved_by)
+    }
+
+    // === Dev-Only Methods ===
 
     #[cfg(feature = "dev")]
     pub async fn complete_text(
@@ -267,7 +384,6 @@ mod tests {
             .await
             .expect("app context init should succeed");
         let providers = ctx
-            .llm_manager()
             .list_providers()
             .await
             .expect("provider list should succeed");

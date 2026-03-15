@@ -5,8 +5,8 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::agents::thread::ThreadId;
 use crate::db::DbError;
+use crate::protocol::ThreadId;
 
 /// Unique identifier for a stored message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -219,24 +219,43 @@ impl Scheduler {
 
         // Create thread
         let thread_id = {
-            let agent = self.agent_manager.get(runtime_id);
-            if let Some(agent) = agent {
-                agent.create_thread(ThreadConfig::default())
-            } else {
-                let err = SchedulerError::DispatchFailed {
-                    job_id: job.id.as_ref().to_string(),
-                    reason: "Agent not found after creation".to_string(),
-                };
-                let _ = self
-                    .job_repository
-                    .update_status(
-                        &job.id,
-                        WorkflowStatus::Failed,
-                        None,
-                        Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-                    )
-                    .await;
-                return Err(err);
+            let agent = self.agent_manager.get(&runtime_id);
+            match agent {
+                Some(agent) => match agent.create_thread(ThreadConfig::default()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let err = SchedulerError::DispatchFailed {
+                            job_id: job.id.as_ref().to_string(),
+                            reason: e.to_string(),
+                        };
+                        let _ = self
+                            .job_repository
+                            .update_status(
+                                &job.id,
+                                WorkflowStatus::Failed,
+                                None,
+                                Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                            )
+                            .await;
+                        return Err(err);
+                    }
+                },
+                None => {
+                    let err = SchedulerError::DispatchFailed {
+                        job_id: job.id.as_ref().to_string(),
+                        reason: "Agent not found after creation".to_string(),
+                    };
+                    let _ = self
+                        .job_repository
+                        .update_status(
+                            &job.id,
+                            WorkflowStatus::Failed,
+                            None,
+                            Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                        )
+                        .await;
+                    return Err(err);
+                }
             }
         };
 
@@ -256,12 +275,9 @@ impl Scheduler {
 
         let handle = tokio::spawn(async move {
             // Get agent and send message
-            if let Some(agent) = agent_manager.get(runtime_id)
-                && let Some(mut thread) = agent.get_thread_mut(&thread_id)
-            {
-                let handle = thread.send_message(job.prompt.clone()).await;
-                match handle.wait_for_result().await {
-                    Ok(_output) => {
+            if let Some(agent) = agent_manager.get(&runtime_id) {
+                match agent.send_message(&thread_id, job.prompt.clone()).await {
+                    Ok(()) => {
                         let _ = job_repository
                             .update_status(
                                 &job_id,
@@ -287,7 +303,7 @@ impl Scheduler {
             }
 
             // Cleanup: delete the agent runtime
-            let _ = agent_manager.delete(runtime_id);
+            let _ = agent_manager.delete(&runtime_id);
         });
 
         // Track the running job
