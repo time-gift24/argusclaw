@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
 use crate::agents::compact::CompactorManager;
 use crate::agents::thread::{ThreadConfig, ThreadInfo};
-use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentSummary};
+use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
@@ -235,8 +235,8 @@ impl AgentManager {
         self.repository.get(id).await
     }
 
-    /// List all agent templates (summaries only).
-    pub async fn list_templates(&self) -> Result<Vec<AgentSummary>, DbError> {
+    /// List all agent templates.
+    pub async fn list_templates(&self) -> Result<Vec<AgentRecord>, DbError> {
         self.repository.list().await
     }
 

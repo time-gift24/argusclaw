@@ -24,7 +24,7 @@ mod types;
 pub use agent::Agent;
 pub use agent::{AgentBuilder, AgentManager, AgentRuntimeInfo};
 pub use thread::ThreadInfo;
-pub use types::{AgentId, AgentRecord, AgentRepository, AgentSummary};
+pub use types::{AgentId, AgentRecord, AgentRepository};
 
 // Re-export thread types still needed by external consumers
 pub use thread::ThreadConfig;

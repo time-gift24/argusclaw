@@ -31,7 +31,7 @@ pub use error::AgentError;
 
 // Agent API (稳定对话接口)
 pub use agents::{AgentBuilder, AgentId, ThreadConfig};
-pub use agents::{AgentRecord, AgentRuntimeInfo, AgentSummary, ThreadInfo};
+pub use agents::{AgentRecord, AgentRuntimeInfo, ThreadInfo};
 
 // Protocol Types (稳定 DTO)
 pub use protocol::{

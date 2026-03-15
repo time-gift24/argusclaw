@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::agents::{AgentId, AgentRecord, AgentRepository, AgentSummary};
+use crate::agents::{AgentId, AgentRecord, AgentRepository};
 use crate::db::DbError;
 
 pub struct SqliteAgentRepository {
@@ -55,16 +55,6 @@ impl SqliteAgentRepository {
             tool_names,
             max_tokens: Self::get::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
             temperature,
-        })
-    }
-
-    fn map_summary(row: sqlx::sqlite::SqliteRow) -> Result<AgentSummary, DbError> {
-        Ok(AgentSummary {
-            id: AgentId::new(Self::get::<String>(&row, "id")?),
-            display_name: Self::get::<String>(&row, "display_name")?,
-            description: Self::get::<String>(&row, "description")?,
-            version: Self::get::<String>(&row, "version")?,
-            provider_id: Self::get::<String>(&row, "provider_id")?,
         })
     }
 }
@@ -127,9 +117,9 @@ impl AgentRepository for SqliteAgentRepository {
         row.map(Self::map_record).transpose()
     }
 
-    async fn list(&self) -> Result<Vec<AgentSummary>, DbError> {
+    async fn list(&self) -> Result<Vec<AgentRecord>, DbError> {
         let rows = sqlx::query(
-            r#"SELECT id, display_name, description, version, provider_id
+            r#"SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
                FROM agents
                ORDER BY display_name ASC"#,
         )
@@ -139,7 +129,7 @@ impl AgentRepository for SqliteAgentRepository {
             reason: e.to_string(),
         })?;
 
-        rows.into_iter().map(Self::map_summary).collect()
+        rows.into_iter().map(Self::map_record).collect()
     }
 
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError> {
