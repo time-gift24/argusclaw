@@ -17,7 +17,7 @@ export interface LlmProviderRecord {
   kind: "openai-compatible"
   display_name: string
   base_url: string
-  api_key: { api_key: string } // SecretString serializes as { api_key: string }
+  api_key: string
   model: string
   is_default: boolean
   extra_headers: Record<string, string>

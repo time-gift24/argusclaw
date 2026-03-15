@@ -4,9 +4,11 @@ use crate::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
 };
 use crate::error::AgentError;
+#[cfg(feature = "dev")]
+use crate::llm::ChatMessage;
 use crate::llm::LlmProvider;
 #[cfg(feature = "dev")]
-use crate::llm::{ChatMessage, CompletionRequest, LlmEventStream};
+use crate::llm::provider::{CompletionRequest, LlmEventStream};
 
 pub struct LLMManager {
     repository: Arc<dyn LlmProviderRepository>,
@@ -49,6 +51,13 @@ impl LLMManager {
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
         self.repository.upsert_provider(&record).await?;
         Ok(())
+    }
+
+    pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, AgentError> {
+        self.repository
+            .delete_provider(id)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn import_providers(
