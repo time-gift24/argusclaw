@@ -15,21 +15,8 @@ const fontMono = Geist_Mono({
   variable: "--font-mono",
 })
 
-const navigationData = [
-  { title: "Home", href: "/" },
-  { title: "Marketing", href: "/marketing" },
-  { title: "Contact", href: "/contact" },
-  { title: "Projects", href: "/projects" },
-  { title: "Sales", href: "/sales" },
-  { title: "Team", href: "/team" },
-  { title: "Tasks", href: "/tasks" },
-  { title: "Blog", href: "/blog" },
-]
-
 const navigationItems = [
-  { title: "Home", href: "/" },
-  { title: "Marketing", href: "/marketing", isActive: true },
-  { title: "Contact", href: "/contact" },
+  { title: "Home", href: "/", isActive: true },
 ]
 
 export default function RootLayout({
@@ -46,7 +33,7 @@ export default function RootLayout({
       <body>
         <TooltipProvider>
           <ThemeProvider>
-            <Navbar navigationData={navigationData} navigationItems={navigationItems} />
+            <Navbar navigationItems={navigationItems} />
             <main className="flex-1">{children}</main>
           </ThemeProvider>
         </TooltipProvider>
