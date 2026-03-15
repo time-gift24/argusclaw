@@ -1,6 +1,6 @@
 "use client"
 
-import { BellIcon, MenuIcon, SearchIcon, Moon, Sun } from 'lucide-react'
+import { BellIcon, MenuIcon, SearchIcon, Moon, Sun, Settings, Bot, Cloud } from 'lucide-react'
 import { useTheme } from 'next-themes'
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -83,6 +83,23 @@ const Navbar = ({
             {resolvedTheme === 'dark' ? <Moon /> : <Sun />}
             <span className='sr-only'>Toggle theme</span>
           </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<Button variant='outline' size='icon' />}>
+              <Settings />
+              <span className='sr-only'>Settings</span>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align='end'>
+              <DropdownMenuItem>
+                <Bot />
+                <span>Agent 配置</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem>
+                <Cloud />
+                <span>LLMProvider 配置</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           <NotificationDropdown
             trigger={
