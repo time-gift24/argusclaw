@@ -743,6 +743,7 @@ mod tests {
             .provider(provider)
             .messages(vec![ChatMessage::user("Hello")])
             .build()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -796,7 +797,7 @@ mod tests {
             .provider(provider)
             .messages(vec![ChatMessage::user("Hello")])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();
@@ -834,7 +835,7 @@ mod tests {
             .provider(provider)
             .messages(vec![ChatMessage::user("Hello")])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let result = execute_turn(input, config).await;
@@ -883,7 +884,7 @@ mod tests {
             .messages(vec![ChatMessage::user("Hello")])
             .tool_manager(tool_manager)
             .tool_ids(vec!["echo".to_string()])
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();
@@ -956,7 +957,7 @@ mod tests {
             .messages(vec![ChatMessage::user("Hello")])
             .tool_manager(tool_manager)
             .tool_ids(vec!["echo".to_string()])
-            .build();
+            .build().unwrap();
 
         let config = TurnConfigBuilder::default()
             .max_iterations(Some(3))
@@ -1021,7 +1022,7 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["echo".to_string()])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();
@@ -1189,7 +1190,7 @@ mod tests {
             .messages(vec![ChatMessage::user("Hello")])
             .tool_manager(tool_manager)
             .tool_ids(vec!["echo".to_string()])
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();
@@ -1257,7 +1258,7 @@ mod tests {
             .messages(vec![ChatMessage::user("Test parallel")])
             .tool_manager(tool_manager)
             .tool_ids(vec!["delayed".to_string()])
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
 
@@ -1323,7 +1324,7 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["counter".to_string()])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();
@@ -1393,7 +1394,7 @@ mod tests {
             .messages(vec![ChatMessage::user("Multi-iteration test")])
             .tool_manager(tool_manager)
             .tool_ids(vec!["echo".to_string()])
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let output = execute_turn(input, config).await.unwrap();

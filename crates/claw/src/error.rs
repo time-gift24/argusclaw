@@ -46,4 +46,10 @@ pub enum AgentError {
 
     #[error("approval resolution failed: {reason}")]
     ApprovalFailed { reason: String },
+
+    #[error("agent build failed: required field `{field}` was not set")]
+    AgentBuildFailed { field: &'static str },
+
+    #[error("thread build failed: {reason}")]
+    ThreadBuildFailed { reason: String },
 }

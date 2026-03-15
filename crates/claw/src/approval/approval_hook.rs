@@ -414,7 +414,7 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["dangerous_tool".to_string()])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let manager_clone = Arc::clone(&approval_manager);
         tokio::spawn(async move {
@@ -475,7 +475,7 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["dangerous_tool".to_string()])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let manager_clone = Arc::clone(&approval_manager);
         tokio::spawn(async move {
@@ -559,7 +559,7 @@ mod tests {
             .tool_manager(tool_manager)
             .tool_ids(vec!["safe_tool".to_string()])
             .hooks(hooks)
-            .build();
+            .build().unwrap();
 
         let config = TurnConfig::default();
         let result = execute_turn(input, config).await;
@@ -620,7 +620,7 @@ mod tests {
             .hooks(hooks)
             .thread_event_sender(thread_event_tx)
             .thread_id(thread_id)
-            .build();
+            .build().unwrap();
 
         let manager_clone = Arc::clone(&approval_manager);
         tokio::spawn(async move {

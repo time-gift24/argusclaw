@@ -34,6 +34,10 @@ pub enum ThreadError {
     #[error("LLM provider not configured")]
     ProviderNotConfigured,
 
+    /// Compactor not configured.
+    #[error("Compactor not configured")]
+    CompactorNotConfigured,
+
     /// Channel send error.
     #[error("Event channel closed")]
     ChannelClosed,

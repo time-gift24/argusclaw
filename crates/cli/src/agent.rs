@@ -117,10 +117,13 @@ async fn run_chat(
         .tool_manager(Arc::clone(&tool_manager))
         .approval_tools(effective_approval_tools.clone())
         .auto_approve(auto_approve)
-        .build();
+        .build()
+        .map_err(|e| anyhow!("Failed to build agent: {}", e))?;
 
     // Create thread
-    let thread_id = agent.create_thread(ThreadConfig::default());
+    let thread_id = agent
+        .create_thread(ThreadConfig::default())
+        .map_err(|e| anyhow!("Failed to create thread: {}", e))?;
 
     // Subscribe to events
     let mut event_rx = agent

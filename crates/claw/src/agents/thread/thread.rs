@@ -51,45 +51,46 @@ impl TurnStreamHandle {
 pub struct Thread {
     /// Unique identifier.
     #[builder(default = ThreadId::new())]
-    pub id: ThreadId,
+    id: ThreadId,
 
     /// Initial message history (for restoring sessions).
     #[builder(default)]
-    pub messages: Vec<ChatMessage>,
+    messages: Vec<ChatMessage>,
 
     /// LLM provider (required).
-    pub provider: Arc<dyn LlmProvider>,
+    provider: Arc<dyn LlmProvider>,
 
     /// Tool manager.
     #[builder(default = "Arc::new(ToolManager::new())")]
-    pub tool_manager: Arc<ToolManager>,
+    tool_manager: Arc<ToolManager>,
 
     /// Compactor for managing context size.
-    pub compactor: Arc<dyn Compactor>,
+    pub(crate) compactor: Arc<dyn Compactor>,
 
-    /// Approval manager (optional).
+    /// Approval manager (optional, used by approval hooks via Arc sharing).
     #[builder(default, setter(strip_option))]
-    pub approval_manager: Option<Arc<ApprovalManager>>,
+    #[allow(dead_code)]
+    approval_manager: Option<Arc<ApprovalManager>>,
 
     /// Hook registry for lifecycle events (optional).
     #[builder(default, setter(strip_option))]
-    pub hooks: Option<Arc<HookRegistry>>,
+    hooks: Option<Arc<HookRegistry>>,
 
     /// Thread configuration.
     #[builder(default)]
-    pub config: ThreadConfig,
+    config: ThreadConfig,
 
     /// Token count (internal).
     #[builder(default)]
-    pub(super) token_count: u32,
+    token_count: u32,
 
     /// Turn count (internal).
     #[builder(default)]
-    pub(super) turn_count: u32,
+    turn_count: u32,
 
     /// Event broadcaster (internal).
     #[builder(default)]
-    pub(super) event_sender: broadcast::Sender<ThreadEvent>,
+    event_sender: broadcast::Sender<ThreadEvent>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -113,28 +114,31 @@ impl ThreadBuilder {
 
     /// Build the Thread.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if provider or compactor is not set.
-    #[must_use]
-    pub fn build(self) -> Thread {
+    /// Returns `ThreadError` if required fields (`provider`, `compactor`) are not set.
+    pub fn build(self) -> Result<Thread, ThreadError> {
         let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
-        Thread {
+        Ok(Thread {
             id: self.id.unwrap_or_default(),
             messages: self.messages.unwrap_or_default(),
-            provider: self.provider.expect("provider is required"),
+            provider: self
+                .provider
+                .ok_or(ThreadError::ProviderNotConfigured)?,
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
-            compactor: self.compactor.expect("compactor is required"),
+            compactor: self
+                .compactor
+                .ok_or(ThreadError::CompactorNotConfigured)?,
             approval_manager: self.approval_manager.flatten(),
             hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
             event_sender,
-        }
+        })
     }
 }
 
@@ -275,7 +279,10 @@ impl Thread {
             turn_input_builder = turn_input_builder.hooks(hooks);
         }
 
-        let turn_input = turn_input_builder.build();
+        // SAFETY: provider is always set since Thread requires it at construction.
+        let turn_input = turn_input_builder
+            .build()
+            .expect("TurnInput build cannot fail: provider is guaranteed by Thread");
 
         let event_sender = self.event_sender.clone();
         let config = self.config.turn_config.clone();
@@ -382,16 +389,13 @@ mod tests {
     #[test]
     fn thread_builder_requires_provider() {
         let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
-        // Use AssertUnwindSafe to allow catch_unwind with Arc<dyn Compactor>
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = ThreadBuilder::new().compactor(compactor).build();
-        }));
-        assert!(result.is_err());
+        let result = ThreadBuilder::new().compactor(compactor).build();
+        assert!(matches!(result, Err(ThreadError::ProviderNotConfigured)));
     }
 
     #[test]
     fn thread_builder_requires_compactor() {
-        let result = std::panic::catch_unwind(|| ThreadBuilder::new().build());
+        let result = ThreadBuilder::new().build();
         assert!(result.is_err());
     }
 
@@ -498,7 +502,8 @@ mod tests {
             .provider(provider)
             .tool_manager(Arc::new(ToolManager::new()))
             .compactor(compactor)
-            .build();
+            .build()
+            .unwrap();
 
         let _event_rx = thread.subscribe();
 
@@ -527,7 +532,8 @@ mod tests {
             .provider(provider)
             .tool_manager(Arc::new(ToolManager::new()))
             .compactor(compactor)
-            .build();
+            .build()
+            .unwrap();
 
         let handle1 = thread.send_message("Hello".to_string()).await;
         let _ = handle1.wait_for_result().await;
@@ -559,7 +565,8 @@ mod tests {
             .tool_manager(Arc::new(ToolManager::new()))
             .compactor(compactor)
             .messages(initial_messages)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(thread.history().len(), 3);
 
@@ -579,7 +586,8 @@ mod tests {
             .provider(provider)
             .tool_manager(Arc::new(ToolManager::new()))
             .compactor(compactor)
-            .build();
+            .build()
+            .unwrap();
 
         thread
             .messages_mut()
@@ -629,7 +637,8 @@ mod tests {
             .tool_manager(Arc::new(ToolManager::new()))
             .compactor(compactor)
             .config(config)
-            .build();
+            .build()
+            .unwrap();
 
         thread
             .messages_mut()

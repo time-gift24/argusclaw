@@ -142,14 +142,16 @@ impl TurnInputBuilder {
 
     /// Build the TurnInput.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if provider is not set.
-    pub fn build(self) -> TurnInput {
-        TurnInput {
+    /// Returns `TurnError` if the required `provider` field is not set.
+    pub fn build(self) -> Result<TurnInput, super::TurnError> {
+        Ok(TurnInput {
             messages: self.messages.unwrap_or_default(),
             system_prompt: self.system_prompt.unwrap_or_default(),
-            provider: self.provider.expect("provider is required"),
+            provider: self
+                .provider
+                .ok_or(super::TurnError::ProviderNotConfigured)?,
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
@@ -158,7 +160,7 @@ impl TurnInputBuilder {
             thread_event_sender: self.thread_event_sender.flatten(),
             thread_id: self.thread_id.flatten(),
             stream_sender: self.stream_sender.flatten(),
-        }
+        })
     }
 }
 
