@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
-use claw::{AgentBuilder, AgentId, AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
+use claw::{AgentId, AgentRecord, AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
 use claw::{GlobTool, GrepTool, LlmProviderId, ReadTool, ShellTool};
 use tokio::io::AsyncBufReadExt;
 
@@ -79,15 +79,22 @@ async fn run_chat(
     muted_tools: Vec<String>,
     auto_approve: bool,
 ) -> Result<()> {
-    // Get provider
-    let llm_provider = if let Some(id) = provider {
+    // Resolve provider ID
+    let provider_id = if let Some(id) = provider {
+        // Verify provider exists
         ctx.get_provider(&LlmProviderId::new(&id))
             .await
-            .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?
+            .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?;
+        id
     } else {
         ctx.get_default_provider().await.map_err(|_| {
             anyhow!("No default provider configured. Use --provider or configure a default.")
-        })?
+        })?;
+        ctx.get_default_provider_record()
+            .await?
+            .id
+            .as_ref()
+            .to_string()
     };
 
     // Filter out muted tools from approval list
@@ -103,25 +110,37 @@ async fn run_chat(
     tool_manager.register(Arc::new(GrepTool::new()));
     tool_manager.register(Arc::new(GlobTool::new()));
 
-    // Build Agent with approval configuration
-    let agent = AgentBuilder::new()
-        .id(AgentId::new("cli-agent"))
-        .system_prompt(system_prompt)
-        .provider(llm_provider)
-        .tool_manager(Arc::clone(&tool_manager))
-        .approval_tools(effective_approval_tools.clone())
-        .auto_approve(auto_approve)
-        .build()
-        .map_err(|e| anyhow!("Failed to build agent: {}", e))?;
+    // Build AgentRecord
+    let agent_record = AgentRecord {
+        id: AgentId::new("cli-agent"),
+        display_name: "CLI Agent".to_string(),
+        description: "Interactive CLI agent".to_string(),
+        version: "1.0.0".to_string(),
+        provider_id,
+        system_prompt,
+        tool_names: vec![],
+        max_tokens: None,
+        temperature: None,
+    };
 
-    // Create thread
-    let thread_id = agent
-        .create_thread(ThreadConfig::default())
+    // Create agent via AppContext
+    let agent_id = ctx
+        .create_agent_with_approval(
+            &agent_record,
+            effective_approval_tools.clone(),
+            auto_approve,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to create agent: {}", e))?;
+
+    // Create thread via AppContext
+    let thread_id = ctx
+        .create_thread(&agent_id, ThreadConfig::default())
         .map_err(|e| anyhow!("Failed to create thread: {}", e))?;
 
-    // Subscribe to events
-    let mut event_rx = agent
-        .subscribe(&thread_id)
+    // Subscribe to events via AppContext
+    let mut event_rx = ctx
+        .subscribe(&agent_id, &thread_id)
         .await
         .ok_or_else(|| anyhow!("Failed to subscribe to thread events"))?;
 
@@ -157,9 +176,8 @@ async fn run_chat(
                 break;
             }
             Some(input) if !input.is_empty() => {
-                // Send message through Agent
-                agent
-                    .send_message(&thread_id, input)
+                // Send message through AppContext
+                ctx.send_message(&agent_id, &thread_id, input)
                     .await
                     .map_err(|e| anyhow!("Failed to send message: {}", e))?;
 
@@ -242,22 +260,18 @@ async fn run_chat(
                             if auto_approve {
                                 eprintln!("   ⚡ Auto-approving...");
                                 let request_id = request.id;
-                                let agent_ref = &agent;
-                                tokio::spawn({
-                                    let resolve_result = {
-                                        let _ = tokio::time::sleep(
-                                            std::time::Duration::from_millis(100),
-                                        )
-                                        .await;
-                                        agent_ref.resolve_approval(
-                                            request_id,
-                                            ApprovalDecision::Approved,
-                                            Some("auto-approve".to_string()),
-                                        )
-                                    };
-                                    async move {
-                                        let _ = resolve_result;
-                                    }
+                                let ctx_clone = ctx.clone();
+                                let agent_id_clone = agent_id.clone();
+                                tokio::spawn(async move {
+                                    let _ =
+                                        tokio::time::sleep(std::time::Duration::from_millis(100))
+                                            .await;
+                                    let _ = ctx_clone.resolve_approval(
+                                        &agent_id_clone,
+                                        request_id,
+                                        ApprovalDecision::Approved,
+                                        Some("auto-approve".to_string()),
+                                    );
                                 });
                             } else {
                                 eprint!("   Approve? [y/n/timeout] (default: y): ");
@@ -273,7 +287,8 @@ async fn run_chat(
                                             _ => ApprovalDecision::Approved,
                                         };
 
-                                        let _ = agent.resolve_approval(
+                                        let _ = ctx.resolve_approval(
+                                            &agent_id,
                                             request.id,
                                             decision,
                                             Some("cli-user".to_string()),
@@ -281,7 +296,8 @@ async fn run_chat(
                                     }
                                     Err(e) => {
                                         eprintln!("   Failed to read input: {}. Denying...", e);
-                                        let _ = agent.resolve_approval(
+                                        let _ = ctx.resolve_approval(
+                                            &agent_id,
                                             request.id,
                                             ApprovalDecision::Denied,
                                             Some("cli-error".to_string()),

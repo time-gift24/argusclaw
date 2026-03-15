@@ -93,6 +93,33 @@ impl AgentManager {
         Ok(id)
     }
 
+    /// Create a runtime Agent with custom approval configuration.
+    ///
+    /// This allows per-agent approval settings instead of using the shared approval manager.
+    pub async fn create_agent_with_approval(
+        &self,
+        record: &AgentRecord,
+        approval_tools: Vec<String>,
+        auto_approve: bool,
+    ) -> Result<AgentId, AgentError> {
+        use crate::db::llm::LlmProviderId;
+        let provider = self
+            .llm_manager
+            .get_provider(&LlmProviderId::new(&record.provider_id))
+            .await?;
+
+        let agent = AgentBuilder::from_record(record, provider)
+            .tool_manager(self.tool_manager.clone())
+            .compactor_manager(self.compactor_manager.clone())
+            .approval_tools(approval_tools)
+            .auto_approve(auto_approve)
+            .build()?;
+
+        let id = agent.id().clone();
+        self.agents.insert(id.clone(), agent);
+        Ok(id)
+    }
+
     /// Get an agent by ID.
     #[must_use]
     pub fn get(&self, id: &AgentId) -> Option<Agent> {

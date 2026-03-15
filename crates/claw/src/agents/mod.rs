@@ -20,7 +20,10 @@ pub(crate) mod turn;
 
 mod types;
 
-pub use agent::{Agent, AgentBuilder, AgentManager};
+#[cfg(feature = "dev")]
+pub use agent::Agent;
+pub use agent::{AgentBuilder, AgentManager, AgentRuntimeInfo};
+pub use thread::ThreadInfo;
 pub use types::{AgentId, AgentRecord, AgentRepository, AgentSummary};
 
 // Re-export thread types still needed by external consumers

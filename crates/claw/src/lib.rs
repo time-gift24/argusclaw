@@ -30,7 +30,8 @@ pub use claw::AppContext;
 pub use error::AgentError;
 
 // Agent API (稳定对话接口)
-pub use agents::{Agent, AgentBuilder, AgentId, ThreadConfig};
+pub use agents::{AgentBuilder, AgentId, ThreadConfig};
+pub use agents::{AgentRecord, AgentRuntimeInfo, AgentSummary, ThreadInfo};
 
 // Protocol Types (稳定 DTO)
 pub use protocol::{
@@ -49,9 +50,11 @@ pub use tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, To
 
 // === Dev Feature 重导出 ===
 #[cfg(feature = "dev")]
-pub use agents::turn;
+pub use agents::Agent;
 #[cfg(feature = "dev")]
-pub use agents::{AgentRecord, AgentRepository};
+pub use agents::AgentRepository;
+#[cfg(feature = "dev")]
+pub use agents::turn;
 #[cfg(feature = "dev")]
 pub use approval::{ApprovalManager, ApprovalPolicy};
 #[cfg(feature = "dev")]
