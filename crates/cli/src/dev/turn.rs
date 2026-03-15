@@ -76,7 +76,8 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
         .system_prompt(system_prompt)
         .tool_manager(tool_manager)
         .tool_ids(tools)
-        .build();
+        .build()
+        .context("Failed to build TurnInput")?;
 
     // Execute turn with timing
     let start = Instant::now();

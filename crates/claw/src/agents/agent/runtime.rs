@@ -1,4 +1,4 @@
-//! Agent and AgentHandle implementations.
+//! Agent runtime implementation.
 
 use std::sync::Arc;
 
@@ -43,17 +43,17 @@ impl AgentRuntimeInfo {
 #[builder(pattern = "owned", build_fn(skip))]
 pub struct Agent {
     /// Agent ID (from AgentRecord).
-    pub id: AgentId,
+    id: AgentId,
     /// System prompt from AgentRecord.
-    pub system_prompt: String,
+    system_prompt: String,
     /// LLM provider (required).
-    pub provider: Arc<dyn LlmProvider>,
+    provider: Arc<dyn LlmProvider>,
     /// Tool manager.
     #[builder(default = "Arc::new(ToolManager::new())")]
-    pub tool_manager: Arc<ToolManager>,
+    tool_manager: Arc<ToolManager>,
     /// Compactor manager.
     #[builder(default = "Arc::new(CompactorManager::with_defaults())")]
-    pub compactor_manager: Arc<CompactorManager>,
+    compactor_manager: Arc<CompactorManager>,
     /// Approval manager.
     #[builder(default)]
     approval_manager: Option<Arc<ApprovalManager>>,
@@ -67,8 +67,9 @@ pub struct Agent {
     #[builder(default)]
     auto_approve: bool,
     /// Active threads, protected by async Mutex for safe concurrent access.
+    /// Wrapped in Arc so clones share the same thread map.
     #[builder(default)]
-    threads: DashMap<ThreadId, Arc<tokio::sync::Mutex<Thread>>>,
+    threads: Arc<DashMap<ThreadId, Arc<tokio::sync::Mutex<Thread>>>>,
 }
 
 impl AgentBuilder {
@@ -88,8 +89,18 @@ impl AgentBuilder {
     }
 
     /// Build the Agent.
-    #[must_use]
-    pub fn build(self) -> Agent {
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError` if required fields (`id`, `provider`) are not set.
+    pub fn build(self) -> Result<Agent, AgentError> {
+        let id = self
+            .id
+            .ok_or(AgentError::AgentBuildFailed { field: "id" })?;
+        let provider = self
+            .provider
+            .ok_or(AgentError::AgentBuildFailed { field: "provider" })?;
+
         let approval_tools = self.approval_tools.unwrap_or_default();
         let auto_approve = self.auto_approve.unwrap_or(false);
 
@@ -121,10 +132,10 @@ impl AgentBuilder {
             hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
         }
 
-        Agent {
-            id: self.id.expect("id is required"),
+        Ok(Agent {
+            id,
             system_prompt: self.system_prompt.unwrap_or_default(),
-            provider: self.provider.expect("provider is required"),
+            provider,
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
@@ -135,8 +146,8 @@ impl AgentBuilder {
             hooks: Some(hooks),
             approval_tools,
             auto_approve,
-            threads: DashMap::new(),
-        }
+            threads: Arc::new(DashMap::new()),
+        })
     }
 }
 
@@ -172,7 +183,7 @@ impl Agent {
     }
 
     /// Create a new thread in this agent.
-    pub fn create_thread(&self, config: ThreadConfig) -> ThreadId {
+    pub fn create_thread(&self, config: ThreadConfig) -> Result<ThreadId, AgentError> {
         let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
 
         let mut builder = ThreadBuilder::new()
@@ -189,7 +200,9 @@ impl Agent {
             builder = builder.approval_manager(Arc::clone(manager));
         }
 
-        let mut thread = builder.build();
+        let mut thread = builder.build().map_err(|e| AgentError::ThreadBuildFailed {
+            reason: e.to_string(),
+        })?;
 
         // Add system prompt as first message
         if !self.system_prompt.is_empty() {
@@ -199,16 +212,15 @@ impl Agent {
         }
 
         let id = *thread.id();
-        self.threads.insert(id, Arc::new(tokio::sync::Mutex::new(thread)));
-        id
+        self.threads
+            .insert(id, Arc::new(tokio::sync::Mutex::new(thread)));
+        Ok(id)
     }
 
-    /// Get a thread by ID.
+    /// Check if a thread exists.
     #[must_use]
-    pub fn get_thread(&self, id: &ThreadId) -> Option<AgentHandle> {
-        self.threads
-            .get(id)
-            .map(|_entry| AgentHandle { id: *id })
+    pub fn has_thread(&self, id: &ThreadId) -> bool {
+        self.threads.contains_key(id)
     }
 
     /// Send a message to a thread and execute a Turn.
@@ -304,7 +316,7 @@ impl Clone for Agent {
             hooks: self.hooks.clone(),
             approval_tools: self.approval_tools.clone(),
             auto_approve: self.auto_approve,
-            threads: DashMap::new(),
+            threads: self.threads.clone(),
         }
     }
 }
@@ -319,35 +331,6 @@ impl std::fmt::Debug for Agent {
     }
 }
 
-/// A handle for accessing a thread through an agent.
-#[derive(Clone)]
-pub struct AgentHandle {
-    /// Thread ID.
-    id: ThreadId,
-}
-
-impl AgentHandle {
-    /// Create a new AgentHandle.
-    #[must_use]
-    pub fn new(id: ThreadId) -> Self {
-        Self { id }
-    }
-
-    /// Get the thread ID.
-    #[must_use]
-    pub fn id(&self) -> &ThreadId {
-        &self.id
-    }
-}
-
-impl std::fmt::Debug for AgentHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentHandle")
-            .field("id", &self.id)
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,12 +339,5 @@ mod tests {
     fn test_agent_runtime_info() {
         let info = AgentRuntimeInfo::new(AgentId::new("test"), 5, "gpt-4".to_string());
         assert_eq!(info.thread_count, 5);
-    }
-
-    #[test]
-    fn test_agent_handle() {
-        let thread_id = ThreadId::new();
-        let handle = AgentHandle::new(thread_id);
-        assert_eq!(*handle.id(), thread_id);
     }
 }

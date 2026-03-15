@@ -220,23 +220,42 @@ impl Scheduler {
         // Create thread
         let thread_id = {
             let agent = self.agent_manager.get(&runtime_id);
-            if let Some(agent) = agent {
-                agent.create_thread(ThreadConfig::default())
-            } else {
-                let err = SchedulerError::DispatchFailed {
-                    job_id: job.id.as_ref().to_string(),
-                    reason: "Agent not found after creation".to_string(),
-                };
-                let _ = self
-                    .job_repository
-                    .update_status(
-                        &job.id,
-                        WorkflowStatus::Failed,
-                        None,
-                        Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-                    )
-                    .await;
-                return Err(err);
+            match agent {
+                Some(agent) => match agent.create_thread(ThreadConfig::default()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let err = SchedulerError::DispatchFailed {
+                            job_id: job.id.as_ref().to_string(),
+                            reason: e.to_string(),
+                        };
+                        let _ = self
+                            .job_repository
+                            .update_status(
+                                &job.id,
+                                WorkflowStatus::Failed,
+                                None,
+                                Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                            )
+                            .await;
+                        return Err(err);
+                    }
+                },
+                None => {
+                    let err = SchedulerError::DispatchFailed {
+                        job_id: job.id.as_ref().to_string(),
+                        reason: "Agent not found after creation".to_string(),
+                    };
+                    let _ = self
+                        .job_repository
+                        .update_status(
+                            &job.id,
+                            WorkflowStatus::Failed,
+                            None,
+                            Some(&Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+                        )
+                        .await;
+                    return Err(err);
+                }
             }
         };
 

@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
 use crate::agents::compact::CompactorManager;
 use crate::agents::thread::{ThreadConfig, ThreadInfo};
-use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
+use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentSummary};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
@@ -86,7 +86,7 @@ impl AgentManager {
             .tool_manager(self.tool_manager.clone())
             .compactor_manager(self.compactor_manager.clone())
             .approval_manager(self.approval_manager.clone())
-            .build();
+            .build()?;
 
         let id = agent.id().clone();
         self.agents.insert(id.clone(), agent);
@@ -122,11 +122,18 @@ impl AgentManager {
     // === Thread operations (passthrough to Agent) ===
 
     /// Create a new thread in an agent.
-    pub fn create_thread(&self, agent_id: &AgentId, config: ThreadConfig) -> Option<ThreadId> {
-        self.agents.get(agent_id).map(|entry| {
-            let agent = entry.value();
-            agent.create_thread(config)
-        })
+    pub fn create_thread(
+        &self,
+        agent_id: &AgentId,
+        config: ThreadConfig,
+    ) -> Result<ThreadId, AgentError> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| AgentError::AgentNotFound {
+                id: agent_id.clone(),
+            })?;
+        agent.value().create_thread(config)
     }
 
     /// List all threads in an agent.
@@ -154,11 +161,10 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .map(|entry| entry.value().clone())
-            .ok_or(AgentError::AgentNotFound {
+            .ok_or_else(|| AgentError::AgentNotFound {
                 id: agent_id.clone(),
             })?;
-        agent.send_message(thread_id, message).await
+        agent.value().send_message(thread_id, message).await
     }
 
     /// Subscribe to thread events.
@@ -167,8 +173,8 @@ impl AgentManager {
         agent_id: &AgentId,
         thread_id: &ThreadId,
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
-        let agent = self.agents.get(agent_id)?.value().clone();
-        agent.subscribe(thread_id).await
+        let agent = self.agents.get(agent_id)?;
+        agent.value().subscribe(thread_id).await
     }
 
     /// Resolve an approval request.
@@ -182,11 +188,12 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .map(|entry| entry.value().clone())
-            .ok_or(AgentError::AgentNotFound {
+            .ok_or_else(|| AgentError::AgentNotFound {
                 id: agent_id.clone(),
             })?;
-        agent.resolve_approval(request_id, decision, resolved_by)
+        agent
+            .value()
+            .resolve_approval(request_id, decision, resolved_by)
     }
 
     // === Template operations (delegated to repository) ===
@@ -201,25 +208,9 @@ impl AgentManager {
         self.repository.get(id).await
     }
 
-    /// List all agent templates.
-    pub async fn list_templates(&self) -> Result<Vec<AgentRecord>, DbError> {
-        Ok(self
-            .repository
-            .list()
-            .await?
-            .into_iter()
-            .map(|s| AgentRecord {
-                id: s.id,
-                display_name: s.display_name,
-                description: s.description,
-                version: s.version,
-                provider_id: s.provider_id,
-                system_prompt: String::new(),
-                tool_names: vec![],
-                max_tokens: None,
-                temperature: None,
-            })
-            .collect())
+    /// List all agent templates (summaries only).
+    pub async fn list_templates(&self) -> Result<Vec<AgentSummary>, DbError> {
+        self.repository.list().await
     }
 
     /// Delete an agent template.
@@ -227,11 +218,6 @@ impl AgentManager {
         self.repository.delete(id).await
     }
 
-    /// Access the agents map for advanced operations.
-    #[must_use]
-    pub fn agents(&self) -> &DashMap<AgentId, Agent> {
-        &self.agents
-    }
 }
 
 impl std::fmt::Debug for AgentManager {
