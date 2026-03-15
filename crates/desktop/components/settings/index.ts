@@ -3,3 +3,5 @@ export { ProviderFormDialog, type LlmProviderRecord } from "./provider-form-dial
 export { AgentCard, type AgentRecord } from "./agent-card"
 export { AgentFormDialog } from "./agent-form-dialog"
 export { DeleteConfirmDialog } from "./delete-confirm-dialog"
+export { Breadcrumb } from "./breadcrumb"
+export { AgentEditor } from "./agent-editor"

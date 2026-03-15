@@ -100,7 +100,7 @@ pub async fn set_default_provider(
 pub async fn list_agent_templates(
     ctx: State<'_, std::sync::Arc<AppContext>>,
 ) -> Result<Vec<AgentRecord>, String> {
-    ctx.list_agent_templates()
+    ctx.list_templates()
         .await
         .map_err(|e| e.to_string())
 }
@@ -110,7 +110,7 @@ pub async fn get_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<Option<AgentRecord>, String> {
-    ctx.get_agent_template(&AgentId::new(id))
+    ctx.get_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
@@ -120,7 +120,7 @@ pub async fn upsert_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: AgentRecord,
 ) -> Result<(), String> {
-    ctx.upsert_agent_template(record)
+    ctx.upsert_template(record)
         .await
         .map_err(|e| e.to_string())
 }
@@ -130,7 +130,7 @@ pub async fn delete_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<bool, String> {
-    ctx.delete_agent_template(&AgentId::new(id))
+    ctx.delete_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
