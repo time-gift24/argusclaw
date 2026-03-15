@@ -5,10 +5,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use claw::AppContext;
-use claw::agents::turn::{TurnConfig, TurnInputBuilder, execute_turn};
-use claw::db::llm::LlmProviderId;
-use claw::llm::ChatMessage;
+use claw::turn::{TurnConfig, TurnInputBuilder, execute_turn};
+use claw::{AppContext, ChatMessage, LlmProviderId};
 use owo_colors::OwoColorize;
 
 /// Turn 执行测试命令。
@@ -58,15 +56,13 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
 
     // Get provider from context via LLM manager
     let provider = if let Some(id) = provider {
-        ctx.llm_manager()
-            .get_provider(&LlmProviderId::new(id))
-            .await?
+        ctx.get_provider(&LlmProviderId::new(id)).await?
     } else {
-        ctx.llm_manager().get_default_provider().await?
+        ctx.get_default_provider().await?
     };
 
     // Build tool manager with requested tools
-    let tool_manager = Arc::new(claw::tool::ToolManager::new());
+    let tool_manager = Arc::new(claw::ToolManager::new());
     // TODO: Register tools based on IDs when tools are implemented
 
     // Build turn input
@@ -76,7 +72,8 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
         .system_prompt(system_prompt)
         .tool_manager(tool_manager)
         .tool_ids(tools)
-        .build();
+        .build()
+        .context("Failed to build TurnInput")?;
 
     // Execute turn with timing
     let start = Instant::now();
@@ -94,16 +91,16 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
     println!("{}", "Messages:".bold());
     for msg in &output.messages {
         let role_str = match msg.role {
-            claw::llm::Role::User => "USER",
-            claw::llm::Role::Assistant => "ASSISTANT",
-            claw::llm::Role::System => "SYSTEM",
-            claw::llm::Role::Tool => "TOOL",
+            claw::Role::User => "USER",
+            claw::Role::Assistant => "ASSISTANT",
+            claw::Role::System => "SYSTEM",
+            claw::Role::Tool => "TOOL",
         };
         let role_colored = match msg.role {
-            claw::llm::Role::User => role_str.blue().to_string(),
-            claw::llm::Role::Assistant => role_str.green().to_string(),
-            claw::llm::Role::System => role_str.yellow().to_string(),
-            claw::llm::Role::Tool => role_str.magenta().to_string(),
+            claw::Role::User => role_str.blue().to_string(),
+            claw::Role::Assistant => role_str.green().to_string(),
+            claw::Role::System => role_str.yellow().to_string(),
+            claw::Role::Tool => role_str.magenta().to_string(),
         };
         let content = if verbose {
             msg.content.clone()

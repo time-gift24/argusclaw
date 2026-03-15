@@ -9,10 +9,9 @@ pub mod secret;
 pub use error::LlmError;
 pub use manager::LLMManager;
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
-    LlmEventStream, LlmProvider, LlmStreamEvent, ModelMetadata, ProviderCapabilities, Role,
-    ThinkingConfig, ThinkingMode, ToolCall, ToolCallDelta, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, ToolResult, sanitize_tool_messages,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmEventStream,
+    LlmProvider, LlmStreamEvent, ProviderCapabilities, Role, ThinkingConfig, ToolCall,
+    ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 pub use retry::{RetryConfig, RetryProvider};
 

@@ -1,7 +1,9 @@
 use thiserror::Error;
 
+use crate::agents::AgentId;
 use crate::db::DbError;
 use crate::llm::LlmError;
+use crate::protocol::ThreadId;
 use crate::tool::ToolError;
 
 #[derive(Debug, Error)]
@@ -32,4 +34,22 @@ pub enum AgentError {
 
     #[error("provider kind `{kind}` is not supported by this build")]
     UnsupportedProviderKind { kind: String },
+
+    #[error("agent `{id}` was not found")]
+    AgentNotFound { id: AgentId },
+
+    #[error("thread `{id}` was not found")]
+    ThreadNotFound { id: ThreadId },
+
+    #[error("approval is not configured for this agent")]
+    ApprovalNotConfigured,
+
+    #[error("approval resolution failed: {reason}")]
+    ApprovalFailed { reason: String },
+
+    #[error("agent build failed: required field `{field}` was not set")]
+    AgentBuildFailed { field: &'static str },
+
+    #[error("thread build failed: {reason}")]
+    ThreadBuildFailed { reason: String },
 }

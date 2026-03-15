@@ -5,10 +5,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use claw::AppContext;
-use claw::agents::AgentId;
-use claw::db::SqliteWorkflowRepository;
-use claw::job::{JobRecord, JobRepository, JobType};
-use claw::workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
+use claw::{AgentId, JobRecord, JobRepository, JobType, SqliteWorkflowRepository};
+use claw::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
 use owo_colors::OwoColorize;
 
 /// 工作流执行测试命令。
@@ -96,7 +94,7 @@ async fn create_dev_workflow_repositories()
 -> Result<(SqliteWorkflowRepository, Box<dyn JobRepository>, String)> {
     let env_database_url = std::env::var("WORKFLOW_DATABASE_URL").ok();
     let database_url = resolve_workflow_dev_database_url(env_database_url.as_deref(), None)?;
-    let pool = claw::db::sqlite::connect(&database_url)
+    let pool = claw::sqlite::connect(&database_url)
         .await
         .with_context(|| {
             format!(
@@ -105,7 +103,7 @@ async fn create_dev_workflow_repositories()
             )
         })?;
 
-    claw::db::sqlite::migrate(&pool).await.with_context(|| {
+    claw::sqlite::migrate(&pool).await.with_context(|| {
         format!(
             "failed to run workflow dev migrations for `{}`",
             database_url
@@ -113,7 +111,7 @@ async fn create_dev_workflow_repositories()
     })?;
 
     let workflow_repo = SqliteWorkflowRepository::new(pool.clone());
-    let job_repo: Box<dyn JobRepository> = Box::new(claw::db::SqliteJobRepository::new(pool));
+    let job_repo: Box<dyn JobRepository> = Box::new(claw::SqliteJobRepository::new(pool));
 
     Ok((workflow_repo, job_repo, database_url))
 }

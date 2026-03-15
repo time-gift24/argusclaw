@@ -6,9 +6,7 @@
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 use claw::AppContext;
-use claw::db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
-};
+use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString};
 use std::collections::HashMap;
 
 #[cfg(feature = "dev")]
@@ -130,7 +128,7 @@ impl From<LlmProviderRecord> for ProviderDisplayRecord {
 }
 
 impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
-    type Error = claw::db::DbError;
+    type Error = claw::DbError;
 
     fn try_from(value: ProviderUpsertArgs) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -197,7 +195,7 @@ fn validate_header_name(name: &str) -> Result<()> {
 pub async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> Result<()> {
     match command {
         ProviderCommand::List => {
-            for provider in ctx.llm_manager().list_providers().await? {
+            for provider in ctx.list_providers().await? {
                 println!("{}", render_provider_output(&provider.into()));
                 println!();
             }

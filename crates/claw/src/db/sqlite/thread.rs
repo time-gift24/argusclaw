@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
-use crate::agents::thread::ThreadId;
 use crate::db::DbError;
 use crate::db::thread::{MessageId, MessageRecord, ThreadRecord, ThreadRepository};
+use crate::protocol::ThreadId;
 
 /// SQLite-backed thread repository.
 #[derive(Clone)]

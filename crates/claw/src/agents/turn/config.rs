@@ -8,9 +8,8 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
-use crate::agents::thread::ThreadId;
 use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
-use crate::protocol::HookRegistry;
+use crate::protocol::{HookRegistry, ThreadEvent, ThreadId, TokenUsage};
 use crate::tool::ToolManager;
 
 /// Turn execution configuration.
@@ -109,7 +108,7 @@ pub struct TurnInput {
     pub hooks: Option<Arc<HookRegistry>>,
     /// Thread event sender for broadcasting approval events.
     #[builder(default, setter(strip_option))]
-    pub thread_event_sender: Option<broadcast::Sender<crate::agents::thread::ThreadEvent>>,
+    pub thread_event_sender: Option<broadcast::Sender<ThreadEvent>>,
     /// Thread ID for event context.
     #[builder(default, setter(strip_option))]
     pub thread_id: Option<ThreadId>,
@@ -143,14 +142,16 @@ impl TurnInputBuilder {
 
     /// Build the TurnInput.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if provider is not set.
-    pub fn build(self) -> TurnInput {
-        TurnInput {
+    /// Returns `TurnError` if the required `provider` field is not set.
+    pub fn build(self) -> Result<TurnInput, super::TurnError> {
+        Ok(TurnInput {
             messages: self.messages.unwrap_or_default(),
             system_prompt: self.system_prompt.unwrap_or_default(),
-            provider: self.provider.expect("provider is required"),
+            provider: self
+                .provider
+                .ok_or(super::TurnError::ProviderNotConfigured)?,
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
@@ -159,7 +160,7 @@ impl TurnInputBuilder {
             thread_event_sender: self.thread_event_sender.flatten(),
             thread_id: self.thread_id.flatten(),
             stream_sender: self.stream_sender.flatten(),
-        }
+        })
     }
 }
 
@@ -174,17 +175,6 @@ pub struct TurnOutput {
     /// Token usage statistics.
     #[builder(default)]
     pub token_usage: TokenUsage,
-}
-
-/// Token usage statistics.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TokenUsage {
-    /// Number of input tokens used.
-    pub input_tokens: u32,
-    /// Number of output tokens generated.
-    pub output_tokens: u32,
-    /// Total tokens (input + output).
-    pub total_tokens: u32,
 }
 
 #[cfg(test)]
@@ -229,35 +219,6 @@ mod tests {
         assert_eq!(config.max_tool_calls, Some(3));
         assert_eq!(config.tool_timeout_secs, Some(120)); // default
         assert_eq!(config.max_iterations, Some(50)); // default
-    }
-
-    #[test]
-    fn test_token_usage_default() {
-        let usage = TokenUsage::default();
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 0);
-        assert_eq!(usage.total_tokens, 0);
-    }
-
-    #[test]
-    fn test_token_usage_equality() {
-        let usage1 = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            total_tokens: 150,
-        };
-        let usage2 = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            total_tokens: 150,
-        };
-        let usage3 = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            total_tokens: 200,
-        };
-        assert_eq!(usage1, usage2);
-        assert_ne!(usage1, usage3);
     }
 
     #[test]

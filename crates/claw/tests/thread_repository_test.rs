@@ -1,8 +1,11 @@
+#![cfg(feature = "dev")]
+
 //! Integration tests for SqliteThreadRepository.
 
-use claw::agents::thread::ThreadId;
-use claw::db::sqlite::{SqliteThreadRepository, connect, migrate};
-use claw::db::thread::{MessageRecord, ThreadRecord, ThreadRepository};
+use claw::{
+    MessageRecord, SqliteThreadRepository, ThreadId, ThreadRecord, ThreadRepository, connect,
+    migrate,
+};
 
 async fn setup_test_db() -> SqliteThreadRepository {
     let pool = connect("sqlite::memory:").await.unwrap();

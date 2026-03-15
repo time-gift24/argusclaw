@@ -1,3 +1,5 @@
+#![cfg(feature = "dev")]
+
 //! Integration tests for the JobRepository.
 //!
 //! These tests verify:
@@ -8,13 +10,10 @@
 //! - Group filtering
 //! - Thread ID association
 
-use claw::agents::AgentId;
-use claw::agents::thread::ThreadId;
-use claw::db::SqliteJobRepository;
-use claw::db::sqlite::{connect, migrate};
-use claw::job::repository::JobRepository;
-use claw::job::types::{JobRecord, JobType};
-use claw::workflow::{JobId, WorkflowStatus};
+use claw::{
+    AgentId, JobId, JobRecord, JobRepository, JobType, SqliteJobRepository, ThreadId,
+    WorkflowStatus, connect, migrate,
+};
 
 async fn setup() -> SqliteJobRepository {
     let pool = connect("sqlite::memory:").await.unwrap();

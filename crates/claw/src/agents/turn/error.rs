@@ -38,6 +38,10 @@ pub enum TurnError {
     /// Turn timeout exceeded.
     #[error("Turn timeout exceeded")]
     TimeoutExceeded,
+
+    /// LLM provider not configured.
+    #[error("LLM provider not configured for TurnInput")]
+    ProviderNotConfigured,
 }
 
 #[cfg(test)]

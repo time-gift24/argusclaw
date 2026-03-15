@@ -8,14 +8,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
-use claw::AppContext;
-use claw::agents::compact::KeepRecentCompactor;
-use claw::agents::thread::{ThreadBuilder, ThreadConfig, ThreadEvent};
-use claw::approval::{ApprovalDecision, ApprovalHook, ApprovalManager, ApprovalPolicy};
-use claw::db::llm::LlmProviderId;
-use claw::llm::ChatMessage;
-use claw::protocol::{HookEvent, HookRegistry};
-use claw::tool::{GlobTool, GrepTool, ReadTool, ShellTool};
+use claw::{AgentId, AgentRecord, AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
+use claw::{GlobTool, GrepTool, LlmProviderId, ReadTool, ShellTool};
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -85,19 +79,22 @@ async fn run_chat(
     muted_tools: Vec<String>,
     auto_approve: bool,
 ) -> Result<()> {
-    // Get provider
-    let llm_provider = if let Some(id) = provider {
-        ctx.llm_manager()
-            .get_provider(&LlmProviderId::new(&id))
+    // Resolve provider ID
+    let provider_id = if let Some(id) = provider {
+        // Verify provider exists
+        ctx.get_provider(&LlmProviderId::new(&id))
             .await
-            .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?
+            .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?;
+        id
     } else {
-        ctx.llm_manager()
-            .get_default_provider()
-            .await
-            .map_err(|_| {
-                anyhow!("No default provider configured. Use --provider or configure a default.")
-            })?
+        ctx.get_default_provider().await.map_err(|_| {
+            anyhow!("No default provider configured. Use --provider or configure a default.")
+        })?;
+        ctx.get_default_provider_record()
+            .await?
+            .id
+            .as_ref()
+            .to_string()
     };
 
     // Filter out muted tools from approval list
@@ -106,31 +103,6 @@ async fn run_chat(
         .filter(|t| !muted_tools.contains(t))
         .collect();
 
-    // Setup approval system if needed
-    let has_approval_tools = !effective_approval_tools.is_empty();
-    let approval_manager = if has_approval_tools {
-        // Create policy with specified tools requiring approval
-        let policy = ApprovalPolicy {
-            require_approval: effective_approval_tools.clone(),
-            timeout_secs: 60,
-            auto_approve: false,
-            auto_approve_autonomous: auto_approve,
-        };
-        Some(Arc::new(ApprovalManager::new(policy.clone())))
-    } else {
-        None
-    };
-
-    // Create hook registry
-    let hooks = Arc::new(HookRegistry::new());
-
-    // Register approval hook if needed
-    if let Some(manager) = &approval_manager {
-        let policy = manager.policy();
-        let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), "cli-agent");
-        hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
-    }
-
     // Register default tools
     let tool_manager = ctx.tool_manager();
     tool_manager.register(Arc::new(ShellTool::new()));
@@ -138,31 +110,51 @@ async fn run_chat(
     tool_manager.register(Arc::new(GrepTool::new()));
     tool_manager.register(Arc::new(GlobTool::new()));
 
-    // Create Thread
-    let compactor = Arc::new(KeepRecentCompactor::with_defaults());
-    let mut thread = ThreadBuilder::new()
-        .provider(llm_provider)
-        .tool_manager(Arc::clone(&tool_manager))
-        .compactor(compactor)
-        .config(ThreadConfig::default())
-        .hooks(hooks)
-        .build();
+    // Build AgentRecord
+    let agent_record = AgentRecord {
+        id: AgentId::new("cli-agent"),
+        display_name: "CLI Agent".to_string(),
+        description: "Interactive CLI agent".to_string(),
+        version: "1.0.0".to_string(),
+        provider_id,
+        system_prompt,
+        tool_names: vec![],
+        max_tokens: None,
+        temperature: None,
+    };
 
-    // Add system prompt
-    thread
-        .messages_mut()
-        .push(ChatMessage::system(&system_prompt));
+    // Create agent via AppContext
+    let agent_id = ctx
+        .create_agent_with_approval(
+            &agent_record,
+            effective_approval_tools.clone(),
+            auto_approve,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to create agent: {}", e))?;
 
-    // Subscribe to events
-    let mut event_rx = thread.subscribe();
+    // Create thread via AppContext
+    let thread_id = ctx
+        .create_thread(&agent_id, ThreadConfig::default())
+        .map_err(|e| anyhow!("Failed to create thread: {}", e))?;
+
+    // Subscribe to events via AppContext
+    let mut event_rx = ctx
+        .subscribe(&agent_id, &thread_id)
+        .await
+        .ok_or_else(|| anyhow!("Failed to subscribe to thread events"))?;
 
     // Print welcome message
+    let has_approval_tools = !effective_approval_tools.is_empty();
     println!("{}", "─".repeat(50));
     println!("Interactive Agent Chat");
     println!("Type 'quit' or 'exit' to leave.");
     println!("Available tools: {}", tool_manager.list_ids().join(", "));
     if has_approval_tools {
-        println!("Approval required for: {}", effective_approval_tools.join(", "));
+        println!(
+            "Approval required for: {}",
+            effective_approval_tools.join(", ")
+        );
         if auto_approve {
             println!("Auto-approve mode: ON");
         }
@@ -184,8 +176,10 @@ async fn run_chat(
                 break;
             }
             Some(input) if !input.is_empty() => {
-                // Send message
-                thread.send_message(input).await;
+                // Send message through AppContext
+                ctx.send_message(&agent_id, &thread_id, input)
+                    .await
+                    .map_err(|e| anyhow!("Failed to send message: {}", e))?;
 
                 // Stream rendering state
                 let mut stream_state = StreamRenderState::default();
@@ -196,7 +190,6 @@ async fn run_chat(
                 loop {
                     match event_rx.recv().await {
                         Ok(ThreadEvent::Processing { event, .. }) => {
-                            // Render stream events in real-time
                             if let Some(output) = render_stream_event(&mut stream_state, &event) {
                                 print!("{}", output);
                                 io::stdout().flush()?;
@@ -208,36 +201,30 @@ async fn run_chat(
                             arguments,
                             ..
                         }) => {
-                            // Show tool execution started
                             eprintln!("\n🔧 Tool: {} ({})", tool_name, tool_call_id);
                             if verbose {
                                 eprintln!("   Args: {:?}", arguments);
                             }
                         }
-                        Ok(ThreadEvent::ToolCompleted { result, .. }) => {
-                            // Show tool execution result
-                            match result {
-                                Ok(value) => {
-                                    let result_str = format!("{:?}", value);
-                                    if verbose {
-                                        eprintln!("   ✅ Result: {}", result_str);
+                        Ok(ThreadEvent::ToolCompleted { result, .. }) => match result {
+                            Ok(value) => {
+                                let result_str = format!("{:?}", value);
+                                if verbose {
+                                    eprintln!("   ✅ Result: {}", result_str);
+                                } else {
+                                    let truncated = if result_str.len() > 100 {
+                                        format!("{}...", &result_str[..100])
                                     } else {
-                                        // Truncate for non-verbose mode
-                                        let truncated = if result_str.len() > 100 {
-                                            format!("{}...", &result_str[..100])
-                                        } else {
-                                            result_str
-                                        };
-                                        eprintln!("   ✅ {}", truncated);
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("   ❌ Error: {}", e);
+                                        result_str
+                                    };
+                                    eprintln!("   ✅ {}", truncated);
                                 }
                             }
-                        }
+                            Err(e) => {
+                                eprintln!("   ❌ Error: {}", e);
+                            }
+                        },
                         Ok(ThreadEvent::TurnCompleted { token_usage, .. }) => {
-                            // Finish stream output with newline
                             if let Some(suffix) = finish_stream_output(&stream_state) {
                                 print!("{}", suffix);
                             }
@@ -253,7 +240,6 @@ async fn run_chat(
                             eprintln!("Error: {}", error);
                         }
                         Ok(ThreadEvent::Idle { .. }) => {
-                            // Turn finished, ready for next input
                             break;
                         }
                         Ok(ThreadEvent::Compacted {
@@ -271,24 +257,23 @@ async fn run_chat(
                             eprintln!("   Risk level: {:?}", request.risk_level);
                             eprintln!("   Timeout: {}s", request.timeout_secs);
 
-                            // If auto_approve is set, automatically approve
                             if auto_approve {
                                 eprintln!("   ⚡ Auto-approving...");
-                                if let Some(manager) = &approval_manager {
-                                    let request_id = request.id;
-                                    let manager_clone = Arc::clone(manager);
-                                    tokio::spawn(async move {
+                                let request_id = request.id;
+                                let ctx_clone = ctx.clone();
+                                let agent_id_clone = agent_id.clone();
+                                tokio::spawn(async move {
+                                    let _ =
                                         tokio::time::sleep(std::time::Duration::from_millis(100))
                                             .await;
-                                        let _ = manager_clone.resolve(
-                                            request_id,
-                                            ApprovalDecision::Approved,
-                                            Some("auto-approve".to_string()),
-                                        );
-                                    });
-                                }
+                                    let _ = ctx_clone.resolve_approval(
+                                        &agent_id_clone,
+                                        request_id,
+                                        ApprovalDecision::Approved,
+                                        Some("auto-approve".to_string()),
+                                    );
+                                });
                             } else {
-                                // Prompt user for approval
                                 eprint!("   Approve? [y/n/timeout] (default: y): ");
                                 io::stderr().flush()?;
 
@@ -299,27 +284,24 @@ async fn run_chat(
                                         let decision = match response.as_str() {
                                             "n" | "no" | "deny" => ApprovalDecision::Denied,
                                             "t" | "timeout" => ApprovalDecision::TimedOut,
-                                            _ => ApprovalDecision::Approved, // default to approved
+                                            _ => ApprovalDecision::Approved,
                                         };
 
-                                        // Resolve the approval
-                                        if let Some(manager) = &approval_manager {
-                                            let _ = manager.resolve(
-                                                request.id,
-                                                decision,
-                                                Some("cli-user".to_string()),
-                                            );
-                                        }
+                                        let _ = ctx.resolve_approval(
+                                            &agent_id,
+                                            request.id,
+                                            decision,
+                                            Some("cli-user".to_string()),
+                                        );
                                     }
                                     Err(e) => {
                                         eprintln!("   Failed to read input: {}. Denying...", e);
-                                        if let Some(manager) = &approval_manager {
-                                            let _ = manager.resolve(
-                                                request.id,
-                                                ApprovalDecision::Denied,
-                                                Some("cli-error".to_string()),
-                                            );
-                                        }
+                                        let _ = ctx.resolve_approval(
+                                            &agent_id,
+                                            request.id,
+                                            ApprovalDecision::Denied,
+                                            Some("cli-error".to_string()),
+                                        );
                                     }
                                 }
                             }

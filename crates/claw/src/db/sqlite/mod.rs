@@ -18,6 +18,7 @@ pub use agent::SqliteAgentRepository;
 pub use approval::SqliteApprovalRepository;
 pub use job::SqliteJobRepository;
 pub use llm::SqliteLlmProviderRepository;
+#[allow(unused_imports)]
 pub use thread::SqliteThreadRepository;
 
 pub async fn connect(database: &str) -> Result<SqlitePool, DbError> {
