@@ -1,3 +1,4 @@
+#![cfg(feature = "dev")]
 //! Integration tests for the turn module.
 //!
 //! These tests verify end-to-end turn execution including:

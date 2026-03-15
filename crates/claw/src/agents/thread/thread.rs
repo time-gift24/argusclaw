@@ -14,7 +14,8 @@ use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
 
-use super::{ThreadConfig, ThreadError, ThreadEvent, ThreadId, ThreadInfo, ThreadState};
+use super::{ThreadConfig, ThreadError, ThreadInfo, ThreadState};
+use crate::protocol::{ThreadEvent, ThreadId};
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;

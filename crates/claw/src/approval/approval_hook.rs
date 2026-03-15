@@ -26,11 +26,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::sync::Arc;
 
-use crate::agents::thread::ThreadEvent;
-use crate::approval::{
-    ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+use crate::approval::{ApprovalManager, ApprovalPolicy};
+use crate::protocol::{
+    ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction, HookEvent, HookHandler,
+    RiskLevel, ThreadEvent, ToolHookContext,
 };
-use crate::protocol::{HookAction, HookEvent, HookHandler, RiskLevel, ToolHookContext};
 
 /// Approval hook that integrates with Turn execution through the hook system.
 ///

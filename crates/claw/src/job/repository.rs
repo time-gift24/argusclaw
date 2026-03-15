@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::agents::thread::ThreadId;
+use crate::protocol::ThreadId;
 use crate::db::DbError;
 use crate::workflow::{JobId, WorkflowStatus};
 
