@@ -117,6 +117,39 @@ async fn run_chat(
         tool_manager.register(Arc::new(GlobTool::new()));
     }
 
+    // Load WASM tools from default directory
+    #[cfg(feature = "wasm")]
+    {
+        use claw::{WasmToolLoader, WasmToolRuntime};
+        use std::sync::Arc;
+
+        let tool_manager = ctx.tool_manager();
+        match WasmToolRuntime::new() {
+            Ok(runtime) => {
+                let runtime = Arc::new(runtime);
+                match WasmToolLoader::with_default_dir(runtime, tool_manager.clone()) {
+                    Ok(loader) => {
+                        let (loaded, errors) = loader.load_all();
+                        if loaded > 0 {
+                            tracing::info!("Loaded {} WASM tools", loaded);
+                        }
+                        if !errors.is_empty() {
+                            for (path, err) in errors {
+                                tracing::warn!("Failed to load WASM tool {:?}: {}", path, err);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create WASM tool loader: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create WASM runtime: {}", e);
+            }
+        }
+    }
+
     let tool_manager = ctx.tool_manager();
 
     // Build AgentRecord
