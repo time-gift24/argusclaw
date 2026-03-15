@@ -9,4 +9,6 @@ mod manager;
 mod runtime;
 
 pub use manager::AgentManager;
-pub use runtime::{Agent, AgentBuilder};
+#[cfg(feature = "dev")]
+pub use runtime::Agent;
+pub use runtime::{AgentBuilder, AgentRuntimeInfo};
