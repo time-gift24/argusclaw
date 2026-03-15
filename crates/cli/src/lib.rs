@@ -8,6 +8,7 @@ use claw::{LlmProviderSummary, LlmStreamEvent};
 
 pub mod agent;
 pub mod provider;
+pub mod tool;
 
 #[cfg(feature = "dev")]
 pub mod dev;

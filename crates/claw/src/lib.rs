@@ -45,8 +45,20 @@ pub use db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
 };
 
-// Tool Types
+// Tool Types (native)
+#[cfg(not(feature = "wasm"))]
 pub use tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
+
+// Tool Types (wasm)
+#[cfg(feature = "wasm")]
+pub use tool::wasm::capabilities_schema::ToolMetadata;
+#[cfg(feature = "wasm")]
+pub use tool::wasm::{
+    AllowlistValidator, Capabilities, HostState, LogEntry, LogLevel, ResourceLimits, WasmError,
+    WasmResourceLimiter, WasmToolLoader, WasmToolRuntime, WasmToolWrapper,
+};
+#[cfg(feature = "wasm")]
+pub use tool::{ToolError, ToolManager};
 
 // === Dev Feature 重导出 ===
 #[cfg(feature = "dev")]

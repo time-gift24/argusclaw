@@ -16,9 +16,13 @@ use dashmap::DashMap;
 use crate::llm::ToolDefinition;
 use crate::protocol::RiskLevel;
 
+#[cfg(not(feature = "wasm"))]
 pub use glob::GlobTool;
+#[cfg(not(feature = "wasm"))]
 pub use grep::GrepTool;
+#[cfg(not(feature = "wasm"))]
 pub use read::ReadTool;
+#[cfg(not(feature = "wasm"))]
 pub use shell::ShellTool;
 
 /// Error type for tool operations.

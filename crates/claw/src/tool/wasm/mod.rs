@@ -65,6 +65,7 @@ pub mod wrapper;
 // Re-export main types for convenience
 pub use allowlist::AllowlistValidator;
 pub use capabilities::Capabilities;
+#[allow(unused_imports)]
 pub use capabilities_schema::ToolMetadata;
 pub use error::WasmError;
 pub use host::{HostState, LogEntry, LogLevel};

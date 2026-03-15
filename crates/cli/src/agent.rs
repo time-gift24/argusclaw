@@ -3,13 +3,16 @@
 //! This is a production command, not behind the `dev` feature.
 
 use std::io::{self, Write};
+
+#[cfg(not(feature = "wasm"))]
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
+use claw::LlmProviderId;
 use claw::{AgentId, AgentRecord, AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
-use claw::{GlobTool, GrepTool, LlmProviderId, ReadTool, ShellTool};
+
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -104,11 +107,17 @@ async fn run_chat(
         .collect();
 
     // Register default tools
+    #[cfg(not(feature = "wasm"))]
+    {
+        use claw::{GlobTool, GrepTool, ReadTool, ShellTool};
+        let tool_manager = ctx.tool_manager();
+        tool_manager.register(Arc::new(ShellTool::new()));
+        tool_manager.register(Arc::new(ReadTool::new()));
+        tool_manager.register(Arc::new(GrepTool::new()));
+        tool_manager.register(Arc::new(GlobTool::new()));
+    }
+
     let tool_manager = ctx.tool_manager();
-    tool_manager.register(Arc::new(ShellTool::new()));
-    tool_manager.register(Arc::new(ReadTool::new()));
-    tool_manager.register(Arc::new(GrepTool::new()));
-    tool_manager.register(Arc::new(GlobTool::new()));
 
     // Build AgentRecord
     let agent_record = AgentRecord {
