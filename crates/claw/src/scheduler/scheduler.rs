@@ -219,7 +219,7 @@ impl Scheduler {
 
         // Create thread
         let thread_id = {
-            let agent = self.agent_manager.get(runtime_id);
+            let agent = self.agent_manager.get(&runtime_id);
             if let Some(agent) = agent {
                 agent.create_thread(ThreadConfig::default())
             } else {
@@ -256,7 +256,7 @@ impl Scheduler {
 
         let handle = tokio::spawn(async move {
             // Get agent and send message
-            if let Some(agent) = agent_manager.get(runtime_id) {
+            if let Some(agent) = agent_manager.get(&runtime_id) {
                 match agent.send_message(&thread_id, job.prompt.clone()).await {
                     Ok(()) => {
                         let _ = job_repository
@@ -284,7 +284,7 @@ impl Scheduler {
             }
 
             // Cleanup: delete the agent runtime
-            let _ = agent_manager.delete(runtime_id);
+            let _ = agent_manager.delete(&runtime_id);
         });
 
         // Track the running job

@@ -3,14 +3,18 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use tokio::sync::broadcast;
+use uuid::Uuid;
 
-use super::runtime::{Agent, AgentBuilder};
+use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
 use crate::agents::compact::CompactorManager;
-use crate::agents::types::{AgentId, AgentRecord, AgentRepository, AgentRuntimeId};
+use crate::agents::thread::{ThreadConfig, ThreadInfo};
+use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
 use crate::llm::LLMManager;
+use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::tool::ToolManager;
 
 /// AgentManager creates and manages runtime Agent instances.
@@ -28,8 +32,8 @@ pub struct AgentManager {
     approval_manager: Option<Arc<ApprovalManager>>,
     /// Global ToolManager (shared by all agents).
     tool_manager: Arc<ToolManager>,
-    /// Active agents indexed by runtime ID.
-    agents: DashMap<AgentRuntimeId, Agent>,
+    /// Active agents indexed by agent ID.
+    agents: DashMap<AgentId, Agent>,
 }
 
 impl AgentManager {
@@ -70,8 +74,8 @@ impl AgentManager {
 
     /// Create a runtime Agent instance from an AgentRecord (template).
     ///
-    /// Returns the `AgentRuntimeId` for accessing the agent.
-    pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentRuntimeId, AgentError> {
+    /// Returns the `AgentId` for accessing the agent.
+    pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentId, AgentError> {
         use crate::db::llm::LlmProviderId;
         let provider = self
             .llm_manager
@@ -84,26 +88,105 @@ impl AgentManager {
             .approval_manager(self.approval_manager.clone())
             .build();
 
-        let runtime_id = agent.runtime_id();
-        self.agents.insert(runtime_id, agent);
-        Ok(runtime_id)
+        let id = agent.id().clone();
+        self.agents.insert(id.clone(), agent);
+        Ok(id)
     }
 
-    /// Get an agent by runtime ID.
+    /// Get an agent by ID.
     #[must_use]
-    pub fn get(&self, id: AgentRuntimeId) -> Option<Agent> {
-        self.agents.get(&id).map(|entry| entry.value().clone())
+    pub fn get(&self, id: &AgentId) -> Option<Agent> {
+        self.agents.get(id).map(|entry| entry.value().clone())
     }
 
-    /// Delete an agent by runtime ID.
-    pub fn delete(&self, id: AgentRuntimeId) -> bool {
-        self.agents.remove(&id).is_some()
+    /// Delete an agent by ID.
+    pub fn delete(&self, id: &AgentId) -> bool {
+        self.agents.remove(id).is_some()
     }
 
     /// Get the number of active agents.
     #[must_use]
     pub fn count(&self) -> usize {
         self.agents.len()
+    }
+
+    /// List all active agents.
+    #[must_use]
+    pub fn list_agents(&self) -> Vec<AgentRuntimeInfo> {
+        self.agents
+            .iter()
+            .map(|entry| entry.value().runtime_info())
+            .collect()
+    }
+
+    // === Thread operations (passthrough to Agent) ===
+
+    /// Create a new thread in an agent.
+    pub fn create_thread(&self, agent_id: &AgentId, config: ThreadConfig) -> Option<ThreadId> {
+        self.agents.get(agent_id).map(|entry| {
+            let agent = entry.value();
+            agent.create_thread(config)
+        })
+    }
+
+    /// List all threads in an agent.
+    #[must_use]
+    pub fn list_threads(&self, agent_id: &AgentId) -> Option<Vec<ThreadInfo>> {
+        self.agents
+            .get(agent_id)
+            .map(|entry| entry.value().list_threads())
+    }
+
+    /// Delete a thread from an agent.
+    pub fn delete_thread(&self, agent_id: &AgentId, thread_id: &ThreadId) -> Option<bool> {
+        self.agents
+            .get(agent_id)
+            .map(|entry| entry.value().delete_thread(thread_id))
+    }
+
+    /// Send a message to a thread.
+    pub async fn send_message(
+        &self,
+        agent_id: &AgentId,
+        thread_id: &ThreadId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .map(|entry| entry.value().clone())
+            .ok_or(AgentError::AgentNotFound {
+                id: agent_id.clone(),
+            })?;
+        agent.send_message(thread_id, message).await
+    }
+
+    /// Subscribe to thread events.
+    pub async fn subscribe(
+        &self,
+        agent_id: &AgentId,
+        thread_id: &ThreadId,
+    ) -> Option<broadcast::Receiver<ThreadEvent>> {
+        let agent = self.agents.get(agent_id)?.value().clone();
+        agent.subscribe(thread_id).await
+    }
+
+    /// Resolve an approval request.
+    pub fn resolve_approval(
+        &self,
+        agent_id: &AgentId,
+        request_id: Uuid,
+        decision: ApprovalDecision,
+        resolved_by: Option<String>,
+    ) -> Result<(), AgentError> {
+        let agent = self
+            .agents
+            .get(agent_id)
+            .map(|entry| entry.value().clone())
+            .ok_or(AgentError::AgentNotFound {
+                id: agent_id.clone(),
+            })?;
+        agent.resolve_approval(request_id, decision, resolved_by)
     }
 
     // === Template operations (delegated to repository) ===
@@ -146,7 +229,7 @@ impl AgentManager {
 
     /// Access the agents map for advanced operations.
     #[must_use]
-    pub fn agents(&self) -> &DashMap<AgentRuntimeId, Agent> {
+    pub fn agents(&self) -> &DashMap<AgentId, Agent> {
         &self.agents
     }
 }

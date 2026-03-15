@@ -21,7 +21,7 @@ pub(crate) mod turn;
 mod types;
 
 pub use agent::{Agent, AgentBuilder, AgentHandle, AgentManager, AgentRuntimeInfo};
-pub use types::{AgentId, AgentRecord, AgentRepository, AgentRuntimeId, AgentSummary};
+pub use types::{AgentId, AgentRecord, AgentRepository, AgentSummary};
 
 // Re-export thread types still needed by external consumers
 pub use thread::{ThreadConfig, ThreadConfigBuilder, ThreadInfo, ThreadState, TurnStreamHandle};
