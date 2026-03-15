@@ -144,3 +144,28 @@ async fn llm_manager_can_import_multiple_providers() {
     assert_eq!(providers.len(), 2);
     assert_eq!(default_provider.id, deepseek.id);
 }
+
+#[cfg(feature = "dev")]
+#[tokio::test]
+async fn llm_manager_deletes_provider_records() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let manager = LLMManager::new(Arc::new(repository));
+    let record = build_record("openai", "OpenAI", false);
+
+    manager
+        .upsert_provider(record.clone())
+        .await
+        .expect("provider should be stored");
+
+    let deleted = manager
+        .delete_provider(&record.id)
+        .await
+        .expect("delete should succeed");
+    let missing = manager.get_provider_record(&record.id).await;
+
+    assert!(deleted);
+    assert!(matches!(
+        missing,
+        Err(claw::AgentError::ProviderNotFound { id }) if id == "openai"
+    ));
+}

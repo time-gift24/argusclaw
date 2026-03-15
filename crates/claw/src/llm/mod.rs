@@ -9,11 +9,9 @@ pub mod secret;
 pub use error::LlmError;
 pub use manager::LLMManager;
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmEventStream,
-    LlmProvider, LlmStreamEvent, ProviderCapabilities, Role, ThinkingConfig, ToolCall,
-    ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
-pub use retry::{RetryConfig, RetryProvider};
 
 #[cfg(test)]
 mod tests {

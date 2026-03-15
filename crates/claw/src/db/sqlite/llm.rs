@@ -202,6 +202,18 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         Ok(())
     }
 
+    async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, DbError> {
+        let result = sqlx::query("delete from llm_providers where id = ?1")
+            .bind(id.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
             "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers

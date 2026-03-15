@@ -701,8 +701,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+            _request: crate::llm::provider::CompletionRequest,
+        ) -> Result<crate::llm::provider::CompletionResponse, crate::llm::LlmError> {
             unreachable!("complete not used in turn execution")
         }
     }
@@ -955,8 +955,9 @@ mod tests {
 
             async fn complete(
                 &self,
-                _request: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+                _request: crate::llm::provider::CompletionRequest,
+            ) -> Result<crate::llm::provider::CompletionResponse, crate::llm::LlmError>
+            {
                 unreachable!()
             }
         }
