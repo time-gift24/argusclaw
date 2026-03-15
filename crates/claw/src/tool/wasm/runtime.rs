@@ -15,6 +15,12 @@ use super::limits::ResourceLimits;
 /// Expected WIT version for compatibility checking.
 pub const WIT_VERSION: &str = "0.1.0";
 
+/// Default tool description when metadata is unavailable.
+pub const DEFAULT_TOOL_DESCRIPTION: &str = "A WASM tool";
+
+/// Default tool schema when metadata is unavailable.
+pub const DEFAULT_TOOL_SCHEMA: &str = r#"{"type": "object"}"#;
+
 /// Global WASM runtime shared across all tool executions.
 ///
 /// This struct holds the wasmtime Engine which is expensive to create
@@ -177,12 +183,12 @@ impl PreparedModule {
 
     /// Get the tool description from the module.
     pub fn get_description(&self) -> Result<String, WasmError> {
-        Ok("A WASM tool".to_string())
+        Ok(DEFAULT_TOOL_DESCRIPTION.to_string())
     }
 
     /// Get the tool schema from the module.
     pub fn get_schema(&self) -> Result<String, WasmError> {
-        Ok(r#"{"type": "object"}"#.to_string())
+        Ok(DEFAULT_TOOL_SCHEMA.to_string())
     }
 
     /// Create a new WASM instance with a fresh store.

@@ -67,8 +67,8 @@ pub enum WasmError {
     InvalidCapabilities { reason: String },
 
     /// Tool directory not found.
-    #[error("Tool directory not found: {path}")]
-    ToolDirectoryNotFound { path: PathBuf },
+    #[error("Tool directory not found: {path} ({reason})")]
+    ToolDirectoryNotFound { path: PathBuf, reason: String },
 
     /// WIT version mismatch.
     #[error("WIT version mismatch: expected '{expected}', got '{actual}'")]

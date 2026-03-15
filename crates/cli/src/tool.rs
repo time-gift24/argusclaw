@@ -6,8 +6,7 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 
 use claw::AppContext;
-
-#[cfg(feature = "wasm")]
+use claw::ToolManager;
 use std::sync::Arc;
 
 #[cfg(feature = "wasm")]
@@ -58,6 +57,50 @@ pub async fn run_tool_command(ctx: AppContext, cmd: ToolCommand) -> Result<()> {
     }
 }
 
+/// List all available tools with their descriptions and risk levels.
+fn list_tools(tool_manager: &Arc<ToolManager>, empty_message: &str) {
+    let ids = tool_manager.list_ids();
+
+    if ids.is_empty() {
+        println!("{}", empty_message);
+        return;
+    }
+
+    println!("Available tools:");
+    println!();
+    for name in ids {
+        if let Some(tool) = tool_manager.get(&name) {
+            let risk = tool.risk_level();
+            println!("  {} - {}", name, tool.definition().description);
+            println!("    risk: {:?}", risk);
+            println!();
+        }
+    }
+}
+
+/// Show detailed information about a specific tool.
+fn show_tool_info(tool_manager: &Arc<ToolManager>, name: &str) -> Result<()> {
+    let tool = tool_manager
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found", name))?;
+
+    println!("Tool: {}", name);
+    println!("Description: {}", tool.definition().description);
+    println!("Risk Level: {:?}", tool.risk_level());
+    println!();
+    println!("Schema:");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&tool.definition().parameters)
+            .unwrap_or_else(|_| tool.definition().parameters.to_string())
+    );
+    Ok(())
+}
+
+// ============================================================================
+// WASM mode implementation
+// ============================================================================
+
 /// Run tool command with WASM support.
 #[cfg(feature = "wasm")]
 async fn run_tool_command_wasm(ctx: AppContext, cmd: ToolCommand) -> Result<()> {
@@ -65,47 +108,21 @@ async fn run_tool_command_wasm(ctx: AppContext, cmd: ToolCommand) -> Result<()> 
 
     match cmd {
         ToolCommand::List => {
-            let ids = tool_manager.list_ids();
-
-            if ids.is_empty() {
-                println!("No tools installed.");
-                return Ok(());
-            }
-
-            println!("Available tools:");
-            println!();
-            for name in ids {
-                if let Some(tool) = tool_manager.get(&name) {
-                    let risk = tool_manager.get_risk_level(&name);
-                    println!("  {} - {}", name, tool.definition().description);
-                    println!("    risk: {:?}", risk);
-                    println!();
-                }
-            }
+            list_tools(&tool_manager, "No tools installed.");
         }
 
         ToolCommand::Info { name } => {
-            let tool = tool_manager
-                .get(&name)
-                .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found", name))?;
-
-            println!("Tool: {}", name);
-            println!("Description: {}", tool.definition().description);
-            println!("Risk Level: {:?}", tool_manager.get_risk_level(&name));
-            println!();
-            println!("Schema:");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tool.definition().parameters)
-                    .unwrap_or_else(|_| tool.definition().parameters.to_string())
-            );
+            show_tool_info(&tool_manager, &name)?;
         }
 
         ToolCommand::Install { source, builtin: _ } => {
             // Create runtime and loader
             let runtime = Arc::new(WasmToolRuntime::new()?);
-            let loader =
-                WasmToolLoader::new(runtime, tool_manager, std::path::PathBuf::from(&source));
+            let loader = WasmToolLoader::new(
+                runtime,
+                tool_manager.clone(),
+                std::path::PathBuf::from(&source),
+            );
 
             let source_path = std::path::Path::new(&source);
             if source_path.exists() && source_path.is_dir() {
@@ -161,6 +178,10 @@ async fn run_tool_command_wasm(ctx: AppContext, cmd: ToolCommand) -> Result<()> 
     Ok(())
 }
 
+// ============================================================================
+// Native mode implementation
+// ============================================================================
+
 /// Run tool command without WASM support (native tools only).
 #[cfg(not(feature = "wasm"))]
 async fn run_tool_command_native(ctx: AppContext, cmd: ToolCommand) -> Result<()> {
@@ -168,39 +189,11 @@ async fn run_tool_command_native(ctx: AppContext, cmd: ToolCommand) -> Result<()
 
     match cmd {
         ToolCommand::List => {
-            let ids = tool_manager.list_ids();
-
-            if ids.is_empty() {
-                println!("No tools registered.");
-                return Ok(());
-            }
-
-            println!("Available tools:");
-            println!();
-            for name in ids {
-                if let Some(tool) = tool_manager.get(&name) {
-                    println!("  {} - {}", name, tool.definition().description);
-                    println!("    risk: {:?}", tool.risk_level());
-                    println!();
-                }
-            }
+            list_tools(&tool_manager, "No tools registered.");
         }
 
         ToolCommand::Info { name } => {
-            let tool = tool_manager
-                .get(&name)
-                .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found", name))?;
-
-            println!("Tool: {}", name);
-            println!("Description: {}", tool.definition().description);
-            println!("Risk Level: {:?}", tool.risk_level());
-            println!();
-            println!("Schema:");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tool.definition().parameters)
-                    .unwrap_or_else(|_| tool.definition().parameters.to_string())
-            );
+            show_tool_info(&tool_manager, &name)?;
         }
 
         ToolCommand::Install { .. } => {

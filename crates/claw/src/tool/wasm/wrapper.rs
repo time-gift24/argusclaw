@@ -12,7 +12,7 @@ use super::capabilities::Capabilities;
 use super::error::WasmError;
 use super::host::HostState;
 use super::limits::ResourceLimits;
-use super::runtime::PreparedModule;
+use super::runtime::{DEFAULT_TOOL_DESCRIPTION, DEFAULT_TOOL_SCHEMA, PreparedModule};
 use crate::llm::ToolDefinition;
 use crate::protocol::RiskLevel;
 use crate::tool::{NamedTool, ToolError};
@@ -57,8 +57,8 @@ impl WasmToolWrapper {
         Ok(Self {
             module,
             name,
-            description: "A WASM tool".to_string(),
-            schema: r#"{"type": "object"}"#.to_string(),
+            description: DEFAULT_TOOL_DESCRIPTION.to_string(),
+            schema: DEFAULT_TOOL_SCHEMA.to_string(),
             path,
             capabilities,
             limits,

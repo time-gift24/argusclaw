@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::capabilities_schema::{ToolMetadata, default_metadata};
 use super::error::WasmError;
-use super::runtime::WasmToolRuntime;
+use super::runtime::{DEFAULT_TOOL_SCHEMA, WasmToolRuntime};
 use super::wrapper::WasmToolWrapper;
 use crate::tool::ToolManager;
 
@@ -66,9 +66,10 @@ impl WasmToolLoader {
     /// Ensure the tools directory exists.
     pub fn ensure_tools_dir(&self) -> Result<(), WasmError> {
         if !self.tools_dir.exists() {
-            std::fs::create_dir_all(&self.tools_dir).map_err(|_e| {
+            std::fs::create_dir_all(&self.tools_dir).map_err(|e| {
                 WasmError::ToolDirectoryNotFound {
                     path: self.tools_dir.clone(),
+                    reason: e.to_string(),
                 }
             })?;
             tracing::info!("Created tools directory: {:?}", self.tools_dir);
@@ -85,8 +86,9 @@ impl WasmToolLoader {
         let mut wasm_files = Vec::new();
 
         let entries =
-            std::fs::read_dir(&self.tools_dir).map_err(|_e| WasmError::ToolDirectoryNotFound {
+            std::fs::read_dir(&self.tools_dir).map_err(|e| WasmError::ToolDirectoryNotFound {
                 path: self.tools_dir.clone(),
+                reason: e.to_string(),
             })?;
 
         for entry in entries {
@@ -140,7 +142,7 @@ impl WasmToolLoader {
             (
                 meta.name,
                 meta.description,
-                r#"{"type": "object"}"#.to_string(),
+                DEFAULT_TOOL_SCHEMA.to_string(),
                 caps,
             )
         };
