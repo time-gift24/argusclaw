@@ -4,14 +4,14 @@ use std::{env, path::Path, path::PathBuf};
 use sqlx::SqlitePool;
 
 use crate::agents::AgentManager;
-use crate::db::llm::{LlmProviderId, LlmProviderRecord};
+use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
 use crate::db::sqlite::{
     SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
     migrate,
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;
-use crate::llm::LLMManager;
+use crate::llm::{LlmProvider, LLMManager};
 #[cfg(feature = "dev")]
 use crate::llm::LlmEventStream;
 use crate::scheduler::{Scheduler, SchedulerConfig};
@@ -120,16 +120,19 @@ impl AppContext {
         }
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn db_pool(&self) -> &SqlitePool {
         &self.db_pool
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn llm_manager(&self) -> Arc<LLMManager> {
         Arc::clone(&self.llm_manager)
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn agent_manager(&self) -> Arc<AgentManager> {
         Arc::clone(&self.agent_manager)
@@ -140,6 +143,7 @@ impl AppContext {
         Arc::clone(&self.tool_manager)
     }
 
+    #[cfg(feature = "dev")]
     #[must_use]
     pub fn job_repository(&self) -> Arc<dyn JobRepository> {
         Arc::clone(&self.job_repository)
@@ -174,6 +178,24 @@ impl AppContext {
 
     pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), AgentError> {
         self.llm_manager.set_default_provider(id).await
+    }
+
+    /// 获取 LLM Provider 实例
+    pub async fn get_provider(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        self.llm_manager.get_provider(id).await
+    }
+
+    /// 获取默认 LLM Provider
+    pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        self.llm_manager.get_default_provider().await
+    }
+
+    /// 列出所有 provider 摘要
+    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
+        self.llm_manager.list_providers().await
     }
 
     #[cfg(feature = "dev")]
@@ -267,7 +289,6 @@ mod tests {
             .await
             .expect("app context init should succeed");
         let providers = ctx
-            .llm_manager()
             .list_providers()
             .await
             .expect("provider list should succeed");

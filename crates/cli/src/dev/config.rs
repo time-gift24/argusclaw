@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use claw::db::llm::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
+use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString, DbError};
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderImportFile {
@@ -24,7 +24,7 @@ pub struct ProviderImportRecord {
 }
 
 impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
-    type Error = claw::db::DbError;
+    type Error = claw::DbError;
 
     fn try_from(value: ProviderImportRecord) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -41,7 +41,7 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
 }
 
 impl ProviderImportFile {
-    pub fn into_records(self) -> Result<Vec<LlmProviderRecord>, claw::db::DbError> {
+    pub fn into_records(self) -> Result<Vec<LlmProviderRecord>, claw::DbError> {
         self.providers.into_iter().map(TryInto::try_into).collect()
     }
 }

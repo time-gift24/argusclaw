@@ -5,12 +5,11 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use clap::Subcommand;
-use claw::approval::{
+use claw::{
     ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
+    ApprovalRepository, RiskLevel,
 };
-use claw::db::ApprovalRepository;
-use claw::db::sqlite::SqliteApprovalRepository;
-use claw::protocol::RiskLevel;
+use claw::sqlite::SqliteApprovalRepository;
 use uuid::Uuid;
 
 use super::APPROVAL_DEV_MIGRATOR;
@@ -117,7 +116,7 @@ fn resolve_approval_dev_database_url(
 async fn create_dev_approval_repository() -> Result<(SqliteApprovalRepository, String)> {
     let env_database_url = std::env::var("APPROVAL_DATABASE_URL").ok();
     let database_url = resolve_approval_dev_database_url(env_database_url.as_deref(), None)?;
-    let pool = claw::db::sqlite::connect(&database_url)
+    let pool = claw::sqlite::connect(&database_url)
         .await
         .with_context(|| {
             format!(

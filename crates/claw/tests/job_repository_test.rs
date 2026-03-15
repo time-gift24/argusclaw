@@ -8,13 +8,10 @@
 //! - Group filtering
 //! - Thread ID association
 
-use claw::agents::AgentId;
-use claw::ThreadId;
-use claw::db::SqliteJobRepository;
-use claw::db::sqlite::{connect, migrate};
-use claw::job::repository::JobRepository;
-use claw::job::types::{JobRecord, JobType};
-use claw::workflow::{JobId, WorkflowStatus};
+use claw::{
+    connect, migrate, AgentId, JobId, JobRecord, JobRepository, JobType, SqliteJobRepository,
+    ThreadId, WorkflowStatus,
+};
 
 async fn setup() -> SqliteJobRepository {
     let pool = connect("sqlite::memory:").await.unwrap();
