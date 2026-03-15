@@ -111,7 +111,7 @@ async fn run_chat(
 
     // Build Agent with approval configuration
     let agent = AgentBuilder::new()
-        .template_id(AgentId::new("cli-agent"))
+        .id(AgentId::new("cli-agent"))
         .system_prompt(system_prompt)
         .provider(llm_provider)
         .tool_manager(Arc::clone(&tool_manager))

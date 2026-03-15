@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::agents::compact::{Compactor, CompactorManager};
 use crate::agents::thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
-use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
+use crate::agents::types::{AgentId, AgentRecord};
 use crate::approval::{ApprovalHook, ApprovalManager, ApprovalPolicy};
 use crate::error::AgentError;
 use crate::llm::{ChatMessage, LlmProvider};
@@ -19,23 +19,16 @@ use crate::tool::ToolManager;
 /// Runtime information about an agent.
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeInfo {
-    pub template_id: AgentId,
-    pub runtime_id: AgentRuntimeId,
+    pub id: AgentId,
     pub thread_count: usize,
     pub provider_model: String,
 }
 
 impl AgentRuntimeInfo {
     #[must_use]
-    pub fn new(
-        template_id: AgentId,
-        runtime_id: AgentRuntimeId,
-        thread_count: usize,
-        provider_model: String,
-    ) -> Self {
+    pub fn new(id: AgentId, thread_count: usize, provider_model: String) -> Self {
         Self {
-            template_id,
-            runtime_id,
+            id,
             thread_count,
             provider_model,
         }
@@ -49,11 +42,8 @@ impl AgentRuntimeInfo {
 #[derive(Builder)]
 #[builder(pattern = "owned", build_fn(skip))]
 pub struct Agent {
-    /// Template ID from AgentRecord.
-    pub template_id: AgentId,
-    /// Unique runtime instance ID.
-    #[builder(default = AgentRuntimeId::new())]
-    pub runtime_id: AgentRuntimeId,
+    /// Agent ID (from AgentRecord).
+    pub id: AgentId,
     /// System prompt from AgentRecord.
     pub system_prompt: String,
     /// LLM provider (required).
@@ -92,7 +82,7 @@ impl AgentBuilder {
     #[must_use]
     pub fn from_record(record: &AgentRecord, provider: Arc<dyn LlmProvider>) -> Self {
         Self::default()
-            .template_id(record.id.clone())
+            .id(record.id.clone())
             .system_prompt(record.system_prompt.clone())
             .provider(provider)
     }
@@ -132,8 +122,7 @@ impl AgentBuilder {
         }
 
         Agent {
-            template_id: self.template_id.expect("template_id is required"),
-            runtime_id: self.runtime_id.unwrap_or_default(),
+            id: self.id.expect("id is required"),
             system_prompt: self.system_prompt.unwrap_or_default(),
             provider: self.provider.expect("provider is required"),
             tool_manager: self
@@ -152,16 +141,10 @@ impl AgentBuilder {
 }
 
 impl Agent {
-    /// Get the template ID.
+    /// Get the agent ID.
     #[must_use]
-    pub fn template_id(&self) -> &AgentId {
-        &self.template_id
-    }
-
-    /// Get the runtime ID.
-    #[must_use]
-    pub fn runtime_id(&self) -> AgentRuntimeId {
-        self.runtime_id
+    pub fn id(&self) -> &AgentId {
+        &self.id
     }
 
     /// Get the provider.
@@ -223,10 +206,9 @@ impl Agent {
     /// Get a thread by ID.
     #[must_use]
     pub fn get_thread(&self, id: &ThreadId) -> Option<AgentHandle> {
-        self.threads.get(id).map(|_entry| AgentHandle {
-            id: *id,
-            runtime_id: self.runtime_id,
-        })
+        self.threads
+            .get(id)
+            .map(|_entry| AgentHandle { id: *id })
     }
 
     /// Send a message to a thread and execute a Turn.
@@ -291,8 +273,7 @@ impl Agent {
     #[must_use]
     pub fn runtime_info(&self) -> AgentRuntimeInfo {
         AgentRuntimeInfo::new(
-            self.template_id.clone(),
-            self.runtime_id,
+            self.id.clone(),
             self.threads.len(),
             self.provider.model_name().to_string(),
         )
@@ -314,8 +295,7 @@ impl Agent {
 impl Clone for Agent {
     fn clone(&self) -> Self {
         Self {
-            template_id: self.template_id.clone(),
-            runtime_id: self.runtime_id,
+            id: self.id.clone(),
             system_prompt: self.system_prompt.clone(),
             provider: self.provider.clone(),
             tool_manager: self.tool_manager.clone(),
@@ -332,8 +312,7 @@ impl Clone for Agent {
 impl std::fmt::Debug for Agent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Agent")
-            .field("template_id", &self.template_id)
-            .field("runtime_id", &self.runtime_id)
+            .field("id", &self.id)
             .field("thread_count", &self.threads.len())
             .field("provider", &self.provider.model_name())
             .finish()
@@ -345,15 +324,13 @@ impl std::fmt::Debug for Agent {
 pub struct AgentHandle {
     /// Thread ID.
     id: ThreadId,
-    /// Agent runtime ID.
-    runtime_id: AgentRuntimeId,
 }
 
 impl AgentHandle {
     /// Create a new AgentHandle.
     #[must_use]
-    pub fn new(id: ThreadId, runtime_id: AgentRuntimeId) -> Self {
-        Self { id, runtime_id }
+    pub fn new(id: ThreadId) -> Self {
+        Self { id }
     }
 
     /// Get the thread ID.
@@ -361,19 +338,12 @@ impl AgentHandle {
     pub fn id(&self) -> &ThreadId {
         &self.id
     }
-
-    /// Get the agent runtime ID.
-    #[must_use]
-    pub fn runtime_id(&self) -> AgentRuntimeId {
-        self.runtime_id
-    }
 }
 
 impl std::fmt::Debug for AgentHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentHandle")
             .field("id", &self.id)
-            .field("runtime_id", &self.runtime_id)
             .finish()
     }
 }
@@ -384,21 +354,14 @@ mod tests {
 
     #[test]
     fn test_agent_runtime_info() {
-        let info = AgentRuntimeInfo::new(
-            AgentId::new("test"),
-            AgentRuntimeId::new(),
-            5,
-            "gpt-4".to_string(),
-        );
+        let info = AgentRuntimeInfo::new(AgentId::new("test"), 5, "gpt-4".to_string());
         assert_eq!(info.thread_count, 5);
     }
 
     #[test]
     fn test_agent_handle() {
         let thread_id = ThreadId::new();
-        let runtime_id = AgentRuntimeId::new();
-        let handle = AgentHandle::new(thread_id, runtime_id);
+        let handle = AgentHandle::new(thread_id);
         assert_eq!(*handle.id(), thread_id);
-        assert_eq!(handle.runtime_id(), runtime_id);
     }
 }

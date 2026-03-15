@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::agents::AgentId;
 use crate::db::DbError;
 use crate::llm::LlmError;
 use crate::protocol::ThreadId;
@@ -33,6 +34,9 @@ pub enum AgentError {
 
     #[error("provider kind `{kind}` is not supported by this build")]
     UnsupportedProviderKind { kind: String },
+
+    #[error("agent `{id}` was not found")]
+    AgentNotFound { id: AgentId },
 
     #[error("thread `{id}` was not found")]
     ThreadNotFound { id: ThreadId },
