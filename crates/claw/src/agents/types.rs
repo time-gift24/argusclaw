@@ -82,28 +82,6 @@ impl AgentRecord {
     }
 }
 
-/// Summary for listing (excludes large fields like system_prompt).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentSummary {
-    pub id: AgentId,
-    pub display_name: String,
-    pub description: String,
-    pub version: String,
-    pub provider_id: String,
-}
-
-impl From<AgentRecord> for AgentSummary {
-    fn from(record: AgentRecord) -> Self {
-        Self {
-            id: record.id,
-            display_name: record.display_name,
-            description: record.description,
-            version: record.version,
-            provider_id: record.provider_id,
-        }
-    }
-}
-
 /// Repository trait for agent persistence.
 #[async_trait]
 pub trait AgentRepository: Send + Sync {
@@ -113,8 +91,8 @@ pub trait AgentRepository: Send + Sync {
     /// Get an agent by ID.
     async fn get(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError>;
 
-    /// List all agents (summaries only).
-    async fn list(&self) -> Result<Vec<AgentSummary>, DbError>;
+    /// List all agents.
+    async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;
 
     /// Delete an agent. Returns true if a row was deleted.
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;
