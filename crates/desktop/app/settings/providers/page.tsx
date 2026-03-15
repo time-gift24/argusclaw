@@ -96,9 +96,9 @@ export default function ProvidersPage() {
     <div className="mx-auto max-w-7xl px-6 py-8 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">LLM Providers</h1>
-          <p className="text-muted-foreground text-sm">
-            Configure your LLM provider connections
+          <h1 className="text-sm font-semibold">LLM 提供者</h1>
+          <p className="text-muted-foreground text-xs">
+            配置你的 LLM 提供者连接
           </p>
         </div>
         <ProviderFormDialog onSubmit={handleSubmit} />

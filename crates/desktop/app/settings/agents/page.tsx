@@ -77,9 +77,9 @@ export default function AgentsPage() {
     <div className="mx-auto max-w-7xl px-6 py-8 space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Agents</h1>
-          <p className="text-muted-foreground text-sm">
-            Configure your AI agents
+          <h1 className="text-sm font-semibold">智能体</h1>
+          <p className="text-muted-foreground text-xs">
+            配置你的 AI 智能体
           </p>
         </div>
         <AgentFormDialog providers={providerList} onSubmit={handleCreate} />
