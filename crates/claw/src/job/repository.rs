@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
-use crate::protocol::ThreadId;
 use crate::db::DbError;
+use crate::protocol::ThreadId;
 use crate::workflow::{JobId, WorkflowStatus};
 
 use super::types::JobRecord;

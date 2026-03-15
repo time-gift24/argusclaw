@@ -1,6 +1,6 @@
 //! Integration tests for SqliteAgentRepository.
 
-use claw::{connect, migrate, AgentId, AgentRecord, AgentRepository, SqliteAgentRepository};
+use claw::{AgentId, AgentRecord, AgentRepository, SqliteAgentRepository, connect, migrate};
 
 fn create_test_record(id: &str, provider_id: &str) -> AgentRecord {
     AgentRecord {

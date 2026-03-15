@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
-use claw::{AgentBuilder, AgentId, ThreadConfig, AppContext, ApprovalDecision, ThreadEvent};
-use claw::{LlmProviderId, GlobTool, GrepTool, ReadTool, ShellTool};
+use claw::{AgentBuilder, AgentId, AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
+use claw::{GlobTool, GrepTool, LlmProviderId, ReadTool, ShellTool};
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -85,11 +85,9 @@ async fn run_chat(
             .await
             .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?
     } else {
-        ctx.get_default_provider()
-            .await
-            .map_err(|_| {
-                anyhow!("No default provider configured. Use --provider or configure a default.")
-            })?
+        ctx.get_default_provider().await.map_err(|_| {
+            anyhow!("No default provider configured. Use --provider or configure a default.")
+        })?
     };
 
     // Filter out muted tools from approval list
@@ -160,9 +158,10 @@ async fn run_chat(
             }
             Some(input) if !input.is_empty() => {
                 // Send message through Agent
-                agent.send_message(&thread_id, input).await.map_err(|e| {
-                    anyhow!("Failed to send message: {}", e)
-                })?;
+                agent
+                    .send_message(&thread_id, input)
+                    .await
+                    .map_err(|e| anyhow!("Failed to send message: {}", e))?;
 
                 // Stream rendering state
                 let mut stream_state = StreamRenderState::default();
@@ -189,26 +188,24 @@ async fn run_chat(
                                 eprintln!("   Args: {:?}", arguments);
                             }
                         }
-                        Ok(ThreadEvent::ToolCompleted { result, .. }) => {
-                            match result {
-                                Ok(value) => {
-                                    let result_str = format!("{:?}", value);
-                                    if verbose {
-                                        eprintln!("   ✅ Result: {}", result_str);
+                        Ok(ThreadEvent::ToolCompleted { result, .. }) => match result {
+                            Ok(value) => {
+                                let result_str = format!("{:?}", value);
+                                if verbose {
+                                    eprintln!("   ✅ Result: {}", result_str);
+                                } else {
+                                    let truncated = if result_str.len() > 100 {
+                                        format!("{}...", &result_str[..100])
                                     } else {
-                                        let truncated = if result_str.len() > 100 {
-                                            format!("{}...", &result_str[..100])
-                                        } else {
-                                            result_str
-                                        };
-                                        eprintln!("   ✅ {}", truncated);
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("   ❌ Error: {}", e);
+                                        result_str
+                                    };
+                                    eprintln!("   ✅ {}", truncated);
                                 }
                             }
-                        }
+                            Err(e) => {
+                                eprintln!("   ❌ Error: {}", e);
+                            }
+                        },
                         Ok(ThreadEvent::TurnCompleted { token_usage, .. }) => {
                             if let Some(suffix) = finish_stream_output(&stream_state) {
                                 print!("{}", suffix);
@@ -283,10 +280,7 @@ async fn run_chat(
                                         );
                                     }
                                     Err(e) => {
-                                        eprintln!(
-                                            "   Failed to read input: {}. Denying...",
-                                            e
-                                        );
+                                        eprintln!("   Failed to read input: {}. Denying...", e);
                                         let _ = agent.resolve_approval(
                                             request.id,
                                             ApprovalDecision::Denied,

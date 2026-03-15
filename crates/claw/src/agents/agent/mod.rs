@@ -9,4 +9,4 @@ mod manager;
 mod runtime;
 
 pub use manager::AgentManager;
-pub use runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
+pub use runtime::{Agent, AgentBuilder};

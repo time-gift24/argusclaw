@@ -5,11 +5,11 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use clap::Subcommand;
-use claw::{
-    ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRequest, ApprovalResponse,
-    ApprovalRepository, RiskLevel,
-};
 use claw::sqlite::SqliteApprovalRepository;
+use claw::{
+    ApprovalDecision, ApprovalManager, ApprovalPolicy, ApprovalRepository, ApprovalRequest,
+    ApprovalResponse, RiskLevel,
+};
 use uuid::Uuid;
 
 use super::APPROVAL_DEV_MIGRATOR;

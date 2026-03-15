@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::agents::compact::Compactor;
 use crate::agents::turn::{
-    execute_turn_streaming, TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent,
+    TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming,
 };
 use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
@@ -123,15 +123,11 @@ impl ThreadBuilder {
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             messages: self.messages.unwrap_or_default(),
-            provider: self
-                .provider
-                .ok_or(ThreadError::ProviderNotConfigured)?,
+            provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
-            compactor: self
-                .compactor
-                .ok_or(ThreadError::CompactorNotConfigured)?,
+            compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
             approval_manager: self.approval_manager.flatten(),
             hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
@@ -415,7 +411,7 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
-    use crate::agents::compact::{KeepTokensCompactor, Compactor};
+    use crate::agents::compact::{Compactor, KeepTokensCompactor};
     use crate::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
         ToolCompletionRequest, ToolCompletionResponse,

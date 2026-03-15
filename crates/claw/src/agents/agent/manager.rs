@@ -217,7 +217,6 @@ impl AgentManager {
     pub async fn delete_template(&self, id: &AgentId) -> Result<bool, DbError> {
         self.repository.delete(id).await
     }
-
 }
 
 impl std::fmt::Debug for AgentManager {

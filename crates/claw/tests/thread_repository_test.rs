@@ -1,8 +1,8 @@
 //! Integration tests for SqliteThreadRepository.
 
 use claw::{
-    connect, migrate, MessageRecord, SqliteThreadRepository, ThreadId, ThreadRecord,
-    ThreadRepository,
+    MessageRecord, SqliteThreadRepository, ThreadId, ThreadRecord, ThreadRepository, connect,
+    migrate,
 };
 
 async fn setup_test_db() -> SqliteThreadRepository {

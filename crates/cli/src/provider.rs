@@ -6,9 +6,7 @@
 use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand};
 use claw::AppContext;
-use claw::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
-};
+use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString};
 use std::collections::HashMap;
 
 #[cfg(feature = "dev")]
