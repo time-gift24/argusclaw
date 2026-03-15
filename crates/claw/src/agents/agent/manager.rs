@@ -33,7 +33,7 @@ pub struct AgentManager {
     /// Global ToolManager (shared by all agents).
     tool_manager: Arc<ToolManager>,
     /// Active agents indexed by runtime ID.
-    agents: DashMap<AgentRuntimeId, Agent>,
+    agents: DashMap<AgentRuntimeId, Arc<Agent>>,
     /// ArgusAgent's RuntimeId (cached after initialization).
     argus_agent_id: OnceLock<AgentRuntimeId>,
 }
@@ -109,7 +109,7 @@ impl AgentManager {
             .build();
 
         let runtime_id = agent.runtime_id();
-        self.agents.insert(runtime_id, agent);
+        self.agents.insert(runtime_id, Arc::new(agent));
 
         // Cache the ArgusAgent's runtime ID
         let _ = self.argus_agent_id.set(runtime_id);
@@ -144,13 +144,13 @@ impl AgentManager {
             .build();
 
         let runtime_id = agent.runtime_id();
-        self.agents.insert(runtime_id, agent);
+        self.agents.insert(runtime_id, Arc::new(agent));
         Ok(runtime_id)
     }
 
     /// Get an agent by runtime ID.
     #[must_use]
-    pub fn get(&self, id: AgentRuntimeId) -> Option<Agent> {
+    pub fn get(&self, id: AgentRuntimeId) -> Option<Arc<Agent>> {
         self.agents.get(&id).map(|entry| entry.value().clone())
     }
 
@@ -221,6 +221,7 @@ impl AgentManager {
 
         agent
             .send_message_to_thread(&thread_id, message)
+            .await
             .ok_or(AgentError::ThreadNotFound { id: thread_id })?;
 
         Ok(())
@@ -302,7 +303,7 @@ impl AgentManager {
 
     /// Access the agents map for advanced operations.
     #[must_use]
-    pub fn agents(&self) -> &DashMap<AgentRuntimeId, Agent> {
+    pub fn agents(&self) -> &DashMap<AgentRuntimeId, Arc<Agent>> {
         &self.agents
     }
 }

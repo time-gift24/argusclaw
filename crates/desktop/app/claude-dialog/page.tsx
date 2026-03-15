@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   PieChart,
   Brain,
@@ -13,9 +13,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useThread } from "@/app/hooks/useThread";
-
-// Default thread ID for the conversation
-const DEFAULT_THREAD_ID = "default-thread";
+import {
+  FALLBACK_THREAD_ID,
+  useResolvedThreadId,
+} from "@/app/hooks/useResolvedThreadId";
 
 // Mock tools (for UI display)
 const MOCK_TOOLS = [
@@ -26,15 +27,20 @@ const MOCK_TOOLS = [
 function ClaudeDialog() {
   const [input, setInput] = useState("");
   const [showTools, setShowTools] = useState(false);
+  const {
+    threadId,
+    isReady,
+    error: threadResolutionError,
+  } = useResolvedThreadId();
 
   // Use the Thread hook for managing conversation
   const { messages, isRunning, sendMessage, error } = useThread({
-    threadId: DEFAULT_THREAD_ID,
-    autoSubscribe: true,
+    threadId: threadId ?? FALLBACK_THREAD_ID,
+    autoSubscribe: isReady,
   });
 
   const handleSend = async () => {
-    if (!input.trim() || isRunning) return;
+    if (!input.trim() || isRunning || !isReady) return;
     console.log(input);
     const messageContent = input;
     setInput("");
@@ -56,10 +62,10 @@ function ClaudeDialog() {
   return (
     <div className="flex h-full flex-col bg-background">
       {/* Error Banner */}
-      {error && (
+      {(threadResolutionError || error) && (
         <div className="flex items-center gap-2 bg-destructive/10 px-4 py-2 text-sm text-destructive">
           <AlertCircle className="h-4 w-4" />
-          <span>{error}</span>
+          <span>{threadResolutionError || error}</span>
         </div>
       )}
 
@@ -78,7 +84,7 @@ function ClaudeDialog() {
                 key={index}
                 className={cn(
                   "flex gap-4",
-                  message.role === "user" && "flex-row-reverse"
+                  message.role === "user" && "flex-row-reverse",
                 )}
               >
                 {/* Avatar */}
@@ -90,26 +96,29 @@ function ClaudeDialog() {
                 <div
                   className={cn(
                     "max-w-[80%] rounded-lg px-4 py-2",
-                    message.role === "user" ? "bg-muted" : "bg-transparent"
+                    message.role === "user" ? "bg-muted" : "bg-transparent",
                   )}
                 >
-                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                  <p className="text-sm whitespace-pre-wrap">
+                    {message.content}
+                  </p>
                 </div>
               </div>
             ))}
 
-            {isRunning && messages[messages.length - 1]?.role !== "assistant" && (
-              <div className="flex gap-4">
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
-                  C
+            {isRunning &&
+              messages[messages.length - 1]?.role !== "assistant" && (
+                <div className="flex gap-4">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
+                    C
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0.15s]" />
+                    <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0.3s]" />
+                  </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0.15s]" />
-                  <div className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/40 [animation-delay:0.3s]" />
-                </div>
-              </div>
-            )}
+              )}
           </div>
         </div>
       </div>
@@ -122,10 +131,14 @@ function ClaudeDialog() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="How can I help you today?"
+              placeholder={
+                isReady
+                  ? "How can I help you today?"
+                  : "Connecting to ArgusAgent..."
+              }
               className="min-h-[60px] max-h-[200px] w-full resize-none bg-transparent px-4 py-4 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
               rows={1}
-              disabled={isRunning}
+              disabled={isRunning || !isReady}
             />
 
             {/* Action Bar */}
@@ -143,7 +156,7 @@ function ClaudeDialog() {
                   onClick={() => setShowTools(!showTools)}
                   className={cn(
                     "flex h-8 items-center gap-1 rounded-md px-2 text-muted-foreground hover:bg-muted hover:text-foreground",
-                    showTools && "bg-muted text-foreground"
+                    showTools && "bg-muted text-foreground",
                   )}
                 >
                   <Paperclip className="size-4" />
@@ -180,7 +193,7 @@ function ClaudeDialog() {
                   <button
                     type="button"
                     onClick={handleSend}
-                    disabled={!input.trim()}
+                    disabled={!input.trim() || !isReady}
                     className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
                   >
                     <Send className="size-4" />
@@ -244,7 +257,9 @@ export default function ClaudeDialogPage() {
       {/* Resolution info */}
       <div className="p-4 text-center text-xs text-muted-foreground">
         <p>当前布局响应式展示 - 调整窗口宽度查看不同分辨率效果</p>
-        <p className="mt-1">Desktop (≥1024px) | Tablet (768-1023px) | Mobile (&lt;768px)</p>
+        <p className="mt-1">
+          Desktop (≥1024px) | Tablet (768-1023px) | Mobile (&lt;768px)
+        </p>
       </div>
     </div>
   );

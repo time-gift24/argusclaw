@@ -7,7 +7,8 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::agents::compact::Compactor;
 use crate::agents::turn::{
-    TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming,
+    TurnConfig as AgentTurnConfig, TurnError, TurnInput, TurnInputBuilder, TurnOutput,
+    TurnStreamEvent, execute_turn_streaming,
 };
 use crate::approval::ApprovalManager;
 use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
@@ -39,6 +40,18 @@ impl TurnStreamHandle {
             .map_err(|_| ThreadError::ChannelClosed)?
             .map_err(ThreadError::TurnFailed)
     }
+}
+
+pub(crate) struct PendingTurn {
+    pub handle: TurnStreamHandle,
+    pub thread_id: ThreadId,
+    pub turn_number: u32,
+    pub turn_input: TurnInput,
+    pub config: AgentTurnConfig,
+    pub stream_rx: broadcast::Receiver<TurnStreamEvent>,
+    pub llm_event_tx: broadcast::Sender<LlmStreamEvent>,
+    pub result_tx: oneshot::Sender<Result<TurnOutput, TurnError>>,
+    pub event_sender: broadcast::Sender<ThreadEvent>,
 }
 
 /// Thread - multi-turn conversation session.
@@ -261,108 +274,47 @@ impl Thread {
             .sum();
     }
 
+    pub(crate) fn apply_turn_output(&mut self, output: TurnOutput) {
+        self.messages = output.messages;
+        self.recalculate_token_count();
+    }
+
     /// Send user message and execute Turn.
     ///
     /// Returns a handle for receiving streaming events and the final result.
     pub async fn send_message(&mut self, user_input: String) -> TurnStreamHandle {
-        // Compactor decides internally whether to compact
-        // Clone the Arc first to avoid borrow conflicts
-        let compactor = self.compactor.clone();
-        if let Err(e) = compactor.compact(self).await {
-            tracing::warn!("Compact failed: {}", e);
-        }
+        let pending = self.prepare_turn(user_input).await;
+        let PendingTurn {
+            handle,
+            thread_id,
+            turn_number,
+            turn_input,
+            config,
+            mut stream_rx,
+            llm_event_tx,
+            result_tx,
+            event_sender,
+        } = pending;
 
-        self.messages.push(ChatMessage::user(user_input));
-        self.execute_turn_streaming().await
-    }
-
-    async fn execute_turn_streaming(&mut self) -> TurnStreamHandle {
-        self.turn_count += 1;
-        let turn_number = self.turn_count;
-        let thread_id = self.id;
-
-        // Create channels for streaming events and result
-        let (stream_tx, mut stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (llm_event_tx, llm_event_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (result_tx, result_rx) = oneshot::channel();
-
-        // Build TurnInput with stream_sender
-        let tool_ids = self.tool_manager.list_ids();
-        let mut turn_input_builder = TurnInputBuilder::new()
-            .provider(self.provider.clone())
-            .messages(self.messages.clone())
-            .tool_manager(self.tool_manager.clone())
-            .tool_ids(tool_ids)
-            .thread_event_sender(self.event_sender.clone())
-            .thread_id(thread_id)
-            .stream_sender(stream_tx);
-
-        // Set hooks if present (need to use into_option pattern for strip_option)
-        if let Some(hooks) = self.hooks.clone() {
-            turn_input_builder = turn_input_builder.hooks(hooks);
-        }
-
-        let turn_input = turn_input_builder.build();
-
-        let event_sender = self.event_sender.clone();
-        let config = self.config.turn_config.clone();
-
-        // Spawn task to execute turn and forward events concurrently
         tokio::spawn(async move {
-            // Clone event_sender for the forwarder task
             let forwarder_event_sender = event_sender.clone();
 
-            // 1. Start event forwarding task (runs concurrently with turn execution)
             let forwarder = tokio::spawn(async move {
                 while let Ok(event) = stream_rx.recv().await {
-                    match event {
-                        TurnStreamEvent::LlmEvent(llm_event) => {
-                            // Send to ThreadEvent::Processing
-                            let _ = forwarder_event_sender.send(ThreadEvent::Processing {
-                                thread_id,
-                                turn_number,
-                                event: llm_event.clone(),
-                            });
-                            // Send to llm_events channel
-                            let _ = llm_event_tx.send(llm_event);
-                        }
-                        TurnStreamEvent::ToolStarted {
-                            tool_call_id,
-                            tool_name,
-                            arguments,
-                        } => {
-                            let _ = forwarder_event_sender.send(ThreadEvent::ToolStarted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id,
-                                tool_name,
-                                arguments,
-                            });
-                        }
-                        TurnStreamEvent::ToolCompleted {
-                            tool_call_id,
-                            tool_name,
-                            result: tool_result,
-                        } => {
-                            let _ = forwarder_event_sender.send(ThreadEvent::ToolCompleted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id,
-                                tool_name,
-                                result: tool_result,
-                            });
-                        }
+                    if let TurnStreamEvent::LlmEvent(llm_event) = event {
+                        let _ = forwarder_event_sender.send(ThreadEvent::Processing {
+                            thread_id,
+                            turn_number,
+                            event: llm_event.clone(),
+                        });
+                        let _ = llm_event_tx.send(llm_event);
                     }
                 }
             });
 
-            // 2. Execute turn (events are forwarded concurrently by the forwarder task)
             let result = execute_turn_streaming(turn_input, config).await;
-
-            // 3. Wait for event forwarding to complete (channel closes after stream_tx is dropped)
             let _ = forwarder.await;
 
-            // 4. Send final events based on result
             match &result {
                 Ok(output) => {
                     let _ = event_sender.send(ThreadEvent::TurnCompleted {
@@ -383,11 +335,54 @@ impl Thread {
             let _ = result_tx.send(result);
         });
 
-        TurnStreamHandle {
+        handle
+    }
+
+    pub(crate) async fn prepare_turn(&mut self, user_input: String) -> PendingTurn {
+        let compactor = self.compactor.clone();
+        if let Err(e) = compactor.compact(self).await {
+            tracing::warn!("Compact failed: {}", e);
+        }
+
+        self.messages.push(ChatMessage::user(user_input));
+        self.recalculate_token_count();
+        self.turn_count += 1;
+
+        let turn_number = self.turn_count;
+        let thread_id = self.id;
+        let (stream_tx, stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (llm_event_tx, llm_event_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let tool_ids = self.tool_manager.list_ids();
+        let mut turn_input_builder = TurnInputBuilder::new()
+            .provider(self.provider.clone())
+            .messages(self.messages.clone())
+            .tool_manager(self.tool_manager.clone())
+            .tool_ids(tool_ids)
+            .thread_event_sender(self.event_sender.clone())
+            .thread_id(thread_id)
+            .stream_sender(stream_tx);
+
+        if let Some(hooks) = self.hooks.clone() {
+            turn_input_builder = turn_input_builder.hooks(hooks);
+        }
+
+        PendingTurn {
+            handle: TurnStreamHandle {
+                thread_id,
+                turn_number,
+                llm_events: llm_event_rx,
+                result: result_rx,
+            },
             thread_id,
             turn_number,
-            llm_events: llm_event_rx,
-            result: result_rx,
+            turn_input: turn_input_builder.build(),
+            config: self.config.turn_config.clone(),
+            stream_rx,
+            llm_event_tx,
+            result_tx,
+            event_sender: self.event_sender.clone(),
         }
     }
 

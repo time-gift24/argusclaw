@@ -40,5 +40,6 @@ mod types;
 
 pub use config::{ThreadConfig, ThreadConfigBuilder};
 pub use error::{CompactError, ThreadError};
+pub(crate) use thread::PendingTurn;
 pub use thread::{Thread, ThreadBuilder, TurnStreamHandle};
 pub use types::{ThreadEvent, ThreadId, ThreadInfo, ThreadState};

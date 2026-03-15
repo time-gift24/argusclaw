@@ -257,9 +257,10 @@ impl Scheduler {
         let handle = tokio::spawn(async move {
             // Get agent and send message
             if let Some(agent) = agent_manager.get(runtime_id)
-                && let Some(mut thread) = agent.get_thread_mut(&thread_id)
+                && let Some(handle) = agent
+                    .send_message_to_thread(&thread_id, job.prompt.clone())
+                    .await
             {
-                let handle = thread.send_message(job.prompt.clone()).await;
                 match handle.wait_for_result().await {
                     Ok(_output) => {
                         let _ = job_repository

@@ -7,8 +7,9 @@ use derive_builder::Builder;
 
 use crate::agents::compact::{Compactor, CompactorManager};
 use crate::agents::thread::{
-    Thread, ThreadBuilder, ThreadConfig, ThreadEvent, ThreadId, ThreadInfo,
+    Thread, ThreadBuilder, ThreadConfig, ThreadEvent, ThreadId, ThreadInfo, TurnStreamHandle,
 };
+use crate::agents::turn::{TurnStreamEvent, execute_turn_streaming};
 use crate::agents::types::{AgentId, AgentRecord, AgentRuntimeId};
 use crate::approval::ApprovalManager;
 use crate::llm::LlmProvider;
@@ -177,14 +178,6 @@ impl Agent {
         self.threads.get_mut(id)
     }
 
-    /// Send a message to a thread.
-    pub fn send_message(&self, thread_id: &ThreadId, _message: String) -> Option<AgentHandle> {
-        self.threads.get(thread_id).map(|_entry| AgentHandle {
-            id: *thread_id,
-            runtime_id: self.runtime_id,
-        })
-    }
-
     /// List all threads in this agent.
     #[must_use]
     pub fn list_threads(&self) -> Vec<ThreadInfo> {
@@ -284,39 +277,90 @@ impl Agent {
         self.threads.get(thread_id).map(|t| t.history().to_vec())
     }
 
-    /// Get mutable access to a thread for sending messages.
-    pub fn send_message_to_thread(
+    pub fn apply_turn_output(
         &self,
         thread_id: &ThreadId,
-        message: String,
-    ) -> Option<tokio::sync::broadcast::Receiver<ThreadEvent>> {
-        if let Some(thread) = self.threads.get(thread_id) {
-            let event_rx = thread.subscribe();
-            // Clone the thread for the async task
-            let mut thread = thread.clone();
-            // Spawn the send operation
-            tokio::spawn(async move {
-                let _ = thread.send_message(message).await;
-            });
-            Some(event_rx)
+        output: crate::agents::turn::TurnOutput,
+    ) -> bool {
+        if let Some(mut thread) = self.threads.get_mut(thread_id) {
+            thread.apply_turn_output(output);
+            true
         } else {
-            None
+            false
         }
     }
-}
 
-impl Clone for Agent {
-    fn clone(&self) -> Self {
-        Self {
-            template_id: self.template_id.clone(),
-            runtime_id: self.runtime_id,
-            system_prompt: self.system_prompt.clone(),
-            provider: self.provider.clone(),
-            tool_manager: self.tool_manager.clone(),
-            compactor_manager: self.compactor_manager.clone(),
-            approval_manager: self.approval_manager.clone(),
-            threads: DashMap::new(),
-        }
+    /// Start a turn on a live thread and keep thread state synchronized before final events.
+    pub async fn send_message_to_thread(
+        self: &Arc<Self>,
+        thread_id: &ThreadId,
+        message: String,
+    ) -> Option<TurnStreamHandle> {
+        let pending = {
+            let mut thread = self.threads.get_mut(thread_id)?;
+            thread.prepare_turn(message).await
+        };
+        let crate::agents::thread::PendingTurn {
+            handle,
+            thread_id,
+            turn_number,
+            turn_input,
+            config,
+            mut stream_rx,
+            llm_event_tx,
+            result_tx,
+            event_sender,
+        } = pending;
+
+        let agent = Arc::clone(self);
+        tokio::spawn(async move {
+            let forwarder_event_sender = event_sender.clone();
+
+            let forwarder = tokio::spawn(async move {
+                while let Ok(event) = stream_rx.recv().await {
+                    if let TurnStreamEvent::LlmEvent(llm_event) = event {
+                        let _ = forwarder_event_sender.send(ThreadEvent::Processing {
+                            thread_id,
+                            turn_number,
+                            event: llm_event.clone(),
+                        });
+                        let _ = llm_event_tx.send(llm_event);
+                    }
+                }
+            });
+
+            let result = execute_turn_streaming(turn_input, config).await;
+            let _ = forwarder.await;
+
+            match &result {
+                Ok(output) => {
+                    if !agent.apply_turn_output(&thread_id, output.clone()) {
+                        tracing::warn!(
+                            "Thread {} disappeared before turn result could be applied",
+                            thread_id
+                        );
+                    }
+
+                    let _ = event_sender.send(ThreadEvent::TurnCompleted {
+                        thread_id,
+                        turn_number,
+                        token_usage: output.token_usage.clone(),
+                    });
+                }
+                Err(error) => {
+                    let _ = event_sender.send(ThreadEvent::TurnFailed {
+                        thread_id,
+                        turn_number,
+                        error: error.to_string(),
+                    });
+                }
+            }
+
+            let _ = event_sender.send(ThreadEvent::Idle { thread_id });
+            let _ = result_tx.send(result);
+        });
+
+        Some(handle)
     }
 }
 

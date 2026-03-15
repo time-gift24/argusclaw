@@ -411,9 +411,209 @@ fn ensure_parent_dir(path: &Path) -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use super::{AppContext, expand_home_path, resolve_database_target};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tempfile::tempdir;
+    use tokio::sync::broadcast;
+    use tokio::time::timeout;
+
+    use super::{ActiveThread, AppContext, expand_home_path, resolve_database_target};
+    use crate::agents::agent::AgentBuilder;
+    use crate::agents::thread::{ThreadEvent, ThreadId};
+    use crate::agents::{AgentId, AgentManager, AgentRecord, AgentRepository, AgentRuntimeId};
+    use crate::db::DbError;
+    use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderRepository};
+    use crate::llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LLMManager, LlmError,
+        LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::tool::ToolManager;
+
+    const DEFAULT_THREAD_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+    struct NoopAgentRepository;
+
+    #[async_trait]
+    impl AgentRepository for NoopAgentRepository {
+        async fn upsert(&self, _record: &AgentRecord) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn get(&self, _id: &crate::agents::AgentId) -> Result<Option<AgentRecord>, DbError> {
+            Ok(None)
+        }
+
+        async fn list(&self) -> Result<Vec<crate::agents::AgentSummary>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete(&self, _id: &crate::agents::AgentId) -> Result<bool, DbError> {
+            Ok(false)
+        }
+    }
+
+    struct NoopLlmRepository;
+
+    #[async_trait]
+    impl LlmProviderRepository for NoopLlmRepository {
+        async fn upsert_provider(&self, _record: &LlmProviderRecord) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn set_default_provider(&self, _id: &LlmProviderId) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn get_provider(
+            &self,
+            _id: &LlmProviderId,
+        ) -> Result<Option<LlmProviderRecord>, DbError> {
+            Ok(None)
+        }
+
+        async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSequentialMockProvider {
+        responses: Mutex<Vec<ToolCompletionResponse>>,
+        call_count: Mutex<usize>,
+        seen_messages: Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    impl RecordingSequentialMockProvider {
+        fn new(responses: Vec<ToolCompletionResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                call_count: Mutex::new(0),
+                seen_messages: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn recorded_messages(&self) -> Vec<Vec<ChatMessage>> {
+            self.seen_messages
+                .lock()
+                .expect("messages mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingSequentialMockProvider {
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        fn context_window(&self) -> u32 {
+            100_000
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unimplemented!("complete is not used in these tests")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.seen_messages
+                .lock()
+                .expect("messages mutex should not be poisoned")
+                .push(request.messages);
+
+            let mut call_count = self
+                .call_count
+                .lock()
+                .expect("call_count mutex should not be poisoned");
+            let responses = self
+                .responses
+                .lock()
+                .expect("responses mutex should not be poisoned");
+            let response = responses
+                .get(*call_count)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing response for call {}", *call_count));
+            *call_count += 1;
+            Ok(response)
+        }
+    }
+
+    fn build_response(content: &str) -> ToolCompletionResponse {
+        ToolCompletionResponse {
+            content: Some(content.to_string()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            input_tokens: 16,
+            output_tokens: 8,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
+    }
+
+    fn setup_test_app_context(
+        responses: Vec<ToolCompletionResponse>,
+    ) -> (
+        AppContext,
+        AgentRuntimeId,
+        Arc<RecordingSequentialMockProvider>,
+    ) {
+        let provider = Arc::new(RecordingSequentialMockProvider::new(responses));
+        let tool_manager = Arc::new(ToolManager::new());
+        let llm_manager = Arc::new(LLMManager::new(Arc::new(NoopLlmRepository)));
+        let agent_manager = Arc::new(AgentManager::new(
+            Arc::new(NoopAgentRepository),
+            llm_manager.clone(),
+            tool_manager.clone(),
+            None,
+        ));
+        let context = AppContext::new(llm_manager, agent_manager.clone(), tool_manager.clone());
+
+        let agent = AgentBuilder::new()
+            .template_id(AgentId::new("argus"))
+            .system_prompt(String::new())
+            .provider(provider.clone())
+            .tool_manager(tool_manager)
+            .build();
+        let runtime_id = agent.runtime_id();
+        agent_manager.agents().insert(runtime_id, Arc::new(agent));
+
+        (context, runtime_id, provider)
+    }
+
+    async fn wait_for_turn_completion(
+        event_rx: &mut broadcast::Receiver<ThreadEvent>,
+    ) -> ThreadEvent {
+        loop {
+            let event = timeout(Duration::from_secs(2), event_rx.recv())
+                .await
+                .expect("thread event should arrive before timeout")
+                .expect("thread event channel should stay open");
+
+            match event {
+                ThreadEvent::TurnCompleted { .. } | ThreadEvent::TurnFailed { .. } => {
+                    return event;
+                }
+                _ => {}
+            }
+        }
+    }
 
     #[test]
     fn resolve_database_target_keeps_sqlite_urls() {
@@ -446,5 +646,115 @@ mod tests {
 
         assert!(providers.is_empty());
         assert!(database_path.exists());
+    }
+
+    #[tokio::test]
+    async fn default_thread_send_message_persists_assistant_history() {
+        let (context, runtime_id, _provider) =
+            setup_test_app_context(vec![build_response("hello from argus")]);
+        let thread_id = ThreadId::parse(DEFAULT_THREAD_ID).expect("default thread id should parse");
+        let mut event_rx = context
+            .get_or_create_thread(runtime_id, thread_id, None)
+            .expect("default thread should be created");
+        context
+            .add_active_thread(ActiveThread {
+                thread_id,
+                agent_runtime_id: runtime_id,
+            })
+            .await;
+
+        let default_thread = context
+            .get_default_thread()
+            .await
+            .expect("default thread should be tracked");
+        context
+            .send_message(
+                default_thread.agent_runtime_id,
+                default_thread.thread_id,
+                "hi".into(),
+            )
+            .await
+            .expect("sending through default thread should succeed");
+
+        let event = wait_for_turn_completion(&mut event_rx).await;
+        assert!(matches!(event, ThreadEvent::TurnCompleted { .. }));
+
+        let messages = context
+            .get_thread_messages(default_thread.agent_runtime_id, default_thread.thread_id)
+            .expect("message history should be readable");
+        let contents: Vec<_> = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["hi", "hello from argus"]);
+    }
+
+    #[tokio::test]
+    async fn second_turn_reuses_prior_assistant_context() {
+        let (context, runtime_id, provider) = setup_test_app_context(vec![
+            build_response("first answer"),
+            build_response("second answer"),
+        ]);
+        let thread_id = ThreadId::parse(DEFAULT_THREAD_ID).expect("default thread id should parse");
+        let mut event_rx = context
+            .get_or_create_thread(runtime_id, thread_id, None)
+            .expect("default thread should be created");
+        context
+            .send_message(runtime_id, thread_id, "first question".into())
+            .await
+            .expect("first send should succeed");
+        wait_for_turn_completion(&mut event_rx).await;
+
+        context
+            .send_message(runtime_id, thread_id, "second question".into())
+            .await
+            .expect("second send should succeed");
+        wait_for_turn_completion(&mut event_rx).await;
+
+        let recorded = provider.recorded_messages();
+        assert_eq!(recorded.len(), 2);
+
+        let first_roles: Vec<_> = recorded[0].iter().map(|message| message.role).collect();
+        let second_contents: Vec<_> = recorded[1]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+
+        assert_eq!(first_roles, vec![crate::llm::Role::User]);
+        assert_eq!(
+            second_contents,
+            vec!["first question", "first answer", "second question"]
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_thread_id_is_preserved_across_events_and_history() {
+        let (context, runtime_id, _provider) =
+            setup_test_app_context(vec![build_response("custom thread answer")]);
+        let custom_thread_id = ThreadId::parse("00000000-0000-0000-0000-000000000099")
+            .expect("custom thread id should parse");
+        let mut event_rx = context
+            .get_or_create_thread(runtime_id, custom_thread_id, None)
+            .expect("custom thread should be created");
+
+        context
+            .send_message(runtime_id, custom_thread_id, "custom hi".into())
+            .await
+            .expect("custom thread send should succeed");
+
+        let event = wait_for_turn_completion(&mut event_rx).await;
+        match event {
+            ThreadEvent::TurnCompleted { thread_id, .. } => assert_eq!(thread_id, custom_thread_id),
+            other => panic!("expected TurnCompleted event, got {:?}", other),
+        }
+
+        let messages = context
+            .get_thread_messages(runtime_id, custom_thread_id)
+            .expect("custom thread history should exist");
+        let contents: Vec<_> = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["custom hi", "custom thread answer"]);
     }
 }
