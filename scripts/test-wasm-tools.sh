@@ -45,7 +45,7 @@ test_native() {
 
     # Test tool command (without WASM, tools are native)
     echo_step "Testing tool list command..."
-    cargo run -p cli -- tool list 2>&1 || true
+    cargo run -p cli --bin argusclaw -- tool list 2>&1 || true
 
     echo_success "Native mode tests completed"
 }
@@ -68,7 +68,7 @@ test_wasm() {
 
     # Test tool command (with WASM)
     echo_step "Testing tool list command with WASM..."
-    cargo run -p cli --features wasm -- tool list 2>&1 || true
+    cargo run -p cli --bin argusclaw --features wasm -- tool list 2>&1 || true
 
     # Ensure tool directories exist
     echo_step "Creating tool directories..."
