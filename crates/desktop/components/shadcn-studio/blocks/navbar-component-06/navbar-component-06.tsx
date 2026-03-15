@@ -89,7 +89,7 @@ const Navbar = ({
               <Settings />
               <span className='sr-only'>Settings</span>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align='end'>
+            <DropdownMenuContent align='end' className='min-w-48'>
               <DropdownMenuItem>
                 <Bot />
                 <span>Agent 配置</span>
