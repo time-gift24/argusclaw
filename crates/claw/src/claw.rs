@@ -320,6 +320,48 @@ impl AppContext {
             .await
     }
 
+    /// Create a runtime agent from a template with an optional provider override.
+    ///
+    /// This method clones the template, assigns a unique runtime ID, and binds
+    /// to either the specified provider or the default provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `template_id` - The ID of the template to clone
+    /// * `provider_override` - Optional provider ID to use instead of the default
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentNotFound` if the template doesn't exist.
+    /// Returns `DefaultProviderNotConfigured` if no override is provided and no default provider is set.
+    pub async fn create_runtime_agent_from_template(
+        &self,
+        template_id: &AgentId,
+        provider_override: Option<&LlmProviderId>,
+    ) -> Result<crate::RuntimeAgentHandle, AgentError> {
+        let mut record =
+            self.get_template(template_id)
+                .await?
+                .ok_or_else(|| AgentError::AgentNotFound {
+                    id: template_id.clone(),
+                })?;
+
+        let effective_provider = match provider_override {
+            Some(provider_id) => provider_id.clone(),
+            None => self.get_default_provider_record().await?.id,
+        };
+
+        record.provider_id = effective_provider.to_string();
+        record.id = AgentId::new(format!("{template_id}--{}", Uuid::new_v4()));
+
+        let runtime_agent_id = self.agent_manager.create_agent(&record).await?;
+        Ok(crate::RuntimeAgentHandle {
+            runtime_agent_id,
+            template_id: template_id.clone(),
+            effective_provider_id: effective_provider,
+        })
+    }
+
     // === Agent Use-Case Methods ===
 
     /// Create a runtime Agent from an AgentRecord template.
@@ -525,5 +567,50 @@ mod tests {
         assert_eq!(default_agent.id.as_ref(), "arguswing");
         assert_eq!(default_agent.display_name, "ArgusWing");
         assert!(default_agent.provider_id.is_empty());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn create_runtime_agent_from_template_keeps_duplicate_templates_alive() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+        })
+        .await
+        .expect("provider should save");
+
+        let first = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("first runtime agent should be created");
+        let second = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("second runtime agent should be created");
+
+        assert_ne!(first.runtime_agent_id, second.runtime_agent_id);
+        assert_eq!(
+            first.template_id,
+            crate::AgentId::new(crate::DEFAULT_AGENT_ID)
+        );
+        assert_eq!(
+            second.template_id,
+            crate::AgentId::new(crate::DEFAULT_AGENT_ID)
+        );
+        assert_eq!(ctx.list_active_agents().len(), 2);
     }
 }
