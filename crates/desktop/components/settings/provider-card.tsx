@@ -56,10 +56,10 @@ export function ProviderCard({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-base flex items-center gap-2">
-            {React.createElement(
-              getProviderIcon(provider.display_name, provider.id),
-              { className: "h-5 w-5 text-muted-foreground" }
-            )}
+            {(() => {
+              const Icon = getProviderIcon(provider.display_name, provider.id);
+              return <Icon className="h-5 w-5 text-muted-foreground" />;
+            })()}
             <span>{provider.display_name}</span>
             {provider.is_default && (
               <Badge
