@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
-use claw::{AgentId, AgentRecord, AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
-use claw::{GlobTool, GrepTool, LlmProviderId, ReadTool, ShellTool};
+use claw::{AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
+use claw::{GlobTool, GrepTool, ReadTool, ShellTool};
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -17,16 +17,8 @@ use super::{StreamRenderState, finish_stream_output, render_stream_event};
 /// Agent subcommands.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
-    /// Start interactive conversation with a default agent.
+    /// Start interactive conversation using the default ArgusWing agent.
     Chat {
-        /// Provider ID to use (defaults to default provider).
-        #[arg(long)]
-        provider: Option<String>,
-
-        /// System prompt for the agent.
-        #[arg(long, default_value = "You are a helpful assistant.")]
-        system_prompt: String,
-
         /// Enable verbose output (shows token usage).
         #[arg(short, long)]
         verbose: bool,
@@ -49,54 +41,21 @@ pub enum AgentCommand {
 pub async fn run_agent_command(ctx: AppContext, command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::Chat {
-            provider,
-            system_prompt,
             verbose,
             approval_tools,
             muted_tools,
             auto_approve,
-        } => {
-            run_chat(
-                ctx,
-                provider,
-                system_prompt,
-                verbose,
-                approval_tools,
-                muted_tools,
-                auto_approve,
-            )
-            .await
-        }
+        } => run_chat(ctx, verbose, approval_tools, muted_tools, auto_approve).await,
     }
 }
 
 async fn run_chat(
     ctx: AppContext,
-    provider: Option<String>,
-    system_prompt: String,
     verbose: bool,
     approval_tools: Vec<String>,
     muted_tools: Vec<String>,
     auto_approve: bool,
 ) -> Result<()> {
-    // Resolve provider ID
-    let provider_id = if let Some(id) = provider {
-        // Verify provider exists
-        ctx.get_provider(&LlmProviderId::new(&id))
-            .await
-            .map_err(|e| anyhow!("Failed to get provider '{}': {}", id, e))?;
-        id
-    } else {
-        ctx.get_default_provider().await.map_err(|_| {
-            anyhow!("No default provider configured. Use --provider or configure a default.")
-        })?;
-        ctx.get_default_provider_record()
-            .await?
-            .id
-            .as_ref()
-            .to_string()
-    };
-
     // Filter out muted tools from approval list
     let effective_approval_tools: Vec<String> = approval_tools
         .into_iter()
@@ -110,28 +69,11 @@ async fn run_chat(
     tool_manager.register(Arc::new(GrepTool::new()));
     tool_manager.register(Arc::new(GlobTool::new()));
 
-    // Build AgentRecord
-    let agent_record = AgentRecord {
-        id: AgentId::new("cli-agent"),
-        display_name: "CLI Agent".to_string(),
-        description: "Interactive CLI agent".to_string(),
-        version: "1.0.0".to_string(),
-        provider_id,
-        system_prompt,
-        tool_names: vec![],
-        max_tokens: None,
-        temperature: None,
-    };
-
-    // Create agent via AppContext
+    // Use the default ArgusWing agent
     let agent_id = ctx
-        .create_agent_with_approval(
-            &agent_record,
-            effective_approval_tools.clone(),
-            auto_approve,
-        )
+        .create_default_agent_with_approval(effective_approval_tools.clone(), auto_approve)
         .await
-        .map_err(|e| anyhow!("Failed to create agent: {}", e))?;
+        .map_err(|e| anyhow!("Failed to create default agent: {}", e))?;
 
     // Create thread via AppContext
     let thread_id = ctx

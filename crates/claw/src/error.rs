@@ -52,4 +52,10 @@ pub enum AgentError {
 
     #[error("thread build failed: {reason}")]
     ThreadBuildFailed { reason: String },
+
+    #[error("failed to load built-in agent: {reason}")]
+    BuiltinAgentLoadFailed { reason: String },
+
+    #[error("default agent not found")]
+    DefaultAgentNotFound,
 }
