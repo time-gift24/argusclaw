@@ -4,7 +4,14 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Plus } from "lucide-react"
-import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
+import {
+  agents,
+  providers,
+  models,
+  type AgentRecord,
+  type LlmProviderSummary,
+  type LlmModelRecord,
+} from "@/lib/tauri"
 import {
   AgentCard,
   DeleteConfirmDialog,
@@ -16,6 +23,7 @@ export default function AgentsPage() {
   const router = useRouter()
   const [agentList, setAgentList] = React.useState<AgentRecord[]>([])
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
+  const [modelList, setModelList] = React.useState<LlmModelRecord[]>([])
   const [loading, setLoading] = React.useState(true)
   const [deleteId, setDeleteId] = React.useState<string | null>(null)
   const [deleteLoading, setDeleteLoading] = React.useState(false)
@@ -28,6 +36,18 @@ export default function AgentsPage() {
       ])
       setAgentList(agentsData)
       setProviderList(providersData)
+
+      // Load all models from all providers
+      const allModels: LlmModelRecord[] = []
+      for (const provider of providersData) {
+        try {
+          const providerModels = await models.listByProvider(provider.id)
+          allModels.push(...providerModels)
+        } catch (error) {
+          console.error(`Failed to load models for provider ${provider.id}:`, error)
+        }
+      }
+      setModelList(allModels)
     } catch (error) {
       console.error("Failed to load data:", error)
     } finally {
@@ -108,6 +128,7 @@ export default function AgentsPage() {
               key={agent.id}
               agent={agent}
               providers={providerList}
+              models={modelList}
               onEdit={handleEdit}
               onDelete={(id) => setDeleteId(id)}
             />

@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react"
 import { Bot, CircleHelp, Pencil, Trash2 } from "lucide-react"
-import type { LlmProviderSummary } from "@/lib/tauri"
+import type { LlmProviderSummary, LlmModelRecord } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -18,11 +18,13 @@ export interface AgentRecord {
   tool_names: string[]
   max_tokens?: number
   temperature?: number
+  model_id?: string
 }
 
 interface AgentCardProps {
   agent: AgentRecord
   providers: LlmProviderSummary[]
+  models: LlmModelRecord[]
   onEdit: (id: string) => void
   onDelete: (id: string) => void
 }
@@ -62,12 +64,18 @@ function formatTemperature(temperature?: number) {
   return `${effectiveTemperature}${temperature === undefined ? "（默认）" : ""}`
 }
 
-export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps) {
-  const providerName =
-    providers.find((provider) => provider.id === agent.provider_id)?.display_name ||
-    agent.provider_id ||
-    "未指定"
+export function AgentCard({ agent, providers, models, onEdit, onDelete }: AgentCardProps) {
+  const provider =
+    providers.find((p) => p.id === agent.provider_id)
+  const providerName = provider?.display_name || agent.provider_id || "未指定"
+
+  const model = agent.model_id
+    ? models.find((m) => m.id === agent.model_id)
+    : null
+  const modelName = model?.name || (agent.model_id ? agent.model_id : null)
+
   const toolNames = agent.tool_names.filter(Boolean)
+  const hasToolFilter = toolNames.length > 0
 
   return (
     <Card>
@@ -90,16 +98,21 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
             <DetailRow label="提供者">
               <div className="min-w-0">
                 <div className="truncate font-medium">{providerName}</div>
-                {agent.provider_id && providerName !== agent.provider_id ? (
+                {modelName && (
+                  <div className="text-[11px] text-muted-foreground mt-0.5">
+                    模型: <span className="font-mono">{modelName}</span>
+                  </div>
+                )}
+                {agent.provider_id && providerName !== agent.provider_id && !modelName && (
                   <div className="truncate font-mono text-[11px] text-muted-foreground">
                     {agent.provider_id}
                   </div>
-                ) : null}
+                )}
               </div>
             </DetailRow>
 
             <DetailRow label="工具">
-              {toolNames.length > 0 ? (
+              {hasToolFilter ? (
                 <div className="flex flex-wrap gap-1">
                   {toolNames.map((tool) => (
                     <Badge key={tool} variant="secondary" className="text-xs">
@@ -108,7 +121,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
                   ))}
                 </div>
               ) : (
-                <span className="text-muted-foreground">未配置</span>
+                <span className="text-muted-foreground">全部可用</span>
               )}
             </DetailRow>
 

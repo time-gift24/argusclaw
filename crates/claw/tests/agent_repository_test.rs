@@ -15,6 +15,7 @@ fn create_test_record(id: &str, provider_id: &str) -> AgentRecord {
         tool_names: vec!["tool1".to_string(), "tool2".to_string()],
         max_tokens: Some(2000),
         temperature: Some(0.5),
+        model_id: None,
     }
 }
 

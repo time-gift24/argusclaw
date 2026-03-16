@@ -62,6 +62,7 @@ pub struct AgentRecord {
     pub max_tokens: Option<u32>,
     /// Sampling temperature (0.0-2.0). Stored as INTEGER * 100 in SQLite for precision.
     pub temperature: Option<f32>,
+    pub model_id: Option<String>,
 }
 
 impl AgentRecord {
@@ -78,6 +79,7 @@ impl AgentRecord {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
+            model_id: None,
         }
     }
 }

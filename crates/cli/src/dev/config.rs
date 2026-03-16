@@ -35,7 +35,6 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
             display_name: value.display_name,
             base_url: value.base_url,
             api_key: SecretString::new(value.api_key),
-            model: value.model,
             is_default: value.is_default,
             extra_headers: value.extra_headers,
             secret_status: ProviderSecretStatus::Ready,

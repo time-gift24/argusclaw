@@ -4,8 +4,9 @@ use std::time::Duration;
 use chrono::Utc;
 
 use crate::db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
-    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
+    LlmModelId, LlmModelRecord, LlmModelRepository, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, LlmProviderRepository, LlmProviderSummary, ProviderSecretStatus,
+    ProviderTestResult, ProviderTestStatus,
 };
 use crate::error::AgentError;
 use crate::llm::ChatMessage;
@@ -17,12 +18,19 @@ use crate::llm::provider::LlmEventStream;
 
 pub struct LLMManager {
     repository: Arc<dyn LlmProviderRepository>,
+    model_repository: Arc<dyn LlmModelRepository>,
 }
 
 impl LLMManager {
     #[must_use]
-    pub fn new(repository: Arc<dyn LlmProviderRepository>) -> Self {
-        Self { repository }
+    pub fn new(
+        repository: Arc<dyn LlmProviderRepository>,
+        model_repository: Arc<dyn LlmModelRepository>,
+    ) -> Self {
+        Self {
+            repository,
+            model_repository,
+        }
     }
 
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
@@ -39,7 +47,29 @@ impl LLMManager {
             .await?
             .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })?;
 
-        self.build_provider(record)
+        let model_name = self.default_model_name_for_provider(id).await?;
+        self.build_provider(record, &model_name)
+    }
+
+    pub async fn get_provider_with_model(
+        &self,
+        model_id: &LlmModelId,
+    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        let model = self.model_repository.get(model_id).await?.ok_or_else(|| {
+            AgentError::ModelNotFound {
+                id: model_id.to_string(),
+            }
+        })?;
+
+        let record = self
+            .repository
+            .get_provider(&model.provider_id)
+            .await?
+            .ok_or_else(|| AgentError::ProviderNotFound {
+                id: model.provider_id.to_string(),
+            })?;
+
+        self.build_provider(record, &model.name)
     }
 
     pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
@@ -49,7 +79,25 @@ impl LLMManager {
             .await?
             .ok_or(AgentError::DefaultProviderNotConfigured)?;
 
-        self.build_provider(record)
+        let model_name = self.default_model_name_for_provider(&record.id).await?;
+        self.build_provider(record, &model_name)
+    }
+
+    async fn default_model_name_for_provider(
+        &self,
+        provider_id: &LlmProviderId,
+    ) -> Result<String, AgentError> {
+        let models = self.model_repository.list_by_provider(provider_id).await?;
+
+        let model = models
+            .iter()
+            .find(|m| m.is_default)
+            .or_else(|| models.first())
+            .ok_or_else(|| AgentError::ModelNotFound {
+                id: format!("no models for provider `{provider_id}`"),
+            })?;
+
+        Ok(model.name.clone())
     }
 
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
@@ -126,10 +174,13 @@ impl LLMManager {
             ));
         };
 
+        let model = self
+            .default_model_name_for_provider(id)
+            .await
+            .unwrap_or_default();
         let provider_id = record.id.to_string();
-        let model = record.model.clone();
         let base_url = record.base_url.clone();
-        let provider = match self.build_provider(record) {
+        let provider = match self.build_provider(record, &model) {
             Ok(provider) => provider,
             Err(AgentError::UnsupportedProviderKind { kind }) => {
                 return Ok(build_provider_test_result(
@@ -150,11 +201,12 @@ impl LLMManager {
     pub async fn test_provider_record(
         &self,
         record: LlmProviderRecord,
+        model_name: &str,
     ) -> Result<ProviderTestResult, AgentError> {
         let provider_id = record.id.to_string();
-        let model = record.model.clone();
+        let model = model_name.to_string();
         let base_url = record.base_url.clone();
-        let provider = match self.build_provider(record) {
+        let provider = match self.build_provider(record, model_name) {
             Ok(provider) => provider,
             Err(AgentError::UnsupportedProviderKind { kind }) => {
                 return Ok(build_provider_test_result(
@@ -170,6 +222,32 @@ impl LLMManager {
         };
 
         Ok(run_provider_connection_test(provider_id, model, base_url, provider).await)
+    }
+
+    // === Model CRUD passthroughs ===
+
+    pub async fn list_models_by_provider(
+        &self,
+        provider_id: &LlmProviderId,
+    ) -> Result<Vec<LlmModelRecord>, AgentError> {
+        self.model_repository
+            .list_by_provider(provider_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn upsert_model(&self, record: LlmModelRecord) -> Result<(), AgentError> {
+        self.model_repository.upsert(&record).await?;
+        Ok(())
+    }
+
+    pub async fn delete_model(&self, id: &LlmModelId) -> Result<bool, AgentError> {
+        self.model_repository.delete(id).await.map_err(Into::into)
+    }
+
+    pub async fn set_default_model(&self, id: &LlmModelId) -> Result<(), AgentError> {
+        self.model_repository.set_default(id).await?;
+        Ok(())
     }
 
     #[cfg(feature = "dev")]
@@ -209,6 +287,7 @@ impl LLMManager {
     fn build_provider(
         &self,
         record: LlmProviderRecord,
+        model_name: &str,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
         match record.kind {
             LlmProviderKind::OpenAiCompatible => {
@@ -217,7 +296,7 @@ impl LLMManager {
                     let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
                         record.base_url,
                         record.api_key.expose_secret().to_string(),
-                        record.model,
+                        model_name.to_string(),
                     );
 
                     for (name, value) in &record.extra_headers {

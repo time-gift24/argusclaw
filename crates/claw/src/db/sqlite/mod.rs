@@ -3,6 +3,7 @@ mod agent;
 mod approval;
 mod job;
 mod llm;
+mod model;
 mod thread;
 
 use std::path::Path;
@@ -18,6 +19,7 @@ pub use agent::SqliteAgentRepository;
 pub use approval::SqliteApprovalRepository;
 pub use job::SqliteJobRepository;
 pub use llm::SqliteLlmProviderRepository;
+pub use model::SqliteLlmModelRepository;
 #[allow(unused_imports)]
 pub use thread::SqliteThreadRepository;
 

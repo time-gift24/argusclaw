@@ -66,6 +66,9 @@ pub struct Agent {
     /// Auto-approve all approval requests.
     #[builder(default)]
     auto_approve: bool,
+    /// Tool names this agent is allowed to use. Empty = all tools.
+    #[builder(default)]
+    tool_names: Vec<String>,
     /// Active threads, protected by async Mutex for safe concurrent access.
     /// Wrapped in Arc so clones share the same thread map.
     #[builder(default)]
@@ -86,6 +89,7 @@ impl AgentBuilder {
             .id(record.id.clone())
             .system_prompt(record.system_prompt.clone())
             .provider(provider)
+            .tool_names(record.tool_names.clone())
     }
 
     /// Build the Agent.
@@ -146,6 +150,7 @@ impl AgentBuilder {
             hooks: Some(hooks),
             approval_tools,
             auto_approve,
+            tool_names: self.tool_names.unwrap_or_default(),
             threads: Arc::new(DashMap::new()),
         })
     }
@@ -191,6 +196,10 @@ impl Agent {
             .tool_manager(self.tool_manager.clone())
             .compactor(compactor)
             .config(config);
+
+        if !self.tool_names.is_empty() {
+            builder = builder.tool_names(Some(self.tool_names.clone()));
+        }
 
         if let Some(hooks) = &self.hooks {
             builder = builder.hooks(Arc::clone(hooks));
@@ -368,6 +377,7 @@ impl Clone for Agent {
             hooks: self.hooks.clone(),
             approval_tools: self.approval_tools.clone(),
             auto_approve: self.auto_approve,
+            tool_names: self.tool_names.clone(),
             threads: self.threads.clone(),
         }
     }

@@ -52,6 +52,10 @@ pub struct Thread {
     #[builder(default, setter(strip_option))]
     hooks: Option<Arc<HookRegistry>>,
 
+    /// Tool names to use (empty = all tools).
+    #[builder(default)]
+    tool_names: Option<Vec<String>>,
+
     /// Thread configuration.
     #[builder(default)]
     config: ThreadConfig,
@@ -106,6 +110,7 @@ impl ThreadBuilder {
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
             approval_manager: self.approval_manager.flatten(),
             hooks: self.hooks.flatten(),
+            tool_names: self.tool_names.flatten(),
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
@@ -137,6 +142,7 @@ impl Thread {
             compactor,
             approval_manager,
             hooks: None,
+            tool_names: None,
             config,
             token_count: 0,
             turn_count: 0,
@@ -238,7 +244,11 @@ impl Thread {
         let (stream_tx, mut stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         // Build TurnInput with stream_sender
-        let tool_ids = self.tool_manager.list_ids();
+        // Use configured tool_names if present, otherwise use all available tools
+        let tool_ids = match &self.tool_names {
+            Some(names) if !names.is_empty() => names.clone(),
+            _ => self.tool_manager.list_ids(),
+        };
         let mut turn_input_builder = TurnInputBuilder::new()
             .provider(self.provider.clone())
             .messages(self.messages.clone())

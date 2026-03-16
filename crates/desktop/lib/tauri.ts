@@ -9,7 +9,6 @@ export interface LlmProviderSummary {
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
-  model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -21,7 +20,6 @@ export interface LlmProviderRecord {
   display_name: string;
   base_url: string;
   api_key: string;
-  model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -33,7 +31,6 @@ export interface ProviderInput {
   display_name: string;
   base_url: string;
   api_key: string;
-  model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
 }
@@ -58,6 +55,21 @@ export interface ProviderTestResult {
   message: string;
 }
 
+// Model Types
+export interface LlmModelRecord {
+  id: string;
+  provider_id: string;
+  name: string;
+  is_default: boolean;
+}
+
+export interface ModelInput {
+  id: string;
+  provider_id: string;
+  name: string;
+  is_default: boolean;
+}
+
 export interface AgentRecord {
   id: string;
   display_name: string;
@@ -68,9 +80,10 @@ export interface AgentRecord {
   tool_names: string[];
   max_tokens?: number;
   temperature?: number;
+  model_id?: string;
 }
 
-// LLMProvider API
+// Provider API
 export const providers = {
   list: () => invoke<LlmProviderSummary[]>("list_providers"),
 
@@ -86,8 +99,26 @@ export const providers = {
   testConnection: (id: string) =>
     invoke<ProviderTestResult>("test_provider_connection", { id }),
 
-  testInput: (record: ProviderInput) =>
-    invoke<ProviderTestResult>("test_provider_input", { record }),
+  testInput: (record: ProviderInput, modelName: string) =>
+    invoke<ProviderTestResult>("test_provider_input", { record, modelName }),
+};
+
+// Model API
+export const models = {
+  listByProvider: (providerId: string) =>
+    invoke<LlmModelRecord[]>("list_models_by_provider", { providerId }),
+
+  upsert: (record: ModelInput) =>
+    invoke<void>("upsert_model", { record }),
+
+  delete: (id: string) => invoke<boolean>("delete_model", { id }),
+
+  setDefault: (id: string) => invoke<void>("set_default_model", { id }),
+};
+
+// Tools API
+export const tools = {
+  listBuiltin: () => invoke<string[]>("list_builtin_tools"),
 };
 
 // Agent API

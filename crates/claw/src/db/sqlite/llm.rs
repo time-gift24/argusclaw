@@ -25,7 +25,6 @@ type SharedProviderFields = (
     crate::db::llm::LlmProviderKind,
     String,
     String,
-    String,
     bool,
     HashMap<String, String>,
     Vec<u8>,
@@ -132,9 +131,6 @@ impl SqliteLlmProviderRepository {
             row.try_get("base_url").map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?,
-            row.try_get("model").map_err(|e| DbError::QueryFailed {
-                reason: e.to_string(),
-            })?,
             row.try_get::<i64, _>("is_default")
                 .map_err(|e| DbError::QueryFailed {
                     reason: e.to_string(),
@@ -164,7 +160,7 @@ impl SqliteLlmProviderRepository {
     }
 
     fn map_record(&self, row: sqlx::sqlite::SqliteRow) -> Result<LlmProviderRecord, DbError> {
-        let (id, kind, display_name, base_url, model, is_default, extra_headers, nonce, ciphertext) =
+        let (id, kind, display_name, base_url, is_default, extra_headers, nonce, ciphertext) =
             Self::parse_shared_fields(row)?;
 
         Ok(LlmProviderRecord {
@@ -173,7 +169,6 @@ impl SqliteLlmProviderRepository {
             display_name,
             base_url,
             api_key: self.decrypt_secret(&nonce, &ciphertext)?,
-            model,
             is_default,
             extra_headers,
             secret_status: ProviderSecretStatus::Ready,
@@ -181,7 +176,7 @@ impl SqliteLlmProviderRepository {
     }
 
     fn map_summary(&self, row: sqlx::sqlite::SqliteRow) -> Result<LlmProviderSummary, DbError> {
-        let (id, kind, display_name, base_url, model, is_default, extra_headers, nonce, ciphertext) =
+        let (id, kind, display_name, base_url, is_default, extra_headers, nonce, ciphertext) =
             Self::parse_shared_fields(row)?;
         let secret_status = if self.decrypt_secret(&nonce, &ciphertext).is_ok() {
             ProviderSecretStatus::Ready
@@ -194,7 +189,6 @@ impl SqliteLlmProviderRepository {
             kind,
             display_name,
             base_url,
-            model,
             is_default,
             extra_headers,
             secret_status,
@@ -225,13 +219,12 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         }
 
         sqlx::query(
-            "insert into llm_providers (id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "insert into llm_providers (id, kind, display_name, base_url, encrypted_api_key, api_key_nonce, is_default, extra_headers)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              on conflict(id) do update set
                  kind = excluded.kind,
                  display_name = excluded.display_name,
                  base_url = excluded.base_url,
-                 model = excluded.model,
                  encrypted_api_key = excluded.encrypted_api_key,
                  api_key_nonce = excluded.api_key_nonce,
                  is_default = excluded.is_default,
@@ -242,7 +235,6 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         .bind(record.kind.as_str())
         .bind(&record.display_name)
         .bind(&record.base_url)
-        .bind(&record.model)
         .bind(encrypted_secret.ciphertext)
         .bind(encrypted_secret.nonce)
         .bind(i64::from(record.is_default))
@@ -324,7 +316,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
              where id = ?1",
         )
@@ -359,7 +351,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, DbError> {
         let rows = sqlx::query(
-            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
              order by display_name asc",
         )
@@ -374,7 +366,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
              where is_default = 1
              limit 1",

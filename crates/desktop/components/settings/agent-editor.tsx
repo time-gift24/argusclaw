@@ -4,13 +4,22 @@ import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
 import { ArrowLeft, Save } from "lucide-react"
-import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
+import {
+  agents,
+  providers,
+  models,
+  tools,
+  type AgentRecord,
+  type LlmProviderSummary,
+  type LlmModelRecord,
+} from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Breadcrumb } from "@/components/settings"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
 
 interface AgentEditorProps {
   agentId?: string
@@ -31,6 +40,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const [loading, setLoading] = React.useState(isEditing)
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
+  const [modelList, setModelList] = React.useState<LlmModelRecord[]>([])
+  const [builtinTools, setBuiltinTools] = React.useState<string[]>([])
 
   const [formData, setFormData] = React.useState<AgentRecord>({
     id: "",
@@ -42,6 +53,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     tool_names: [],
     max_tokens: undefined,
     temperature: undefined,
+    model_id: undefined,
   })
 
   const previewMessage = React.useMemo<ThreadAssistantMessage>(
@@ -72,17 +84,40 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       formData.system_prompt.trim(),
   )
 
-  // Load providers and agent data (if editing)
+  // Load models when provider changes
+  const loadModelsForProvider = React.useCallback(async (providerId: string) => {
+    if (!providerId) {
+      setModelList([])
+      return
+    }
+    try {
+      const list = await models.listByProvider(providerId)
+      setModelList(list)
+    } catch (error) {
+      console.error("Failed to load models:", error)
+      setModelList([])
+    }
+  }, [])
+
+  // Load providers, builtin tools, and agent data (if editing)
   React.useEffect(() => {
     const loadData = async () => {
       try {
-        const providersData = await providers.list()
+        const [providersData, builtinToolsData] = await Promise.all([
+          providers.list(),
+          tools.listBuiltin(),
+        ])
         setProviderList(providersData)
+        setBuiltinTools(builtinToolsData)
 
         if (agentId) {
           const agent = await agents.get(agentId)
           if (agent) {
             setFormData(agent)
+            // Load models for the agent's provider
+            if (agent.provider_id) {
+              await loadModelsForProvider(agent.provider_id)
+            }
           }
         } else {
           const preferredProviderId = getPreferredProviderId(providersData)
@@ -90,6 +125,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             setFormData((prev) =>
               prev.provider_id ? prev : { ...prev, provider_id: preferredProviderId },
             )
+            await loadModelsForProvider(preferredProviderId)
           }
         }
       } catch (error) {
@@ -99,7 +135,21 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId])
+  }, [agentId, loadModelsForProvider])
+
+  const handleProviderChange = async (providerId: string) => {
+    setFormData((prev) => ({ ...prev, provider_id: providerId, model_id: undefined }))
+    await loadModelsForProvider(providerId)
+  }
+
+  const handleToolToggle = (toolName: string, checked: boolean) => {
+    setFormData((prev) => ({
+      ...prev,
+      tool_names: checked
+        ? [...prev.tool_names, toolName]
+        : prev.tool_names.filter((t) => t !== toolName),
+    }))
+  }
 
   const handleSave = async () => {
     if (!canSave) {
@@ -189,24 +239,14 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="version">版本</Label>
-              <Input
-                id="version"
-                value={formData.version}
-                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                placeholder="1.0.0"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="provider_id">LLM 提供者（可选）</Label>
+              <Label htmlFor="provider_id">LLM 提供者</Label>
               <select
                 id="provider_id"
                 value={formData.provider_id}
-                onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
+                onChange={(e) => void handleProviderChange(e.target.value)}
                 className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
               >
-                <option value="">不指定提供者</option>
+                <option value="">选择提供者</option>
                 {providerList.map((p) => (
                   <option
                     key={p.id}
@@ -223,6 +263,26 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 </p>
               )}
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="model_id">模型</Label>
+              <select
+                id="model_id"
+                value={formData.model_id || ""}
+                onChange={(e) => setFormData({ ...formData, model_id: e.target.value || undefined })}
+                className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
+                disabled={!formData.provider_id || modelList.length === 0}
+              >
+                <option value="">默认模型</option>
+                {modelList.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} {m.is_default ? "(默认)" : ""}
+                  </option>
+                ))}
+              </select>
+              {formData.provider_id && modelList.length === 0 && (
+                <p className="text-xs text-muted-foreground">该提供者暂无模型，请先添加模型</p>
+              )}
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -232,9 +292,41 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               value={formData.system_prompt}
               onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
               placeholder="你是一个有帮助的助手..."
-              className="flex min-h-[400px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30 resize-none"
+              className="flex min-h-[300px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30 resize-none"
               required
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label>工具选择</Label>
+            <div className="border rounded-md p-3 max-h-32 overflow-y-auto">
+              {builtinTools.length > 0 ? (
+                <div className="space-y-2">
+                  {builtinTools.map((toolName) => (
+                    <div key={toolName} className="flex items-center gap-2">
+                      <Checkbox
+                        id={`tool-${toolName}`}
+                        checked={formData.tool_names.includes(toolName)}
+                        onCheckedChange={(checked) =>
+                          handleToolToggle(toolName, checked === true)
+                        }
+                      />
+                      <label
+                        htmlFor={`tool-${toolName}`}
+                        className="text-sm font-mono cursor-pointer"
+                      >
+                        {toolName}
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">暂无内置工具</p>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              不选择任何工具 = 启用所有工具
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">

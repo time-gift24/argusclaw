@@ -32,6 +32,7 @@ pub fn load_arguswing() -> Result<AgentRecord, toml::de::Error> {
         tool_names: def.tool_names,
         max_tokens: None,
         temperature: None,
+        model_id: None,
     })
 }
 

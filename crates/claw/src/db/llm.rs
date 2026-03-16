@@ -30,6 +30,28 @@ impl fmt::Display for LlmProviderId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LlmModelId(String);
+
+impl LlmModelId {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+}
+
+impl AsRef<str> for LlmModelId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for LlmModelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProviderKind {
     OpenAiCompatible,
@@ -98,7 +120,6 @@ pub struct LlmProviderRecord {
     pub display_name: String,
     pub base_url: String,
     pub api_key: SecretString,
-    pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -110,7 +131,6 @@ pub struct LlmProviderSummary {
     pub kind: LlmProviderKind,
     pub display_name: String,
     pub base_url: String,
-    pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -123,12 +143,19 @@ impl From<LlmProviderRecord> for LlmProviderSummary {
             kind: record.kind,
             display_name: record.display_name,
             base_url: record.base_url,
-            model: record.model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmModelRecord {
+    pub id: LlmModelId,
+    pub provider_id: LlmProviderId,
+    pub name: String,
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +200,18 @@ pub trait LlmProviderRepository: Send + Sync {
     async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, DbError>;
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError>;
+}
+
+#[async_trait]
+pub trait LlmModelRepository: Send + Sync {
+    async fn upsert(&self, record: &LlmModelRecord) -> Result<(), DbError>;
+    async fn delete(&self, id: &LlmModelId) -> Result<bool, DbError>;
+    async fn get(&self, id: &LlmModelId) -> Result<Option<LlmModelRecord>, DbError>;
+    async fn list_by_provider(
+        &self,
+        provider_id: &LlmProviderId,
+    ) -> Result<Vec<LlmModelRecord>, DbError>;
+    async fn set_default(&self, id: &LlmModelId) -> Result<(), DbError>;
 }
 
 #[cfg(test)]

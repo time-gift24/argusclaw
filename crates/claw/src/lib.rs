@@ -45,8 +45,8 @@ pub use protocol::{
 // LLM Provider Types (DTO)
 pub use db::DbError;
 pub use db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus,
-    ProviderTestResult, ProviderTestStatus, SecretString,
+    LlmModelId, LlmModelRecord, LlmProviderId, LlmProviderKind, LlmProviderRecord,
+    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
 };
 
 // Tool Types
@@ -65,11 +65,13 @@ pub use agents::turn;
 #[cfg(feature = "dev")]
 pub use approval::{ApprovalManager, ApprovalPolicy};
 #[cfg(feature = "dev")]
+pub use db::llm::LlmModelRepository;
+#[cfg(feature = "dev")]
 pub use db::llm::LlmProviderRepository;
 #[cfg(feature = "dev")]
 pub use db::sqlite::{
-    self, SqliteAgentRepository, SqliteLlmProviderRepository, SqliteThreadRepository, connect,
-    migrate,
+    self, SqliteAgentRepository, SqliteLlmModelRepository, SqliteLlmProviderRepository,
+    SqliteThreadRepository, connect, migrate,
 };
 #[cfg(feature = "dev")]
 pub use db::thread::{MessageRecord, ThreadRecord, ThreadRepository};

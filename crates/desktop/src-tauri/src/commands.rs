@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use claw::{
-    AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
+    AgentError, AgentId, AgentRecord, AppContext, DbError, LlmModelId, LlmModelRecord,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus,
+    ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -42,7 +43,6 @@ pub struct ProviderInput {
     pub display_name: String,
     pub base_url: String,
     pub api_key: String,
-    pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
 }
@@ -55,7 +55,6 @@ impl From<ProviderInput> for LlmProviderRecord {
             display_name: input.display_name,
             base_url: input.base_url,
             api_key: SecretString::new(input.api_key),
-            model: input.model,
             is_default: input.is_default,
             extra_headers: input.extra_headers,
             secret_status: ProviderSecretStatus::Ready,
@@ -69,7 +68,6 @@ pub struct ProviderSummary {
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
-    pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -82,7 +80,6 @@ impl From<LlmProviderSummary> for ProviderSummary {
             kind: summary.kind.into(),
             display_name: summary.display_name,
             base_url: summary.base_url,
-            model: summary.model,
             is_default: summary.is_default,
             extra_headers: summary.extra_headers,
             secret_status: summary.secret_status,
@@ -97,7 +94,6 @@ pub struct ProviderRecord {
     pub display_name: String,
     pub base_url: String,
     pub api_key: String,
-    pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -111,7 +107,6 @@ impl From<LlmProviderRecord> for ProviderRecord {
             display_name: record.display_name,
             base_url: record.base_url,
             api_key: record.api_key.expose_secret().to_string(),
-            model: record.model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
@@ -126,10 +121,49 @@ fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord 
         display_name: summary.display_name,
         base_url: summary.base_url,
         api_key: String::new(),
-        model: summary.model,
         is_default: summary.is_default,
         extra_headers: summary.extra_headers,
         secret_status: summary.secret_status,
+    }
+}
+
+// === Model Types ===
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInput {
+    pub id: String,
+    pub provider_id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+impl From<ModelInput> for LlmModelRecord {
+    fn from(input: ModelInput) -> Self {
+        Self {
+            id: LlmModelId::new(input.id),
+            provider_id: LlmProviderId::new(input.provider_id),
+            name: input.name,
+            is_default: input.is_default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+impl From<LlmModelRecord> for ModelRecord {
+    fn from(record: LlmModelRecord) -> Self {
+        Self {
+            id: record.id.to_string(),
+            provider_id: record.provider_id.to_string(),
+            name: record.name,
+            is_default: record.is_default,
+        }
     }
 }
 
@@ -218,10 +252,59 @@ pub async fn test_provider_connection(
 pub async fn test_provider_input(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: ProviderInput,
+    model_name: String,
 ) -> Result<ProviderTestResult, String> {
-    ctx.test_provider_record(record.into())
+    ctx.test_provider_record(record.into(), &model_name)
         .await
         .map_err(|e| e.to_string())
+}
+
+// === Model Commands ===
+
+#[tauri::command]
+pub async fn list_models_by_provider(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    provider_id: String,
+) -> Result<Vec<ModelRecord>, String> {
+    ctx.list_models_by_provider(&LlmProviderId::new(provider_id))
+        .await
+        .map(|models| models.into_iter().map(Into::into).collect())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn upsert_model(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    record: ModelInput,
+) -> Result<(), String> {
+    ctx.upsert_model(record.into())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_model(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    id: String,
+) -> Result<bool, String> {
+    ctx.delete_model(&LlmModelId::new(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_default_model(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    id: String,
+) -> Result<(), String> {
+    ctx.set_default_model(&LlmModelId::new(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_builtin_tools(ctx: State<'_, std::sync::Arc<AppContext>>) -> Vec<String> {
+    ctx.list_builtin_tool_names()
 }
 
 // === Agent Commands ===
@@ -467,7 +550,6 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: "sk-test".to_string(),
-            model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
         }
@@ -497,7 +579,6 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,

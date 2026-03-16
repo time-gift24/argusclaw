@@ -11,10 +11,13 @@ use crate::agents::Agent;
 use crate::agents::builtins::load_arguswing;
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
-use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
+use crate::db::llm::{
+    LlmModelId, LlmModelRecord, LlmProviderId, LlmProviderRecord, LlmProviderSummary,
+    ProviderTestResult,
+};
 use crate::db::sqlite::{
-    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
-    migrate,
+    SqliteAgentRepository, SqliteJobRepository, SqliteLlmModelRepository,
+    SqliteLlmProviderRepository, connect, connect_path, migrate,
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;
@@ -62,13 +65,14 @@ impl AppContext {
         migrate(&pool).await?;
 
         let llm_repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
+        let model_repository = Arc::new(SqliteLlmModelRepository::new(pool.clone()));
         let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
         let job_repository: Arc<dyn JobRepository> =
             Arc::new(SqliteJobRepository::new(pool.clone()));
 
         let user = UserService::new(pool.clone());
 
-        let llm_manager = Arc::new(LLMManager::new(llm_repository));
+        let llm_manager = Arc::new(LLMManager::new(llm_repository, model_repository));
         let tool_manager = Arc::new(ToolManager::new());
         let agent_manager = Arc::new(AgentManager::new(
             agent_repository,
@@ -250,8 +254,38 @@ impl AppContext {
     pub async fn test_provider_record(
         &self,
         record: LlmProviderRecord,
+        model_name: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.llm_manager.test_provider_record(record).await
+        self.llm_manager
+            .test_provider_record(record, model_name)
+            .await
+    }
+
+    // === Model CRUD Methods ===
+
+    pub async fn list_models_by_provider(
+        &self,
+        provider_id: &LlmProviderId,
+    ) -> Result<Vec<LlmModelRecord>, AgentError> {
+        self.llm_manager.list_models_by_provider(provider_id).await
+    }
+
+    pub async fn upsert_model(&self, record: LlmModelRecord) -> Result<(), AgentError> {
+        self.llm_manager.upsert_model(record).await
+    }
+
+    pub async fn delete_model(&self, id: &LlmModelId) -> Result<bool, AgentError> {
+        self.llm_manager.delete_model(id).await
+    }
+
+    pub async fn set_default_model(&self, id: &LlmModelId) -> Result<(), AgentError> {
+        self.llm_manager.set_default_model(id).await
+    }
+
+    /// List all built-in tool names available in the tool manager.
+    #[must_use]
+    pub fn list_builtin_tool_names(&self) -> Vec<String> {
+        self.tool_manager.list_ids()
     }
 
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {

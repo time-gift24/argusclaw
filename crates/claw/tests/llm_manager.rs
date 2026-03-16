@@ -9,8 +9,9 @@ use std::{
 };
 
 use claw::{
-    LLMManager, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
-    ProviderSecretStatus, ProviderTestStatus, SecretString, SqliteLlmProviderRepository, migrate,
+    LLMManager, LlmModelId, LlmModelRecord, LlmModelRepository, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus, ProviderTestStatus,
+    SecretString, SqliteLlmModelRepository, SqliteLlmProviderRepository, migrate,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -22,14 +23,18 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         display_name: display_name.to_string(),
         base_url: format!("https://{id}.example.com/v1"),
         api_key: SecretString::new(format!("sk-{id}")),
-        model: "gpt-4o-mini".to_string(),
         is_default,
         extra_headers: HashMap::new(),
         secret_status: ProviderSecretStatus::Ready,
     }
 }
 
-async fn setup_repository() -> (tempfile::TempDir, SqlitePool, SqliteLlmProviderRepository) {
+async fn setup_repository() -> (
+    tempfile::TempDir,
+    SqlitePool,
+    SqliteLlmProviderRepository,
+    SqliteLlmModelRepository,
+) {
     let temp_dir = tempfile::tempdir().expect("tempdir should be created");
     let database_path = temp_dir.path().join("arguswing.db");
     let options = SqliteConnectOptions::new()
@@ -44,8 +49,9 @@ async fn setup_repository() -> (tempfile::TempDir, SqlitePool, SqliteLlmProvider
         pool.clone(),
         b"fixed-test-key".to_vec(),
     );
+    let model_repository = SqliteLlmModelRepository::new(pool.clone());
 
-    (temp_dir, pool, repository)
+    (temp_dir, pool, repository, model_repository)
 }
 
 fn spawn_single_response_server(
@@ -80,7 +86,7 @@ fn spawn_single_response_server(
 
 #[tokio::test]
 async fn llm_manager_lists_provider_summaries_for_user_selection() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     repository
         .upsert_provider(&build_record("openai", "OpenAI", true))
         .await
@@ -90,7 +96,7 @@ async fn llm_manager_lists_provider_summaries_for_user_selection() {
         .await
         .expect("deepseek provider should be stored");
 
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let providers = manager
         .list_providers()
         .await
@@ -105,13 +111,22 @@ async fn llm_manager_lists_provider_summaries_for_user_selection() {
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_builds_a_provider_from_the_stored_default_configuration() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     repository
         .upsert_provider(&build_record("openai", "OpenAI", true))
         .await
         .expect("openai provider should be stored");
+    model_repository
+        .upsert(&LlmModelRecord {
+            id: LlmModelId::new("openai:gpt-4o-mini"),
+            provider_id: LlmProviderId::new("openai"),
+            name: "gpt-4o-mini".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should be stored");
 
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let provider = manager
         .get_default_provider()
         .await
@@ -123,10 +138,10 @@ async fn llm_manager_builds_a_provider_from_the_stored_default_configuration() {
 #[cfg(feature = "dev")]
 #[tokio::test]
 async fn llm_manager_exposes_dev_passthrough_for_provider_records() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     let openai = build_record("openai", "OpenAI", true);
     let deepseek = build_record("deepseek", "DeepSeek", false);
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
 
     manager
         .upsert_provider(openai.clone())
@@ -158,8 +173,8 @@ async fn llm_manager_exposes_dev_passthrough_for_provider_records() {
 #[cfg(feature = "dev")]
 #[tokio::test]
 async fn llm_manager_can_import_multiple_providers() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
-    let manager = LLMManager::new(Arc::new(repository));
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let openai = build_record("openai", "OpenAI", false);
     let deepseek = build_record("deepseek", "DeepSeek", true);
 
@@ -184,8 +199,8 @@ async fn llm_manager_can_import_multiple_providers() {
 #[cfg(feature = "dev")]
 #[tokio::test]
 async fn llm_manager_deletes_provider_records() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
-    let manager = LLMManager::new(Arc::new(repository));
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let record = build_record("openai", "OpenAI", false);
 
     manager
@@ -209,13 +224,13 @@ async fn llm_manager_deletes_provider_records() {
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_reports_successful_provider_connection_tests() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     let base_url = spawn_single_response_server(
         "200 OK",
         r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
         &[],
     );
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let mut record = build_record("openai", "OpenAI", true);
     record.base_url = base_url.clone();
 
@@ -223,6 +238,15 @@ async fn llm_manager_reports_successful_provider_connection_tests() {
         .upsert_provider(record.clone())
         .await
         .expect("provider should be stored");
+    manager
+        .upsert_model(LlmModelRecord {
+            id: LlmModelId::new("openai:gpt-4o-mini"),
+            provider_id: record.id.clone(),
+            name: "gpt-4o-mini".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should be stored");
 
     let result = manager
         .test_provider_connection(&record.id)
@@ -239,18 +263,24 @@ async fn llm_manager_reports_successful_provider_connection_tests() {
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_can_test_unsaved_provider_configurations() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     let base_url = spawn_single_response_server(
         "200 OK",
         r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
         &[],
     );
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let mut record = build_record("", "Draft Provider", false);
     record.base_url = base_url;
+    let model_record = LlmModelRecord {
+        id: LlmModelId::new("draft:gpt-4o-mini"),
+        provider_id: record.id.clone(),
+        name: "gpt-4o-mini".to_string(),
+        is_default: true,
+    };
 
     let result = manager
-        .test_provider_record(record)
+        .test_provider_record(record, &model_record.name)
         .await
         .expect("draft provider test should succeed");
 
@@ -261,9 +291,9 @@ async fn llm_manager_can_test_unsaved_provider_configurations() {
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     let base_url = spawn_single_response_server("401 Unauthorized", r#"{"error":"bad key"}"#, &[]);
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let mut record = build_record("openai", "OpenAI", true);
     record.base_url = base_url;
 
@@ -271,6 +301,15 @@ async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
         .upsert_provider(record.clone())
         .await
         .expect("provider should be stored");
+    manager
+        .upsert_model(LlmModelRecord {
+            id: LlmModelId::new("openai:gpt-4o-mini"),
+            provider_id: record.id.clone(),
+            name: "gpt-4o-mini".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should be stored");
 
     let result = manager
         .test_provider_connection(&record.id)
@@ -283,8 +322,8 @@ async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_reports_missing_providers_in_connection_tests() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
-    let manager = LLMManager::new(Arc::new(repository));
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
 
     let result = manager
         .test_provider_connection(&LlmProviderId::new("missing"))
@@ -298,10 +337,10 @@ async fn llm_manager_reports_missing_providers_in_connection_tests() {
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_maps_model_availability_failures_for_provider_connection_tests() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     let base_url =
         spawn_single_response_server("404 Not Found", r#"{"error":"model not available"}"#, &[]);
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let mut record = build_record("openai", "OpenAI", true);
     record.base_url = base_url;
 
@@ -309,6 +348,15 @@ async fn llm_manager_maps_model_availability_failures_for_provider_connection_te
         .upsert_provider(record.clone())
         .await
         .expect("provider should be stored");
+    manager
+        .upsert_model(LlmModelRecord {
+            id: LlmModelId::new("openai:gpt-4o-mini"),
+            provider_id: record.id.clone(),
+            name: "gpt-4o-mini".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should be stored");
 
     let result = manager
         .test_provider_connection(&record.id)
@@ -321,13 +369,13 @@ async fn llm_manager_maps_model_availability_failures_for_provider_connection_te
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() {
-    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let (_temp_dir, _pool, repository, model_repository) = setup_repository().await;
     let base_url = spawn_single_response_server(
         "500 Internal Server Error",
         r#"{"error":"upstream exploded"}"#,
         &[],
     );
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let mut record = build_record("openai", "OpenAI", true);
     record.base_url = base_url;
 
@@ -335,6 +383,15 @@ async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() 
         .upsert_provider(record.clone())
         .await
         .expect("provider should be stored");
+    manager
+        .upsert_model(LlmModelRecord {
+            id: LlmModelId::new("openai:gpt-4o-mini"),
+            provider_id: record.id.clone(),
+            name: "gpt-4o-mini".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should be stored");
 
     let result = manager
         .test_provider_connection(&record.id)
