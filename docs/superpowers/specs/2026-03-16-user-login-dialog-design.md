@@ -6,7 +6,7 @@
 
 ## Overview
 
-Add a local authentication system to the desktop application. Users click the avatar in the top-right corner to access a login dialog. On first use, users set up credentials; subsequent visits require login. Passwords are hashed using Argon2 with MAC-address-derived salt.
+Add a local authentication system to the desktop application. Users click the avatar in the top-right corner to access a login dialog. On first use, users set up credentials; subsequent visits require login. Passwords are hashed using Argon2 with random salts stored in the database.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ Add a local authentication system to the desktop application. Users click the av
 - Local storage only (no remote API)
 - Password hashed (one-way, not encrypted)
 - Minimal user data (username only)
-- Session persists across app restarts
+- Session persists across app restarts (persistent login)
 - No registration/delete logic (single-user, first-time setup only)
 - Avatar appearance changes based on login state
 - Logout option in profile dropdown
@@ -42,7 +42,7 @@ Add a local authentication system to the desktop application. Users click the av
 │                                                              │
 │  user.rs (new module in claw)                               │
 │    - UserService with Argon2 password hashing               │
-│    - Uses mac_address for salt derivation (existing pattern)│
+│    - Random salt per password (stored in DB)                │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
@@ -53,6 +53,7 @@ Add a local authentication system to the desktop application. Users click the av
 │    - id: INTEGER PRIMARY KEY                                │
 │    - username: TEXT UNIQUE NOT NULL                         │
 │    - password_hash: TEXT NOT NULL                           │
+│    - password_salt: TEXT NOT NULL                           │
 │    - is_logged_in: BOOLEAN DEFAULT 0                        │
 │    - created_at: TEXT                                       │
 │    - updated_at: TEXT                                       │
@@ -63,13 +64,16 @@ Add a local authentication system to the desktop application. Users click the av
 
 ### Database Migration
 
-File: `crates/claw/migrations/YYYYMMDDHHMMSS_create_users_table.sql`
+**Command to create:** `sqlx migrate add create_users_table` (run in `crates/claw/` directory)
+
+File: `crates/claw/migrations/<timestamp>_create_users_table.sql`
 
 ```sql
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
     is_logged_in BOOLEAN NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -79,6 +83,9 @@ CREATE TABLE users (
 ### New Module: `crates/claw/src/user.rs`
 
 ```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     pub username: String,
 }
@@ -88,18 +95,64 @@ pub struct UserService {
 }
 
 impl UserService {
-    pub async fn get_current_user(&self) -> Result<Option<UserInfo>>;
-    pub async fn setup_account(&self, username: &str, password: &str) -> Result<()>;
-    pub async fn login(&self, username: &str, password: &str) -> Result<UserInfo>;
-    pub async fn logout(&self) -> Result<()>;
+    pub async fn get_current_user(&self) -> Result<Option<UserInfo>, UserError>;
+    pub async fn setup_account(&self, username: &str, password: &str) -> Result<(), UserError>;
+    pub async fn login(&self, username: &str, password: &str) -> Result<UserInfo, UserError>;
+    pub async fn logout(&self) -> Result<(), UserError>;
 }
 ```
 
 ### Password Hashing Strategy
 
-- Use `argon2` crate for password hashing
-- Salt derived from MAC address via HKDF-SHA256 (follows existing `secret.rs` pattern)
-- Host-bound hashing ensures passwords are tied to the machine
+- Use `argon2` crate for password hashing (Argon2id variant recommended)
+- Generate a random 16-byte salt per password using `ring::rand::SecureRandom`
+- Store salt in `password_salt` column as base64 or hex string
+- Hash stored in `password_hash` column as PHC string format (Argon2 default)
+
+**Hashing process:**
+1. Generate random salt: `SecureRandom::fill(&mut salt)`
+2. Hash password with Argon2id: `argon2.hash_password(password, &salt)`
+3. Store both hash and salt in database
+
+**Verification process:**
+1. Retrieve hash and salt from database
+2. Verify: `argon2.verify_password(password, &stored_hash)`
+
+### Error Integration
+
+Add `UserError` to `error.rs` and integrate with `AgentError`:
+
+```rust
+// In error.rs
+#[derive(Debug, thiserror::Error)]
+pub enum AgentError {
+    // ... existing variants ...
+
+    #[error(transparent)]
+    User(#[from] UserError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UserError {
+    #[error("User already exists: {username}")]
+    UserAlreadyExists { username: String },
+
+    #[error("User not found: {username}")]
+    UserNotFound { username: String },
+
+    #[error("Invalid password")]
+    InvalidPassword,
+
+    #[error("No user setup")]
+    NoUserSetup,
+
+    #[error("Database error: {reason}")]
+    DatabaseError { reason: String },
+
+    #[error("Password hash error: {reason}")]
+    HashError { reason: String },
+}
+```
 
 ### Tauri Commands
 
@@ -121,13 +174,20 @@ pub async fn logout(ctx: AppContext) -> Result<(), String>;
 
 ### AppContext Integration
 
-Add `UserService` to `AppContext` in `claw.rs`.
+Add `UserService` to `AppContext` in `claw.rs`:
+
+```rust
+pub struct AppContext {
+    // existing fields...
+    pub user: UserService,
+}
+```
 
 ## Frontend Design
 
 ### Zustand Auth Store
 
-File: `crates/desktop/stores/auth-store.ts`
+File: `crates/desktop/components/auth/use-auth-store.ts`
 
 ```typescript
 interface AuthState {
@@ -251,28 +311,30 @@ pub enum UserError {
 - Min 4 characters
 - Max 100 characters
 
+**Validation timing:** On form submit (not on blur)
+
 ### Edge Cases
 
 | Case | Behavior |
 |------|----------|
-| DB has user but app restarts | `get_current_user` returns user, `is_logged_in` persists |
-| Multiple rows in users table | App logic enforces single-user, use `LIMIT 1` |
-| MAC address changes | User must re-setup account (salt derivation changes) |
+| DB has user but app restarts | `get_current_user` returns user with `is_logged_in=1`, user stays logged in (persistent login is intentional) |
+| Multiple rows in users table | App logic enforces single-user, always use `LIMIT 1` |
+| User calls setup_account when user already exists | Backend returns `UserAlreadyExists` error, frontend shows "Account already set up" |
 
 ## File Changes Summary
 
 ### New Files
 
-- `crates/claw/migrations/YYYYMMDDHHMMSS_create_users_table.sql`
+- `crates/claw/migrations/<timestamp>_create_users_table.sql`
 - `crates/claw/src/user.rs`
-- `crates/desktop/stores/auth-store.ts`
+- `crates/desktop/components/auth/use-auth-store.ts`
 - `crates/desktop/components/auth/login-dialog.tsx`
 
 ### Modified Files
 
 - `crates/claw/src/lib.rs` — Add `user` module
 - `crates/claw/src/claw.rs` — Add `UserService` to `AppContext`
-- `crates/claw/src/error.rs` — Add `UserError`
+- `crates/claw/src/error.rs` — Add `UserError` and integrate with `AgentError`
 - `crates/desktop/src-tauri/src/commands.rs` — Add auth commands
 - `crates/desktop/src-tauri/src/lib.rs` — Register new commands
 - `crates/desktop/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06.tsx` — Update ProfileDropdown
