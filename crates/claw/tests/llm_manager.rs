@@ -404,7 +404,7 @@ async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() 
 
 #[tokio::test]
 async fn llm_manager_lists_provider_summaries_when_some_secrets_require_reentry() {
-    let (_temp_dir, pool, repository) = setup_repository().await;
+    let (_temp_dir, pool, repository, model_repository) = setup_repository().await;
     repository
         .upsert_provider(&build_record("openai", "OpenAI", true))
         .await
@@ -419,7 +419,7 @@ async fn llm_manager_lists_provider_summaries_when_some_secrets_require_reentry(
         .await
         .expect("legacy provider should be stored");
 
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = LLMManager::new(Arc::new(repository), Arc::new(model_repository));
     let providers = manager
         .list_providers()
         .await

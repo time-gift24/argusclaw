@@ -85,7 +85,7 @@ export function ProviderTestDialog({
               <div className="flex items-start justify-between gap-3">
                 <span className="text-muted-foreground">Model</span>
                 <span className="font-mono text-right">
-                  {provider?.model ?? result?.model ?? "-"}
+                  {result?.model ?? "-"}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-3">

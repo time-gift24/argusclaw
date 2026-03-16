@@ -58,7 +58,6 @@ export default function ProvidersPage() {
       display_name: record.display_name,
       base_url: record.base_url,
       api_key: record.api_key,
-      model: record.model,
       is_default: record.is_default,
       extra_headers: record.extra_headers,
     };
@@ -80,7 +79,6 @@ export default function ProvidersPage() {
           typeof provider.api_key === "string"
             ? provider.api_key
             : (provider.api_key as { api_key: string }).api_key || "",
-        model: provider.model,
         is_default: provider.is_default,
         extra_headers: provider.extra_headers,
         secret_status: provider.secret_status,
@@ -125,7 +123,7 @@ export default function ProvidersPage() {
       } catch (error) {
         const fallbackResult: ProviderTestResult = {
           provider_id: id,
-          model: provider?.model ?? "",
+          model: "",
           base_url: provider?.base_url ?? "",
           checked_at: new Date().toISOString(),
           latency_ms: 0,
@@ -185,7 +183,7 @@ export default function ProvidersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="mx-auto w-full max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb
         items={[{ label: "设置", href: "/settings" }, { label: "LLM 提供者" }]}
       />

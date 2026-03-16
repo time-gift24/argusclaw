@@ -666,13 +666,21 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
         })
         .await
         .expect("provider should save");
+
+        ctx.upsert_model(crate::LlmModelRecord {
+            id: crate::LlmModelId::new("openai:gpt-4o"),
+            provider_id: crate::LlmProviderId::new("openai"),
+            name: "gpt-4o".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should save");
 
         let first = ctx
             .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
@@ -712,13 +720,21 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
         })
         .await
         .expect("provider should save");
+
+        ctx.upsert_model(crate::LlmModelRecord {
+            id: crate::LlmModelId::new("openai:gpt-4o"),
+            provider_id: crate::LlmProviderId::new("openai"),
+            name: "gpt-4o".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should save");
 
         let runtime = ctx
             .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
@@ -757,13 +773,21 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
         })
         .await
         .expect("provider should save");
+
+        ctx.upsert_model(crate::LlmModelRecord {
+            id: crate::LlmModelId::new("openai:gpt-4o"),
+            provider_id: crate::LlmProviderId::new("openai"),
+            name: "gpt-4o".to_string(),
+            is_default: true,
+        })
+        .await
+        .expect("model should save");
 
         let runtime = ctx
             .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)

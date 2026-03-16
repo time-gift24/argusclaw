@@ -15,7 +15,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { LlmProviderSummary } from "./provider-card"
+import type { LlmProviderSummary } from "@/lib/tauri"
 
 export interface AgentRecord {
   id: string

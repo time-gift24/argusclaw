@@ -1,4 +1,4 @@
-export { ProviderCard, type LlmProviderSummary } from "./provider-card";
+export { ProviderCard } from "./provider-card";
 export {
   ProviderFormDialog,
   type LlmProviderRecord,
