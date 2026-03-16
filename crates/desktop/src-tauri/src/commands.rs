@@ -247,6 +247,52 @@ pub async fn create_default_agent(
     Ok(agent_id.to_string())
 }
 
+// ========== User Auth Commands ==========
+
+#[tauri::command]
+pub async fn get_current_user(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+) -> Result<Option<claw::UserInfo>, String> {
+    ctx.user()
+        .get_current_user()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn has_any_user(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<bool, String> {
+    ctx.user().has_any_user().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn setup_account(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    ctx.user()
+        .setup_account(&username, &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn login(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    username: String,
+    password: String,
+) -> Result<claw::UserInfo, String> {
+    ctx.user()
+        .login(&username, &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn logout(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<(), String> {
+    ctx.user().logout().await.map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
