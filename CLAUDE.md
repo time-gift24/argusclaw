@@ -1,6 +1,7 @@
 # ArgusClaw 开发指南
 
 ## 构建与测试
+务必使用 `cargo install prek && prek install` 初始化项目
 
 ```bash
 prek                                           # 静态检查基线
