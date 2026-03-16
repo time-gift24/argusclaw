@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::DbError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LlmProviderId(String);
 
 impl LlmProviderId {

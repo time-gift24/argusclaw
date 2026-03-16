@@ -37,8 +37,8 @@ pub use agents::{AgentRecord, AgentRuntimeInfo, ThreadInfo};
 
 // Protocol Types (稳定 DTO)
 pub use protocol::{
-    ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmStreamEvent, RiskLevel, ThreadEvent,
-    ThreadId, TokenUsage,
+    ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmStreamEvent, RiskLevel,
+    RuntimeAgentHandle, ThreadEvent, ThreadId, TokenUsage,
 };
 
 // LLM Provider Types (DTO)
