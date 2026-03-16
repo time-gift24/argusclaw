@@ -290,6 +290,27 @@ impl AppContext {
         self.agent_manager.create_agent(&record).await
     }
 
+    /// Create a runtime agent from the default template with approval configuration.
+    ///
+    /// Binds to the default LLM provider at runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DefaultProviderNotConfigured` if no default provider is set.
+    pub async fn create_default_agent_with_approval(
+        &self,
+        approval_tools: Vec<String>,
+        auto_approve: bool,
+    ) -> Result<AgentId, AgentError> {
+        let template = self.get_default_agent_template().await?;
+        let default_provider = self.get_default_provider_record().await?;
+        let mut record = template;
+        record.provider_id = default_provider.id.to_string();
+        self.agent_manager
+            .create_agent_with_approval(&record, approval_tools, auto_approve)
+            .await
+    }
+
     // === Agent Use-Case Methods ===
 
     /// Create a runtime Agent from an AgentRecord template.
