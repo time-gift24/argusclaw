@@ -36,6 +36,12 @@ pub enum AgentError {
     #[error("provider kind `{kind}` is not supported by this build")]
     UnsupportedProviderKind { kind: String },
 
+    #[error("model `{model}` is not available on provider `{provider}`")]
+    ModelNotAvailable { provider: String, model: String },
+
+    #[error("provider validation failed: {reason}")]
+    ProviderValidationFailed { reason: String },
+
     #[error("agent `{id}` was not found")]
     AgentNotFound { id: AgentId },
 
@@ -62,4 +68,31 @@ pub enum AgentError {
 
     #[error(transparent)]
     User(#[from] UserError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentError;
+
+    #[test]
+    fn model_not_available_error_formats_correctly() {
+        let error = AgentError::ModelNotAvailable {
+            provider: "openai".to_string(),
+            model: "gpt-5".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("openai"));
+        assert!(message.contains("gpt-5"));
+        assert!(message.contains("not available"));
+    }
+
+    #[test]
+    fn provider_validation_failed_error_formats_correctly() {
+        let error = AgentError::ProviderValidationFailed {
+            reason: "models list is empty".to_string(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("validation failed"));
+        assert!(message.contains("models list is empty"));
+    }
 }
