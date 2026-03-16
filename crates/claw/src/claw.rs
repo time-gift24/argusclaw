@@ -215,6 +215,13 @@ impl AppContext {
         self.llm_manager.test_provider_connection(id).await
     }
 
+    pub async fn test_provider_record(
+        &self,
+        record: LlmProviderRecord,
+    ) -> Result<ProviderTestResult, AgentError> {
+        self.llm_manager.test_provider_record(record).await
+    }
+
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {
         self.agent_manager
             .upsert_template(record)

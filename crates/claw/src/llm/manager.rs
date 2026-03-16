@@ -131,31 +131,32 @@ impl LLMManager {
             Err(error) => return Err(error),
         };
 
-        let started = std::time::Instant::now();
-        let request = CompletionRequest::new(vec![ChatMessage::user("Reply with exactly OK.")])
-            .with_max_tokens(8)
-            .with_temperature(0.0);
+        Ok(run_provider_connection_test(provider_id, model, base_url, provider).await)
+    }
 
-        let result = match provider.complete(request).await {
-            Ok(_) => build_provider_test_result(
-                provider_id,
-                model,
-                base_url,
-                started.elapsed(),
-                ProviderTestStatus::Success,
-                "Provider connection test succeeded.".to_string(),
-            ),
-            Err(error) => build_provider_test_result(
-                provider_id,
-                model.clone(),
-                base_url,
-                started.elapsed(),
-                map_llm_error_to_test_status(&error),
-                error.to_string(),
-            ),
+    pub async fn test_provider_record(
+        &self,
+        record: LlmProviderRecord,
+    ) -> Result<ProviderTestResult, AgentError> {
+        let provider_id = record.id.to_string();
+        let model = record.model.clone();
+        let base_url = record.base_url.clone();
+        let provider = match self.build_provider(record) {
+            Ok(provider) => provider,
+            Err(AgentError::UnsupportedProviderKind { kind }) => {
+                return Ok(build_provider_test_result(
+                    provider_id,
+                    model,
+                    base_url,
+                    Duration::ZERO,
+                    ProviderTestStatus::UnsupportedProviderKind,
+                    AgentError::UnsupportedProviderKind { kind }.to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
         };
 
-        Ok(result)
+        Ok(run_provider_connection_test(provider_id, model, base_url, provider).await)
     }
 
     #[cfg(feature = "dev")]
@@ -244,6 +245,37 @@ fn build_provider_test_result(
         latency_ms: duration_to_millis(latency),
         status,
         message,
+    }
+}
+
+async fn run_provider_connection_test(
+    provider_id: String,
+    model: String,
+    base_url: String,
+    provider: Arc<dyn LlmProvider>,
+) -> ProviderTestResult {
+    let started = std::time::Instant::now();
+    let request = CompletionRequest::new(vec![ChatMessage::user("Reply with exactly OK.")])
+        .with_max_tokens(8)
+        .with_temperature(0.0);
+
+    match provider.complete(request).await {
+        Ok(_) => build_provider_test_result(
+            provider_id,
+            model,
+            base_url,
+            started.elapsed(),
+            ProviderTestStatus::Success,
+            "Provider connection test succeeded.".to_string(),
+        ),
+        Err(error) => build_provider_test_result(
+            provider_id,
+            model,
+            base_url,
+            started.elapsed(),
+            map_llm_error_to_test_status(&error),
+            error.to_string(),
+        ),
     }
 }
 

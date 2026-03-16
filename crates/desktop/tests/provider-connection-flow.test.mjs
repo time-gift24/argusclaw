@@ -2,10 +2,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
-const tauriSource = readFileSync(new URL("../lib/tauri.ts", import.meta.url), "utf8");
-const providersPageSource = readFileSync(new URL("../app/settings/providers/page.tsx", import.meta.url), "utf8");
-const providerCardSource = readFileSync(new URL("../components/settings/provider-card.tsx", import.meta.url), "utf8");
-const providerDialogPath = new URL("../components/settings/provider-test-dialog.tsx", import.meta.url);
+const tauriSource = readFileSync(
+  new URL("../lib/tauri.ts", import.meta.url),
+  "utf8",
+);
+const providersPageSource = readFileSync(
+  new URL("../app/settings/providers/page.tsx", import.meta.url),
+  "utf8",
+);
+const providerCardSource = readFileSync(
+  new URL("../components/settings/provider-card.tsx", import.meta.url),
+  "utf8",
+);
+const providerDialogPath = new URL(
+  "../components/settings/provider-test-dialog.tsx",
+  import.meta.url,
+);
 
 test("desktop tauri bindings expose provider test connection types and invoke wrapper", () => {
   assert.match(tauriSource, /export type ProviderTestStatus =/);
@@ -13,6 +25,10 @@ test("desktop tauri bindings expose provider test connection types and invoke wr
   assert.match(
     tauriSource,
     /testConnection:\s*\(id: string\)\s*=>\s*invoke<ProviderTestResult>\("test_provider_connection",\s*\{ id \}\)/,
+  );
+  assert.match(
+    tauriSource,
+    /testInput:\s*\(record: ProviderInput\)\s*=>\s*invoke<ProviderTestResult>\("test_provider_input",\s*\{ record \}\)/,
   );
 });
 
@@ -25,13 +41,19 @@ test("providers page keeps transient provider test status state and wires the ca
     providersPageSource,
     /const \[activeProviderId, setActiveProviderId\] = React\.useState<string \| null>\(\s*null,\s*\)/,
   );
-  assert.match(providersPageSource, /const \[testDialogOpen, setTestDialogOpen\] = React\.useState\(false\)/);
+  assert.match(
+    providersPageSource,
+    /const \[testDialogOpen, setTestDialogOpen\] = React\.useState\(false\)/,
+  );
   assert.match(
     providersPageSource,
     /const \[testingProviderId, setTestingProviderId\] = React\.useState<\s*string \| null\s*>\(null\)/,
   );
   assert.match(providersPageSource, /providers\.testConnection\(id\)/);
-  assert.match(providersPageSource, /onTestConnection=\{handleTestConnection\}/);
+  assert.match(
+    providersPageSource,
+    /onTestConnection=\{handleTestConnection\}/,
+  );
   assert.match(providersPageSource, /onViewStatus=\{handleViewStatus\}/);
   assert.match(providersPageSource, /<ProviderTestDialog/);
 });
