@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 #[cfg(feature = "dev")]
 use crate::agents::Agent;
+use crate::agents::builtins::load_arguswing;
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
 use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
@@ -23,6 +24,18 @@ use crate::llm::{LLMManager, LlmProvider};
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
+
+/// The ID of the default built-in agent.
+pub const DEFAULT_AGENT_ID: &str = "arguswing";
+
+/// Ensures the default ArgusWing agent exists in the database.
+async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentError> {
+    let default_agent = load_arguswing().map_err(|e| AgentError::BuiltinAgentLoadFailed {
+        reason: e.to_string(),
+    })?;
+    agent_manager.upsert_template(default_agent).await?;
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -59,6 +72,9 @@ impl AppContext {
             tool_manager.clone(),
             None,
         ));
+
+        // Ensure default agent exists
+        ensure_default_agent(&agent_manager).await?;
 
         // Create and start scheduler
         let scheduler = Arc::new(Scheduler::new(
@@ -250,6 +266,51 @@ impl AppContext {
             .map_err(Into::into)
     }
 
+    /// Get the default ArgusWing agent template.
+    ///
+    /// This agent is guaranteed to exist after `AppContext::init()`.
+    pub async fn get_default_agent_template(&self) -> Result<AgentRecord, AgentError> {
+        self.get_template(&AgentId::new(DEFAULT_AGENT_ID))
+            .await?
+            .ok_or(AgentError::DefaultAgentNotFound)
+    }
+
+    /// Create a runtime agent from the default template.
+    ///
+    /// Binds to the default LLM provider at runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DefaultProviderNotConfigured` if no default provider is set.
+    pub async fn create_default_agent(&self) -> Result<AgentId, AgentError> {
+        let template = self.get_default_agent_template().await?;
+        let default_provider = self.get_default_provider_record().await?;
+        let mut record = template;
+        record.provider_id = default_provider.id.to_string();
+        self.agent_manager.create_agent(&record).await
+    }
+
+    /// Create a runtime agent from the default template with approval configuration.
+    ///
+    /// Binds to the default LLM provider at runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DefaultProviderNotConfigured` if no default provider is set.
+    pub async fn create_default_agent_with_approval(
+        &self,
+        approval_tools: Vec<String>,
+        auto_approve: bool,
+    ) -> Result<AgentId, AgentError> {
+        let template = self.get_default_agent_template().await?;
+        let default_provider = self.get_default_provider_record().await?;
+        let mut record = template;
+        record.provider_id = default_provider.id.to_string();
+        self.agent_manager
+            .create_agent_with_approval(&record, approval_tools, auto_approve)
+            .await
+    }
+
     // === Agent Use-Case Methods ===
 
     /// Create a runtime Agent from an AgentRecord template.
@@ -436,5 +497,24 @@ mod tests {
 
         assert!(providers.is_empty());
         assert!(database_path.exists());
+    }
+
+    #[tokio::test]
+    async fn init_creates_default_arguswing_agent() {
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        let default_agent = ctx
+            .get_default_agent_template()
+            .await
+            .expect("default agent should exist");
+
+        assert_eq!(default_agent.id.as_ref(), "arguswing");
+        assert_eq!(default_agent.display_name, "ArgusWing");
+        assert!(default_agent.provider_id.is_empty());
     }
 }

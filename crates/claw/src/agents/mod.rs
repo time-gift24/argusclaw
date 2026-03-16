@@ -1,6 +1,7 @@
 //! Agent management module.
 
 pub mod agent;
+pub(crate) mod builtins;
 
 // Internal modules: pub for dev feature, otherwise crate-internal
 #[cfg(feature = "dev")]
