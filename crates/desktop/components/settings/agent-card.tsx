@@ -1,11 +1,12 @@
 "use client"
 
 import type { ReactNode } from "react"
-import { Bot, Pencil, Trash2 } from "lucide-react"
+import { Bot, CircleHelp, Pencil, Trash2 } from "lucide-react"
 import type { LlmProviderSummary } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export interface AgentRecord {
   id: string
@@ -27,7 +28,7 @@ interface AgentCardProps {
 }
 
 interface DetailRowProps {
-  label: string
+  label: ReactNode
   children: ReactNode
 }
 
@@ -111,7 +112,27 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
               )}
             </DetailRow>
 
-            <DetailRow label="最大 Token">
+            <DetailRow
+              label={(
+                <span className="inline-flex items-center gap-1">
+                  <span>最大 Token</span>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={(
+                        <button
+                          type="button"
+                          className="inline-flex size-3 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          aria-label="最大 Token 说明"
+                        />
+                      )}
+                    >
+                      <CircleHelp className="size-3" />
+                    </TooltipTrigger>
+                    <TooltipContent side="top">模型单次 turn 允许返回的最大 token</TooltipContent>
+                  </Tooltip>
+                </span>
+              )}
+            >
               <span className="font-mono text-xs">{formatMaxTokens(agent.max_tokens)}</span>
             </DetailRow>
 
