@@ -6,6 +6,9 @@ import {
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { AgentSelector } from "@/components/assistant-ui/agent-selector";
+import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
+import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -60,6 +63,7 @@ export const Thread: FC = () => {
 
         <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4 md:pb-6">
           <ThreadScrollToBottom />
+          <ApprovalPrompt />
           <Composer />
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
@@ -144,22 +148,16 @@ const Composer: FC = () => {
 
 const ComposerAction: FC = () => {
   return (
-    <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
-      <ComposerAddAttachment />
-      <AuiIf condition={(s) => !s.thread.isRunning}>
-        <ComposerPrimitive.Send asChild>
-          <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
-            <ArrowUpIcon className="aui-composer-send-icon size-4" />
-          </TooltipIconButton>
-        </ComposerPrimitive.Send>
-      </AuiIf>
-      <AuiIf condition={(s) => s.thread.isRunning}>
-        <ComposerPrimitive.Cancel asChild>
-          <Button type="button" variant="default" size="icon" className="aui-composer-cancel size-8 rounded-full" aria-label="Stop generating">
-            <SquareIcon className="aui-composer-cancel-icon size-3 fill-current" />
-          </Button>
-        </ComposerPrimitive.Cancel>
-      </AuiIf>
+    <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2">
+        <AgentSelector />
+        <ProviderSelector />
+      </div>
+      <ComposerPrimitive.Send asChild>
+        <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
+          <ArrowUpIcon className="aui-composer-send-icon size-4" />
+        </TooltipIconButton>
+      </ComposerPrimitive.Send>
     </div>
   );
 };
