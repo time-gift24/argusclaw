@@ -47,7 +47,7 @@ export const Thread: FC = () => {
     >
       <ThreadPrimitive.Viewport
         turnAnchor="top"
-        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
+        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4 pb-32"
       >
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
@@ -60,13 +60,15 @@ export const Thread: FC = () => {
             AssistantMessage,
           }}
         />
+      </ThreadPrimitive.Viewport>
 
-        <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4 md:pb-6">
-          <ThreadScrollToBottom />
+      {/* Fixed bottom composer */}
+      <div className="fixed bottom-0 left-0 right-0 z-50 bg-background">
+        <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-2 px-4 pb-4 pt-2">
           <ApprovalPrompt />
           <Composer />
-        </ThreadPrimitive.ViewportFooter>
-      </ThreadPrimitive.Viewport>
+        </div>
+      </div>
     </ThreadPrimitive.Root>
   );
 };

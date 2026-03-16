@@ -4,6 +4,23 @@ export interface ToolCallPayload {
   arguments: unknown;
 }
 
+export interface ApprovalRequestPayload {
+  id: string;
+  agent_id: string;
+  tool_name: string;
+  action: string;
+  risk_level: "low" | "medium" | "high" | "critical";
+  requested_at: string;
+  timeout_secs: number;
+}
+
+export interface ApprovalResponsePayload {
+  request_id: string;
+  decision: ApprovalDecision;
+  decided_at: string;
+  decided_by?: string | null;
+}
+
 export interface ChatMessagePayload {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -29,24 +46,30 @@ export interface ChatSessionPayload {
 }
 
 export type ThreadEventPayload =
-  | { type: "ReasoningDelta"; delta: string }
-  | { type: "ContentDelta"; delta: string }
+  | { type: "reasoning_delta"; delta: string }
+  | { type: "content_delta"; delta: string }
   | {
-      type: "ToolCallDelta";
+      type: "tool_call_delta";
       index: number;
       id?: string | null;
       name?: string | null;
       arguments_delta?: string | null;
     }
-  | { type: "LlmUsage"; input_tokens: number; output_tokens: number }
-  | { type: "ToolStarted"; tool_call_id: string; tool_name: string; arguments: unknown }
-  | { type: "ToolCompleted"; tool_call_id: string; tool_name: string; result: unknown }
-  | { type: "TurnCompleted"; input_tokens: number; output_tokens: number; total_tokens: number }
-  | { type: "TurnFailed"; error: string }
-  | { type: "Idle" }
-  | { type: "Compacted"; new_token_count: number }
-  | { type: "WaitingForApproval"; request: Record<string, unknown> }
-  | { type: "ApprovalResolved"; response: Record<string, unknown> };
+  | { type: "llm_usage"; input_tokens: number; output_tokens: number }
+  | { type: "tool_started"; tool_call_id: string; tool_name: string; arguments: unknown }
+  | {
+      type: "tool_completed";
+      tool_call_id: string;
+      tool_name: string;
+      result: unknown;
+      is_error: boolean;
+    }
+  | { type: "turn_completed"; input_tokens: number; output_tokens: number; total_tokens: number }
+  | { type: "turn_failed"; error: string }
+  | { type: "idle" }
+  | { type: "compacted"; new_token_count: number }
+  | { type: "waiting_for_approval"; request: ApprovalRequestPayload }
+  | { type: "approval_resolved"; response: ApprovalResponsePayload };
 
 export interface ThreadEventEnvelope {
   runtime_agent_id: string;

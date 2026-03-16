@@ -8,6 +8,10 @@ const pageSource = readFileSync(new URL("../app/page.tsx", import.meta.url), "ut
 
 test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatRuntimeSource, /useExternalStoreRuntime/);
+  assert.match(chatRuntimeSource, /pendingAssistant/);
+  assert.match(chatRuntimeSource, /tool_calls|tool-call|toolCallId/);
+  assert.match(chatRuntimeSource, /role:\s*"tool"/);
+  assert.match(chatRuntimeSource, /onNew:/);
   assert.match(chatScreenSource, /AssistantRuntimeProvider/);
   assert.match(chatScreenSource, /useChatRuntime\(\)/);
   assert.match(chatScreenSource, /<Thread \/>/);

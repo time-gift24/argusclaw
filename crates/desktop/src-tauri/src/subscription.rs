@@ -113,13 +113,13 @@ impl ThreadSubscriptions {
                 result = receiver.recv() => {
                     match result {
                         Ok(event) => {
-                            let envelope =
-                                ThreadEventEnvelope::from_thread_event(
-                                    runtime_agent_id.clone(),
-                                    event
-                                );
-                            if let Err(e) = app.emit("thread:event", &envelope) {
-                                error!("Failed to emit thread event: {}", e);
+                            if let Some(envelope) = ThreadEventEnvelope::from_thread_event(
+                                runtime_agent_id.clone(),
+                                event,
+                            ) {
+                                if let Err(e) = app.emit("thread:event", &envelope) {
+                                    error!("Failed to emit thread event: {}", e);
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {

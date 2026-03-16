@@ -354,7 +354,28 @@ impl AppContext {
         record.provider_id = effective_provider.to_string();
         record.id = AgentId::new(format!("{template_id}--{}", Uuid::new_v4()));
 
-        let runtime_agent_id = self.agent_manager.create_agent(&record).await?;
+        let approval_tools: Vec<String> = record
+            .tool_names
+            .iter()
+            .filter(|tool_name| match self.tool_manager.get(tool_name) {
+                Some(tool) => {
+                    matches!(
+                        tool.risk_level(),
+                        crate::RiskLevel::High | crate::RiskLevel::Critical
+                    )
+                }
+                None => true,
+            })
+            .cloned()
+            .collect();
+
+        let runtime_agent_id = if approval_tools.is_empty() {
+            self.agent_manager.create_agent(&record).await?
+        } else {
+            self.agent_manager
+                .create_agent_with_approval(&record, approval_tools, false)
+                .await?
+        };
         Ok(crate::RuntimeAgentHandle {
             runtime_agent_id,
             template_id: template_id.clone(),
@@ -674,5 +695,47 @@ mod tests {
         assert_eq!(snapshot.turn_count, 0);
         assert!(!snapshot.messages.is_empty());
         assert_eq!(snapshot.messages[0].role, "system");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn create_runtime_agent_from_template_enables_approval_for_risky_tools() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+        })
+        .await
+        .expect("provider should save");
+
+        let runtime = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("runtime agent should be created");
+
+        let result = ctx.resolve_approval(
+            &runtime.runtime_agent_id,
+            uuid::Uuid::new_v4(),
+            crate::ApprovalDecision::Approved,
+            Some("desktop-user".to_string()),
+        );
+
+        assert!(
+            matches!(result, Err(crate::AgentError::ApprovalFailed { .. })),
+            "runtime agent should have an approval manager for risky tools",
+        );
     }
 }

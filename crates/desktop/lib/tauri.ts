@@ -1,11 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type {
-  ApprovalDecision,
-  ChatSessionPayload,
-  ThreadSnapshotPayload,
-} from "./types/chat";
-
 // Types matching Rust structs
 
 export interface LlmProviderSummary {
