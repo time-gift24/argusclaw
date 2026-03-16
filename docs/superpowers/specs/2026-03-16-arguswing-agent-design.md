@@ -6,94 +6,101 @@
 
 ## Overview
 
-Add a default agent (`arguswing`) that is seeded via database migration and ensured at runtime. The desktop frontend can assume this agent always exists and use it for conversations by default.
+Add a default agent (`arguswing`) defined in a TOML file, embedded at compile time, and upserted at runtime. The desktop frontend can assume this agent always exists and use it for conversations by default.
 
 ## Requirements
 
 - Agent exists by default after app initialization
 - Agent ID is stable and predictable (`arguswing`)
 - Agent is provider-agnostic — binds to default provider at runtime
-- Agent configuration can evolve with code version
-
-## Data Model
-
-```rust
-AgentRecord {
-    id: AgentId::new("arguswing"),
-    display_name: "ArgusWing",
-    description: "Default assistant for ArgusWing",
-    version: env!("CARGO_PKG_VERSION"),
-    provider_id: String::new(),  // Empty = bind to default at runtime
-    system_prompt: "You are ArgusWing, a helpful AI assistant.",
-    tool_names: vec!["shell", "read", "grep", "glob"],
-    max_tokens: None,
-    temperature: None,
-}
-```
-
-### Key Decisions
-
-- **Provider-agnostic**: `provider_id` is empty in the template, resolved to default provider when creating runtime agent
-- **Version tracking**: Uses crate version to help track agent config changes
-- **Full capabilities**: All built-in tools enabled by default
+- Agent configuration is version-controlled in code (single source of truth)
 
 ## Implementation
 
-### 1. Migration
+### 1. Agent Definition File
 
-**File:** `crates/claw/migrations/20260316XXXXXX_seed_arguswing_agent.sql`
+**File:** `agents/arguswing.toml`
 
-```sql
--- Seed the default ArgusWing agent
-INSERT OR IGNORE INTO agents (
-    id, display_name, description, version, provider_id,
-    system_prompt, tool_names, max_tokens, temperature
-) VALUES (
-    'arguswing',
-    'ArgusWing',
-    'Default assistant for ArgusWing',
-    '0.1.0',
-    NULL,
-    'You are ArgusWing, a helpful AI assistant.',
-    '["shell", "read", "grep", "glob"]',
-    NULL,
-    NULL
-);
+```toml
+id = "arguswing"
+display_name = "ArgusWing"
+description = "Default assistant for ArgusWing"
+version = "0.1.0"
+system_prompt = "You are ArgusWing, a helpful AI assistant."
+tool_names = ["shell", "read", "grep", "glob"]
+# provider_id omitted = bind to default at runtime
+# max_tokens omitted = use provider default
+# temperature omitted = use provider default
 ```
 
-- `INSERT OR IGNORE` is idempotent — safe to run multiple times
-- Uses `NULL` for `provider_id` (SQLite equivalent of empty)
+### 2. Compile-Time Embedding
 
-### 2. Runtime Initialization
+**File:** `crates/claw/src/agents/builtins.rs`
+
+```rust
+use super::types::{AgentId, AgentRecord};
+
+/// Default ArgusWing agent definition embedded at compile time.
+const ARGUSWING_TOML: &str = include_str!("../../../agents/arguswing.toml");
+
+/// Load the built-in ArgusWing agent record.
+pub fn load_arguswing() -> Result<AgentRecord, toml::de::Error> {
+    #[derive(serde::Deserialize)]
+    struct AgentDef {
+        id: String,
+        display_name: String,
+        description: String,
+        version: String,
+        system_prompt: String,
+        tool_names: Vec<String>,
+    }
+
+    let def: AgentDef = toml::from_str(ARGUSWING_TOML)?;
+    Ok(AgentRecord {
+        id: AgentId::new(def.id),
+        display_name: def.display_name,
+        description: def.description,
+        version: def.version,
+        provider_id: String::new(),
+        system_prompt: def.system_prompt,
+        tool_names: def.tool_names,
+        max_tokens: None,
+        temperature: None,
+    })
+}
+```
+
+### 3. Runtime Initialization
 
 **File:** `crates/claw/src/claw.rs`
 
-Add `ensure_default_agent()` function called during `AppContext::init()`:
-
 ```rust
+use crate::agents::builtins::load_arguswing;
+
 const DEFAULT_AGENT_ID: &str = "arguswing";
+
+impl AppContext {
+    pub async fn init(database_target: Option<String>) -> Result<Self, AgentError> {
+        // ... existing init code ...
+
+        // Ensure default agent exists
+        ensure_default_agent(&agent_manager).await?;
+
+        Ok(Self { ... })
+    }
+}
 
 /// Ensures the default ArgusWing agent exists in the database.
 async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentError> {
-    let default_agent = AgentRecord {
-        id: AgentId::new(DEFAULT_AGENT_ID),
-        display_name: "ArgusWing".to_string(),
-        description: "Default assistant for ArgusWing".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        provider_id: String::new(),
-        system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
-        tool_names: vec!["shell".to_string(), "read".to_string(),
-                        "grep".to_string(), "glob".to_string()],
-        max_tokens: None,
-        temperature: None,
-    };
-
+    let default_agent = load_arguswing().map_err(|e| AgentError::BuiltinAgentLoadFailed {
+        reason: e.to_string(),
+    })?;
     agent_manager.upsert_template(default_agent).await?;
     Ok(())
 }
 ```
 
-### 3. Public API
+### 4. Public API
 
 **File:** `crates/claw/src/claw.rs`
 
@@ -118,26 +125,31 @@ impl AppContext {
 }
 ```
 
-### 4. Error Handling
+### 5. Error Handling
 
 **File:** `crates/claw/src/error.rs`
 
 ```rust
-#[error("Default agent not found")]
-DefaultAgentNotFound,
+pub enum AgentError {
+    // ... existing variants ...
+
+    #[error("Failed to load built-in agent: {reason}")]
+    BuiltinAgentLoadFailed { reason: String },
+
+    #[error("Default agent not found")]
+    DefaultAgentNotFound,
+}
 ```
 
-### 5. Exports
+### 6. Exports
 
 **File:** `crates/claw/src/lib.rs`
-
-Export `DEFAULT_AGENT_ID` constant for consumers:
 
 ```rust
 pub const DEFAULT_AGENT_ID: &str = "arguswing";
 ```
 
-### 6. Desktop Frontend Commands
+### 7. Desktop Frontend Commands
 
 **File:** `crates/desktop/src-tauri/src/commands.rs`
 
@@ -167,22 +179,31 @@ pub async fn create_default_agent(
 
 | File | Change |
 |------|--------|
-| `crates/claw/migrations/20260316XXXXXX_seed_arguswing_agent.sql` | New migration |
-| `crates/claw/src/claw.rs` | Add initialization and API methods |
-| `crates/claw/src/error.rs` | Add `DefaultAgentNotFound` error |
+| `agents/arguswing.toml` | **New** — Agent definition file |
+| `crates/claw/src/agents/builtins.rs` | **New** — TOML parsing and loading |
+| `crates/claw/src/agents/mod.rs` | Export `builtins` module |
+| `crates/claw/src/claw.rs` | Add `ensure_default_agent()`, public API methods |
+| `crates/claw/src/error.rs` | Add `BuiltinAgentLoadFailed`, `DefaultAgentNotFound` |
 | `crates/claw/src/lib.rs` | Export `DEFAULT_AGENT_ID` |
 | `crates/desktop/src-tauri/src/commands.rs` | Add Tauri commands |
 | `crates/desktop/src-tauri/src/lib.rs` | Register new commands |
 
 ## Flow
 
-1. **Migration runs** → seeds `arguswing` agent into database
-2. **`AppContext::init()`** → upserts `arguswing` agent (ensures consistency)
+1. **Compile time** → `include_str!` embeds `agents/arguswing.toml` into binary
+2. **`AppContext::init()`** → `load_arguswing()` parses TOML → upserts to database
 3. **Desktop starts** → calls `create_default_agent` → gets runtime agent bound to default provider
 4. **User conversation** → messages go through `arguswing` agent
+
+## Benefits Over Migration Approach
+
+- **Single source of truth**: Agent definition is code, not database state
+- **Version controlled**: Changes tracked in git, not migration history
+- **Easier updates**: Modify TOML, rebuild, upsert handles the rest
+- **No migration needed**: Cleaner, less to manage
 
 ## Out of Scope
 
 - Updating agent config via UI
-- Multiple default agents
+- Multiple built-in agents
 - Provider selection at conversation start
