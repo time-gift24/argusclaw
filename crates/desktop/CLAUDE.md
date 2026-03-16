@@ -1,4 +1,4 @@
-# ArgusClaw Desktop 开发指南
+# ArgusWing Desktop 开发指南
 
 ## 技术栈
 

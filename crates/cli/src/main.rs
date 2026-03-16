@@ -1,4 +1,4 @@
-//! Production CLI entry point (argusclaw).
+//! Production CLI entry point (arguswing).
 //!
 //! This binary is minimal - it only includes provider and agent commands.
 
@@ -11,9 +11,9 @@ use cli::agent::{AgentCommand, run_agent_command};
 use cli::provider::{ProviderCommand, run_provider_command};
 use cli::{db_path_to_url, resolve_db_path};
 
-/// ArgusClaw - AI Agent CLI Tool
+/// ArgusWing - AI Agent CLI Tool
 #[derive(Debug, Parser)]
-#[command(name = "argusclaw", version, about)]
+#[command(name = "arguswing", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -55,7 +55,7 @@ fn init_tracing() {
     // Only initialize tracing if RUST_LOG is set
     if std::env::var("RUST_LOG").is_ok() {
         let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("argusclaw=info,claw=info"));
+            .unwrap_or_else(|_| EnvFilter::new("arguswing=info,claw=info"));
 
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
