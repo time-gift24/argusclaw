@@ -140,6 +140,7 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
             model: value.model,
             is_default: value.is_default,
             extra_headers: HashMap::new(),
+            secret_status: claw::ProviderSecretStatus::Ready,
         })
     }
 }

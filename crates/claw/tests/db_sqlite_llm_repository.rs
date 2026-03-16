@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use claw::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
-    SqliteLlmProviderRepository, migrate,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus,
+    SecretString, SqliteLlmProviderRepository, migrate,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -19,6 +19,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         model: "gpt-4o-mini".to_string(),
         is_default,
         extra_headers: HashMap::new(),
+        secret_status: ProviderSecretStatus::Ready,
     }
 }
 
@@ -37,6 +38,7 @@ fn build_record_with_headers(
         model: "gpt-4o-mini".to_string(),
         is_default,
         extra_headers: headers,
+        secret_status: ProviderSecretStatus::Ready,
     }
 }
 
@@ -211,4 +213,71 @@ async fn sqlite_repository_deletes_providers_by_id() {
 
     assert!(deleted);
     assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn sqlite_repository_lists_summaries_even_when_a_secret_can_not_be_decrypted() {
+    let (_temp_dir, pool, repository) = setup_repository().await;
+    let readable = build_record("openai", "OpenAI", true);
+
+    repository
+        .upsert_provider(&readable)
+        .await
+        .expect("readable provider should be stored");
+
+    let legacy_repository = SqliteLlmProviderRepository::new_with_key_material(
+        pool.clone(),
+        b"legacy-test-key".to_vec(),
+    );
+    let unreadable = build_record("legacy", "Legacy", false);
+
+    legacy_repository
+        .upsert_provider(&unreadable)
+        .await
+        .expect("legacy provider should be stored");
+
+    let summaries = repository
+        .list_providers()
+        .await
+        .expect("listing summaries should still succeed");
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].display_name, "Legacy");
+    assert_eq!(
+        summaries[0].secret_status,
+        ProviderSecretStatus::RequiresReentry
+    );
+    assert_eq!(summaries[1].display_name, "OpenAI");
+    assert_eq!(summaries[1].secret_status, ProviderSecretStatus::Ready);
+}
+
+#[tokio::test]
+async fn sqlite_repository_can_read_provider_records_encrypted_with_legacy_fallback_key_material() {
+    let (_temp_dir, pool, _repository) = setup_repository().await;
+    let legacy_repository = SqliteLlmProviderRepository::new_with_key_material(
+        pool.clone(),
+        b"legacy-test-key".to_vec(),
+    );
+    let record = build_record("legacy", "Legacy", true);
+
+    legacy_repository
+        .upsert_provider(&record)
+        .await
+        .expect("legacy provider should be stored");
+
+    let repository = SqliteLlmProviderRepository::new_with_key_material_and_fallbacks(
+        pool.clone(),
+        b"primary-test-key".to_vec(),
+        vec![b"legacy-test-key".to_vec()],
+    );
+
+    let stored = repository
+        .get_provider(&record.id)
+        .await
+        .expect("legacy provider should still decrypt through fallback")
+        .expect("legacy provider should exist");
+
+    assert_eq!(stored.id, record.id);
+    assert_eq!(stored.api_key.expose_secret(), "sk-legacy");
+    assert_eq!(stored.secret_status, ProviderSecretStatus::Ready);
 }

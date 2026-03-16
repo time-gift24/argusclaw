@@ -1,5 +1,4 @@
 import {
-  ComposerAddAttachment,
   ComposerAttachments,
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
@@ -9,6 +8,7 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
+import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -23,7 +23,6 @@ import {
   ThreadPrimitive,
 } from "@assistant-ui/react";
 import {
-  ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
   ChevronLeftIcon,
@@ -33,7 +32,6 @@ import {
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
-  SquareIcon,
 } from "lucide-react";
 import type { FC } from "react";
 
@@ -65,21 +63,12 @@ export const Thread: FC = () => {
       {/* Fixed bottom composer */}
       <div className="fixed bottom-0 left-0 right-0 z-50 bg-background">
         <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-2 px-4 pb-4 pt-2">
+          <ChatStatusBanner />
           <ApprovalPrompt />
           <Composer />
         </div>
       </div>
     </ThreadPrimitive.Root>
-  );
-};
-
-const ThreadScrollToBottom: FC = () => {
-  return (
-    <ThreadPrimitive.ScrollToBottom asChild>
-      <TooltipIconButton tooltip="Scroll to bottom" variant="outline" className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible dark:bg-background dark:hover:bg-accent">
-        <ArrowDownIcon />
-      </TooltipIconButton>
-    </ThreadPrimitive.ScrollToBottom>
   );
 };
 
@@ -184,6 +173,7 @@ const AssistantMessage: FC = () => {
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
+            Reasoning: ReasoningBlock,
             tools: { Fallback: ToolFallback },
           }}
         />
@@ -239,6 +229,19 @@ const AssistantActionBar: FC = () => {
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>
+  );
+};
+
+const ReasoningBlock: FC = () => {
+  return (
+    <details className="aui-reasoning-block mb-3 overflow-hidden rounded-xl border border-border/60 bg-muted/40 text-sm">
+      <summary className="cursor-pointer list-none px-3 py-2 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+        Reasoning
+      </summary>
+      <div className="border-border/60 border-t px-3 py-2 text-muted-foreground">
+        <MarkdownText />
+      </div>
+    </details>
   );
 };
 

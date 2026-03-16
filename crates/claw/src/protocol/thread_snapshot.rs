@@ -20,6 +20,8 @@ pub struct ThreadMessageSnapshot {
     pub role: String,
     /// The content of the message.
     pub content: String,
+    /// Reasoning content associated with the message, if any.
+    pub reasoning_content: Option<String>,
     /// The tool call ID if this is a tool response message.
     pub tool_call_id: Option<String>,
     /// The name of the tool if this is a tool message.

@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{
+    ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -146,22 +148,31 @@ impl OpenAiCompatibleProvider {
         &self,
         body: &ChatCompletionsRequest,
     ) -> Result<reqwest::Response, LlmError> {
-        let response = self
-            .client
-            .post(self.endpoint())
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "openai-compatible".to_string(),
-                reason: e.to_string(),
-            })?;
+        let response =
+            self.build_chat_request(body)
+                .send()
+                .await
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "openai-compatible".to_string(),
+                    reason: e.to_string(),
+                })?;
 
         if response.status().is_success() {
             return Ok(response);
         }
 
         Err(map_http_error(response, &self.model).await)
+    }
+
+    fn build_chat_request(&self, body: &ChatCompletionsRequest) -> reqwest::RequestBuilder {
+        let mut request = self.client.post(self.endpoint()).json(body);
+        if body.stream {
+            request = request
+                .header(ACCEPT, "text/event-stream")
+                .header(ACCEPT_ENCODING, "identity");
+        }
+
+        request
     }
 }
 
@@ -696,6 +707,41 @@ mod tests {
 
         assert_eq!(json["thinking"]["type"], "enabled");
         assert_eq!(json["thinking"]["clear_thinking"], false);
+    }
+
+    #[test]
+    fn streaming_requests_set_sse_headers() {
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
+            "https://example.com/v1",
+            "key",
+            "glm-5",
+        ))
+        .expect("provider should build");
+        let body = ChatCompletionsRequest::from_completion_request(
+            "glm-5",
+            CompletionRequest::new(vec![ChatMessage::user("hi")]),
+            true,
+        );
+
+        let request = provider
+            .build_chat_request(&body)
+            .build()
+            .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(ACCEPT)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get(ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("identity")
+        );
     }
 
     #[test]

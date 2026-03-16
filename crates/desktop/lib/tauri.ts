@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 // Types matching Rust structs
 
+export type ProviderSecretStatus = "ready" | "requires_reentry";
+
 export interface LlmProviderSummary {
   id: string;
   kind: "openai-compatible";
@@ -10,6 +12,7 @@ export interface LlmProviderSummary {
   model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 export interface LlmProviderRecord {
@@ -21,6 +24,7 @@ export interface LlmProviderRecord {
   model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 export interface ProviderInput {
@@ -111,8 +115,9 @@ export interface ThreadSnapshotPayload {
   runtime_agent_id: string;
   thread_id: string;
   messages: Array<{
-    role: string;
+    role: "system" | "user" | "assistant" | "tool";
     content: string;
+    reasoning_content?: string | null;
     tool_call_id?: string | null;
     name?: string | null;
     tool_calls?: Array<{ id: string; name: string; arguments: unknown }> | null;

@@ -234,8 +234,17 @@ impl Agent {
             .get(thread_id)
             .map(|entry| entry.value().clone())
             .ok_or(AgentError::ThreadNotFound { id: *thread_id })?;
-        let mut thread = thread_arc.lock().await;
-        thread.send_message(message).await;
+        let thread_id = *thread_id;
+        tokio::spawn(async move {
+            let mut thread = thread_arc.lock().await;
+            if let Err(error) = thread.send_message(message).await {
+                tracing::error!(
+                    %thread_id,
+                    error = %error,
+                    "thread turn failed while processing a message"
+                );
+            }
+        });
         Ok(())
     }
 
@@ -326,6 +335,7 @@ impl Agent {
                         crate::llm::Role::Tool => "tool".to_string(),
                     },
                     content: message.content.clone(),
+                    reasoning_content: message.reasoning_content.clone(),
                     tool_call_id: message.tool_call_id.clone(),
                     name: message.name.clone(),
                     tool_calls: message.tool_calls.as_ref().map(|tool_calls| {
@@ -375,11 +385,126 @@ impl std::fmt::Debug for Agent {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::time::{Duration, timeout};
+
     use super::*;
+    use crate::llm::provider::{CompletionRequest, CompletionResponse};
+    use crate::llm::{
+        FinishReason, LlmError, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::protocol::ThreadEvent;
 
     #[test]
     fn test_agent_runtime_info() {
         let info = AgentRuntimeInfo::new(AgentId::new("test"), 5, "gpt-4".to_string());
         assert_eq!(info.thread_count, 5);
+    }
+
+    struct SingleResponseProvider;
+
+    #[async_trait]
+    impl LlmProvider for SingleResponseProvider {
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        fn context_window(&self) -> u32 {
+            100_000
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unimplemented!("complete is not used in runtime send_message tests")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("Persisted answer".to_string()),
+                reasoning_content: Some("Visible reasoning".to_string()),
+                tool_calls: vec![],
+                input_tokens: 12,
+                output_tokens: 8,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn send_message_persists_history_before_idle_snapshot_reads_it() {
+        let agent = AgentBuilder::new()
+            .id(AgentId::new("test-agent"))
+            .system_prompt("You are helpful".to_string())
+            .provider(Arc::new(SingleResponseProvider))
+            .build()
+            .expect("agent should build");
+
+        let thread_id = agent
+            .create_thread(ThreadConfig::default())
+            .expect("thread should be created");
+        let mut subscription = agent
+            .subscribe(&thread_id)
+            .await
+            .expect("thread subscription should exist");
+
+        agent
+            .send_message(&thread_id, "Hello".to_string())
+            .await
+            .expect("message dispatch should succeed");
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                match subscription.recv().await {
+                    Ok(ThreadEvent::Idle {
+                        thread_id: idle_thread_id,
+                    }) if idle_thread_id == thread_id => {
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("failed to receive thread event: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("idle event should arrive");
+
+        let snapshot = agent
+            .get_thread_snapshot(&thread_id)
+            .await
+            .expect("snapshot should exist");
+
+        assert_eq!(
+            snapshot
+                .messages
+                .last()
+                .map(|message| message.role.as_str()),
+            Some("assistant")
+        );
+        assert_eq!(
+            snapshot
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("Persisted answer")
+        );
+        assert_eq!(
+            snapshot
+                .messages
+                .last()
+                .and_then(|message| message.reasoning_content.as_deref()),
+            Some("Visible reasoning")
+        );
     }
 }

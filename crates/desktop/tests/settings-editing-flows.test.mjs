@@ -38,7 +38,7 @@ test("agent editor treats provider as optional when deciding whether the form ca
   assert.match(agentEditorSource, /function getPreferredProviderId/);
   assert.match(
     agentEditorSource,
-    /providersData\.find\(\(p\)\s*=>\s*p\.is_default\)\?\.id \|\| providersData\[0\]\?\.id \|\| ""/,
+    /providersData\.find\(\(p\)\s*=>\s*p\.is_default && p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*providersData\.find\(\(p\)\s*=>\s*p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*""/,
   );
   assert.match(
     agentEditorSource,
@@ -73,6 +73,9 @@ test("provider editing flow controls the dialog from the page state", () => {
     providerDialogSource,
     /<Dialog open=\{open\} onOpenChange=\{handleOpenChange\}>/,
   );
+  assert.match(providerDialogSource, /secret_status:/);
+  assert.match(providerDialogSource, /requires_reentry/);
+  assert.match(providerDialogSource, /重新填写 API Key/);
 });
 
 test("provider form dialog can test the current draft configuration before saving", () => {
@@ -96,4 +99,16 @@ test("provider form dialog can test the current draft configuration before savin
   assert.match(providerDialogSource, /providers\.testInput\(record\)/);
   assert.match(providerDialogSource, /测试连接/);
   assert.match(providerDialogSource, /<ProviderTestDialog/);
+});
+
+test("provider cards and agent editor surface providers that require api key reentry", () => {
+  const providersPageSource = readFileSync(providersPagePath, "utf8");
+  const providerDialogSource = readFileSync(providerDialogPath, "utf8");
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(providersPageSource, /secret_status/);
+  assert.match(providersPageSource, /requires_reentry/);
+  assert.match(providerDialogSource, /secret_status === "requires_reentry"/);
+  assert.match(agentEditorSource, /secret_status === "requires_reentry"/);
+  assert.match(agentEditorSource, /disabled=\{.*secret_status === "requires_reentry"/);
 });

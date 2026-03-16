@@ -5,7 +5,7 @@ use chrono::Utc;
 
 use crate::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
-    ProviderTestResult, ProviderTestStatus,
+    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
 };
 use crate::error::AgentError;
 use crate::llm::ChatMessage;
@@ -26,8 +26,7 @@ impl LLMManager {
     }
 
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
-        let providers = self.repository.list_providers().await?;
-        Ok(providers.into_iter().map(Into::into).collect())
+        self.repository.list_providers().await.map_err(Into::into)
     }
 
     pub async fn get_provider(
@@ -54,6 +53,10 @@ impl LLMManager {
     }
 
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
+        let record = LlmProviderRecord {
+            secret_status: ProviderSecretStatus::Ready,
+            ..record
+        };
         self.repository.upsert_provider(&record).await?;
         Ok(())
     }
@@ -82,6 +85,16 @@ impl LLMManager {
     ) -> Result<LlmProviderRecord, AgentError> {
         self.repository
             .get_provider(id)
+            .await?
+            .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })
+    }
+
+    pub async fn get_provider_summary(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<LlmProviderSummary, AgentError> {
+        self.repository
+            .get_provider_summary(id)
             .await?
             .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })
     }

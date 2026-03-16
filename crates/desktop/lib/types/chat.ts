@@ -24,6 +24,7 @@ export interface ApprovalResponsePayload {
 export interface ChatMessagePayload {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  reasoning_content?: string | null;
   tool_call_id?: string | null;
   name?: string | null;
   tool_calls?: ToolCallPayload[] | null;

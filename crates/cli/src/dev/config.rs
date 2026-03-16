@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use claw::{DbError, LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
+use claw::{
+    DbError, LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus, SecretString,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderImportFile {
@@ -36,6 +38,7 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
             model: value.model,
             is_default: value.is_default,
             extra_headers: value.extra_headers,
+            secret_status: ProviderSecretStatus::Ready,
         })
     }
 }
