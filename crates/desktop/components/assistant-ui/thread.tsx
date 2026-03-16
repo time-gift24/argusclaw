@@ -1,11 +1,14 @@
 import {
-  ComposerAddAttachment,
   ComposerAttachments,
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { AgentSelector } from "@/components/assistant-ui/agent-selector";
+import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
+import { ApprovalPrompt } from "@/components/chat/approval-prompt";
+import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -15,6 +18,7 @@ import {
   BranchPickerPrimitive,
   ComposerPrimitive,
   ErrorPrimitive,
+  MessagePartPrimitive,
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
@@ -23,6 +27,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -30,22 +35,19 @@ import {
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
-  SquareIcon,
 } from "lucide-react";
 import type { FC } from "react";
 
 export const Thread: FC = () => {
   return (
     <ThreadPrimitive.Root
-      className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
+      className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background"
       style={{
-        ["--thread-max-width" as string]: "44rem",
+        ["--thread-max-width" as string]: "52rem",
+        ["--composer-max-width" as string]: "44rem",
       }}
     >
-      <ThreadPrimitive.Viewport
-        turnAnchor="top"
-        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4"
-      >
+      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-32">
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
@@ -58,22 +60,24 @@ export const Thread: FC = () => {
           }}
         />
 
-        <ThreadPrimitive.ViewportFooter className="aui-thread-viewport-footer sticky bottom-0 mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-4 overflow-visible rounded-t-3xl bg-background pb-4 md:pb-6">
-          <ThreadScrollToBottom />
-          <Composer />
-        </ThreadPrimitive.ViewportFooter>
+        <div className="pointer-events-none sticky bottom-24 z-40 mx-auto mt-4 flex w-fit">
+          <ThreadPrimitive.ScrollToBottom asChild>
+            <button className="pointer-events-auto flex size-8 items-center justify-center rounded-full border border-border/60 bg-background/80 text-muted-foreground shadow-md backdrop-blur-sm transition-all hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-0">
+              <ArrowDownIcon className="size-4" />
+            </button>
+          </ThreadPrimitive.ScrollToBottom>
+        </div>
       </ThreadPrimitive.Viewport>
-    </ThreadPrimitive.Root>
-  );
-};
 
-const ThreadScrollToBottom: FC = () => {
-  return (
-    <ThreadPrimitive.ScrollToBottom asChild>
-      <TooltipIconButton tooltip="Scroll to bottom" variant="outline" className="aui-thread-scroll-to-bottom absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible dark:bg-background dark:hover:bg-accent">
-        <ArrowDownIcon />
-      </TooltipIconButton>
-    </ThreadPrimitive.ScrollToBottom>
+      {/* Fixed bottom composer */}
+      <div className="fixed bottom-0 left-0 right-0 z-50 bg-background">
+        <div className="mx-auto flex w-full max-w-(--composer-max-width) flex-col gap-2 px-4 pb-4 pt-2">
+          <ChatStatusBanner />
+          <ApprovalPrompt />
+          <Composer />
+        </div>
+      </div>
+    </ThreadPrimitive.Root>
   );
 };
 
@@ -144,22 +148,16 @@ const Composer: FC = () => {
 
 const ComposerAction: FC = () => {
   return (
-    <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between">
-      <ComposerAddAttachment />
-      <AuiIf condition={(s) => !s.thread.isRunning}>
-        <ComposerPrimitive.Send asChild>
-          <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
-            <ArrowUpIcon className="aui-composer-send-icon size-4" />
-          </TooltipIconButton>
-        </ComposerPrimitive.Send>
-      </AuiIf>
-      <AuiIf condition={(s) => s.thread.isRunning}>
-        <ComposerPrimitive.Cancel asChild>
-          <Button type="button" variant="default" size="icon" className="aui-composer-cancel size-8 rounded-full" aria-label="Stop generating">
-            <SquareIcon className="aui-composer-cancel-icon size-3 fill-current" />
-          </Button>
-        </ComposerPrimitive.Cancel>
-      </AuiIf>
+    <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2">
+        <AgentSelector />
+        <ProviderSelector />
+      </div>
+      <ComposerPrimitive.Send asChild>
+        <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
+          <ArrowUpIcon className="aui-composer-send-icon size-4" />
+        </TooltipIconButton>
+      </ComposerPrimitive.Send>
     </div>
   );
 };
@@ -184,6 +182,7 @@ const AssistantMessage: FC = () => {
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
+            Reasoning: ReasoningBlock,
             tools: { Fallback: ToolFallback },
           }}
         />
@@ -239,6 +238,40 @@ const AssistantActionBar: FC = () => {
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>
+  );
+};
+
+const ReasoningBlock: FC = () => {
+  return (
+    <div className="aui-reasoning-block mb-2 text-sm">
+      {/* 运行中: 展开显示，无边框 */}
+      <MessagePartPrimitive.InProgress>
+        <div className="flex w-full items-center gap-2 px-1 py-1 font-medium text-muted-foreground">
+          <span className="relative flex size-2 items-center justify-center">
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/40 opacity-75"></span>
+            <span className="relative inline-flex size-2 rounded-full bg-primary/60"></span>
+          </span>
+          <span className="opacity-70">思考中...</span>
+        </div>
+        <div className="px-1 py-1 text-muted-foreground">
+          <MarkdownText />
+        </div>
+      </MessagePartPrimitive.InProgress>
+
+      {/* 完成后: 收缩成可展开的小标签，无边框 */}
+      <AuiIf condition={(s) => s.part.status.type !== "running"}>
+        <details className="group w-full" open={false}>
+          <summary className="flex w-full cursor-pointer list-none items-center gap-2 px-1 py-1 text-muted-foreground transition-colors hover:bg-muted/30 rounded-md [&::-webkit-details-marker]:hidden">
+            <span className="size-2 rounded-full bg-primary/40"></span>
+            <span className="opacity-70">思考完成</span>
+            <ChevronDownIcon className="ml-auto size-4 shrink-0 opacity-50 transition-transform duration-200 group-open:rotate-180" />
+          </summary>
+          <div className="px-1 py-1 text-muted-foreground">
+            <MarkdownText />
+          </div>
+        </details>
+      </AuiIf>
+    </div>
   );
 };
 

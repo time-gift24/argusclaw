@@ -21,8 +21,8 @@ test("agent editor preview uses assistant-ui markdown parts directly", () => {
     /<MessagePrimitive\.Parts\s+components=\{\{\s*Text:\s*MarkdownText\s*\}\}\s*\/>/,
   );
   assert.match(agentEditorSource, /<MessageProvider\s+message=\{previewMessage\}\s+index=\{0\}\s+isLast>/);
-  assert.match(agentEditorSource, /text-\[14px\]/);
-  assert.match(agentEditorSource, /\[\&_\.aui-md-h3\]:text-\[14px\]/);
+  assert.match(agentEditorSource, /text-foreground leading-relaxed/);
+  assert.match(agentEditorSource, /\[\&_\.aui-md-h3\]:text-sm/);
   assert.doesNotMatch(agentEditorSource, /from\s+"react-markdown"/);
   assert.doesNotMatch(agentEditorSource, /\bprose\b/);
 });

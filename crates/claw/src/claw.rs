@@ -207,6 +207,13 @@ impl AppContext {
         self.llm_manager.get_provider_record(id).await
     }
 
+    pub async fn get_provider_summary(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<LlmProviderSummary, AgentError> {
+        self.llm_manager.get_provider_summary(id).await
+    }
+
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
         self.llm_manager.get_default_provider_record().await
     }
@@ -320,6 +327,69 @@ impl AppContext {
             .await
     }
 
+    /// Create a runtime agent from a template with an optional provider override.
+    ///
+    /// This method clones the template, assigns a unique runtime ID, and binds
+    /// to either the specified provider or the default provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `template_id` - The ID of the template to clone
+    /// * `provider_override` - Optional provider ID to use instead of the default
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentNotFound` if the template doesn't exist.
+    /// Returns `DefaultProviderNotConfigured` if no override is provided and no default provider is set.
+    pub async fn create_runtime_agent_from_template(
+        &self,
+        template_id: &AgentId,
+        provider_override: Option<&LlmProviderId>,
+    ) -> Result<crate::RuntimeAgentHandle, AgentError> {
+        let mut record =
+            self.get_template(template_id)
+                .await?
+                .ok_or_else(|| AgentError::AgentNotFound {
+                    id: template_id.clone(),
+                })?;
+
+        let effective_provider = match provider_override {
+            Some(provider_id) => provider_id.clone(),
+            None => self.get_default_provider_record().await?.id,
+        };
+
+        record.provider_id = effective_provider.to_string();
+        record.id = AgentId::new(format!("{template_id}--{}", Uuid::new_v4()));
+
+        let approval_tools: Vec<String> = record
+            .tool_names
+            .iter()
+            .filter(|tool_name| match self.tool_manager.get(tool_name) {
+                Some(tool) => {
+                    matches!(
+                        tool.risk_level(),
+                        crate::RiskLevel::High | crate::RiskLevel::Critical
+                    )
+                }
+                None => true,
+            })
+            .cloned()
+            .collect();
+
+        let runtime_agent_id = if approval_tools.is_empty() {
+            self.agent_manager.create_agent(&record).await?
+        } else {
+            self.agent_manager
+                .create_agent_with_approval(&record, approval_tools, false)
+                .await?
+        };
+        Ok(crate::RuntimeAgentHandle {
+            runtime_agent_id,
+            template_id: template_id.clone(),
+            effective_provider_id: effective_provider,
+        })
+    }
+
     // === Agent Use-Case Methods ===
 
     /// Create a runtime Agent from an AgentRecord template.
@@ -405,6 +475,24 @@ impl AppContext {
     ) -> Result<(), AgentError> {
         self.agent_manager
             .resolve_approval(agent_id, request_id, decision, resolved_by)
+    }
+
+    /// Get a snapshot of a thread's current state.
+    ///
+    /// Returns the thread's messages, turn count, and token count.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ThreadNotFound` if the thread doesn't exist.
+    pub async fn get_thread_snapshot(
+        &self,
+        runtime_agent_id: &AgentId,
+        thread_id: &ThreadId,
+    ) -> Result<crate::ThreadSnapshot, AgentError> {
+        self.agent_manager
+            .get_thread_snapshot(runtime_agent_id, thread_id)
+            .await
+            .ok_or(AgentError::ThreadNotFound { id: *thread_id })
     }
 
     // === Dev-Only Methods ===
@@ -525,5 +613,139 @@ mod tests {
         assert_eq!(default_agent.id.as_ref(), "arguswing");
         assert_eq!(default_agent.display_name, "ArgusWing");
         assert!(default_agent.provider_id.is_empty());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn create_runtime_agent_from_template_keeps_duplicate_templates_alive() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
+        })
+        .await
+        .expect("provider should save");
+
+        let first = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("first runtime agent should be created");
+        let second = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("second runtime agent should be created");
+
+        assert_ne!(first.runtime_agent_id, second.runtime_agent_id);
+        assert_eq!(
+            first.template_id,
+            crate::AgentId::new(crate::DEFAULT_AGENT_ID)
+        );
+        assert_eq!(
+            second.template_id,
+            crate::AgentId::new(crate::DEFAULT_AGENT_ID)
+        );
+        assert_eq!(ctx.list_active_agents().len(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn get_thread_snapshot_returns_live_history_for_runtime_agent() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
+        })
+        .await
+        .expect("provider should save");
+
+        let runtime = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("runtime agent should be created");
+        let thread_id = ctx
+            .create_thread(&runtime.runtime_agent_id, crate::ThreadConfig::default())
+            .expect("thread should be created");
+
+        let snapshot = ctx
+            .get_thread_snapshot(&runtime.runtime_agent_id, &thread_id)
+            .await
+            .expect("snapshot should be returned");
+
+        assert_eq!(snapshot.thread_id, thread_id);
+        assert_eq!(snapshot.runtime_agent_id, runtime.runtime_agent_id);
+        assert_eq!(snapshot.turn_count, 0);
+        assert!(!snapshot.messages.is_empty());
+        assert_eq!(snapshot.messages[0].role, "system");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn create_runtime_agent_from_template_enables_approval_for_risky_tools() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
+        })
+        .await
+        .expect("provider should save");
+
+        let runtime = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("runtime agent should be created");
+
+        let result = ctx.resolve_approval(
+            &runtime.runtime_agent_id,
+            uuid::Uuid::new_v4(),
+            crate::ApprovalDecision::Approved,
+            Some("desktop-user".to_string()),
+        );
+
+        assert!(
+            matches!(result, Err(crate::AgentError::ApprovalFailed { .. })),
+            "runtime agent should have an approval manager for risky tools",
+        );
     }
 }

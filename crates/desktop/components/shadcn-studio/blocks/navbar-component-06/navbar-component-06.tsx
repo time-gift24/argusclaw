@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import Link from 'next/link'
@@ -41,7 +41,6 @@ const Navbar = ({
   const { resolvedTheme, setTheme } = useTheme()
   const { username, isLoggedIn } = useAuthStore()
   const [loginDialogOpen, setLoginDialogOpen] = useState(false)
-  const [mounted, setMounted] = useState(false)
 
   // Get avatar fallback based on auth state
   const avatarFallback = isLoggedIn && username ? username.charAt(0).toUpperCase() : '?'
@@ -56,10 +55,6 @@ const Navbar = ({
   const openLoginDialog = () => {
     setLoginDialogOpen(true)
   }
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
 
   return (
     <header className='bg-background sticky top-0 z-50'>
@@ -85,7 +80,7 @@ const Navbar = ({
 
         <div className='flex items-center gap-3'>
           <Button variant='outline' size='icon' onClick={toggleTheme}>
-            {mounted && resolvedTheme === 'dark' ? <Moon /> : <Sun />}
+            {resolvedTheme === 'dark' ? <Moon /> : <Sun />}
             <span className='sr-only'>切换主题</span>
           </Button>
 

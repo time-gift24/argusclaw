@@ -17,7 +17,11 @@ interface AgentEditorProps {
 }
 
 function getPreferredProviderId(providersData: LlmProviderSummary[]): string {
-  return providersData.find((p) => p.is_default)?.id || providersData[0]?.id || ""
+  return (
+    providersData.find((p) => p.is_default && p.secret_status !== "requires_reentry")?.id ||
+    providersData.find((p) => p.secret_status !== "requires_reentry")?.id ||
+    ""
+  )
 }
 
 export function AgentEditor({ agentId }: AgentEditorProps) {
@@ -56,6 +60,10 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       },
     }),
     [formData.system_prompt],
+  )
+  const selectedProvider = React.useMemo(
+    () => providerList.find((provider) => provider.id === formData.provider_id) ?? null,
+    [formData.provider_id, providerList],
   )
 
   const canSave = Boolean(
@@ -200,11 +208,20 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               >
                 <option value="">不指定提供者</option>
                 {providerList.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.display_name} {p.is_default ? "(默认)" : ""}
+                  <option
+                    key={p.id}
+                    value={p.id}
+                    disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
+                  >
+                    {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写 API Key)" : ""}
                   </option>
                 ))}
               </select>
+              {selectedProvider?.secret_status === "requires_reentry" && (
+                <p className="text-xs text-amber-700">
+                  当前 Provider 的密钥需要重新填写，修复前无法正常用于新会话。
+                </p>
+              )}
             </div>
           </div>
 
@@ -265,7 +282,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           <div className="flex-1 overflow-y-auto p-4">
             {formData.system_prompt ? (
               <MessageProvider message={previewMessage} index={0} isLast>
-                <div className="wrap-break-word px-2 text-[14px] text-foreground leading-relaxed [&_.aui-md-h3]:text-[14px]">
+                <div className="wrap-break-word px-2 text-foreground leading-relaxed [&_.aui-md-h3]:text-sm">
                   <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
                 </div>
               </MessageProvider>

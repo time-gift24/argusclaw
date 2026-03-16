@@ -100,6 +100,9 @@ pub struct ProviderCapabilities {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Hidden or auxiliary reasoning content associated with the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Multimodal content parts (images, etc.).
     /// When non-empty, providers serialize content as an array of parts
     /// (with `content` included as a text part) instead of a plain string.
@@ -123,6 +126,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: content.into(),
+            reasoning_content: None,
             content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -135,6 +139,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: content.into(),
+            reasoning_content: None,
             content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -149,6 +154,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: content.into(),
+            reasoning_content: None,
             content_parts: parts,
             tool_call_id: None,
             name: None,
@@ -158,9 +164,18 @@ impl ChatMessage {
 
     /// Create an assistant message.
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::assistant_with_reasoning(content, None)
+    }
+
+    /// Create an assistant message with optional reasoning content.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+    ) -> Self {
         Self {
             role: Role::Assistant,
             content: content.into(),
+            reasoning_content,
             content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -173,9 +188,19 @@ impl ChatMessage {
     /// Per the OpenAI protocol, an assistant message with tool_calls must
     /// precede the corresponding tool result messages in the conversation.
     pub fn assistant_with_tool_calls(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self::assistant_with_tool_calls_and_reasoning(content, tool_calls, None)
+    }
+
+    /// Create an assistant message with tool calls and optional reasoning content.
+    pub fn assistant_with_tool_calls_and_reasoning(
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning_content: Option<String>,
+    ) -> Self {
         Self {
             role: Role::Assistant,
             content: content.unwrap_or_default(),
+            reasoning_content,
             content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
@@ -196,6 +221,7 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: content.into(),
+            reasoning_content: None,
             content_parts: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),

@@ -5,39 +5,94 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::DbError;
-use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderRepository};
+use crate::db::llm::{
+    LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
+    ProviderSecretStatus, SecretString,
+};
 use crate::llm::secret::{
-    ApiKeyCipher, HostMacAddressKeyMaterialSource, KeyMaterialSource, StaticKeyMaterialSource,
+    ApiKeyCipher, FileKeyMaterialSource, HostMacAddressKeyMaterialSource, KeyMaterialSource,
+    StaticKeyMaterialSource,
 };
 
 pub struct SqliteLlmProviderRepository {
     pool: SqlitePool,
-    cipher: ApiKeyCipher,
+    write_cipher: ApiKeyCipher,
+    read_ciphers: Vec<ApiKeyCipher>,
 }
+
+type SharedProviderFields = (
+    LlmProviderId,
+    crate::db::llm::LlmProviderKind,
+    String,
+    String,
+    String,
+    bool,
+    HashMap<String, String>,
+    Vec<u8>,
+    Vec<u8>,
+);
 
 impl SqliteLlmProviderRepository {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
-        Self::with_key_source(pool, Arc::new(HostMacAddressKeyMaterialSource))
+        Self::with_key_sources(
+            pool,
+            Arc::new(FileKeyMaterialSource::from_env_or_default()),
+            vec![Arc::new(HostMacAddressKeyMaterialSource)],
+        )
     }
 
     #[must_use]
     pub fn new_with_key_material(pool: SqlitePool, key_material: Vec<u8>) -> Self {
-        Self::with_key_source(pool, Arc::new(StaticKeyMaterialSource::new(key_material)))
+        Self::with_key_sources(
+            pool,
+            Arc::new(StaticKeyMaterialSource::new(key_material)),
+            Vec::new(),
+        )
+    }
+
+    #[must_use]
+    pub fn new_with_key_material_and_fallbacks(
+        pool: SqlitePool,
+        key_material: Vec<u8>,
+        fallback_key_materials: Vec<Vec<u8>>,
+    ) -> Self {
+        let fallback_sources = fallback_key_materials
+            .into_iter()
+            .map(|key_material| {
+                Arc::new(StaticKeyMaterialSource::new(key_material)) as Arc<dyn KeyMaterialSource>
+            })
+            .collect();
+
+        Self::with_key_sources(
+            pool,
+            Arc::new(StaticKeyMaterialSource::new(key_material)),
+            fallback_sources,
+        )
     }
 
     #[must_use]
     pub fn with_key_source(pool: SqlitePool, key_source: Arc<dyn KeyMaterialSource>) -> Self {
+        Self::with_key_sources(pool, key_source, Vec::new())
+    }
+
+    #[must_use]
+    pub fn with_key_sources(
+        pool: SqlitePool,
+        key_source: Arc<dyn KeyMaterialSource>,
+        fallback_sources: Vec<Arc<dyn KeyMaterialSource>>,
+    ) -> Self {
+        let mut read_ciphers = vec![ApiKeyCipher::new_arc(Arc::clone(&key_source))];
+        read_ciphers.extend(fallback_sources.into_iter().map(ApiKeyCipher::new_arc));
+
         Self {
             pool,
-            cipher: ApiKeyCipher::new_arc(key_source),
+            write_cipher: ApiKeyCipher::new_arc(key_source),
+            read_ciphers,
         }
     }
 
-    fn map_record(
-        row: sqlx::sqlite::SqliteRow,
-        cipher: &ApiKeyCipher,
-    ) -> Result<LlmProviderRecord, DbError> {
+    fn parse_shared_fields(row: sqlx::sqlite::SqliteRow) -> Result<SharedProviderFields, DbError> {
         let nonce: Vec<u8> = row
             .try_get("api_key_nonce")
             .map_err(|e| DbError::QueryFailed {
@@ -59,37 +114,90 @@ impl SqliteLlmProviderRepository {
                 reason: format!("failed to parse extra_headers: {e}"),
             })?;
 
-        Ok(LlmProviderRecord {
-            id: LlmProviderId::new(row.try_get::<String, _>("id").map_err(|e| {
+        Ok((
+            LlmProviderId::new(row.try_get::<String, _>("id").map_err(|e| {
                 DbError::QueryFailed {
                     reason: e.to_string(),
                 }
             })?),
-            kind: row
-                .try_get::<String, _>("kind")
+            row.try_get::<String, _>("kind")
                 .map_err(|e| DbError::QueryFailed {
                     reason: e.to_string(),
                 })?
                 .parse()?,
-            display_name: row
-                .try_get("display_name")
+            row.try_get("display_name")
                 .map_err(|e| DbError::QueryFailed {
                     reason: e.to_string(),
                 })?,
-            base_url: row.try_get("base_url").map_err(|e| DbError::QueryFailed {
+            row.try_get("base_url").map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?,
-            api_key: cipher.decrypt(&nonce, &ciphertext)?,
-            model: row.try_get("model").map_err(|e| DbError::QueryFailed {
+            row.try_get("model").map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?,
-            is_default: row
-                .try_get::<i64, _>("is_default")
+            row.try_get::<i64, _>("is_default")
                 .map_err(|e| DbError::QueryFailed {
                     reason: e.to_string(),
                 })?
                 != 0,
             extra_headers,
+            nonce,
+            ciphertext,
+        ))
+    }
+
+    fn decrypt_secret(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<SecretString, DbError> {
+        let mut last_error = None;
+
+        for cipher in &self.read_ciphers {
+            match cipher.decrypt(nonce, ciphertext) {
+                Ok(secret) => return Ok(secret),
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        Err(
+            last_error.unwrap_or_else(|| DbError::SecretDecryptionFailed {
+                reason: "no key sources are configured".to_string(),
+            }),
+        )
+    }
+
+    fn map_record(&self, row: sqlx::sqlite::SqliteRow) -> Result<LlmProviderRecord, DbError> {
+        let (id, kind, display_name, base_url, model, is_default, extra_headers, nonce, ciphertext) =
+            Self::parse_shared_fields(row)?;
+
+        Ok(LlmProviderRecord {
+            id,
+            kind,
+            display_name,
+            base_url,
+            api_key: self.decrypt_secret(&nonce, &ciphertext)?,
+            model,
+            is_default,
+            extra_headers,
+            secret_status: ProviderSecretStatus::Ready,
+        })
+    }
+
+    fn map_summary(&self, row: sqlx::sqlite::SqliteRow) -> Result<LlmProviderSummary, DbError> {
+        let (id, kind, display_name, base_url, model, is_default, extra_headers, nonce, ciphertext) =
+            Self::parse_shared_fields(row)?;
+        let secret_status = if self.decrypt_secret(&nonce, &ciphertext).is_ok() {
+            ProviderSecretStatus::Ready
+        } else {
+            ProviderSecretStatus::RequiresReentry
+        };
+
+        Ok(LlmProviderSummary {
+            id,
+            kind,
+            display_name,
+            base_url,
+            model,
+            is_default,
+            extra_headers,
+            secret_status,
         })
     }
 }
@@ -97,7 +205,7 @@ impl SqliteLlmProviderRepository {
 #[async_trait]
 impl LlmProviderRepository for SqliteLlmProviderRepository {
     async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError> {
-        let encrypted_secret = self.cipher.encrypt(record.api_key.expose_secret())?;
+        let encrypted_secret = self.write_cipher.encrypt(record.api_key.expose_secret())?;
         let extra_headers_json =
             serde_json::to_string(&record.extra_headers).map_err(|e| DbError::QueryFailed {
                 reason: format!("failed to serialize extra_headers: {e}"),
@@ -227,11 +335,29 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             reason: e.to_string(),
         })?;
 
-        row.map(|row| Self::map_record(row, &self.cipher))
-            .transpose()
+        row.map(|row| self.map_record(row)).transpose()
     }
 
-    async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError> {
+    async fn get_provider_summary(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<Option<LlmProviderSummary>, DbError> {
+        let row = sqlx::query(
+            "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+             from llm_providers
+             where id = ?1",
+        )
+        .bind(id.as_ref())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        row.map(|row| self.map_summary(row)).transpose()
+    }
+
+    async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, DbError> {
         let rows = sqlx::query(
             "select id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
@@ -243,9 +369,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             reason: e.to_string(),
         })?;
 
-        rows.into_iter()
-            .map(|row| Self::map_record(row, &self.cipher))
-            .collect()
+        rows.into_iter().map(|row| self.map_summary(row)).collect()
     }
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError> {
@@ -261,7 +385,6 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             reason: e.to_string(),
         })?;
 
-        row.map(|row| Self::map_record(row, &self.cipher))
-            .transpose()
+        row.map(|row| self.map_record(row)).transpose()
     }
 }

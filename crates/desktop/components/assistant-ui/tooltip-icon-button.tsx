@@ -2,7 +2,7 @@
 
 import { forwardRef } from "react";
 import { Slot } from "radix-ui";
-import { cva, type VariantProps } from "class-variance-authority";
+import { type VariantProps } from "class-variance-authority";
 
 import {
   Tooltip,

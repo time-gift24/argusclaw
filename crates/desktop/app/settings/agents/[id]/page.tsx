@@ -1,5 +1,11 @@
 import { AgentEditor } from "@/components/settings"
 
-export default function EditAgentPage({ params }: { params: { id: string } }) {
-  return <AgentEditor agentId={params.id} />
+export default async function EditAgentPage({
+  params,
+}: {
+  params: Promise<{ id: string }>
+}) {
+  const { id } = await params
+
+  return <AgentEditor agentId={id} />
 }

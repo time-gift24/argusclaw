@@ -6,8 +6,10 @@
 mod approval;
 mod hooks;
 mod risk_level;
+mod runtime_agent;
 mod thread_event;
 mod thread_id;
+mod thread_snapshot;
 mod token_usage;
 
 pub use approval::{
@@ -19,8 +21,10 @@ pub use hooks::{
     ToolHookContext,
 };
 pub use risk_level::RiskLevel;
+pub use runtime_agent::RuntimeAgentHandle;
 pub use thread_event::ThreadEvent;
 pub use thread_id::ThreadId;
+pub use thread_snapshot::{ThreadMessageSnapshot, ThreadSnapshot, ToolCallSnapshot};
 pub use token_usage::TokenUsage;
 
 // Convenience re-export

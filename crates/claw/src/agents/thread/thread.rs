@@ -3,14 +3,12 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 
 use crate::agents::compact::Compactor;
-use crate::agents::turn::{
-    TurnError, TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming,
-};
+use crate::agents::turn::{TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming};
 use crate::approval::ApprovalManager;
-use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
+use crate::llm::{ChatMessage, LlmProvider};
 use crate::protocol::HookRegistry;
 use crate::tool::ToolManager;
 
@@ -19,28 +17,6 @@ use crate::protocol::{ThreadEvent, ThreadId};
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
-
-/// Handle for receiving Turn execution events.
-pub struct TurnStreamHandle {
-    /// Thread ID.
-    pub thread_id: ThreadId,
-    /// Turn number.
-    pub turn_number: u32,
-    /// Raw LLM events during processing.
-    pub llm_events: broadcast::Receiver<LlmStreamEvent>,
-    /// Final result when Turn completes.
-    pub result: oneshot::Receiver<Result<TurnOutput, TurnError>>,
-}
-
-impl TurnStreamHandle {
-    /// Wait for Turn completion and get the result.
-    pub async fn wait_for_result(self) -> Result<TurnOutput, ThreadError> {
-        self.result
-            .await
-            .map_err(|_| ThreadError::ChannelClosed)?
-            .map_err(ThreadError::TurnFailed)
-    }
-}
 
 /// Thread - multi-turn conversation session.
 ///
@@ -234,10 +210,13 @@ impl Thread {
             .sum();
     }
 
+    fn apply_turn_output(&mut self, output: TurnOutput) {
+        self.messages = output.messages;
+        self.recalculate_token_count();
+    }
+
     /// Send user message and execute Turn.
-    ///
-    /// Returns a handle for receiving streaming events and the final result.
-    pub async fn send_message(&mut self, user_input: String) -> TurnStreamHandle {
+    pub async fn send_message(&mut self, user_input: String) -> Result<(), ThreadError> {
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
@@ -246,18 +225,17 @@ impl Thread {
         }
 
         self.messages.push(ChatMessage::user(user_input));
+        self.recalculate_token_count();
         self.execute_turn_streaming().await
     }
 
-    async fn execute_turn_streaming(&mut self) -> TurnStreamHandle {
+    async fn execute_turn_streaming(&mut self) -> Result<(), ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id;
 
-        // Create channels for streaming events and result
+        // Create channel for streaming events
         let (stream_tx, mut stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (llm_event_tx, llm_event_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (result_tx, result_rx) = oneshot::channel();
 
         // Build TurnInput with stream_sender
         let tool_ids = self.tool_manager.list_ids();
@@ -283,88 +261,74 @@ impl Thread {
         let event_sender = self.event_sender.clone();
         let config = self.config.turn_config.clone();
 
-        // Spawn task to execute turn and forward events concurrently
-        tokio::spawn(async move {
-            // Clone event_sender for the forwarder task
-            let forwarder_event_sender = event_sender.clone();
-
-            // 1. Start event forwarding task (runs concurrently with turn execution)
-            let forwarder = tokio::spawn(async move {
-                while let Ok(event) = stream_rx.recv().await {
-                    match event {
-                        TurnStreamEvent::LlmEvent(llm_event) => {
-                            // Send to ThreadEvent::Processing
-                            let _ = forwarder_event_sender.send(ThreadEvent::Processing {
-                                thread_id,
-                                turn_number,
-                                event: llm_event.clone(),
-                            });
-                            // Send to llm_events channel
-                            let _ = llm_event_tx.send(llm_event);
-                        }
-                        TurnStreamEvent::ToolStarted {
+        // Start event forwarding task (runs concurrently with turn execution)
+        let forwarder_event_sender = event_sender.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Ok(event) = stream_rx.recv().await {
+                match event {
+                    TurnStreamEvent::LlmEvent(llm_event) => {
+                        let _ = forwarder_event_sender.send(ThreadEvent::Processing {
+                            thread_id,
+                            turn_number,
+                            event: llm_event,
+                        });
+                    }
+                    TurnStreamEvent::ToolStarted {
+                        tool_call_id,
+                        tool_name,
+                        arguments,
+                    } => {
+                        let _ = forwarder_event_sender.send(ThreadEvent::ToolStarted {
+                            thread_id,
+                            turn_number,
                             tool_call_id,
                             tool_name,
                             arguments,
-                        } => {
-                            let _ = forwarder_event_sender.send(ThreadEvent::ToolStarted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id,
-                                tool_name,
-                                arguments,
-                            });
-                        }
-                        TurnStreamEvent::ToolCompleted {
+                        });
+                    }
+                    TurnStreamEvent::ToolCompleted {
+                        tool_call_id,
+                        tool_name,
+                        result: tool_result,
+                    } => {
+                        let _ = forwarder_event_sender.send(ThreadEvent::ToolCompleted {
+                            thread_id,
+                            turn_number,
                             tool_call_id,
                             tool_name,
                             result: tool_result,
-                        } => {
-                            let _ = forwarder_event_sender.send(ThreadEvent::ToolCompleted {
-                                thread_id,
-                                turn_number,
-                                tool_call_id,
-                                tool_name,
-                                result: tool_result,
-                            });
-                        }
+                        });
                     }
                 }
-            });
-
-            // 2. Execute turn (events are forwarded concurrently by the forwarder task)
-            let result = execute_turn_streaming(turn_input, config).await;
-
-            // 3. Wait for event forwarding to complete (channel closes after stream_tx is dropped)
-            let _ = forwarder.await;
-
-            // 4. Send final events based on result
-            match &result {
-                Ok(output) => {
-                    let _ = event_sender.send(ThreadEvent::TurnCompleted {
-                        thread_id,
-                        turn_number,
-                        token_usage: output.token_usage.clone(),
-                    });
-                }
-                Err(e) => {
-                    let _ = event_sender.send(ThreadEvent::TurnFailed {
-                        thread_id,
-                        turn_number,
-                        error: e.to_string(),
-                    });
-                }
             }
-            let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-            let _ = result_tx.send(result);
         });
 
-        TurnStreamHandle {
-            thread_id,
-            turn_number,
-            llm_events: llm_event_rx,
-            result: result_rx,
-        }
+        let result = execute_turn_streaming(turn_input, config).await;
+        let _ = forwarder.await;
+
+        let final_result = match result {
+            Ok(output) => {
+                let token_usage = output.token_usage.clone();
+                self.apply_turn_output(output);
+                let _ = event_sender.send(ThreadEvent::TurnCompleted {
+                    thread_id,
+                    turn_number,
+                    token_usage,
+                });
+                Ok(())
+            }
+            Err(error) => {
+                let _ = event_sender.send(ThreadEvent::TurnFailed {
+                    thread_id,
+                    turn_number,
+                    error: error.to_string(),
+                });
+                Err(ThreadError::TurnFailed(error))
+            }
+        };
+
+        let _ = event_sender.send(ThreadEvent::Idle { thread_id });
+        final_result
     }
 
     /// Estimate token count for a string.
@@ -505,12 +469,17 @@ mod tests {
 
         assert_eq!(thread.turn_count(), 0);
 
-        let handle = thread.send_message("Hello".to_string()).await;
+        let result = thread.send_message("Hello".to_string()).await;
 
         assert_eq!(thread.turn_count(), 1);
 
-        let result = handle.wait_for_result().await;
         assert!(result.is_ok());
+        assert_eq!(thread.history().len(), 2);
+        assert_eq!(thread.history()[0].role, Role::User);
+        assert_eq!(thread.history()[0].content, "Hello");
+        assert_eq!(thread.history()[1].role, Role::Assistant);
+        assert_eq!(thread.history()[1].content, "Hello! How can I help?");
+        assert!(thread.token_count() > 0);
     }
 
     #[tokio::test]
@@ -531,14 +500,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let handle1 = thread.send_message("Hello".to_string()).await;
-        let _ = handle1.wait_for_result().await;
+        let _ = thread.send_message("Hello".to_string()).await;
 
-        let handle2 = thread.send_message("How are you?".to_string()).await;
-        let _ = handle2.wait_for_result().await;
+        let _ = thread.send_message("How are you?".to_string()).await;
 
-        let handle3 = thread.send_message("Goodbye".to_string()).await;
-        let _ = handle3.wait_for_result().await;
+        let _ = thread.send_message("Goodbye".to_string()).await;
 
         assert_eq!(thread.turn_count(), 3);
     }
@@ -566,11 +532,17 @@ mod tests {
 
         assert_eq!(thread.history().len(), 3);
 
-        let handle = thread.send_message("New question".to_string()).await;
-        let result = handle.wait_for_result().await;
+        let result = thread.send_message("New question".to_string()).await;
         assert!(result.is_ok());
 
         assert!(thread.history().len() > 3);
+        assert_eq!(
+            thread
+                .history()
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("Continuing conversation")
+        );
     }
 
     #[tokio::test]

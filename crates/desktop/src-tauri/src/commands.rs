@@ -3,11 +3,14 @@
 use std::collections::HashMap;
 
 use claw::{
-    AgentError, AgentId, AgentRecord, AppContext, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderTestResult, SecretString,
+    AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use uuid::Uuid;
+
+use crate::subscription::ThreadSubscriptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
@@ -55,6 +58,7 @@ impl From<ProviderInput> for LlmProviderRecord {
             model: input.model,
             is_default: input.is_default,
             extra_headers: input.extra_headers,
+            secret_status: ProviderSecretStatus::Ready,
         }
     }
 }
@@ -68,6 +72,7 @@ pub struct ProviderSummary {
     pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
 }
 
 impl From<LlmProviderSummary> for ProviderSummary {
@@ -80,6 +85,7 @@ impl From<LlmProviderSummary> for ProviderSummary {
             model: summary.model,
             is_default: summary.is_default,
             extra_headers: summary.extra_headers,
+            secret_status: summary.secret_status,
         }
     }
 }
@@ -94,6 +100,7 @@ pub struct ProviderRecord {
     pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
 }
 
 impl From<LlmProviderRecord> for ProviderRecord {
@@ -107,10 +114,26 @@ impl From<LlmProviderRecord> for ProviderRecord {
             model: record.model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
+            secret_status: record.secret_status,
         }
     }
 }
 
+fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord {
+    ProviderRecord {
+        id: summary.id.to_string(),
+        kind: summary.kind.into(),
+        display_name: summary.display_name,
+        base_url: summary.base_url,
+        api_key: String::new(),
+        model: summary.model,
+        is_default: summary.is_default,
+        extra_headers: summary.extra_headers,
+        secret_status: summary.secret_status,
+    }
+}
+
+#[cfg(test)]
 fn map_provider_lookup_result(
     result: Result<LlmProviderRecord, AgentError>,
 ) -> Result<Option<ProviderRecord>, String> {
@@ -136,8 +159,19 @@ pub async fn get_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<Option<ProviderRecord>, String> {
-    let provider = ctx.get_provider_record(&LlmProviderId::new(id)).await;
-    map_provider_lookup_result(provider)
+    let provider_id = LlmProviderId::new(id);
+    match ctx.get_provider_record(&provider_id).await {
+        Ok(record) => Ok(Some(record.into())),
+        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
+        Err(AgentError::Database(DbError::SecretDecryptionFailed { .. })) => {
+            let summary = ctx
+                .get_provider_summary(&provider_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Some(build_provider_reentry_record(summary)))
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -293,16 +327,136 @@ pub async fn logout(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<(), St
     ctx.user().logout().await.map_err(|e| e.to_string())
 }
 
+// ========== Chat Session Commands ==========
+
+/// Payload returned when creating a chat session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSessionPayload {
+    /// Unique session key (template_id::provider_preference_id).
+    pub session_key: String,
+    /// The template ID this session was created from.
+    pub template_id: String,
+    /// The runtime agent ID for this session.
+    pub runtime_agent_id: String,
+    /// The thread ID for this session.
+    pub thread_id: String,
+    /// The effective provider ID bound to this session.
+    pub effective_provider_id: String,
+}
+
+#[tauri::command]
+pub async fn create_chat_session(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    subscriptions: State<'_, ThreadSubscriptions>,
+    app: tauri::AppHandle,
+    template_id: String,
+    provider_preference_id: Option<String>,
+) -> Result<ChatSessionPayload, String> {
+    let provider_override = provider_preference_id
+        .as_ref()
+        .map(|id| LlmProviderId::new(id.clone()));
+
+    let runtime = ctx
+        .create_runtime_agent_from_template(
+            &AgentId::new(template_id.clone()),
+            provider_override.as_ref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let thread_id = ctx
+        .create_thread(&runtime.runtime_agent_id, claw::ThreadConfig::default())
+        .map_err(|e| e.to_string())?;
+
+    let session_key = format!(
+        "{}::{}",
+        template_id,
+        provider_preference_id.as_deref().unwrap_or("__default__")
+    );
+
+    // Start event forwarder
+    subscriptions
+        .start_forwarder(
+            session_key.clone(),
+            runtime.runtime_agent_id.clone(),
+            thread_id,
+            app,
+            ctx.inner().clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(ChatSessionPayload {
+        session_key,
+        template_id,
+        runtime_agent_id: runtime.runtime_agent_id.to_string(),
+        thread_id: thread_id.to_string(),
+        effective_provider_id: runtime.effective_provider_id.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn send_message(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    runtime_agent_id: String,
+    thread_id: String,
+    content: String,
+) -> Result<(), String> {
+    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    ctx.send_message(&AgentId::new(runtime_agent_id), &thread_id, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_thread_snapshot(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    runtime_agent_id: String,
+    thread_id: String,
+) -> Result<claw::ThreadSnapshot, String> {
+    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    ctx.get_thread_snapshot(&AgentId::new(runtime_agent_id), &thread_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn resolve_approval(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    runtime_agent_id: String,
+    request_id: String,
+    decision: String,
+    resolved_by: Option<String>,
+) -> Result<(), String> {
+    let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
+    let decision = match decision.as_str() {
+        "approved" => claw::ApprovalDecision::Approved,
+        "denied" => claw::ApprovalDecision::Denied,
+        _ => return Err(format!("Invalid approval decision: {}", decision)),
+    };
+
+    ctx.resolve_approval(
+        &AgentId::new(runtime_agent_id),
+        request_id,
+        decision,
+        resolved_by,
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use serde_json::json;
 
-    use super::{map_provider_lookup_result, ProviderInput, ProviderKind, ProviderRecord};
+    use super::{
+        build_provider_reentry_record, map_provider_lookup_result, ChatSessionPayload,
+        ProviderInput, ProviderKind, ProviderRecord, ProviderSummary,
+    };
     use claw::{
-        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderTestResult,
-        ProviderTestStatus, SecretString,
+        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary,
+        ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
     };
 
     #[test]
@@ -322,6 +476,7 @@ mod tests {
         assert_eq!(record.id, LlmProviderId::new("openai"));
         assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);
         assert_eq!(record.api_key.expose_secret(), "sk-test");
+        assert_eq!(record.secret_status, ProviderSecretStatus::Ready);
     }
 
     #[test]
@@ -345,6 +500,7 @@ mod tests {
             model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::Ready,
         };
 
         let output = ProviderRecord::from(record);
@@ -352,6 +508,42 @@ mod tests {
         assert_eq!(output.id, "openai");
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
+        assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
+    }
+
+    #[test]
+    fn provider_summary_can_build_a_reentry_record_with_a_blank_api_key() {
+        let record = build_provider_reentry_record(LlmProviderSummary {
+            id: LlmProviderId::new("legacy"),
+            kind: LlmProviderKind::OpenAiCompatible,
+            display_name: "Legacy".to_string(),
+            base_url: "https://legacy.example.com/v1".to_string(),
+            model: "gpt-4.1".to_string(),
+            is_default: false,
+            extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::RequiresReentry,
+        });
+
+        assert_eq!(record.id, "legacy");
+        assert_eq!(record.api_key, "");
+        assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
+    }
+
+    #[test]
+    fn provider_summary_conversion_exposes_secret_status_for_frontend() {
+        let output = ProviderSummary::from(LlmProviderSummary {
+            id: LlmProviderId::new("openai"),
+            kind: LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::Ready,
+        });
+
+        assert_eq!(output.id, "openai");
+        assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 
     #[test]
@@ -392,5 +584,20 @@ mod tests {
                 "message": "Provider connection test succeeded.",
             })
         );
+    }
+
+    #[test]
+    fn chat_session_payload_serializes_effective_provider_id() {
+        let payload = ChatSessionPayload {
+            session_key: "arguswing::__default__".to_string(),
+            template_id: "arguswing".to_string(),
+            runtime_agent_id: "arguswing--runtime".to_string(),
+            thread_id: claw::ThreadId::new().to_string(),
+            effective_provider_id: "openai".to_string(),
+        };
+
+        let value = serde_json::to_value(payload).expect("payload should serialize");
+        assert_eq!(value["effective_provider_id"], json!("openai"));
+        assert_eq!(value["session_key"], json!("arguswing::__default__"));
     }
 }
