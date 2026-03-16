@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { agents, chat, providers } from "@/lib/tauri";
+import { agents, chat, models, providers } from "@/lib/tauri";
 import type {
   ApprovalRequestPayload,
   ThreadEventEnvelope,
@@ -34,6 +34,13 @@ export interface ChatSessionState {
   error: string | null;
 }
 
+export interface ProviderModel {
+  providerId: string;
+  providerName: string;
+  modelId: string;
+  modelName: string;
+}
+
 export interface ChatStore {
   selectedTemplateId: string | null;
   selectedProviderPreferenceId: string | null;
@@ -42,11 +49,12 @@ export interface ChatStore {
   sessionsByKey: Record<string, ChatSessionState>;
   templates: Awaited<ReturnType<typeof agents.list>>;
   providers: Awaited<ReturnType<typeof providers.list>>;
+  providerModels: ProviderModel[];
   _unlisten: UnlistenFn | null;
 
   initialize: () => Promise<void>;
   activateSession: (templateId: string) => Promise<void>;
-  selectProviderPreference: (providerId: string | null) => Promise<void>;
+  selectProviderPreference: (providerModelId: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   refreshSnapshot: (sessionKey: string) => Promise<void>;
   cleanup: () => void;
@@ -61,6 +69,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sessionsByKey: {},
   templates: [],
   providers: [],
+  providerModels: [],
   _unlisten: null,
 
   async initialize() {
@@ -76,7 +85,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         agents.list(),
         providers.list(),
       ]);
-      set({ templates: templateList, providers: providerList, errorMessage: null });
+
+      // Load all models from all providers
+      const allModels: ProviderModel[] = [];
+      for (const provider of providerList) {
+        try {
+          const providerModels = await models.listByProvider(provider.id);
+          for (const model of providerModels) {
+            allModels.push({
+              providerId: provider.id,
+              providerName: provider.display_name,
+              modelId: model.id,
+              modelName: model.name,
+            });
+          }
+        } catch (error) {
+          console.error(`Failed to load models for provider ${provider.id}:`, error);
+        }
+      }
+
+      set({
+        templates: templateList,
+        providers: providerList,
+        providerModels: allModels,
+        errorMessage: null,
+      });
 
       if (templateList.length === 0) {
         set({ errorMessage: "当前没有可用的 Agent 模板。" });
@@ -139,12 +172,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async selectProviderPreference(providerId: string | null) {
-    set({ selectedProviderPreferenceId: providerId, errorMessage: null });
+  async selectProviderPreference(providerModelId: string | null) {
+    // Extract providerId from providerModelId (format: "providerId:modelId" or just "providerId" for default)
+    const providerId = providerModelId?.includes(":")
+      ? providerModelId.split(":")[0]
+      : providerModelId;
+
+    set({ selectedProviderPreferenceId: providerModelId, errorMessage: null });
 
     const state = get();
     if (state.selectedTemplateId) {
       try {
+        // Pass providerId (not providerModelId) to activateSession for session key
         await get().activateSession(state.selectedTemplateId);
       } catch {
         // activateSession already populated the visible error state
