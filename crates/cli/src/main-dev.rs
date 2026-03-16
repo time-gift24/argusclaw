@@ -1,4 +1,4 @@
-//! Development CLI entry point (argusclaw-dev).
+//! Development CLI entry point (arguswing-dev).
 //!
 //! This binary includes all development-only commands and is a superset of
 //! the production CLI.
@@ -30,7 +30,7 @@ fn init_tracing() {
     // Only initialize tracing if RUST_LOG is set
     if std::env::var("RUST_LOG").is_ok() {
         let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("argusclaw=info,claw=info"));
+            .unwrap_or_else(|_| EnvFilter::new("arguswing=info,claw=info"));
 
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)

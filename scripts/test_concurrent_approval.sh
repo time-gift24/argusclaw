@@ -18,7 +18,7 @@ mkdir -p "${TMP_DIR}"
 DB_FILE="${TMP_DIR}/approval.sqlite"
 export APPROVAL_DATABASE_URL="sqlite:${DB_FILE}"
 
-CLI_BIN="${ROOT_DIR}/target/debug/argusclaw-dev"
+CLI_BIN="${ROOT_DIR}/target/debug/arguswing-dev"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
