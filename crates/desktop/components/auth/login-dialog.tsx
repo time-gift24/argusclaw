@@ -18,6 +18,57 @@ interface LoginDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+const getSetupErrorMessage = (message?: string): string => {
+  if (!message) {
+    return '创建账号时出现异常，请稍后重试。';
+  }
+
+  const normalizedMessage = message.toLowerCase();
+
+  if (normalizedMessage.includes('user already exists')) {
+    return '账号已创建，请直接登录。';
+  }
+
+  if (normalizedMessage.includes('username is required')) {
+    return '请输入用户名。';
+  }
+
+  if (normalizedMessage.includes('password is required')) {
+    return '请输入密码。';
+  }
+
+  if (normalizedMessage.includes('password must be at least')) {
+    return '密码至少需要 4 个字符。';
+  }
+
+  return `系统错误：${message}`;
+};
+
+const getLoginErrorMessage = (message?: string): string => {
+  if (!message) {
+    return '登录时出现异常，请稍后重试。';
+  }
+
+  const normalizedMessage = message.toLowerCase();
+
+  if (
+    normalizedMessage.includes('invalid password') ||
+    normalizedMessage.includes('user not found')
+  ) {
+    return '用户名或密码错误，请重试。';
+  }
+
+  if (normalizedMessage.includes('username is required')) {
+    return '请输入用户名。';
+  }
+
+  if (normalizedMessage.includes('password is required')) {
+    return '请输入密码。';
+  }
+
+  return `系统错误：${message}`;
+};
+
 export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
   const { checkHasUser, setupAccount, login } = useAuthStore();
   const [mode, setMode] = useState<'setup' | 'login'>('setup');
@@ -51,22 +102,22 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
       if (mode === 'setup') {
         // Validation
         if (!username.trim()) {
-          setError('Username is required');
+          setError('请输入用户名。');
           setIsLoading(false);
           return;
         }
         if (!password) {
-          setError('Password is required');
+          setError('请输入密码。');
           setIsLoading(false);
           return;
         }
         if (password !== confirmPassword) {
-          setError('Passwords do not match');
+          setError('两次输入的密码不一致。');
           setIsLoading(false);
           return;
         }
         if (password.length < 4) {
-          setError('Password must be at least 4 characters');
+          setError('密码至少需要 4 个字符。');
           setIsLoading(false);
           return;
         }
@@ -76,18 +127,22 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
           onOpenChange(false);
           resetForm();
         } else {
-          setError('Account already set up');
-          setMode('login');
+          const nextError = getSetupErrorMessage(result.error);
+          setError(nextError);
+
+          if (nextError === '账号已创建，请直接登录。') {
+            setMode('login');
+          }
         }
       } else {
         // Login mode
         if (!username.trim()) {
-          setError('Username is required');
+          setError('请输入用户名。');
           setIsLoading(false);
           return;
         }
         if (!password) {
-          setError('Password is required');
+          setError('请输入密码。');
           setIsLoading(false);
           return;
         }
@@ -97,7 +152,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
           onOpenChange(false);
           resetForm();
         } else {
-          setError('Incorrect password. Please try again.');
+          setError(getLoginErrorMessage(result.error));
         }
       }
     } finally {
@@ -121,73 +176,76 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>
-            {isCheckingMode ? 'Loading...' : mode === 'setup' ? 'Set Up Your Account' : 'Login'}
+      <DialogContent className="gap-3 p-5 sm:max-w-sm">
+        <DialogHeader className="gap-1.5">
+          <DialogTitle className="text-base font-semibold">
+            {isCheckingMode ? '正在加载' : mode === 'setup' ? '创建本地账号' : '登录 ArgusWing'}
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-sm leading-6">
             {isCheckingMode
               ? ''
               : mode === 'setup'
-                ? 'Create your account to get started'
-                : 'Enter your credentials to continue'}
+                ? '首次使用请先创建本地账号。'
+                : '输入用户名和密码后继续。'}
           </DialogDescription>
         </DialogHeader>
 
         {isCheckingMode ? (
-          <div className="py-8 text-center text-muted-foreground">Checking...</div>
+          <div className="py-8 text-center text-sm text-muted-foreground">正在检查账号状态...</div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-3.5">
             <div className="space-y-2">
-              <Label htmlFor="username">Username</Label>
+              <Label htmlFor="username" className="text-sm">用户名</Label>
               <Input
                 id="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter username"
+                placeholder="请输入用户名"
                 disabled={isLoading}
                 maxLength={50}
                 autoFocus
+                className="h-9 px-3 text-sm md:text-sm"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password" className="text-sm">密码</Label>
               <Input
                 id="password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password"
+                placeholder="请输入密码"
                 disabled={isLoading}
                 maxLength={100}
+                className="h-9 px-3 text-sm md:text-sm"
               />
             </div>
 
             {mode === 'setup' && (
               <div className="space-y-2">
-                <Label htmlFor="confirmPassword">Confirm Password</Label>
+                <Label htmlFor="confirmPassword" className="text-sm">确认密码</Label>
                 <Input
                   id="confirmPassword"
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Confirm password"
+                  placeholder="请再次输入密码"
                   disabled={isLoading}
                   maxLength={100}
+                  className="h-9 px-3 text-sm md:text-sm"
                 />
               </div>
             )}
 
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && <p className="text-sm leading-6 text-destructive">{error}</p>}
 
-            <Button type="submit" className="w-full" disabled={isLoading}>
+            <Button type="submit" className="h-9 w-full text-sm md:text-sm" disabled={isLoading}>
               {isLoading
-                ? 'Please wait...'
+                ? '请稍候...'
                 : mode === 'setup'
-                  ? 'Create Account'
-                  : 'Login'}
+                  ? '创建账号'
+                  : '登录'}
             </Button>
           </form>
         )}

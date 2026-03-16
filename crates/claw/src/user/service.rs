@@ -6,6 +6,8 @@ use argon2::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+const MIN_PASSWORD_LENGTH: usize = 4;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     pub username: String,
@@ -23,9 +25,8 @@ impl UserService {
 
     /// Returns the currently logged-in user, if any
     pub async fn get_current_user(&self) -> Result<Option<UserInfo>> {
-        let row = sqlx::query_as!(
-            UserInfo,
-            r#"SELECT username FROM users WHERE is_logged_in = 1 LIMIT 1"#
+        let username = sqlx::query_scalar::<_, String>(
+            r#"SELECT username FROM users WHERE is_logged_in = 1 LIMIT 1"#,
         )
         .fetch_optional(&self.pool)
         .await
@@ -33,12 +34,12 @@ impl UserService {
             reason: e.to_string(),
         })?;
 
-        Ok(row)
+        Ok(username.map(|username| UserInfo { username }))
     }
 
     /// Check if any user account exists (for determining setup vs login mode)
     pub async fn has_any_user(&self) -> Result<bool> {
-        let row = sqlx::query!("SELECT id FROM users LIMIT 1")
+        let row = sqlx::query_scalar::<_, i64>("SELECT id FROM users LIMIT 1")
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| UserError::DatabaseError {
@@ -50,8 +51,11 @@ impl UserService {
 
     /// Create the initial user account (fails if user already exists)
     pub async fn setup_account(&self, username: &str, password: &str) -> Result<()> {
+        let username = username.trim();
+        validate_setup_credentials(username, password)?;
+
         // Check if user already exists
-        let existing = sqlx::query!("SELECT id FROM users LIMIT 1")
+        let existing = sqlx::query_scalar::<_, i64>("SELECT id FROM users LIMIT 1")
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| UserError::DatabaseError {
@@ -66,13 +70,13 @@ impl UserService {
 
         let (hash, salt) = hash_password(password)?;
 
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO users (username, password_hash, password_salt, is_logged_in)
                VALUES (?, ?, ?, 1)"#,
-            username,
-            hash,
-            salt
         )
+        .bind(username)
+        .bind(hash)
+        .bind(salt)
         .execute(&self.pool)
         .await
         .map_err(|e| UserError::DatabaseError {
@@ -84,10 +88,13 @@ impl UserService {
 
     /// Authenticate user and set login state
     pub async fn login(&self, username: &str, password: &str) -> Result<UserInfo> {
-        let row = sqlx::query!(
+        let username = username.trim();
+        validate_login_credentials(username, password)?;
+
+        let row = sqlx::query_as::<_, (String, String)>(
             r#"SELECT username, password_hash FROM users WHERE username = ? LIMIT 1"#,
-            username
         )
+        .bind(username)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| UserError::DatabaseError {
@@ -97,28 +104,24 @@ impl UserService {
             username: username.to_string(),
         })?;
 
-        if !verify_password(password, &row.password_hash)? {
+        if !verify_password(password, &row.1)? {
             return Err(UserError::InvalidPassword);
         }
 
-        sqlx::query!(
-            r#"UPDATE users SET is_logged_in = 1 WHERE username = ?"#,
-            username
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| UserError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        sqlx::query(r#"UPDATE users SET is_logged_in = 1 WHERE username = ?"#)
+            .bind(username)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| UserError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
-        Ok(UserInfo {
-            username: row.username,
-        })
+        Ok(UserInfo { username: row.0 })
     }
 
     /// Clear login state
     pub async fn logout(&self) -> Result<()> {
-        sqlx::query!(r#"UPDATE users SET is_logged_in = 0"#)
+        sqlx::query(r#"UPDATE users SET is_logged_in = 0"#)
             .execute(&self.pool)
             .await
             .map_err(|e| UserError::DatabaseError {
@@ -130,6 +133,30 @@ impl UserService {
 }
 
 // Helper functions for password hashing
+
+fn validate_setup_credentials(username: &str, password: &str) -> Result<()> {
+    validate_login_credentials(username, password)?;
+
+    if password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(UserError::PasswordTooShort {
+            min_length: MIN_PASSWORD_LENGTH,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_login_credentials(username: &str, password: &str) -> Result<()> {
+    if username.is_empty() {
+        return Err(UserError::UsernameRequired);
+    }
+
+    if password.is_empty() {
+        return Err(UserError::PasswordRequired);
+    }
+
+    Ok(())
+}
 
 fn hash_password(password: &str) -> Result<(String, String)> {
     let salt = SaltString::generate(&mut OsRng);
@@ -214,6 +241,29 @@ mod tests {
 
         let result = service.setup_account("another", "another").await;
         assert!(matches!(result, Err(UserError::UserAlreadyExists { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_setup_account_rejects_blank_username() {
+        let service = setup_test_service().await;
+
+        let result = service.setup_account("   ", "password123").await;
+
+        assert!(matches!(result, Err(UserError::UsernameRequired)));
+    }
+
+    #[tokio::test]
+    async fn test_setup_account_rejects_short_password() {
+        let service = setup_test_service().await;
+
+        let result = service.setup_account("testuser", "123").await;
+
+        assert!(matches!(
+            result,
+            Err(UserError::PasswordTooShort {
+                min_length: MIN_PASSWORD_LENGTH
+            })
+        ));
     }
 
     #[tokio::test]

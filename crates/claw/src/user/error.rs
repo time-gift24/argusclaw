@@ -14,6 +14,15 @@ pub enum UserError {
     #[error("No user setup")]
     NoUserSetup,
 
+    #[error("username is required")]
+    UsernameRequired,
+
+    #[error("password is required")]
+    PasswordRequired,
+
+    #[error("password must be at least {min_length} characters")]
+    PasswordTooShort { min_length: usize },
+
     #[error("Database error: {reason}")]
     DatabaseError { reason: String },
 
