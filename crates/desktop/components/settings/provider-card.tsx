@@ -1,8 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { Cloud, Pencil, Trash2, Check, Activity } from "lucide-react";
+import { Pencil, Trash2, Check, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getProviderIcon } from "./provider-form-dialog";
 import {
   Card,
   CardContent,
@@ -12,18 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import type { ProviderSecretStatus, ProviderTestResult } from "@/lib/tauri";
-
-export interface LlmProviderSummary {
-  id: string;
-  kind: string;
-  display_name: string;
-  base_url: string;
-  model: string;
-  is_default: boolean;
-  extra_headers: Record<string, string>;
-  secret_status: ProviderSecretStatus;
-}
+import type { LlmProviderSummary, ProviderTestResult } from "@/lib/tauri";
 
 interface ProviderCardProps {
   provider: LlmProviderSummary;
@@ -66,7 +56,10 @@ export function ProviderCard({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-base flex items-center gap-2">
-            <Cloud className="h-5 w-5 text-muted-foreground" />
+            {React.createElement(
+              getProviderIcon(provider.display_name, provider.id),
+              { className: "h-5 w-5 text-muted-foreground" }
+            )}
             <span>{provider.display_name}</span>
             {provider.is_default && (
               <Badge
@@ -91,12 +84,6 @@ export function ProviderCard({
           <span className="text-muted-foreground">Kind:</span>
           <span className="font-mono text-xs bg-muted px-2 py-1 rounded">
             {provider.kind}
-          </span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">Model:</span>
-          <span className="font-mono text-xs break-all bg-muted px-2 py-1 rounded">
-            {provider.model}
           </span>
         </div>
         <div className="flex justify-between">
