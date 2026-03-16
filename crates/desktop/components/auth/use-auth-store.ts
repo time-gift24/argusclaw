@@ -18,6 +18,27 @@ interface AuthState {
   logout: () => Promise<void>;
 }
 
+const toErrorMessage = (error: unknown): string => {
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return error.message;
+  }
+
+  return '未知错误';
+};
+
 export const useAuthStore = create<AuthState>((set) => ({
   username: null,
   isLoggedIn: false,
@@ -54,7 +75,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ username, isLoggedIn: true });
       return { success: true };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: toErrorMessage(error) };
     }
   },
 
@@ -64,7 +85,7 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ username: user.username, isLoggedIn: true });
       return { success: true };
     } catch (error) {
-      return { success: false, error: String(error) };
+      return { success: false, error: toErrorMessage(error) };
     }
   },
 

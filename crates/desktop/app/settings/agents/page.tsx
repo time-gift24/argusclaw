@@ -107,6 +107,7 @@ export default function AgentsPage() {
             <AgentCard
               key={agent.id}
               agent={agent}
+              providers={providerList}
               onEdit={handleEdit}
               onDelete={(id) => setDeleteId(id)}
             />

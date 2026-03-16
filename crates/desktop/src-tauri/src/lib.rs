@@ -23,7 +23,6 @@ pub fn run() {
             commands::get_agent_template,
             commands::upsert_agent_template,
             commands::delete_agent_template,
-<<<<<<< HEAD
             commands::get_default_agent_template,
             commands::create_default_agent,
             commands::get_current_user,
