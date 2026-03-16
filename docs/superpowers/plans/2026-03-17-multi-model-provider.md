@@ -1550,7 +1550,13 @@ EOF
 **Files:**
 - Modify: `crates/desktop/components/settings/provider-test-dialog.tsx`
 
-- [ ] **Step 1: Add model selector state**
+- [ ] **Step 1: Install Select component from shadcn**
+
+```bash
+cd crates/desktop && pnpm dlx shadcn@latest add select
+```
+
+- [ ] **Step 2: Add model selector state**
 
 ```typescript
 interface ProviderTestDialogProps {
@@ -1565,7 +1571,7 @@ interface ProviderTestDialogProps {
 }
 ```
 
-- [ ] **Step 2: Add Select imports**
+- [ ] **Step 3: Add Select imports**
 
 ```typescript
 import {
@@ -1577,7 +1583,7 @@ import {
 } from "@/components/ui/select";
 ```
 
-- [ ] **Step 3: Add model selector to dialog**
+- [ ] **Step 4: Add model selector to dialog**
 
 Add after the provider info section and before the test button:
 
@@ -1605,7 +1611,7 @@ Add after the provider info section and before the test button:
         )}
 ```
 
-- [ ] **Step 4: Update model display in info section**
+- [ ] **Step 5: Update model display in info section**
 
 ```tsx
               <div className="flex items-start justify-between gap-3">
@@ -1616,7 +1622,7 @@ Add after the provider info section and before the test button:
               </div>
 ```
 
-- [ ] **Step 5: Commit test dialog changes**
+- [ ] **Step 6: Commit test dialog changes**
 
 ```bash
 git add crates/desktop/components/settings/provider-test-dialog.tsx
