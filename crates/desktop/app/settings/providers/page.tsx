@@ -1,36 +1,55 @@
-"use client"
+"use client";
 
-import * as React from "react"
-import { providers, type LlmProviderSummary, type ProviderInput } from "@/lib/tauri"
+import * as React from "react";
+import {
+  providers,
+  type LlmProviderSummary,
+  type ProviderInput,
+  type ProviderTestResult,
+} from "@/lib/tauri";
 import {
   ProviderCard,
   ProviderFormDialog,
+  ProviderTestDialog,
   type LlmProviderRecord,
   DeleteConfirmDialog,
   Breadcrumb,
-} from "@/components/settings"
+} from "@/components/settings";
 
 export default function ProvidersPage() {
-  const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [editingProvider, setEditingProvider] = React.useState<LlmProviderRecord | null>(null)
-  const [deleteId, setDeleteId] = React.useState<string | null>(null)
-  const [deleteLoading, setDeleteLoading] = React.useState(false)
+  const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>(
+    [],
+  );
+  const [loading, setLoading] = React.useState(true);
+  const [editingProvider, setEditingProvider] =
+    React.useState<LlmProviderRecord | null>(null);
+  const [deleteId, setDeleteId] = React.useState<string | null>(null);
+  const [deleteLoading, setDeleteLoading] = React.useState(false);
+  const [testResultsByProviderId, setTestResultsByProviderId] = React.useState<
+    Record<string, ProviderTestResult>
+  >({});
+  const [activeProviderId, setActiveProviderId] = React.useState<string | null>(
+    null,
+  );
+  const [testDialogOpen, setTestDialogOpen] = React.useState(false);
+  const [testingProviderId, setTestingProviderId] = React.useState<
+    string | null
+  >(null);
 
   const loadProviders = React.useCallback(async () => {
     try {
-      const data = await providers.list()
-      setProviderList(data)
+      const data = await providers.list();
+      setProviderList(data);
     } catch (error) {
-      console.error("Failed to load providers:", error)
+      console.error("Failed to load providers:", error);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }, [])
+  }, []);
 
   React.useEffect(() => {
-    loadProviders()
-  }, [loadProviders])
+    loadProviders();
+  }, [loadProviders]);
 
   const handleSubmit = async (record: LlmProviderRecord) => {
     const input: ProviderInput = {
@@ -42,14 +61,14 @@ export default function ProvidersPage() {
       model: record.model,
       is_default: record.is_default,
       extra_headers: record.extra_headers,
-    }
-    await providers.upsert(input)
-    setEditingProvider(null)
-    await loadProviders()
-  }
+    };
+    await providers.upsert(input);
+    setEditingProvider(null);
+    await loadProviders();
+  };
 
   const handleEdit = async (id: string) => {
-    const provider = await providers.get(id)
+    const provider = await providers.get(id);
     if (provider) {
       // Transform from API format to form format
       const formRecord: LlmProviderRecord = {
@@ -57,48 +76,114 @@ export default function ProvidersPage() {
         kind: provider.kind,
         display_name: provider.display_name,
         base_url: provider.base_url,
-        api_key: typeof provider.api_key === "string"
-          ? provider.api_key
-          : (provider.api_key as { api_key: string }).api_key || "",
+        api_key:
+          typeof provider.api_key === "string"
+            ? provider.api_key
+            : (provider.api_key as { api_key: string }).api_key || "",
         model: provider.model,
         is_default: provider.is_default,
         extra_headers: provider.extra_headers,
-      }
-      setEditingProvider(formRecord)
+      };
+      setEditingProvider(formRecord);
     }
-  }
+  };
 
   const handleDelete = async () => {
-    if (!deleteId) return
-    setDeleteLoading(true)
+    if (!deleteId) return;
+    setDeleteLoading(true);
     try {
-      await providers.delete(deleteId)
-      setDeleteId(null)
-      await loadProviders()
+      await providers.delete(deleteId);
+      setTestResultsByProviderId((current) => {
+        const next = { ...current };
+        delete next[deleteId];
+        return next;
+      });
+      if (activeProviderId === deleteId) {
+        setActiveProviderId(null);
+        setTestDialogOpen(false);
+      }
+      setDeleteId(null);
+      await loadProviders();
     } finally {
-      setDeleteLoading(false)
+      setDeleteLoading(false);
     }
-  }
+  };
 
   const handleSetDefault = async (id: string) => {
-    await providers.setDefault(id)
-    await loadProviders()
-  }
+    await providers.setDefault(id);
+    await loadProviders();
+  };
+
+  const runConnectionTest = React.useCallback(
+    async (id: string) => {
+      const provider = providerList.find((item) => item.id === id);
+      setTestingProviderId(id);
+      try {
+        const result = await providers.testConnection(id);
+        setTestResultsByProviderId((current) => ({ ...current, [id]: result }));
+      } catch (error) {
+        const fallbackResult: ProviderTestResult = {
+          provider_id: id,
+          model: provider?.model ?? "",
+          base_url: provider?.base_url ?? "",
+          checked_at: new Date().toISOString(),
+          latency_ms: 0,
+          status: "request_failed",
+          message: error instanceof Error ? error.message : String(error),
+        };
+        setTestResultsByProviderId((current) => ({
+          ...current,
+          [id]: fallbackResult,
+        }));
+        console.error("Failed to test provider connection:", error);
+      } finally {
+        setTestingProviderId((current) => (current === id ? null : current));
+      }
+    },
+    [providerList],
+  );
+
+  const handleTestConnection = React.useCallback(
+    (id: string) => {
+      setActiveProviderId(id);
+      setTestDialogOpen(true);
+      void runConnectionTest(id);
+    },
+    [runConnectionTest],
+  );
+
+  const handleViewStatus = React.useCallback((id: string) => {
+    setActiveProviderId(id);
+    setTestDialogOpen(true);
+  }, []);
+
+  const handleRetest = React.useCallback(() => {
+    if (!activeProviderId) return;
+    void runConnectionTest(activeProviderId);
+  }, [activeProviderId, runConnectionTest]);
+
+  const activeProvider = React.useMemo(
+    () =>
+      providerList.find((provider) => provider.id === activeProviderId) ?? null,
+    [activeProviderId, providerList],
+  );
+  const activeTestResult = activeProviderId
+    ? (testResultsByProviderId[activeProviderId] ?? null)
+    : null;
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-muted-foreground">Loading providers...</div>
       </div>
-    )
+    );
   }
 
   return (
     <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
-      <Breadcrumb items={[
-        { label: "设置", href: "/settings" },
-        { label: "LLM 提供者" },
-      ]} />
+      <Breadcrumb
+        items={[{ label: "设置", href: "/settings" }, { label: "LLM 提供者" }]}
+      />
 
       <div className="flex items-center justify-between">
         <div>
@@ -124,6 +209,10 @@ export default function ProvidersPage() {
               onEdit={handleEdit}
               onDelete={(id) => setDeleteId(id)}
               onSetDefault={handleSetDefault}
+              onTestConnection={handleTestConnection}
+              onViewStatus={handleViewStatus}
+              testResult={testResultsByProviderId[provider.id]}
+              isTesting={testingProviderId === provider.id}
             />
           ))}
         </div>
@@ -134,7 +223,9 @@ export default function ProvidersPage() {
         <ProviderFormDialog
           provider={editingProvider}
           onSubmit={handleSubmit}
-          trigger={<span />}
+          open={!!editingProvider}
+          onOpenChange={(open) => !open && setEditingProvider(null)}
+          trigger={null}
         />
       )}
 
@@ -147,6 +238,22 @@ export default function ProvidersPage() {
         onConfirm={handleDelete}
         loading={deleteLoading}
       />
+
+      <ProviderTestDialog
+        open={testDialogOpen}
+        onOpenChange={(open) => {
+          setTestDialogOpen(open);
+          if (!open) {
+            setActiveProviderId(null);
+          }
+        }}
+        provider={activeProvider}
+        result={activeTestResult}
+        testing={
+          activeProviderId !== null && testingProviderId === activeProviderId
+        }
+        onRetest={handleRetest}
+      />
     </div>
-  )
+  );
 }

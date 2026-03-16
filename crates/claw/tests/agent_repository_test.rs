@@ -81,6 +81,21 @@ async fn upsert_updates_existing() {
 }
 
 #[tokio::test]
+async fn upsert_allows_empty_provider_id() {
+    let repo = setup_test_db().await;
+
+    let record = create_test_record("empty-provider", "");
+    repo.upsert(&record).await.unwrap();
+
+    let retrieved = repo
+        .get(&AgentId::new("empty-provider"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retrieved.provider_id, "");
+}
+
+#[tokio::test]
 async fn list_returns_summaries() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;

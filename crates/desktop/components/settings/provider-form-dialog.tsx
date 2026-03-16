@@ -29,13 +29,32 @@ export interface LlmProviderRecord {
 interface ProviderFormDialogProps {
   provider?: LlmProviderRecord | null
   onSubmit: (record: LlmProviderRecord) => Promise<void>
-  trigger?: React.ReactElement
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  trigger?: React.ReactElement | null
 }
 
-export function ProviderFormDialog({ provider, onSubmit, trigger }: ProviderFormDialogProps) {
-  const [open, setOpen] = React.useState(false)
+export function ProviderFormDialog({
+  provider,
+  onSubmit,
+  open: openProp,
+  onOpenChange,
+  trigger,
+}: ProviderFormDialogProps) {
+  const [internalOpen, setInternalOpen] = React.useState(false)
   const [loading, setLoading] = React.useState(false)
   const isEditing = !!provider
+  const open = openProp ?? internalOpen
+
+  const handleOpenChange = React.useCallback(
+    (nextOpen: boolean) => {
+      if (openProp === undefined) {
+        setInternalOpen(nextOpen)
+      }
+      onOpenChange?.(nextOpen)
+    },
+    [onOpenChange, openProp],
+  )
 
   const [formData, setFormData] = React.useState<LlmProviderRecord>(() =>
     provider || {
@@ -71,7 +90,7 @@ export function ProviderFormDialog({ provider, onSubmit, trigger }: ProviderForm
     setLoading(true)
     try {
       await onSubmit(formData)
-      setOpen(false)
+      handleOpenChange(false)
     } catch (error) {
       console.error("Failed to save provider:", error)
     } finally {
@@ -89,10 +108,11 @@ export function ProviderFormDialog({ provider, onSubmit, trigger }: ProviderForm
       Add Provider
     </Button>
   )
+  const dialogTrigger = trigger === undefined ? defaultTrigger : trigger
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={trigger ? trigger : defaultTrigger} />
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      {dialogTrigger ? <DialogTrigger render={dialogTrigger} /> : null}
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{isEditing ? "Edit Provider" : "Add Provider"}</DialogTitle>

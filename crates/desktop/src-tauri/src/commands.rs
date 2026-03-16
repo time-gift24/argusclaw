@@ -4,14 +4,14 @@ use std::collections::HashMap;
 
 use claw::{
     AgentError, AgentId, AgentRecord, AppContext, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, SecretString,
+    LlmProviderRecord, LlmProviderSummary, ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
+    #[serde(rename = "openai-compatible", alias = "open-ai-compatible")]
     OpenAiCompatible,
 }
 
@@ -170,6 +170,16 @@ pub async fn set_default_provider(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn test_provider_connection(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    id: String,
+) -> Result<ProviderTestResult, String> {
+    ctx.test_provider_connection(&LlmProviderId::new(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // === Agent Commands ===
 
 #[tauri::command]
@@ -211,8 +221,13 @@ pub async fn delete_agent_template(
 mod tests {
     use std::collections::HashMap;
 
+    use serde_json::json;
+
     use super::{map_provider_lookup_result, ProviderInput, ProviderKind, ProviderRecord};
-    use claw::{AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
+    use claw::{
+        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderTestResult,
+        ProviderTestStatus, SecretString,
+    };
 
     #[test]
     fn provider_input_converts_into_domain_record() {
@@ -261,5 +276,45 @@ mod tests {
         assert_eq!(output.id, "openai");
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
+    }
+
+    #[test]
+    fn provider_kind_serde_matches_frontend_payloads() {
+        let parsed: ProviderKind = serde_json::from_value(json!("openai-compatible"))
+            .expect("frontend value should parse");
+        assert_eq!(parsed, ProviderKind::OpenAiCompatible);
+
+        let serialized =
+            serde_json::to_value(ProviderKind::OpenAiCompatible).expect("kind should serialize");
+        assert_eq!(serialized, json!("openai-compatible"));
+    }
+
+    #[test]
+    fn provider_test_result_serializes_for_frontend_consumption() {
+        let result: ProviderTestResult = serde_json::from_value(json!({
+            "provider_id": "openai",
+            "model": "gpt-4.1",
+            "base_url": "https://api.example.com/v1",
+            "checked_at": "2026-03-16T12:00:00Z",
+            "latency_ms": 57,
+            "status": ProviderTestStatus::Success,
+            "message": "Provider connection test succeeded.",
+        }))
+        .expect("result should deserialize");
+
+        let serialized = serde_json::to_value(result).expect("result should serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "provider_id": "openai",
+                "model": "gpt-4.1",
+                "base_url": "https://api.example.com/v1",
+                "checked_at": "2026-03-16T12:00:00Z",
+                "latency_ms": 57,
+                "status": "success",
+                "message": "Provider connection test succeeded.",
+            })
+        );
     }
 }

@@ -50,7 +50,7 @@ impl SqliteAgentRepository {
             display_name: Self::get::<String>(&row, "display_name")?,
             description: Self::get::<String>(&row, "description")?,
             version: Self::get::<String>(&row, "version")?,
-            provider_id: Self::get::<String>(&row, "provider_id")?,
+            provider_id: Self::get::<Option<String>>(&row, "provider_id")?.unwrap_or_default(),
             system_prompt: Self::get::<String>(&row, "system_prompt")?,
             tool_names,
             max_tokens: Self::get::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
@@ -68,6 +68,12 @@ impl AgentRepository for SqliteAgentRepository {
             })?;
 
         let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
+
+        let provider_id = if record.provider_id.is_empty() {
+            None
+        } else {
+            Some(record.provider_id.as_str())
+        };
 
         sqlx::query(
             r#"INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
@@ -87,7 +93,7 @@ impl AgentRepository for SqliteAgentRepository {
         .bind(&record.display_name)
         .bind(&record.description)
         .bind(&record.version)
-        .bind(&record.provider_id)
+        .bind(provider_id)
         .bind(&record.system_prompt)
         .bind(&tool_names_json)
         .bind(record.max_tokens.map(|t| t as i64))
