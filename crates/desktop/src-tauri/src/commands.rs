@@ -8,6 +8,9 @@ use claw::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use uuid::Uuid;
+
+use crate::subscription::ThreadSubscriptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
@@ -293,13 +296,132 @@ pub async fn logout(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<(), St
     ctx.user().logout().await.map_err(|e| e.to_string())
 }
 
+// ========== Chat Session Commands ==========
+
+/// Payload returned when creating a chat session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSessionPayload {
+    /// Unique session key (template_id::provider_preference_id).
+    pub session_key: String,
+    /// The template ID this session was created from.
+    pub template_id: String,
+    /// The runtime agent ID for this session.
+    pub runtime_agent_id: String,
+    /// The thread ID for this session.
+    pub thread_id: String,
+    /// The effective provider ID bound to this session.
+    pub effective_provider_id: String,
+}
+
+#[tauri::command]
+pub async fn create_chat_session(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    subscriptions: State<'_, ThreadSubscriptions>,
+    app: tauri::AppHandle,
+    template_id: String,
+    provider_preference_id: Option<String>,
+) -> Result<ChatSessionPayload, String> {
+    let provider_override = provider_preference_id
+        .as_ref()
+        .map(|id| LlmProviderId::new(id.clone()));
+
+    let runtime = ctx
+        .create_runtime_agent_from_template(
+            &AgentId::new(template_id.clone()),
+            provider_override.as_ref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let thread_id = ctx
+        .create_thread(&runtime.runtime_agent_id, claw::ThreadConfig::default())
+        .map_err(|e| e.to_string())?;
+
+    let session_key = format!(
+        "{}::{}",
+        template_id,
+        provider_preference_id.as_deref().unwrap_or("__default__")
+    );
+
+    // Start event forwarder
+    subscriptions
+        .start_forwarder(
+            session_key.clone(),
+            runtime.runtime_agent_id.clone(),
+            thread_id,
+            app,
+            ctx.inner().clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(ChatSessionPayload {
+        session_key,
+        template_id,
+        runtime_agent_id: runtime.runtime_agent_id.to_string(),
+        thread_id: thread_id.to_string(),
+        effective_provider_id: runtime.effective_provider_id.to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn send_message(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    runtime_agent_id: String,
+    thread_id: String,
+    content: String,
+) -> Result<(), String> {
+    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    ctx.send_message(&AgentId::new(runtime_agent_id), &thread_id, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_thread_snapshot(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    runtime_agent_id: String,
+    thread_id: String,
+) -> Result<claw::ThreadSnapshot, String> {
+    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    ctx.get_thread_snapshot(&AgentId::new(runtime_agent_id), &thread_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn resolve_approval(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    runtime_agent_id: String,
+    request_id: String,
+    decision: String,
+    resolved_by: Option<String>,
+) -> Result<(), String> {
+    let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
+    let decision = match decision.as_str() {
+        "approved" => claw::ApprovalDecision::Approved,
+        "denied" => claw::ApprovalDecision::Denied,
+        _ => return Err(format!("Invalid approval decision: {}", decision)),
+    };
+
+    ctx.resolve_approval(
+        &AgentId::new(runtime_agent_id),
+        request_id,
+        decision,
+        resolved_by,
+    )
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use serde_json::json;
 
-    use super::{map_provider_lookup_result, ProviderInput, ProviderKind, ProviderRecord};
+    use super::{
+        map_provider_lookup_result, ChatSessionPayload, ProviderInput, ProviderKind, ProviderRecord,
+    };
     use claw::{
         AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderTestResult,
         ProviderTestStatus, SecretString,
@@ -392,5 +514,20 @@ mod tests {
                 "message": "Provider connection test succeeded.",
             })
         );
+    }
+
+    #[test]
+    fn chat_session_payload_serializes_effective_provider_id() {
+        let payload = ChatSessionPayload {
+            session_key: "arguswing::__default__".to_string(),
+            template_id: "arguswing".to_string(),
+            runtime_agent_id: "arguswing--runtime".to_string(),
+            thread_id: claw::ThreadId::new().to_string(),
+            effective_provider_id: "openai".to_string(),
+        };
+
+        let value = serde_json::to_value(payload).expect("payload should serialize");
+        assert_eq!(value["effective_provider_id"], json!("openai"));
+        assert_eq!(value["session_key"], json!("arguswing::__default__"));
     }
 }

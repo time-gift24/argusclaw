@@ -1,0 +1,241 @@
+//! Thread event types for frontend communication.
+//!
+//! This module provides envelope and payload types for forwarding thread events
+//! from the backend to the frontend via Tauri events.
+
+use serde::{Deserialize, Serialize};
+
+use claw::{LlmStreamEvent, ThreadEvent};
+
+/// Envelope for thread events sent to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadEventEnvelope {
+    /// The runtime agent ID that owns this thread.
+    pub runtime_agent_id: String,
+    /// The thread ID.
+    pub thread_id: String,
+    /// The turn number (if applicable).
+    pub turn_number: Option<u32>,
+    /// The event payload.
+    pub payload: ThreadEventPayload,
+}
+
+impl ThreadEventEnvelope {
+    /// Create an envelope from a claw ThreadEvent.
+    pub fn from_thread_event(runtime_agent_id: String, event: ThreadEvent) -> Self {
+        match event {
+            ThreadEvent::Processing {
+                thread_id,
+                turn_number,
+                event,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::from_llm_event(event),
+            },
+            ThreadEvent::ToolStarted {
+                thread_id,
+                turn_number,
+                tool_call_id,
+                tool_name,
+                arguments,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::ToolStarted {
+                    tool_call_id,
+                    tool_name,
+                    arguments,
+                },
+            },
+            ThreadEvent::ToolCompleted {
+                thread_id,
+                turn_number,
+                tool_call_id,
+                tool_name,
+                result,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::ToolCompleted {
+                    tool_call_id,
+                    tool_name,
+                    result: result.unwrap_or(serde_json::Value::Null),
+                },
+            },
+            ThreadEvent::TurnCompleted {
+                thread_id,
+                turn_number,
+                token_usage,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::TurnCompleted {
+                    input_tokens: token_usage.input_tokens,
+                    output_tokens: token_usage.output_tokens,
+                    total_tokens: token_usage.total_tokens,
+                },
+            },
+            ThreadEvent::TurnFailed {
+                thread_id,
+                turn_number,
+                error,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::TurnFailed { error },
+            },
+            ThreadEvent::Idle { thread_id } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::Idle,
+            },
+            ThreadEvent::Compacted {
+                thread_id,
+                new_token_count,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::Compacted { new_token_count },
+            },
+            ThreadEvent::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::WaitingForApproval {
+                    request: serde_json::to_value(&request).unwrap_or_default(),
+                },
+            },
+            ThreadEvent::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            } => Self {
+                runtime_agent_id,
+                thread_id: thread_id.to_string(),
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::ApprovalResolved {
+                    response: serde_json::to_value(&response).unwrap_or_default(),
+                },
+            },
+        }
+    }
+}
+
+/// Payload types for thread events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThreadEventPayload {
+    ReasoningDelta {
+        delta: String,
+    },
+    ContentDelta {
+        delta: String,
+    },
+    ToolCallDelta {
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_delta: Option<String>,
+    },
+    LlmUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    ToolStarted {
+        tool_call_id: String,
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
+    ToolCompleted {
+        tool_call_id: String,
+        tool_name: String,
+        result: serde_json::Value,
+    },
+    TurnCompleted {
+        input_tokens: u32,
+        output_tokens: u32,
+        total_tokens: u32,
+    },
+    TurnFailed {
+        error: String,
+    },
+    Idle,
+    Compacted {
+        new_token_count: u32,
+    },
+    WaitingForApproval {
+        request: serde_json::Value,
+    },
+    ApprovalResolved {
+        response: serde_json::Value,
+    },
+}
+
+impl ThreadEventPayload {
+    /// Convert an LLM stream event to a payload.
+    pub fn from_llm_event(event: LlmStreamEvent) -> Self {
+        match event {
+            LlmStreamEvent::ReasoningDelta { delta } => Self::ReasoningDelta { delta },
+            LlmStreamEvent::ContentDelta { delta } => Self::ContentDelta { delta },
+            LlmStreamEvent::ToolCallDelta(delta) => Self::ToolCallDelta {
+                index: delta.index,
+                id: delta.id,
+                name: delta.name,
+                arguments_delta: delta.arguments_delta,
+            },
+            LlmStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => Self::LlmUsage {
+                input_tokens,
+                output_tokens,
+            },
+            LlmStreamEvent::Finished { .. } => {
+                // Finished events are handled at the turn level, not forwarded as individual events
+                Self::Idle
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use claw::{LlmStreamEvent, ThreadId};
+
+    use super::{ThreadEventEnvelope, ThreadEventPayload};
+
+    #[test]
+    fn processing_event_conversion_keeps_route_fields() {
+        let runtime_agent_id = "agent-runtime-1".to_string();
+        let thread_id = ThreadId::new();
+        let event = claw::ThreadEvent::Processing {
+            thread_id,
+            turn_number: 3,
+            event: LlmStreamEvent::ContentDelta {
+                delta: "hello".to_string(),
+            },
+        };
+
+        let envelope = ThreadEventEnvelope::from_thread_event(runtime_agent_id.clone(), event);
+
+        assert_eq!(envelope.runtime_agent_id, runtime_agent_id);
+        assert_eq!(envelope.thread_id, thread_id.to_string());
+        assert_eq!(envelope.turn_number, Some(3));
+        assert!(matches!(
+            envelope.payload,
+            ThreadEventPayload::ContentDelta { ref delta } if delta == "hello"
+        ));
+    }
+}
