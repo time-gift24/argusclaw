@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 // Types matching Rust structs
 
+export type ProviderSecretStatus = "ready" | "requires_reentry";
+
 export interface LlmProviderSummary {
   id: string;
   kind: "openai-compatible";
@@ -10,6 +12,7 @@ export interface LlmProviderSummary {
   model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 export interface LlmProviderRecord {
@@ -21,6 +24,7 @@ export interface LlmProviderRecord {
   model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 export interface ProviderInput {
@@ -96,4 +100,60 @@ export const agents = {
     invoke<void>("upsert_agent_template", { record }),
 
   delete: (id: string) => invoke<boolean>("delete_agent_template", { id }),
+};
+
+// Chat API
+export interface ChatSessionPayload {
+  session_key: string;
+  template_id: string;
+  runtime_agent_id: string;
+  thread_id: string;
+  effective_provider_id: string;
+}
+
+export interface ThreadSnapshotPayload {
+  runtime_agent_id: string;
+  thread_id: string;
+  messages: Array<{
+    role: "system" | "user" | "assistant" | "tool";
+    content: string;
+    reasoning_content?: string | null;
+    tool_call_id?: string | null;
+    name?: string | null;
+    tool_calls?: Array<{ id: string; name: string; arguments: unknown }> | null;
+  }>;
+  turn_count: number;
+  token_count: number;
+}
+
+export type ApprovalDecision = "approved" | "denied" | "timed_out";
+
+export const chat = {
+  createChatSession: (templateId: string, providerPreferenceId: string | null) =>
+    invoke<ChatSessionPayload>("create_chat_session", {
+      templateId,
+      providerPreferenceId,
+    }),
+
+  sendMessage: (runtimeAgentId: string, threadId: string, content: string) =>
+    invoke<void>("send_message", { runtimeAgentId, threadId, content }),
+
+  getThreadSnapshot: (runtimeAgentId: string, threadId: string) =>
+    invoke<ThreadSnapshotPayload>("get_thread_snapshot", {
+      runtimeAgentId,
+      threadId,
+    }),
+
+  resolveApproval: (
+    runtimeAgentId: string,
+    requestId: string,
+    decision: ApprovalDecision,
+    resolvedBy?: string | null,
+  ) =>
+    invoke<void>("resolve_approval", {
+      runtimeAgentId,
+      requestId,
+      decision,
+      resolvedBy,
+    }),
 };
