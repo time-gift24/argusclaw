@@ -279,6 +279,12 @@ export function ProviderFormDialog({
         return;
       }
 
+      // Check if the deleted model is the currently selected test model
+      const deletedModel = modelList.find((m) => m.id === modelId);
+      if (selectedModelForTest && deletedModel && deletedModel.name === selectedModelForTest) {
+        setSelectedModelForTest("");
+      }
+
       await models.delete(modelId);
       const nextModels = modelList.filter((model) => model.id !== modelId);
       setModelList(nextModels);
