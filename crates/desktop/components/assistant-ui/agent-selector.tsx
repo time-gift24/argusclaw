@@ -29,20 +29,22 @@ export function AgentSelector() {
     setOpen(false);
   };
 
+  const trigger = (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+    >
+      <BotIcon className="size-3.5" />
+      <span className="max-w-[80px] truncate">
+        {selectedTemplate?.display_name ?? "选择 Agent"}
+      </span>
+    </Button>
+  );
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <BotIcon className="size-3.5" />
-          <span className="max-w-[80px] truncate">
-            {selectedTemplate?.display_name ?? "选择 Agent"}
-          </span>
-        </Button>
-      </DialogTrigger>
+      <DialogTrigger render={trigger} />
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>选择 Agent</DialogTitle>

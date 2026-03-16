@@ -4,6 +4,7 @@ import * as React from "react";
 import { Plus, Pencil } from "lucide-react";
 import {
   providers,
+  type ProviderSecretStatus,
   type ProviderInput,
   type ProviderTestResult,
 } from "@/lib/tauri";
@@ -30,6 +31,7 @@ export interface LlmProviderRecord {
   model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 interface ProviderFormDialogProps {
@@ -78,6 +80,7 @@ export function ProviderFormDialog({
         model: "",
         is_default: false,
         extra_headers: {},
+        secret_status: "ready",
       },
   );
 
@@ -94,6 +97,7 @@ export function ProviderFormDialog({
         model: "",
         is_default: false,
         extra_headers: {},
+        secret_status: "ready",
       });
     }
     setTestingConnection(false);
@@ -163,6 +167,7 @@ export function ProviderFormDialog({
     model: formData.model,
     is_default: formData.is_default,
     extra_headers: formData.extra_headers,
+    secret_status: formData.secret_status,
   };
 
   return (
@@ -180,6 +185,11 @@ export function ProviderFormDialog({
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {formData.secret_status === "requires_reentry" && (
+            <div className="rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              当前保存的密钥已无法解密，请重新填写 API Key 后再保存。
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="id">ID</Label>
             <Input

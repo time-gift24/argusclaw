@@ -84,6 +84,13 @@ impl fmt::Debug for SecretString {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSecretStatus {
+    Ready,
+    RequiresReentry,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmProviderRecord {
     pub id: LlmProviderId,
@@ -94,6 +101,7 @@ pub struct LlmProviderRecord {
     pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +113,7 @@ pub struct LlmProviderSummary {
     pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
 }
 
 impl From<LlmProviderRecord> for LlmProviderSummary {
@@ -117,6 +126,7 @@ impl From<LlmProviderRecord> for LlmProviderSummary {
             model: record.model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
+            secret_status: record.secret_status,
         }
     }
 }
@@ -155,7 +165,12 @@ pub trait LlmProviderRepository: Send + Sync {
 
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError>;
 
-    async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError>;
+    async fn get_provider_summary(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<Option<LlmProviderSummary>, DbError>;
+
+    async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, DbError>;
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError>;
 }

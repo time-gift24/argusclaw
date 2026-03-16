@@ -32,6 +32,9 @@ pub enum DbError {
     #[error("host key material is unavailable: {reason}")]
     HostKeyUnavailable { reason: String },
 
+    #[error("secret key material is unavailable: {reason}")]
+    SecretKeyMaterialUnavailable { reason: String },
+
     #[error("failed to encrypt secret: {reason}")]
     SecretEncryptionFailed { reason: String },
 

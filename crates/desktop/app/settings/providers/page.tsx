@@ -83,6 +83,7 @@ export default function ProvidersPage() {
         model: provider.model,
         is_default: provider.is_default,
         extra_headers: provider.extra_headers,
+        secret_status: provider.secret_status,
       };
       setEditingProvider(formRecord);
     }
@@ -145,11 +146,15 @@ export default function ProvidersPage() {
 
   const handleTestConnection = React.useCallback(
     (id: string) => {
+      const provider = providerList.find((item) => item.id === id);
+      if (provider?.secret_status === "requires_reentry") {
+        return;
+      }
       setActiveProviderId(id);
       setTestDialogOpen(true);
       void runConnectionTest(id);
     },
-    [runConnectionTest],
+    [providerList, runConnectionTest],
   );
 
   const handleViewStatus = React.useCallback((id: string) => {

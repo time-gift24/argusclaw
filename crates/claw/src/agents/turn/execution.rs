@@ -84,18 +84,32 @@ fn process_finish_reason(
     token_usage: &mut TokenUsage,
     max_tool_calls: Option<u32>,
 ) -> NextAction {
-    // Track token usage
-    token_usage.input_tokens += response.input_tokens;
-    token_usage.output_tokens += response.output_tokens;
-    token_usage.total_tokens += response.input_tokens + response.output_tokens;
+    let ToolCompletionResponse {
+        content,
+        reasoning_content,
+        tool_calls: response_tool_calls,
+        input_tokens,
+        output_tokens,
+        finish_reason,
+        ..
+    } = response;
 
-    match response.finish_reason {
+    // Track token usage
+    token_usage.input_tokens += input_tokens;
+    token_usage.output_tokens += output_tokens;
+    token_usage.total_tokens += input_tokens + output_tokens;
+
+    match finish_reason {
         FinishReason::Stop => {
-            // Add assistant message to history
-            if let Some(content) = &response.content
-                && !content.is_empty()
+            if content.as_deref().is_some_and(|value| !value.is_empty())
+                || reasoning_content
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
             {
-                messages.push(ChatMessage::assistant(content.clone()));
+                messages.push(ChatMessage::assistant_with_reasoning(
+                    content.unwrap_or_default(),
+                    reasoning_content,
+                ));
             }
 
             NextAction::Return(TurnOutput {
@@ -106,36 +120,42 @@ fn process_finish_reason(
         FinishReason::ToolUse => {
             // Limit tool calls based on max_tool_calls config
             let tool_calls: Vec<ToolCall> = match max_tool_calls {
-                Some(max) if response.tool_calls.len() > max as usize => {
+                Some(max) if response_tool_calls.len() > max as usize => {
                     tracing::debug!(
-                        requested = response.tool_calls.len(),
+                        requested = response_tool_calls.len(),
                         max_allowed = max,
                         "Limiting tool calls per iteration"
                     );
-                    response.tool_calls.into_iter().take(max as usize).collect()
+                    response_tool_calls.into_iter().take(max as usize).collect()
                 }
-                _ => response.tool_calls,
+                _ => response_tool_calls,
             };
 
             // Add assistant message with tool_calls to history
-            let assistant_msg = ChatMessage::assistant_with_tool_calls(
-                response.content.clone(),
+            let assistant_msg = ChatMessage::assistant_with_tool_calls_and_reasoning(
+                content.clone(),
                 tool_calls.clone(),
+                reasoning_content,
             );
             messages.push(assistant_msg);
 
             NextAction::ContinueWithTools {
                 tool_calls,
-                content: response.content,
+                content,
             }
         }
         FinishReason::Length => NextAction::LengthExceeded,
         FinishReason::ContentFilter | FinishReason::Unknown => {
             // For content filter or unknown reasons, return what we have
-            if let Some(content) = &response.content
-                && !content.is_empty()
+            if content.as_deref().is_some_and(|value| !value.is_empty())
+                || reasoning_content
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
             {
-                messages.push(ChatMessage::assistant(content.clone()));
+                messages.push(ChatMessage::assistant_with_reasoning(
+                    content.unwrap_or_default(),
+                    reasoning_content,
+                ));
             }
 
             NextAction::Return(TurnOutput {

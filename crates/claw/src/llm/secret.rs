@@ -1,3 +1,7 @@
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mac_address::get_mac_address;
@@ -10,6 +14,9 @@ use crate::db::llm::SecretString;
 
 const ARGUSCLAW_KEY_SALT: &[u8] = b"argusclaw.llm.api-key.salt.v1";
 const ARGUSCLAW_KEY_INFO: &[u8] = b"argusclaw.llm.api-key.info.v1";
+const ARGUSCLAW_MASTER_KEY_PATH: &str = "~/.arguswing/master.key";
+const ARGUSCLAW_MASTER_KEY_PATH_ENV: &str = "ARGUSCLAW_MASTER_KEY_PATH";
+const MASTER_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 
 pub trait KeyMaterialSource: Send + Sync {
@@ -46,6 +53,33 @@ impl StaticKeyMaterialSource {
 impl KeyMaterialSource for StaticKeyMaterialSource {
     fn key_material(&self) -> Result<Vec<u8>, DbError> {
         Ok(self.key_material.clone())
+    }
+}
+
+pub struct FileKeyMaterialSource {
+    configured_path: Option<String>,
+}
+
+impl FileKeyMaterialSource {
+    #[must_use]
+    pub fn new(configured_path: impl Into<String>) -> Self {
+        Self {
+            configured_path: Some(configured_path.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn from_env_or_default() -> Self {
+        Self {
+            configured_path: None,
+        }
+    }
+}
+
+impl KeyMaterialSource for FileKeyMaterialSource {
+    fn key_material(&self) -> Result<Vec<u8>, DbError> {
+        let path = resolve_master_key_path(self.configured_path.clone())?;
+        load_or_create_master_key(&path)
     }
 }
 
@@ -156,8 +190,134 @@ impl ApiKeyCipher {
     }
 }
 
+fn resolve_master_key_path(configured: Option<String>) -> Result<PathBuf, DbError> {
+    let configured = configured
+        .or_else(|| env::var(ARGUSCLAW_MASTER_KEY_PATH_ENV).ok())
+        .unwrap_or_else(|| ARGUSCLAW_MASTER_KEY_PATH.to_string());
+
+    if let Some(relative_path) = configured.strip_prefix("~/") {
+        let home_dir = dirs::home_dir().ok_or_else(|| DbError::SecretKeyMaterialUnavailable {
+            reason: "failed to resolve home directory for master key".to_string(),
+        })?;
+        return Ok(home_dir.join(relative_path));
+    }
+
+    Ok(PathBuf::from(configured))
+}
+
+fn load_or_create_master_key(path: &Path) -> Result<Vec<u8>, DbError> {
+    match fs::read(path) {
+        Ok(key_material) => validate_master_key(path, key_material),
+        Err(error) if error.kind() == ErrorKind::NotFound => create_master_key(path),
+        Err(error) => Err(DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to read `{}`: {error}", path.display()),
+        }),
+    }
+}
+
+fn validate_master_key(path: &Path, key_material: Vec<u8>) -> Result<Vec<u8>, DbError> {
+    if key_material.is_empty() {
+        return replace_empty_master_key(path);
+    }
+
+    if key_material.len() != MASTER_KEY_LEN {
+        return Err(DbError::SecretKeyMaterialUnavailable {
+            reason: format!(
+                "expected `{}` to contain {MASTER_KEY_LEN} bytes, found {}",
+                path.display(),
+                key_material.len()
+            ),
+        });
+    }
+
+    Ok(key_material)
+}
+
+fn create_master_key(path: &Path) -> Result<Vec<u8>, DbError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| DbError::SecretKeyMaterialUnavailable {
+            reason: format!(
+                "master key path `{}` has no parent directory",
+                path.display()
+            ),
+        })?;
+    fs::create_dir_all(parent).map_err(|error| DbError::SecretKeyMaterialUnavailable {
+        reason: format!("failed to create `{}`: {error}", parent.display()),
+    })?;
+
+    let key_material = generate_master_key()?;
+
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => write_master_key_file(path, file, &key_material),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => load_or_create_master_key(path),
+        Err(error) => Err(DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to create `{}`: {error}", path.display()),
+        }),
+    }
+}
+
+fn replace_empty_master_key(path: &Path) -> Result<Vec<u8>, DbError> {
+    let key_material = generate_master_key()?;
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to recreate `{}`: {error}", path.display()),
+        })?;
+
+    write_master_key_file(path, file, &key_material)
+}
+
+fn generate_master_key() -> Result<Vec<u8>, DbError> {
+    let mut key_material = vec![0_u8; MASTER_KEY_LEN];
+    SystemRandom::new()
+        .fill(&mut key_material)
+        .map_err(|error| DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to generate master key bytes: {error}"),
+        })?;
+
+    Ok(key_material)
+}
+
+fn write_master_key_file(
+    path: &Path,
+    mut file: fs::File,
+    key_material: &[u8],
+) -> Result<Vec<u8>, DbError> {
+    file.write_all(key_material)
+        .map_err(|error| DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to write `{}`: {error}", path.display()),
+        })?;
+    file.sync_all()
+        .map_err(|error| DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to flush `{}`: {error}", path.display()),
+        })?;
+    set_master_key_permissions(path)?;
+    Ok(key_material.to_vec())
+}
+
+#[cfg(unix)]
+fn set_master_key_permissions(path: &Path) -> Result<(), DbError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        DbError::SecretKeyMaterialUnavailable {
+            reason: format!("failed to set permissions on `{}`: {error}", path.display()),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn set_master_key_permissions(_path: &Path) -> Result<(), DbError> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -170,5 +330,36 @@ mod tests {
 
         assert_eq!(decrypted.expose_secret(), "sk-secret");
         assert_ne!(encrypted.ciphertext, b"sk-secret");
+    }
+
+    #[test]
+    fn file_key_material_source_persists_a_stable_master_key() {
+        let temp_dir = tempdir().expect("tempdir should exist");
+        let path = temp_dir.path().join("master.key");
+        let source = FileKeyMaterialSource::new(path.display().to_string());
+
+        let first = source.key_material().expect("master key should be created");
+        let second = source.key_material().expect("master key should be reused");
+
+        assert_eq!(first.len(), MASTER_KEY_LEN);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn file_key_material_source_recreates_an_empty_master_key_file() {
+        let temp_dir = tempdir().expect("tempdir should exist");
+        let path = temp_dir.path().join("master.key");
+        fs::write(&path, []).expect("empty master key file should be created");
+
+        let source = FileKeyMaterialSource::new(path.display().to_string());
+        let key_material = source
+            .key_material()
+            .expect("empty master key should be recreated");
+
+        assert_eq!(key_material.len(), MASTER_KEY_LEN);
+        assert_eq!(
+            fs::read(&path).expect("master key should be readable"),
+            key_material,
+        );
     }
 }

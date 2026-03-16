@@ -10,7 +10,7 @@ use std::{
 
 use claw::{
     LLMManager, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
-    ProviderTestStatus, SecretString, SqliteLlmProviderRepository, migrate,
+    ProviderSecretStatus, ProviderTestStatus, SecretString, SqliteLlmProviderRepository, migrate,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -25,6 +25,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         model: "gpt-4o-mini".to_string(),
         is_default,
         extra_headers: HashMap::new(),
+        secret_status: ProviderSecretStatus::Ready,
     }
 }
 
@@ -342,4 +343,36 @@ async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() 
 
     assert_eq!(result.status, ProviderTestStatus::RequestFailed);
     assert!(result.message.contains("HTTP 500"));
+}
+
+#[tokio::test]
+async fn llm_manager_lists_provider_summaries_when_some_secrets_require_reentry() {
+    let (_temp_dir, pool, repository) = setup_repository().await;
+    repository
+        .upsert_provider(&build_record("openai", "OpenAI", true))
+        .await
+        .expect("openai provider should be stored");
+
+    let legacy_repository = SqliteLlmProviderRepository::new_with_key_material(
+        pool.clone(),
+        b"legacy-test-key".to_vec(),
+    );
+    legacy_repository
+        .upsert_provider(&build_record("legacy", "Legacy", false))
+        .await
+        .expect("legacy provider should be stored");
+
+    let manager = LLMManager::new(Arc::new(repository));
+    let providers = manager
+        .list_providers()
+        .await
+        .expect("provider summaries should still load");
+
+    assert_eq!(providers.len(), 2);
+    assert_eq!(providers[0].display_name, "Legacy");
+    assert_eq!(
+        providers[0].secret_status,
+        ProviderSecretStatus::RequiresReentry
+    );
+    assert_eq!(providers[1].secret_status, ProviderSecretStatus::Ready);
 }

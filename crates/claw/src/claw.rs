@@ -207,6 +207,13 @@ impl AppContext {
         self.llm_manager.get_provider_record(id).await
     }
 
+    pub async fn get_provider_summary(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<LlmProviderSummary, AgentError> {
+        self.llm_manager.get_provider_summary(id).await
+    }
+
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
         self.llm_manager.get_default_provider_record().await
     }
@@ -628,6 +635,7 @@ mod tests {
             model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
         })
         .await
         .expect("provider should save");
@@ -673,6 +681,7 @@ mod tests {
             model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
         })
         .await
         .expect("provider should save");
@@ -717,6 +726,7 @@ mod tests {
             model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
         })
         .await
         .expect("provider should save");

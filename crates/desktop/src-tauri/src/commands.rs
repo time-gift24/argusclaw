@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use claw::{
-    AgentError, AgentId, AgentRecord, AppContext, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderTestResult, SecretString,
+    AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -58,6 +58,7 @@ impl From<ProviderInput> for LlmProviderRecord {
             model: input.model,
             is_default: input.is_default,
             extra_headers: input.extra_headers,
+            secret_status: ProviderSecretStatus::Ready,
         }
     }
 }
@@ -71,6 +72,7 @@ pub struct ProviderSummary {
     pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
 }
 
 impl From<LlmProviderSummary> for ProviderSummary {
@@ -83,6 +85,7 @@ impl From<LlmProviderSummary> for ProviderSummary {
             model: summary.model,
             is_default: summary.is_default,
             extra_headers: summary.extra_headers,
+            secret_status: summary.secret_status,
         }
     }
 }
@@ -97,6 +100,7 @@ pub struct ProviderRecord {
     pub model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
 }
 
 impl From<LlmProviderRecord> for ProviderRecord {
@@ -110,10 +114,26 @@ impl From<LlmProviderRecord> for ProviderRecord {
             model: record.model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
+            secret_status: record.secret_status,
         }
     }
 }
 
+fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord {
+    ProviderRecord {
+        id: summary.id.to_string(),
+        kind: summary.kind.into(),
+        display_name: summary.display_name,
+        base_url: summary.base_url,
+        api_key: String::new(),
+        model: summary.model,
+        is_default: summary.is_default,
+        extra_headers: summary.extra_headers,
+        secret_status: summary.secret_status,
+    }
+}
+
+#[cfg(test)]
 fn map_provider_lookup_result(
     result: Result<LlmProviderRecord, AgentError>,
 ) -> Result<Option<ProviderRecord>, String> {
@@ -139,8 +159,19 @@ pub async fn get_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<Option<ProviderRecord>, String> {
-    let provider = ctx.get_provider_record(&LlmProviderId::new(id)).await;
-    map_provider_lookup_result(provider)
+    let provider_id = LlmProviderId::new(id);
+    match ctx.get_provider_record(&provider_id).await {
+        Ok(record) => Ok(Some(record.into())),
+        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
+        Err(AgentError::Database(DbError::SecretDecryptionFailed { .. })) => {
+            let summary = ctx
+                .get_provider_summary(&provider_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Some(build_provider_reentry_record(summary)))
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -420,11 +451,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        map_provider_lookup_result, ChatSessionPayload, ProviderInput, ProviderKind, ProviderRecord,
+        build_provider_reentry_record, map_provider_lookup_result, ChatSessionPayload,
+        ProviderInput, ProviderKind, ProviderRecord, ProviderSummary,
     };
     use claw::{
-        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderTestResult,
-        ProviderTestStatus, SecretString,
+        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary,
+        ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
     };
 
     #[test]
@@ -444,6 +476,7 @@ mod tests {
         assert_eq!(record.id, LlmProviderId::new("openai"));
         assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);
         assert_eq!(record.api_key.expose_secret(), "sk-test");
+        assert_eq!(record.secret_status, ProviderSecretStatus::Ready);
     }
 
     #[test]
@@ -467,6 +500,7 @@ mod tests {
             model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::Ready,
         };
 
         let output = ProviderRecord::from(record);
@@ -474,6 +508,42 @@ mod tests {
         assert_eq!(output.id, "openai");
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
+        assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
+    }
+
+    #[test]
+    fn provider_summary_can_build_a_reentry_record_with_a_blank_api_key() {
+        let record = build_provider_reentry_record(LlmProviderSummary {
+            id: LlmProviderId::new("legacy"),
+            kind: LlmProviderKind::OpenAiCompatible,
+            display_name: "Legacy".to_string(),
+            base_url: "https://legacy.example.com/v1".to_string(),
+            model: "gpt-4.1".to_string(),
+            is_default: false,
+            extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::RequiresReentry,
+        });
+
+        assert_eq!(record.id, "legacy");
+        assert_eq!(record.api_key, "");
+        assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
+    }
+
+    #[test]
+    fn provider_summary_conversion_exposes_secret_status_for_frontend() {
+        let output = ProviderSummary::from(LlmProviderSummary {
+            id: LlmProviderId::new("openai"),
+            kind: LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::Ready,
+        });
+
+        assert_eq!(output.id, "openai");
+        assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 
     #[test]
