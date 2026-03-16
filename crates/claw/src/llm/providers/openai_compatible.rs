@@ -9,11 +9,14 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use crate::llm::provider::{
+    CompletionRequest, CompletionResponse, ContentPart, LlmEventStream, ProviderCapabilities,
+    ThinkingConfig, ToolCallDelta,
+};
+use crate::llm::retry::{RetryConfig, RetryProvider};
 use crate::llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmError,
-    LlmEventStream, LlmProvider, LlmStreamEvent, ProviderCapabilities, RetryConfig, RetryProvider,
-    Role, ThinkingConfig, ToolCall, ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition,
+    ChatMessage, FinishReason, LlmError, LlmProvider, LlmStreamEvent, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 #[derive(Debug, Clone)]
@@ -158,7 +161,7 @@ impl OpenAiCompatibleProvider {
             return Ok(response);
         }
 
-        Err(map_http_error(response).await)
+        Err(map_http_error(response, &self.model).await)
     }
 }
 
@@ -639,7 +642,7 @@ fn parse_finish_reason(reason: Option<&str>) -> FinishReason {
     }
 }
 
-async fn map_http_error(response: reqwest::Response) -> LlmError {
+async fn map_http_error(response: reqwest::Response, model: &str) -> LlmError {
     let status = response.status();
     let retry_after = response
         .headers()
@@ -649,9 +652,24 @@ async fn map_http_error(response: reqwest::Response) -> LlmError {
         .map(Duration::from_secs);
     let body = response.text().await.unwrap_or_default();
 
+    classify_http_error(status, retry_after, &body, model)
+}
+
+fn classify_http_error(
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+    body: &str,
+    model: &str,
+) -> LlmError {
+    let lower_body = body.to_ascii_lowercase();
+
     match status.as_u16() {
         401 | 403 => LlmError::AuthFailed {
             provider: "openai-compatible".to_string(),
+        },
+        404 if lower_body.contains("model") => LlmError::ModelNotAvailable {
+            provider: "openai-compatible".to_string(),
+            model: model.to_string(),
         },
         429 => LlmError::RateLimited {
             provider: "openai-compatible".to_string(),
@@ -829,5 +847,21 @@ mod tests {
             create_openai_compatible_provider(config).expect("factory should build provider");
 
         assert_eq!(provider.model_name(), "model");
+    }
+
+    #[test]
+    fn http_404_model_errors_map_to_model_not_available() {
+        let error = classify_http_error(
+            reqwest::StatusCode::NOT_FOUND,
+            None,
+            r#"{"error":"model not available"}"#,
+            "gpt-4.1",
+        );
+
+        assert!(matches!(
+            error,
+            LlmError::ModelNotAvailable { provider, model }
+            if provider == "openai-compatible" && model == "gpt-4.1"
+        ));
     }
 }

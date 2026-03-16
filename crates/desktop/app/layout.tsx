@@ -5,14 +5,19 @@ import { Geist, Geist_Mono, Public_Sans } from "next/font/google"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils"
+import Navbar from "@/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06"
 
-const publicSans = Public_Sans({subsets:['latin'],variable:'--font-sans'})
+const publicSans = Public_Sans({ subsets: ["latin"], variable: "--font-sans" })
 
 const fontMono = Geist_Mono({
   subsets: ["latin"],
   variable: "--font-mono",
 })
+
+const navigationItems = [
+  { title: "Home", href: "/", isActive: true },
+]
 
 export default function RootLayout({
   children,
@@ -27,7 +32,10 @@ export default function RootLayout({
     >
       <body>
         <TooltipProvider>
-          <ThemeProvider>{children}</ThemeProvider>
+          <ThemeProvider>
+            <Navbar navigationItems={navigationItems} />
+            <main className="flex-1">{children}</main>
+          </ThemeProvider>
         </TooltipProvider>
       </body>
     </html>

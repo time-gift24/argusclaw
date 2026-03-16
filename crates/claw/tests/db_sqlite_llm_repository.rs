@@ -189,3 +189,26 @@ async fn sqlite_repository_can_set_the_default_provider_by_id() {
     assert_eq!(default_provider.id, second.id);
     assert!(!first_provider.is_default);
 }
+
+#[tokio::test]
+async fn sqlite_repository_deletes_providers_by_id() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let record = build_record("openai", "OpenAI", false);
+
+    repository
+        .upsert_provider(&record)
+        .await
+        .expect("provider should be stored");
+
+    let deleted = repository
+        .delete_provider(&record.id)
+        .await
+        .expect("delete should succeed");
+    let missing = repository
+        .get_provider(&record.id)
+        .await
+        .expect("query should succeed");
+
+    assert!(deleted);
+    assert!(missing.is_none());
+}

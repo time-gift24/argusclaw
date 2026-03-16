@@ -238,8 +238,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _request: crate::llm::provider::CompletionRequest,
+        ) -> Result<crate::llm::provider::CompletionResponse, LlmError> {
             unimplemented!("complete not used in turn execution")
         }
 

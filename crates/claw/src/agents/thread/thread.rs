@@ -412,9 +412,9 @@ mod tests {
     use rust_decimal::Decimal;
 
     use crate::agents::compact::{Compactor, KeepTokensCompactor};
+    use crate::llm::provider::{CompletionRequest, CompletionResponse};
     use crate::llm::{
-        CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-        ToolCompletionRequest, ToolCompletionResponse,
+        FinishReason, LlmError, LlmProvider, Role, ToolCompletionRequest, ToolCompletionResponse,
     };
 
     use super::super::ThreadConfigBuilder;

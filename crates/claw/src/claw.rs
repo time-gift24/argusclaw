@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::agents::Agent;
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
-use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
+use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
 use crate::db::sqlite::{
     SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
     migrate,
@@ -18,7 +18,7 @@ use crate::db::sqlite::{
 use crate::error::AgentError;
 use crate::job::JobRepository;
 #[cfg(feature = "dev")]
-use crate::llm::LlmEventStream;
+use crate::llm::provider::LlmEventStream;
 use crate::llm::{LLMManager, LlmProvider};
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
@@ -164,6 +164,10 @@ impl AppContext {
         self.llm_manager.upsert_provider(record).await
     }
 
+    pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, AgentError> {
+        self.llm_manager.delete_provider(id).await
+    }
+
     pub async fn import_providers(
         &self,
         records: Vec<LlmProviderRecord>,
@@ -202,6 +206,48 @@ impl AppContext {
     /// 列出所有 provider 摘要
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
         self.llm_manager.list_providers().await
+    }
+
+    pub async fn test_provider_connection(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<ProviderTestResult, AgentError> {
+        self.llm_manager.test_provider_connection(id).await
+    }
+
+    pub async fn test_provider_record(
+        &self,
+        record: LlmProviderRecord,
+    ) -> Result<ProviderTestResult, AgentError> {
+        self.llm_manager.test_provider_record(record).await
+    }
+
+    pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {
+        self.agent_manager
+            .upsert_template(record)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn get_template(&self, id: &AgentId) -> Result<Option<AgentRecord>, AgentError> {
+        self.agent_manager
+            .get_template(id)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn list_templates(&self) -> Result<Vec<AgentRecord>, AgentError> {
+        self.agent_manager
+            .list_templates()
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn delete_template(&self, id: &AgentId) -> Result<bool, AgentError> {
+        self.agent_manager
+            .delete_template(id)
+            .await
+            .map_err(Into::into)
     }
 
     // === Agent Use-Case Methods ===
