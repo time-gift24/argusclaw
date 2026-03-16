@@ -42,7 +42,8 @@ pub use protocol::{
 // LLM Provider Types (DTO)
 pub use db::DbError;
 pub use db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderTestResult,
+    ProviderTestStatus, SecretString,
 };
 
 // Tool Types
@@ -71,6 +72,8 @@ pub use db::{ApprovalRepository, SqliteJobRepository, SqliteWorkflowRepository};
 #[cfg(feature = "dev")]
 pub use job::{JobRecord, JobRepository, JobType};
 #[cfg(feature = "dev")]
-pub use llm::{ChatMessage, LLMManager, LlmEventStream, LlmProvider, Role};
+pub use llm::provider::LlmEventStream;
+#[cfg(feature = "dev")]
+pub use llm::{ChatMessage, LLMManager, LlmProvider, Role};
 #[cfg(feature = "dev")]
 pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};

@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS agents (
     display_name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     version TEXT NOT NULL DEFAULT '1.0.0',
-    provider_id TEXT NOT NULL REFERENCES llm_providers(id) ON DELETE RESTRICT,
+    provider_id TEXT REFERENCES llm_providers(id) ON DELETE RESTRICT,
     system_prompt TEXT NOT NULL,
     tool_names TEXT NOT NULL DEFAULT '[]',
     max_tokens INTEGER,

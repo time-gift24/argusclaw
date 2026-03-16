@@ -3,6 +3,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::db::DbError;
 
@@ -119,9 +121,35 @@ impl From<LlmProviderRecord> for LlmProviderSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTestStatus {
+    Success,
+    AuthFailed,
+    ModelNotAvailable,
+    RateLimited,
+    RequestFailed,
+    InvalidResponse,
+    ProviderNotFound,
+    UnsupportedProviderKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderTestResult {
+    pub provider_id: String,
+    pub model: String,
+    pub base_url: String,
+    pub checked_at: DateTime<Utc>,
+    pub latency_ms: u64,
+    pub status: ProviderTestStatus,
+    pub message: String,
+}
+
 #[async_trait]
 pub trait LlmProviderRepository: Send + Sync {
     async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError>;
+
+    async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, DbError>;
 
     async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), DbError>;
 
@@ -130,4 +158,43 @@ pub trait LlmProviderRepository: Send + Sync {
     async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError>;
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    use super::{ProviderTestResult, ProviderTestStatus};
+
+    #[test]
+    fn provider_test_result_serializes_with_stable_shape() {
+        let result = ProviderTestResult {
+            provider_id: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            checked_at: Utc
+                .with_ymd_and_hms(2026, 3, 16, 12, 0, 0)
+                .single()
+                .expect("timestamp should be valid"),
+            latency_ms: 42,
+            status: ProviderTestStatus::ModelNotAvailable,
+            message: "Model gpt-4.1 not available on provider openai-compatible".to_string(),
+        };
+
+        let serialized = serde_json::to_value(result).expect("result should serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "provider_id": "openai",
+                "model": "gpt-4.1",
+                "base_url": "https://api.example.com/v1",
+                "checked_at": "2026-03-16T12:00:00Z",
+                "latency_ms": 42,
+                "status": "model_not_available",
+                "message": "Model gpt-4.1 not available on provider openai-compatible",
+            })
+        );
+    }
 }
