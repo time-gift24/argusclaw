@@ -51,6 +51,8 @@ interface DraftModel {
   is_default: boolean;
 }
 
+type DialogStep = "provider" | "models";
+
 function normalizeModelName(value: string) {
   return value.trim().toLowerCase();
 }
@@ -76,8 +78,10 @@ export function ProviderFormDialog({
   const [savedProviderId, setSavedProviderId] = React.useState<string | null>(
     provider?.id || null,
   );
+  const [step, setStep] = React.useState<DialogStep>(
+    provider ? "models" : "provider",
+  );
   const [modelList, setModelList] = React.useState<LlmModelRecord[]>([]);
-  const [draftModels, setDraftModels] = React.useState<DraftModel[]>([]);
   const [newModelName, setNewModelName] = React.useState("");
   const [addingModel, setAddingModel] = React.useState(false);
   const [modelError, setModelError] = React.useState<string | null>(null);
@@ -103,7 +107,7 @@ export function ProviderFormDialog({
       onOpenChange?.(nextOpen);
       if (!nextOpen) {
         setSavedProviderId(provider?.id || null);
-        setDraftModels([]);
+        setStep(provider ? "models" : "provider");
         setNewModelName("");
         setModelError(null);
       }
@@ -125,23 +129,20 @@ export function ProviderFormDialog({
       },
   );
 
-  // Load models when provider changes
+  // Load models when savedProviderId changes
   React.useEffect(() => {
-    const loadModels = async () => {
-      const targetId = savedProviderId || provider?.id;
-      if (targetId) {
-        await loadPersistedModels(targetId);
-      } else {
-        setModelList([]);
-      }
-    };
-    void loadModels();
-  }, [loadPersistedModels, savedProviderId, provider?.id]);
+    if (savedProviderId) {
+      void loadPersistedModels(savedProviderId);
+    } else {
+      setModelList([]);
+    }
+  }, [savedProviderId, loadPersistedModels]);
 
   React.useEffect(() => {
     if (provider) {
       setFormData(provider);
       setSavedProviderId(provider.id);
+      setStep("models");
     } else {
       setFormData({
         id: "",
@@ -154,8 +155,8 @@ export function ProviderFormDialog({
         secret_status: "ready",
       });
       setSavedProviderId(null);
+      setStep("provider");
     }
-    setDraftModels([]);
     setTestingConnection(false);
     setTestDialogOpen(false);
     setTestResult(null);
@@ -163,58 +164,36 @@ export function ProviderFormDialog({
     setModelError(null);
   }, [provider]);
 
-  const visibleModels = savedProviderId
-    ? modelList.map((model) => ({
-        key: model.id,
-        id: model.id,
-        name: model.name,
-        is_default: model.is_default,
-        persisted: true,
-      }))
-    : draftModels.map((model) => ({
-        key: model.tempId,
-        id: model.tempId,
-        name: model.name,
-        is_default: model.is_default,
-        persisted: false,
-      }));
+  const visibleModels = modelList.map((model) => ({
+    key: model.id,
+    id: model.id,
+    name: model.name,
+    is_default: model.is_default,
+  }));
 
   const defaultModelName =
     visibleModels.find((model) => model.is_default)?.name ?? "";
 
-  const persistDraftModels = React.useCallback(
-    async (providerId: string) => {
-      for (const model of draftModels) {
-        const input: ModelInput = {
-          id: buildModelId(providerId, model.name),
-          provider_id: providerId,
-          name: model.name,
-          is_default: model.is_default,
-        };
-        await models.upsert(input);
-      }
-      setDraftModels([]);
-      await loadPersistedModels(providerId);
-    },
-    [draftModels, loadPersistedModels],
+  const canSave = Boolean(
+    formData.id.trim() &&
+    formData.display_name.trim() &&
+    formData.base_url.trim() &&
+    formData.api_key.trim()
   );
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveProvider = async () => {
+    if (!canSave) return;
+
     setSaving(true);
     setModelError(null);
     try {
       await onSubmit(formData);
       setSavedProviderId(formData.id);
-      if (draftModels.length > 0) {
-        await persistDraftModels(formData.id);
-      } else {
-        await loadPersistedModels(formData.id);
-      }
+      setStep("models");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setModelError(message);
-      console.error("Failed to save provider or models:", error);
+      console.error("Failed to save provider:", error);
     } finally {
       setSaving(false);
     }
@@ -272,20 +251,14 @@ export function ProviderFormDialog({
       return;
     }
 
+    if (!savedProviderId) {
+      setModelError("请先保存 Provider");
+      return;
+    }
+
     setAddingModel(true);
     setModelError(null);
     try {
-      if (!savedProviderId) {
-        const nextDraftModel: DraftModel = {
-          tempId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          name: trimmedModelName,
-          is_default: draftModels.length === 0,
-        };
-        setDraftModels((current) => [...current, nextDraftModel]);
-        setNewModelName("");
-        return;
-      }
-
       const input: ModelInput = {
         id: buildModelId(savedProviderId, trimmedModelName),
         provider_id: savedProviderId,
@@ -307,13 +280,7 @@ export function ProviderFormDialog({
     try {
       setModelError(null);
       if (!savedProviderId) {
-        setDraftModels((current) => {
-          const next = current.filter((model) => model.tempId !== modelId);
-          if (next.length > 0 && !next.some((model) => model.is_default)) {
-            next[0] = { ...next[0], is_default: true };
-          }
-          return next;
-        });
+        setModelError("请先保存 Provider");
         return;
       }
 
@@ -333,12 +300,7 @@ export function ProviderFormDialog({
     try {
       setModelError(null);
       if (!savedProviderId) {
-        setDraftModels((current) =>
-          current.map((model) => ({
-            ...model,
-            is_default: model.tempId === modelId,
-          })),
-        );
+        setModelError("请先保存 Provider");
         return;
       }
 
@@ -355,7 +317,7 @@ export function ProviderFormDialog({
   const canTest = Boolean(
     formData.base_url.trim() &&
     formData.api_key.trim() &&
-    (visibleModels.length > 0 || newModelName.trim()),
+    (visibleModels.length > 0 || (step === "provider" && newModelName.trim())),
   );
 
   const defaultTrigger = isEditing ? (
@@ -383,86 +345,101 @@ export function ProviderFormDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       {dialogTrigger ? <DialogTrigger render={dialogTrigger} /> : null}
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle>
-            {isEditing ? "Edit Provider" : "Add Provider"}
-          </DialogTitle>
-          <DialogDescription>
-            {isEditing
-              ? "Update the LLM provider configuration."
-              : "Configure a new LLM provider."}
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {formData.secret_status === "requires_reentry" && (
-            <div className="rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              当前保存的密钥已无法解密，请重新填写 API Key 后再保存。
+        {step === "provider" && (
+          <>
+            <DialogHeader>
+              <DialogTitle>
+                {isEditing ? "编辑 Provider" : "添加 Provider"}
+              </DialogTitle>
+              <DialogDescription>
+                {isEditing
+                  ? "更新 LLM Provider 配置"
+                  : "配置一个新的 LLM Provider"}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              {formData.secret_status === "requires_reentry" && (
+                <div className="rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  当前保存的密钥已无法解密，请重新填写 API Key 后再保存。
+                </div>
+              )}
+              <div className="space-y-2">
+                <Label htmlFor="id">ID</Label>
+                <Input
+                  id="id"
+                  value={formData.id}
+                  onChange={(e) => setFormData({ ...formData, id: e.target.value })}
+                  placeholder="unique-provider-id"
+                  required
+                  disabled={isEditing}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="display_name">Display Name</Label>
+                <Input
+                  id="display_name"
+                  value={formData.display_name}
+                  onChange={(e) =>
+                    setFormData({ ...formData, display_name: e.target.value })
+                  }
+                  placeholder="My LLM Provider"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="base_url">Base URL</Label>
+                <Input
+                  id="base_url"
+                  value={formData.base_url}
+                  onChange={(e) =>
+                    setFormData({ ...formData, base_url: e.target.value })
+                  }
+                  placeholder="https://api.example.com/v1"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="api_key">API Key</Label>
+                <Input
+                  id="api_key"
+                  type="password"
+                  value={formData.api_key}
+                  onChange={(e) =>
+                    setFormData({ ...formData, api_key: e.target.value })
+                  }
+                  placeholder="sk-..."
+                  required
+                />
+              </div>
+              <DialogFooter className="gap-2 sm:gap-0">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => onOpenChange?.(false)}
+                >
+                  取消
+                </Button>
+                <Button
+                  onClick={handleSaveProvider}
+                  disabled={saving || !canSave}
+                >
+                  {saving ? "保存中..." : "下一步: 添加模型"}
+                </Button>
+              </DialogFooter>
             </div>
-          )}
-          <div className="space-y-2">
-            <Label htmlFor="id">ID</Label>
-            <Input
-              id="id"
-              value={formData.id}
-              onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-              placeholder="unique-provider-id"
-              required
-              disabled={isEditing}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="display_name">Display Name</Label>
-            <Input
-              id="display_name"
-              value={formData.display_name}
-              onChange={(e) =>
-                setFormData({ ...formData, display_name: e.target.value })
-              }
-              placeholder="My LLM Provider"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="base_url">Base URL</Label>
-            <Input
-              id="base_url"
-              value={formData.base_url}
-              onChange={(e) =>
-                setFormData({ ...formData, base_url: e.target.value })
-              }
-              placeholder="https://api.example.com/v1"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="api_key">API Key</Label>
-            <Input
-              id="api_key"
-              type="password"
-              value={formData.api_key}
-              onChange={(e) =>
-                setFormData({ ...formData, api_key: e.target.value })
-              }
-              placeholder="sk-..."
-              required
-            />
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={handleTestConnection}
-              disabled={saving || testingConnection || !canTest}
-            >
-              {testingConnection ? "正在测试" : "测试连接"}
-            </Button>
-            <Button type="submit" disabled={saving || testingConnection}>
-              {saving ? "Saving..." : isEditing ? "Update" : "Create"}
-            </Button>
-          </DialogFooter>
-        </form>
+          </>
+        )}
 
-        <div className="mt-4 border-t pt-4">
+        {step === "models" && (
+          <>
+            <DialogHeader>
+              <DialogTitle>添加模型</DialogTitle>
+              <DialogDescription>
+                为 {formData.display_name} 添加模型
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="mt-4 border-t pt-4">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
               <h4 className="text-sm font-medium">模型列表</h4>
@@ -470,11 +447,6 @@ export function ProviderFormDialog({
                 一个 Provider 可以配置多个模型，其中一个作为默认模型。
               </p>
             </div>
-            {!savedProviderId ? (
-              <span className="rounded-full border border-dashed px-2 py-1 text-[11px] text-muted-foreground">
-                保存 Provider 后写入
-              </span>
-            ) : null}
           </div>
 
           <div className="mb-3 flex gap-2">
@@ -518,11 +490,6 @@ export function ProviderFormDialog({
                       <Star className="h-3 w-3 fill-yellow-500 text-yellow-500" />
                     ) : null}
                     <span className="font-mono text-xs">{model.name}</span>
-                    {!model.persisted ? (
-                      <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                        草稿
-                      </span>
-                    ) : null}
                   </div>
                   <div className="flex items-center gap-1">
                     {!model.is_default ? (
@@ -553,10 +520,26 @@ export function ProviderFormDialog({
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">
-              先添加至少一个模型。新建 Provider 时，这些模型会在保存后一起创建。
+              添加至少一个模型以便测试连接。
             </p>
           )}
-        </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setStep("provider")}
+            >
+              上一步
+            </Button>
+            <Button onClick={() => onOpenChange?.(false)}>
+              完成
+            </Button>
+          </DialogFooter>
+            </div>
+            </div>
+          </>
+        )}
 
         <ProviderTestDialog
           open={testDialogOpen}
