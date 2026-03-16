@@ -227,6 +227,26 @@ pub async fn delete_agent_template(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn get_default_agent_template(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+) -> Result<AgentRecord, String> {
+    ctx.get_default_agent_template()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn create_default_agent(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+) -> Result<String, String> {
+    let agent_id = ctx
+        .create_default_agent()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(agent_id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
