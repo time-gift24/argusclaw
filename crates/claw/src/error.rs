@@ -5,6 +5,7 @@ use crate::db::DbError;
 use crate::llm::LlmError;
 use crate::protocol::ThreadId;
 use crate::tool::ToolError;
+use crate::user::UserError;
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -58,4 +59,7 @@ pub enum AgentError {
 
     #[error("default agent not found")]
     DefaultAgentNotFound,
+
+    #[error(transparent)]
+    User(#[from] UserError),
 }

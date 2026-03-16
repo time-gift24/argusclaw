@@ -16,6 +16,7 @@ pub(crate) mod workflow;
 pub mod claw; // AppContext
 pub mod error; // AgentError
 pub mod protocol; // 稳定 DTO
+pub mod user; // User management
 
 // approval: dev feature 下公开，否则 crate 内部
 #[cfg(feature = "dev")]
@@ -49,6 +50,9 @@ pub use db::llm::{
 
 // Tool Types
 pub use tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
+
+// User Types
+pub use user::UserInfo;
 
 // === Dev Feature 重导出 ===
 #[cfg(feature = "dev")]
