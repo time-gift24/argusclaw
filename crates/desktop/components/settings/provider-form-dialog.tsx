@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Pencil, Trash2, Star, BotIcon, SparklesIcon, UserIcon, SearchIcon, CloudIcon, MoonIcon } from "lucide-react";
+import { Plus, Pencil, Trash2, Star, BotIcon, SparklesIcon, UserIcon, SearchIcon, CloudIcon, MoonIcon, Activity } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
   providers,
@@ -79,6 +79,7 @@ export function ProviderFormDialog({
   const [newModelName, setNewModelName] = React.useState("");
   const [addingModel, setAddingModel] = React.useState(false);
   const [modelError, setModelError] = React.useState<string | null>(null);
+  const [selectedModelForTest, setSelectedModelForTest] = React.useState<string>("");
 
   const isEditing = !!provider;
   const open = openProp ?? internalOpen;
@@ -195,7 +196,7 @@ export function ProviderFormDialog({
 
   const handleTestConnection = async () => {
     const record: ProviderInput = { ...formData };
-    const modelName = defaultModelName || newModelName.trim();
+    const modelName = selectedModelForTest || defaultModelName || newModelName.trim();
 
     if (!modelName) {
       setTestResult({
@@ -516,6 +517,32 @@ export function ProviderFormDialog({
             <p className="text-xs text-muted-foreground">
               添加至少一个模型以便测试连接。
             </p>
+          )}
+
+          {visibleModels.length > 0 && (
+            <div className="space-y-2 pt-3 border-t">
+              <Label htmlFor="test_model">选择模型</Label>
+              <select
+                id="test_model"
+                value={selectedModelForTest || defaultModelName}
+                onChange={(e) => setSelectedModelForTest(e.target.value)}
+                className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm"
+              >
+                {visibleModels.map((model) => (
+                  <option key={model.id} value={model.name}>
+                    {model.name} {model.is_default ? "(默认)" : ""}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                onClick={() => void handleTestConnection()}
+                disabled={testingConnection || !canTest}
+              >
+                <Activity className="h-3 w-3 mr-1" />
+                {testingConnection ? "测试中..." : "测试连接"}
+              </Button>
+            </div>
           )}
 
           <DialogFooter className="gap-2 sm:gap-0">
