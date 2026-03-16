@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useState } from 'react'
 import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import Link from 'next/link'
@@ -21,8 +22,10 @@ import {
 } from '@/components/ui/navigation-menu'
 
 import LogoSvg from '@/assets/svg/logo'
+import { LoginDialog } from '@/components/auth/login-dialog'
 import NotificationDropdown from '@/components/shadcn-studio/blocks/dropdown-notification'
 import ProfileDropdown from '@/components/shadcn-studio/blocks/dropdown-profile'
+import { useAuthStore } from '@/components/auth/use-auth-store'
 
 type NavigationItem = {
   title: string
@@ -36,10 +39,27 @@ const Navbar = ({
   navigationItems: NavigationItem
 }) => {
   const { resolvedTheme, setTheme } = useTheme()
+  const { username, isLoggedIn } = useAuthStore()
+  const [loginDialogOpen, setLoginDialogOpen] = useState(false)
+  const [mounted, setMounted] = useState(false)
+
+  // Get avatar fallback based on auth state
+  const avatarFallback = isLoggedIn && username ? username.charAt(0).toUpperCase() : '?'
+  const avatarClassName = isLoggedIn
+    ? 'size-8 rounded-md bg-primary text-primary-foreground text-sm'
+    : 'size-8 rounded-md bg-muted text-muted-foreground text-sm'
 
   const toggleTheme = () => {
     setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')
   }
+
+  const openLoginDialog = () => {
+    setLoginDialogOpen(true)
+  }
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   return (
     <header className='bg-background sticky top-0 z-50'>
@@ -47,7 +67,7 @@ const Navbar = ({
         <Link href='/'>
           <div className='flex items-center gap-3'>
             <LogoSvg className='size-8' />
-            <span className='text-xl font-semibold max-sm:hidden'>ArgusWing</span>
+            <span className='text-lg font-semibold max-sm:hidden'>ArgusWing</span>
           </div>
         </Link>
 
@@ -65,14 +85,14 @@ const Navbar = ({
 
         <div className='flex items-center gap-3'>
           <Button variant='outline' size='icon' onClick={toggleTheme}>
-            {resolvedTheme === 'dark' ? <Moon /> : <Sun />}
-            <span className='sr-only'>Toggle theme</span>
+            {mounted && resolvedTheme === 'dark' ? <Moon /> : <Sun />}
+            <span className='sr-only'>切换主题</span>
           </Button>
 
           <DropdownMenu>
             <DropdownMenuTrigger render={<Button variant='outline' size='icon' />}>
               <Settings />
-              <span className='sr-only'>Settings</span>
+              <span className='sr-only'>设置</span>
             </DropdownMenuTrigger>
             <DropdownMenuContent align='end' className='min-w-48'>
               <DropdownMenuItem>
@@ -99,24 +119,38 @@ const Navbar = ({
             }
           />
 
-          <ProfileDropdown
-            trigger={
-              <Button variant='ghost' className='h-full rounded-lg p-0'>
-                <Avatar className='size-9.5 rounded-lg'>
-                  <AvatarImage
-                    src='https://cdn.shadcnstudio.com/ss-assets/avatar/avatar-1.png'
-                    className='rounded-lg'
-                  />
-                  <AvatarFallback>JD</AvatarFallback>
-                </Avatar>
-              </Button>
-            }
-          />
+          {isLoggedIn ? (
+            <ProfileDropdown
+              trigger={
+                <Button variant='ghost' className='h-full rounded-lg p-0'>
+                  <Avatar className={avatarClassName}>
+                    <AvatarImage src='' className='rounded-lg' />
+                    <AvatarFallback>{avatarFallback}</AvatarFallback>
+                  </Avatar>
+                </Button>
+              }
+              onLoginRequested={openLoginDialog}
+            />
+          ) : (
+            <Button
+              variant='ghost'
+              className='h-8 rounded-md p-0'
+              onClick={openLoginDialog}
+              aria-label='打开登录弹窗'
+            >
+              <Avatar className={avatarClassName}>
+                <AvatarImage src='' className='rounded-md' />
+                <AvatarFallback>{avatarFallback}</AvatarFallback>
+              </Avatar>
+            </Button>
+          )}
+
+          <LoginDialog open={loginDialogOpen} onOpenChange={setLoginDialogOpen} />
 
           <DropdownMenu>
             <DropdownMenuTrigger className='md:hidden' render={<Button variant='outline' size='icon' />}>
               <MenuIcon />
-              <span className='sr-only'>Menu</span>
+              <span className='sr-only'>菜单</span>
             </DropdownMenuTrigger>
             <DropdownMenuContent className='w-56' align='end'>
               {navigationItems.map((item, index) => (

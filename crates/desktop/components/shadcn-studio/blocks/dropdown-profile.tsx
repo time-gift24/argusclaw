@@ -1,93 +1,121 @@
-import type { ReactElement } from 'react'
+'use client'
 
 import {
-  UserIcon,
-  SettingsIcon,
-  CreditCardIcon,
-  UsersIcon,
-  SquarePenIcon,
-  CirclePlusIcon,
-  LogOutIcon
-} from 'lucide-react'
+  cloneElement,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactElement,
+} from 'react'
 
-import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
+import { LogOutIcon } from 'lucide-react'
+
+import { useAuthStore } from '@/components/auth/use-auth-store'
+import { Button } from '@/components/ui/button'
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
-type Props = {
-  trigger: ReactElement
-  defaultOpen?: boolean
-  align?: 'start' | 'center' | 'end'
+type TriggerElementProps = {
+  onClick?: (event: MouseEvent<HTMLElement>) => void
+  onKeyDown?: (event: KeyboardEvent<HTMLElement>) => void
+  role?: string
+  tabIndex?: number
+  'aria-label'?: string
 }
 
-const ProfileDropdown = ({ trigger, defaultOpen, align = 'end' }: Props) => {
+type Props = {
+  trigger: ReactElement<TriggerElementProps>
+  defaultOpen?: boolean
+  align?: 'start' | 'center' | 'end'
+  onLoginRequested?: () => void
+}
+
+const ProfileDropdown = ({ trigger, defaultOpen, onLoginRequested }: Props) => {
+  const { username, isLoggedIn, logout } = useAuthStore()
+  const [dialogOpen, setDialogOpen] = useState(defaultOpen ?? false)
+  const [loggingOut, setLoggingOut] = useState(false)
+
+  const openLoginDialog = () => {
+    window.requestAnimationFrame(() => {
+      onLoginRequested?.()
+    })
+  }
+
+  const handleTriggerActivation = () => {
+    if (isLoggedIn) {
+      setDialogOpen(true)
+      return
+    }
+
+    openLoginDialog()
+  }
+
+  const handleTriggerClick = (event: MouseEvent<HTMLElement>) => {
+    trigger.props.onClick?.(event)
+    if (event.defaultPrevented) return
+    handleTriggerActivation()
+  }
+
+  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    trigger.props.onKeyDown?.(event)
+    if (event.defaultPrevented) return
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      handleTriggerActivation()
+    }
+  }
+
+  const handleLogoutConfirm = async () => {
+    setLoggingOut(true)
+
+    try {
+      await logout()
+      setDialogOpen(false)
+    } finally {
+      setLoggingOut(false)
+    }
+  }
+
   return (
-    <DropdownMenu defaultOpen={defaultOpen}>
-      <DropdownMenuTrigger render={trigger} />
-      <DropdownMenuContent className='w-80' align={align || 'end'}>
-        <DropdownMenuLabel className='flex items-center gap-4 px-4 py-2.5 font-normal'>
-          <div className='relative'>
-            <Avatar className='size-10'>
-              <AvatarImage src='https://cdn.shadcnstudio.com/ss-assets/avatar/avatar-1.png' alt='John Doe' />
-              <AvatarFallback>JD</AvatarFallback>
-            </Avatar>
-            <span className='ring-card absolute right-0 bottom-0 block size-2 rounded-full bg-green-600 ring-2' />
-          </div>
-          <div className='flex flex-1 flex-col items-start'>
-            <span className='text-foreground text-lg font-semibold'>John Doe</span>
-            <span className='text-muted-foreground text-base'>john.doe@example.com</span>
-          </div>
-        </DropdownMenuLabel>
+    <>
+      {cloneElement(trigger, {
+        onClick: handleTriggerClick,
+        onKeyDown: handleTriggerKeyDown,
+        role: trigger.props.role ?? 'button',
+        tabIndex: trigger.props.tabIndex ?? 0,
+        'aria-label': trigger.props['aria-label'] ?? (isLoggedIn ? '打开退出登录确认弹窗' : '打开登录弹窗'),
+      })}
 
-        <DropdownMenuSeparator />
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className='gap-3 p-5 sm:max-w-sm' showCloseButton={false}>
+          <DialogHeader className='gap-1.5'>
+            <DialogTitle className='text-base font-semibold'>确认退出登录</DialogTitle>
+            <DialogDescription className='text-sm leading-6'>
+              {username
+                ? `退出 ${username} 后，需要重新登录才能继续使用 ArgusWing。`
+                : '退出后，需要重新登录才能继续使用 ArgusWing。'}
+            </DialogDescription>
+          </DialogHeader>
 
-        <DropdownMenuGroup>
-          <DropdownMenuItem className='px-4 py-2.5 text-base'>
-            <UserIcon className='text-foreground size-5' />
-            <span>My account</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem className='px-4 py-2.5 text-base'>
-            <SettingsIcon className='text-foreground size-5' />
-            <span>Settings</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem className='px-4 py-2.5 text-base'>
-            <CreditCardIcon className='text-foreground size-5' />
-            <span>Billing</span>
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-
-        <DropdownMenuSeparator />
-
-        <DropdownMenuGroup>
-          <DropdownMenuItem className='px-4 py-2.5 text-base'>
-            <UsersIcon className='text-foreground size-5' />
-            <span>Manage team</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem className='px-4 py-2.5 text-base'>
-            <SquarePenIcon className='text-foreground size-5' />
-            <span>Customization</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem className='px-4 py-2.5 text-base'>
-            <CirclePlusIcon className='text-foreground size-5' />
-            <span>Add team account</span>
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-
-        <DropdownMenuSeparator />
-
-        <DropdownMenuItem variant='destructive' className='px-4 py-2.5 text-base'>
-          <LogOutIcon className='size-5' />
-          <span>Logout</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          <DialogFooter className='gap-2 sm:gap-0'>
+            <Button variant='outline' onClick={() => setDialogOpen(false)} disabled={loggingOut}>
+              取消
+            </Button>
+            <Button variant='destructive' onClick={handleLogoutConfirm} disabled={loggingOut}>
+              <LogOutIcon className='size-4' />
+              <span>{loggingOut ? '正在退出...' : '退出登录'}</span>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 

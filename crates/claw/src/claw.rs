@@ -24,6 +24,7 @@ use crate::llm::{LLMManager, LlmProvider};
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
+use crate::user::UserService;
 
 /// The ID of the default built-in agent.
 pub const DEFAULT_AGENT_ID: &str = "arguswing";
@@ -45,6 +46,7 @@ pub struct AppContext {
     tool_manager: Arc<ToolManager>,
     job_repository: Arc<dyn JobRepository>,
     shutdown: CancellationToken,
+    user: UserService,
 }
 
 impl AppContext {
@@ -63,6 +65,8 @@ impl AppContext {
         let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
         let job_repository: Arc<dyn JobRepository> =
             Arc::new(SqliteJobRepository::new(pool.clone()));
+
+        let user = UserService::new(pool.clone());
 
         let llm_manager = Arc::new(LLMManager::new(llm_repository));
         let tool_manager = Arc::new(ToolManager::new());
@@ -99,6 +103,7 @@ impl AppContext {
             tool_manager,
             job_repository,
             shutdown,
+            user,
         })
     }
 
@@ -108,19 +113,17 @@ impl AppContext {
         agent_manager: Arc<AgentManager>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
+        let pool = SqlitePool::connect_lazy_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(std::path::Path::new(":memory:")),
+        );
         Self {
-            db_pool: SqlitePool::connect_lazy_with(
-                sqlx::sqlite::SqliteConnectOptions::new()
-                    .filename(std::path::Path::new(":memory:")),
-            ),
+            db_pool: pool.clone(),
             llm_manager,
             agent_manager,
             tool_manager,
-            job_repository: Arc::new(SqliteJobRepository::new(SqlitePool::connect_lazy_with(
-                sqlx::sqlite::SqliteConnectOptions::new()
-                    .filename(std::path::Path::new(":memory:")),
-            ))),
+            job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
             shutdown: CancellationToken::new(),
+            user: UserService::new(pool),
         }
     }
 
@@ -137,8 +140,9 @@ impl AppContext {
             llm_manager,
             agent_manager,
             tool_manager,
-            job_repository: Arc::new(SqliteJobRepository::new(pool)),
+            job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
             shutdown: CancellationToken::new(),
+            user: UserService::new(pool),
         }
     }
 
@@ -163,6 +167,11 @@ impl AppContext {
     #[must_use]
     pub fn tool_manager(&self) -> Arc<ToolManager> {
         Arc::clone(&self.tool_manager)
+    }
+
+    /// Get the user service for authentication operations.
+    pub fn user(&self) -> &UserService {
+        &self.user
     }
 
     #[cfg(feature = "dev")]

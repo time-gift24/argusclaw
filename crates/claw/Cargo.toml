@@ -13,6 +13,7 @@ files = ["src/llm/provider.rs", "src/llm/error.rs", "src/llm/retry.rs"]
 notes = "Vendored, provider-agnostic core derived from ironclaw/src/llm for use as ArgusClaw's stable llm facade, including retry decoration."
 
 [dependencies]
+argon2 = { version = "0.5", features = ["std"] }
 async-graphql = "7"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }

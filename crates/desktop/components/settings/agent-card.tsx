@@ -1,9 +1,12 @@
 "use client"
 
-import { Bot, Pencil, Trash2 } from "lucide-react"
+import type { ReactNode } from "react"
+import { Bot, CircleHelp, Pencil, Trash2 } from "lucide-react"
+import type { LlmProviderSummary } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export interface AgentRecord {
   id: string
@@ -19,11 +22,53 @@ export interface AgentRecord {
 
 interface AgentCardProps {
   agent: AgentRecord
+  providers: LlmProviderSummary[]
   onEdit: (id: string) => void
   onDelete: (id: string) => void
 }
 
-export function AgentCard({ agent, onEdit, onDelete }: AgentCardProps) {
+interface DetailRowProps {
+  label: ReactNode
+  children: ReactNode
+}
+
+const DEFAULT_MAX_TOKENS = 4096
+const DEFAULT_TEMPERATURE = 0.7
+
+function DetailRow({ label, children }: DetailRowProps) {
+  return (
+    <div className="grid grid-cols-[88px_1fr] items-start gap-3">
+      <span className="text-[11px] font-medium text-muted-foreground">
+        {label}
+      </span>
+      <div className="min-w-0 text-xs">{children}</div>
+    </div>
+  )
+}
+
+function formatMaxTokens(maxTokens?: number) {
+  const effectiveMaxTokens = maxTokens ?? DEFAULT_MAX_TOKENS
+  const valueInK = effectiveMaxTokens / 1024
+  const formattedValue = Number.isInteger(valueInK)
+    ? valueInK.toString()
+    : valueInK.toFixed(1).replace(/\.0$/, "")
+
+  return `${formattedValue}K${maxTokens === undefined ? "（默认）" : ""}`
+}
+
+function formatTemperature(temperature?: number) {
+  const effectiveTemperature = temperature ?? DEFAULT_TEMPERATURE
+
+  return `${effectiveTemperature}${temperature === undefined ? "（默认）" : ""}`
+}
+
+export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps) {
+  const providerName =
+    providers.find((provider) => provider.id === agent.provider_id)?.display_name ||
+    agent.provider_id ||
+    "未指定"
+  const toolNames = agent.tool_names.filter(Boolean)
+
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -38,34 +83,73 @@ export function AgentCard({ agent, onEdit, onDelete }: AgentCardProps) {
         </div>
         <CardDescription className="text-xs">{agent.id}</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-2 text-sm">
+      <CardContent className="space-y-3 text-sm">
         <p className="text-muted-foreground line-clamp-2">{agent.description}</p>
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">Provider:</span>
-          <span className="font-mono text-xs">{agent.provider_id}</span>
-        </div>
-        {agent.tool_names.length > 0 && (
-          <div className="flex flex-wrap gap-1">
-            {agent.tool_names.map((tool) => (
-              <Badge key={tool} variant="secondary" className="text-xs">
-                {tool}
-              </Badge>
-            ))}
+        <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+          <div className="space-y-3">
+            <DetailRow label="提供者">
+              <div className="min-w-0">
+                <div className="truncate font-medium">{providerName}</div>
+                {agent.provider_id && providerName !== agent.provider_id ? (
+                  <div className="truncate font-mono text-[11px] text-muted-foreground">
+                    {agent.provider_id}
+                  </div>
+                ) : null}
+              </div>
+            </DetailRow>
+
+            <DetailRow label="工具">
+              {toolNames.length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {toolNames.map((tool) => (
+                    <Badge key={tool} variant="secondary" className="text-xs">
+                      {tool}
+                    </Badge>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-muted-foreground">未配置</span>
+              )}
+            </DetailRow>
+
+            <DetailRow
+              label={(
+                <span className="inline-flex items-center gap-1">
+                  <span>最大 Token</span>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={(
+                        <button
+                          type="button"
+                          className="inline-flex size-3 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          aria-label="最大 Token 说明"
+                        />
+                      )}
+                    >
+                      <CircleHelp className="size-3" />
+                    </TooltipTrigger>
+                    <TooltipContent side="top">模型单次 turn 允许返回的最大 token</TooltipContent>
+                  </Tooltip>
+                </span>
+              )}
+            >
+              <span className="font-mono text-xs">{formatMaxTokens(agent.max_tokens)}</span>
+            </DetailRow>
+
+            <DetailRow label="温度">
+              <span className="font-mono text-xs">{formatTemperature(agent.temperature)}</span>
+            </DetailRow>
           </div>
-        )}
-        <div className="flex gap-4 text-xs text-muted-foreground">
-          {agent.max_tokens && <span>Max tokens: {agent.max_tokens}</span>}
-          {agent.temperature !== undefined && <span>Temp: {agent.temperature}</span>}
         </div>
       </CardContent>
       <CardFooter className="gap-2">
         <Button size="sm" variant="outline" onClick={() => onEdit(agent.id)}>
           <Pencil className="h-3 w-3 mr-1" />
-          Edit
+          编辑
         </Button>
         <Button size="sm" variant="destructive" onClick={() => onDelete(agent.id)}>
           <Trash2 className="h-3 w-3 mr-1" />
-          Delete
+          删除
         </Button>
       </CardFooter>
     </Card>
