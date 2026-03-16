@@ -28,12 +28,12 @@
 | File | Changes |
 |------|---------|
 | `crates/claw/src/lib.rs` | Add user module, re-export UserInfo |
-| `crates/claw/src/claw.rs` | Add UserService to AppContext |
+| `crates/claw/src/claw.rs` | Add user field and `user()` accessor method |
 | `crates/claw/src/error.rs` | Add UserError variant to AgentError |
 | `crates/claw/Cargo.toml` | Add argon2 dependency |
 | `crates/desktop/src-tauri/src/commands.rs` | Add auth Tauri commands |
 | `crates/desktop/src-tauri/src/lib.rs` | Register auth commands |
-| `crates/desktop/components/shadcn-studio/blocks/dropdown-profile.tsx` | Update ProfileDropdown with auth |
+| `crates/desktop/components/shadcn-studio/blocks/dropdown-profile.tsx` | Update with auth state |
 | `crates/desktop/app/layout.tsx` | Initialize auth state on mount |
 
 ---
@@ -133,7 +133,7 @@ pub use service::{UserInfo, UserService};
 
 - [ ] **Step 4: Add UserError to AgentError in error.rs**
 
-Add this variant to the AgentError enum:
+Add this variant to the AgentError enum (after existing variants):
 
 ```rust
 #[error(transparent)]
@@ -142,12 +142,15 @@ User(#[from] crate::user::UserError),
 
 - [ ] **Step 5: Add user module to lib.rs**
 
-Add to module declarations:
+In `crates/claw/src/lib.rs`, add to the modules section:
 
 ```rust
 pub mod user;
+```
 
-// Re-export for Tauri commands
+And add to the re-exports section:
+
+```rust
 pub use user::UserInfo;
 ```
 
@@ -468,35 +471,64 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 **Files:**
 - Modify: `crates/claw/src/claw.rs`
 
-- [ ] **Step 1: Add UserService to AppContext**
+- [ ] **Step 1: Add user import at top of claw.rs**
 
-Add field to AppContext struct:
+Add to the imports section:
+
+```rust
+use crate::user::UserService;
+```
+
+- [ ] **Step 2: Add user field to AppContext struct**
+
+Add field to AppContext struct (keep it private, add accessor):
 
 ```rust
 pub struct AppContext {
-    // ... existing fields ...
-    pub user: user::UserService,
+    db_pool: SqlitePool,
+    llm_manager: Arc<LLMManager>,
+    agent_manager: Arc<AgentManager>,
+    tool_manager: Arc<ToolManager>,
+    job_repository: Arc<dyn JobRepository>,
+    shutdown: CancellationToken,
+    user: UserService,  // Add this line
 }
 ```
 
-- [ ] **Step 2: Initialize UserService in AppContext::init()**
+- [ ] **Step 3: Initialize UserService in AppContext::init()**
 
-Add to the init function after pool creation:
+In the `init` function, after pool creation and before creating llm_manager, add:
 
 ```rust
-let user = user::UserService::new(pool.clone());
+let user = UserService::new(pool.clone());
 ```
 
 And include in the returned struct:
 
 ```rust
 Self {
-    // ... existing fields ...
-    user,
+    db_pool: pool,
+    llm_manager,
+    agent_manager,
+    tool_manager,
+    job_repository,
+    shutdown,
+    user,  // Add this line
 }
 ```
 
-- [ ] **Step 3: Run cargo check**
+- [ ] **Step 4: Add user accessor method**
+
+Add this accessor method alongside other accessor methods (like `tool_manager()`):
+
+```rust
+/// Get the user service for authentication operations.
+pub fn user(&self) -> &UserService {
+    &self.user
+}
+```
+
+- [ ] **Step 5: Run cargo check**
 
 ```bash
 cargo check -p claw
@@ -504,7 +536,7 @@ cargo check -p claw
 
 Expected: No errors
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add crates/claw/src/claw.rs
@@ -525,31 +557,35 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Add auth commands to commands.rs**
 
-Add to the end of commands.rs:
+Add to the end of commands.rs (following the existing pattern with `State<'_, Arc<AppContext>>`):
 
 ```rust
-// ========== Auth Commands ==========
+// ========== User Auth Commands ==========
 
 #[tauri::command]
-pub async fn get_current_user(ctx: AppContext) -> Result<Option<claw::UserInfo>, String> {
-    ctx.user
+pub async fn get_current_user(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+) -> Result<Option<claw::UserInfo>, String> {
+    ctx.user()
         .get_current_user()
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn has_any_user(ctx: AppContext) -> Result<bool, String> {
-    ctx.user.has_any_user().await.map_err(|e| e.to_string())
+pub async fn has_any_user(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+) -> Result<bool, String> {
+    ctx.user().has_any_user().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn setup_account(
-    ctx: AppContext,
+    ctx: State<'_, std::sync::Arc<AppContext>>,
     username: String,
     password: String,
 ) -> Result<(), String> {
-    ctx.user
+    ctx.user()
         .setup_account(&username, &password)
         .await
         .map_err(|e| e.to_string())
@@ -557,19 +593,21 @@ pub async fn setup_account(
 
 #[tauri::command]
 pub async fn login(
-    ctx: AppContext,
+    ctx: State<'_, std::sync::Arc<AppContext>>,
     username: String,
     password: String,
 ) -> Result<claw::UserInfo, String> {
-    ctx.user
+    ctx.user()
         .login(&username, &password)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn logout(ctx: AppContext) -> Result<(), String> {
-    ctx.user.logout().await.map_err(|e| e.to_string())
+pub async fn logout(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+) -> Result<(), String> {
+    ctx.user().logout().await.map_err(|e| e.to_string())
 }
 ```
 
@@ -643,7 +681,7 @@ interface AuthState {
   logout: () => Promise<void>;
 }
 
-export const useAuthStore = create<AuthState>((set, get) => ({
+export const useAuthStore = create<AuthState>((set) => ({
   username: null,
   isLoggedIn: false,
   isLoading: true,
@@ -940,102 +978,143 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 **Files:**
 - Modify: `crates/desktop/components/shadcn-studio/blocks/dropdown-profile.tsx`
 
-- [ ] **Step 1: Read current dropdown-profile.tsx**
+- [ ] **Step 1: Update dropdown-profile.tsx with auth integration**
 
-First, read the file to understand its current structure:
-
-```bash
-cat crates/desktop/components/shadcn-studio/blocks/dropdown-profile.tsx
-```
-
-- [ ] **Step 2: Update dropdown-profile.tsx with auth integration**
-
-Replace the entire file content with:
+Replace the entire file content with (keeping trigger prop API, using lucide-react icons):
 
 ```tsx
-'use client';
+import type { ReactElement } from 'react'
+import { useState } from 'react'
 
-import { useState } from 'react';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { Button } from '@/components/ui/button';
+import {
+  UserIcon,
+  SettingsIcon,
+  CreditCardIcon,
+  UsersIcon,
+  SquarePenIcon,
+  CirclePlusIcon,
+  LogOutIcon
+} from 'lucide-react'
+
+import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { useAuthStore } from '@/components/auth/use-auth-store';
-import { LoginDialog } from '@/components/auth/login-dialog';
-import { UserRoundIcon } from '@hugeicons/react';
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
+import { useAuthStore } from '@/components/auth/use-auth-store'
+import { LoginDialog } from '@/components/auth/login-dialog'
 
-export function DropdownProfile() {
-  const { username, isLoggedIn, logout } = useAuthStore();
-  const [loginDialogOpen, setLoginDialogOpen] = useState(false);
+type Props = {
+  trigger: ReactElement
+  defaultOpen?: boolean
+  align?: 'start' | 'center' | 'end'
+}
 
-  const handleAvatarClick = () => {
-    if (!isLoggedIn) {
-      setLoginDialogOpen(true);
-    }
-  };
+const ProfileDropdown = ({ trigger, defaultOpen, align = 'end' }: Props) => {
+  const { username, isLoggedIn, logout } = useAuthStore()
+  const [loginDialogOpen, setLoginDialogOpen] = useState(false)
 
   const handleLogout = async () => {
-    await logout();
-  };
+    await logout()
+  }
 
+  const handleLoginClick = () => {
+    setLoginDialogOpen(true)
+  }
+
+  // Get avatar fallback text based on auth state
   const getAvatarFallback = () => {
     if (isLoggedIn && username) {
-      return username.charAt(0).toUpperCase();
+      return username.charAt(0).toUpperCase()
     }
-    return '?';
-  };
+    return '?'
+  }
 
   return (
     <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            className="relative h-10 w-10 rounded-full"
-            onClick={handleAvatarClick}
-          >
-            <Avatar className={`h-10 w-10 ${isLoggedIn ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
-              <AvatarImage src="" alt={username ?? 'User'} />
-              <AvatarFallback>{getAvatarFallback()}</AvatarFallback>
-            </Avatar>
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent className="w-56" align="end" forceMount>
+      <DropdownMenu defaultOpen={defaultOpen}>
+        <DropdownMenuTrigger render={trigger} />
+        <DropdownMenuContent className='w-80' align={align || 'end'}>
           {isLoggedIn ? (
             <>
-              <DropdownMenuLabel className="font-normal">
-                <div className="flex flex-col space-y-1">
-                  <p className="text-sm font-medium leading-none">{username}</p>
+              <DropdownMenuLabel className='flex items-center gap-4 px-4 py-2.5 font-normal'>
+                <div className='relative'>
+                  <Avatar className={`size-10 ${isLoggedIn ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>
+                    <AvatarImage src='' alt={username ?? 'User'} />
+                    <AvatarFallback>{getAvatarFallback()}</AvatarFallback>
+                  </Avatar>
+                  <span className='ring-card absolute right-0 bottom-0 block size-2 rounded-full bg-green-600 ring-2' />
+                </div>
+                <div className='flex flex-1 flex-col items-start'>
+                  <span className='text-foreground text-lg font-semibold'>{username}</span>
                 </div>
               </DropdownMenuLabel>
+
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleLogout}>
-                <UserRoundIcon className="mr-2 h-4 w-4" />
+
+              <DropdownMenuGroup>
+                <DropdownMenuItem className='px-4 py-2.5 text-base'>
+                  <UserIcon className='text-foreground size-5' />
+                  <span>My account</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem className='px-4 py-2.5 text-base'>
+                  <SettingsIcon className='text-foreground size-5' />
+                  <span>Settings</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem className='px-4 py-2.5 text-base'>
+                  <CreditCardIcon className='text-foreground size-5' />
+                  <span>Billing</span>
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+
+              <DropdownMenuSeparator />
+
+              <DropdownMenuGroup>
+                <DropdownMenuItem className='px-4 py-2.5 text-base'>
+                  <UsersIcon className='text-foreground size-5' />
+                  <span>Manage team</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem className='px-4 py-2.5 text-base'>
+                  <SquarePenIcon className='text-foreground size-5' />
+                  <span>Customization</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem className='px-4 py-2.5 text-base'>
+                  <CirclePlusIcon className='text-foreground size-5' />
+                  <span>Add team account</span>
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+
+              <DropdownMenuSeparator />
+
+              <DropdownMenuItem variant='destructive' className='px-4 py-2.5 text-base' onClick={handleLogout}>
+                <LogOutIcon className='size-5' />
                 <span>Logout</span>
               </DropdownMenuItem>
             </>
           ) : (
-            <DropdownMenuItem onClick={() => setLoginDialogOpen(true)}>
-              <UserRoundIcon className="mr-2 h-4 w-4" />
-              <span>Login</span>
-            </DropdownMenuItem>
+            <>
+              <DropdownMenuItem className='px-4 py-2.5 text-base' onClick={handleLoginClick}>
+                <UserIcon className='text-foreground size-5' />
+                <span>Login</span>
+              </DropdownMenuItem>
+            </>
           )}
         </DropdownMenuContent>
       </DropdownMenu>
 
       <LoginDialog open={loginDialogOpen} onOpenChange={setLoginDialogOpen} />
     </>
-  );
+  )
 }
+
+export default ProfileDropdown
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit**
 
 ```bash
 git add crates/desktop/components/shadcn-studio/blocks/dropdown-profile.tsx
@@ -1044,37 +1123,88 @@ git commit -m "feat(desktop): update ProfileDropdown with auth state
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
 
-### Task 4.4: Initialize Auth State on App Mount
+### Task 4.4: Update Navbar Avatar Based on Auth State
+
+**Files:**
+- Modify: `crates/desktop/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06.tsx`
+
+- [ ] **Step 1: Add useAuthStore import to navbar**
+
+Add to the imports:
+
+```tsx
+import { useAuthStore } from '@/components/auth/use-auth-store'
+```
+
+- [ ] **Step 2: Use auth state in Navbar component**
+
+Inside the Navbar component, add at the beginning:
+
+```tsx
+const { username, isLoggedIn } = useAuthStore()
+
+// Get avatar fallback based on auth state
+const avatarFallback = isLoggedIn && username ? username.charAt(0).toUpperCase() : '?'
+const avatarClassName = isLoggedIn ? 'size-9.5 rounded-lg bg-primary text-primary-foreground' : 'size-9.5 rounded-lg bg-muted text-muted-foreground'
+```
+
+- [ ] **Step 3: Update ProfileDropdown trigger avatar**
+
+Replace the ProfileDropdown trigger (around lines 102-114) with:
+
+```tsx
+<ProfileDropdown
+  trigger={
+    <Button variant='ghost' className='h-full rounded-lg p-0'>
+      <Avatar className={avatarClassName}>
+        <AvatarImage
+          src=''
+          className='rounded-lg'
+        />
+        <AvatarFallback>{avatarFallback}</AvatarFallback>
+      </Avatar>
+    </Button>
+  }
+/>
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/desktop/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06.tsx
+git commit -m "feat(desktop): update navbar avatar with auth state
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+```
+
+### Task 4.5: Initialize Auth State on App Mount
 
 **Files:**
 - Modify: `crates/desktop/app/layout.tsx`
 
-- [ ] **Step 1: Add auth initialization to layout.tsx**
+- [ ] **Step 1: Add imports to layout.tsx**
 
-Add the following import at the top of the file:
+Add at the top of the file:
 
 ```tsx
-import { useAuthStore } from '@/components/auth/use-auth-store';
+import { useEffect } from 'react'
+import { useAuthStore } from '@/components/auth/use-auth-store'
 ```
 
-Add the auth initialization hook inside the RootLayout component, before the return statement:
+- [ ] **Step 2: Add auth initialization inside RootLayout**
+
+Inside the RootLayout component function, before the return statement, add:
 
 ```tsx
 // Initialize auth state on mount
-const fetchCurrentUser = useAuthStore((state) => state.fetchCurrentUser);
-// eslint-disable-next-line react-hooks/exhaustive-deps
-React.useEffect(() => {
-  fetchCurrentUser();
-}, []);
+const fetchCurrentUser = useAuthStore((state) => state.fetchCurrentUser)
+
+useEffect(() => {
+  void fetchCurrentUser()
+}, [fetchCurrentUser])
 ```
 
-If React is not already imported, add it:
-
-```tsx
-import React from 'react';
-```
-
-- [ ] **Step 2: Verify build**
+- [ ] **Step 3: Verify build**
 
 ```bash
 cd crates/desktop && npm run build
@@ -1082,7 +1212,7 @@ cd crates/desktop && npm run build
 
 Expected: Build succeeds
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add crates/desktop/app/layout.tsx
@@ -1140,16 +1270,17 @@ cd crates/desktop && npm run tauri dev
 Manual verification checklist:
 1. [ ] App starts without errors
 2. [ ] Avatar shows "?" with muted background (not logged in)
-3. [ ] Clicking avatar opens login dialog in setup mode
-4. [ ] Can create account with username/password
-5. [ ] Avatar shows first letter of username with primary background
-6. [ ] Clicking avatar shows dropdown with username and "Logout"
-7. [ ] Can logout
-8. [ ] Avatar shows "?" again after logout
-9. [ ] Clicking avatar shows login dialog in login mode (not setup)
-10. [ ] Can login with correct credentials
-11. [ ] Wrong password shows error message
-12. [ ] App restart keeps login state (persistent)
+3. [ ] Clicking avatar opens dropdown with "Login" option
+4. [ ] Clicking "Login" opens login dialog in setup mode
+5. [ ] Can create account with username/password
+6. [ ] Avatar shows first letter of username with primary background
+7. [ ] Clicking avatar shows dropdown with username and "Logout"
+8. [ ] Can logout
+9. [ ] Avatar shows "?" again after logout
+10. [ ] Clicking "Login" shows login dialog in login mode (not setup)
+11. [ ] Can login with correct credentials
+12. [ ] Wrong password shows error message
+13. [ ] App restart keeps login state (persistent)
 
 ### Task 5.3: Create PR
 
@@ -1176,6 +1307,7 @@ Implements local authentication for the desktop app with username/password login
 - Add `users` table migration with username, password_hash, password_salt, is_logged_in
 - Add `UserService` with Argon2 password hashing
 - Add `UserError` type integrated with `AgentError`
+- Add `user()` accessor method to `AppContext`
 
 ### Backend (desktop Tauri)
 - Add auth Tauri commands: `get_current_user`, `has_any_user`, `setup_account`, `login`, `logout`
@@ -1184,6 +1316,8 @@ Implements local authentication for the desktop app with username/password login
 - Add zustand auth store (`use-auth-store.ts`)
 - Add `LoginDialog` component with setup/login modes
 - Update `ProfileDropdown` with auth state and login/logout
+- Update navbar avatar to reflect auth state
+- Initialize auth state on app mount
 
 ## Test plan
 
@@ -1207,7 +1341,7 @@ EOF
 | 1. Database and Errors | 1.1, 1.2 | 2 |
 | 2. UserService | 2.1, 2.2 | 2 |
 | 3. Tauri Commands | 3.1 | 1 |
-| 4. Frontend | 4.1, 4.2, 4.3, 4.4 | 4 |
-| 5. Integration | 5.1, 5.2, 5.3 | 0-1 |
+| 4. Frontend | 4.1, 4.2, 4.3, 4.4, 4.5 | 5 |
+| 5. Integration | 5.1, 5.2, 5.3 | 0 |
 
-**Total: ~9-10 commits**
+**Total: ~10 commits**
