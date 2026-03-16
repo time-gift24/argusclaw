@@ -223,6 +223,16 @@ impl AgentManager {
             .resolve_approval(request_id, decision, resolved_by)
     }
 
+    /// Get a snapshot of a thread's current state.
+    pub async fn get_thread_snapshot(
+        &self,
+        agent_id: &AgentId,
+        thread_id: &ThreadId,
+    ) -> Option<crate::protocol::ThreadSnapshot> {
+        let agent = self.agents.get(agent_id)?;
+        agent.value().get_thread_snapshot(thread_id).await
+    }
+
     // === Template operations (delegated to repository) ===
 
     /// Create or update an agent template.

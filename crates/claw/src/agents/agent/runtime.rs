@@ -302,6 +302,48 @@ impl Agent {
     pub fn auto_approve(&self) -> bool {
         self.auto_approve
     }
+
+    /// Get a snapshot of a thread's current state.
+    ///
+    /// Returns `None` if the thread doesn't exist.
+    pub async fn get_thread_snapshot(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<crate::protocol::ThreadSnapshot> {
+        let thread_arc = self.threads.get(thread_id)?.value().clone();
+        let thread = thread_arc.lock().await;
+        Some(crate::protocol::ThreadSnapshot {
+            runtime_agent_id: self.id.clone(),
+            thread_id: *thread.id(),
+            messages: thread
+                .history()
+                .iter()
+                .map(|message| crate::protocol::ThreadMessageSnapshot {
+                    role: match message.role {
+                        crate::llm::Role::System => "system".to_string(),
+                        crate::llm::Role::User => "user".to_string(),
+                        crate::llm::Role::Assistant => "assistant".to_string(),
+                        crate::llm::Role::Tool => "tool".to_string(),
+                    },
+                    content: message.content.clone(),
+                    tool_call_id: message.tool_call_id.clone(),
+                    name: message.name.clone(),
+                    tool_calls: message.tool_calls.as_ref().map(|tool_calls| {
+                        tool_calls
+                            .iter()
+                            .map(|tool_call| crate::protocol::ToolCallSnapshot {
+                                id: tool_call.id.clone(),
+                                name: tool_call.name.clone(),
+                                arguments: tool_call.arguments.clone(),
+                            })
+                            .collect()
+                    }),
+                })
+                .collect(),
+            turn_count: thread.turn_count(),
+            token_count: thread.token_count(),
+        })
+    }
 }
 
 impl Clone for Agent {
