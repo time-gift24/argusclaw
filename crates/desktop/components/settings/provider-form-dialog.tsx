@@ -45,12 +45,6 @@ interface ProviderFormDialogProps {
   trigger?: React.ReactElement | null;
 }
 
-interface DraftModel {
-  tempId: string;
-  name: string;
-  is_default: boolean;
-}
-
 type DialogStep = "provider" | "models";
 
 function normalizeModelName(value: string) {
