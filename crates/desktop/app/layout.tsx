@@ -28,13 +28,13 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className="antialiased font-sans"
+      className="h-full antialiased font-sans"
     >
-      <body>
+      <body className="flex h-dvh min-h-dvh flex-col overflow-hidden">
         <TooltipProvider>
           <ThemeProvider>
             <Navbar navigationItems={navigationItems} />
-            <main className="flex-1">{children}</main>
+            <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</main>
           </ThemeProvider>
         </TooltipProvider>
       </body>
