@@ -449,6 +449,24 @@ impl AppContext {
             .resolve_approval(agent_id, request_id, decision, resolved_by)
     }
 
+    /// Get a snapshot of a thread's current state.
+    ///
+    /// Returns the thread's messages, turn count, and token count.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ThreadNotFound` if the thread doesn't exist.
+    pub async fn get_thread_snapshot(
+        &self,
+        runtime_agent_id: &AgentId,
+        thread_id: &ThreadId,
+    ) -> Result<crate::ThreadSnapshot, AgentError> {
+        self.agent_manager
+            .get_thread_snapshot(runtime_agent_id, thread_id)
+            .await
+            .ok_or(AgentError::ThreadNotFound { id: *thread_id })
+    }
+
     // === Dev-Only Methods ===
 
     #[cfg(feature = "dev")]
@@ -612,5 +630,49 @@ mod tests {
             crate::AgentId::new(crate::DEFAULT_AGENT_ID)
         );
         assert_eq!(ctx.list_active_agents().len(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn get_thread_snapshot_returns_live_history_for_runtime_agent() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            model: "gpt-4.1".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+        })
+        .await
+        .expect("provider should save");
+
+        let runtime = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .await
+            .expect("runtime agent should be created");
+        let thread_id = ctx
+            .create_thread(&runtime.runtime_agent_id, crate::ThreadConfig::default())
+            .expect("thread should be created");
+
+        let snapshot = ctx
+            .get_thread_snapshot(&runtime.runtime_agent_id, &thread_id)
+            .await
+            .expect("snapshot should be returned");
+
+        assert_eq!(snapshot.thread_id, thread_id);
+        assert_eq!(snapshot.runtime_agent_id, runtime.runtime_agent_id);
+        assert_eq!(snapshot.turn_count, 0);
+        assert!(!snapshot.messages.is_empty());
+        assert_eq!(snapshot.messages[0].role, "system");
     }
 }
