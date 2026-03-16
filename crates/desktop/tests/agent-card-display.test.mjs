@@ -27,6 +27,7 @@ test("agent list cards receive provider metadata and render stable parameter row
   assert.match(agentCardSource, /<DetailRow label="温度">/);
   assert.match(agentCardSource, /const toolNames = agent\.tool_names\.filter\(Boolean\)/);
   assert.match(agentCardSource, /toolNames\.length > 0[\s\S]*toolNames\.map/);
+  assert.match(agentCardSource, /<div className="min-w-0 text-xs">/);
   assert.match(agentCardSource, /const DEFAULT_MAX_TOKENS = 4096/);
   assert.match(agentCardSource, /const DEFAULT_TEMPERATURE = 0\.7/);
   assert.match(agentCardSource, /function formatMaxTokens\(maxTokens\?: number\)/);
