@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Pencil, Trash2, Star } from "lucide-react";
+import { Plus, Pencil, Trash2, Star, BotIcon, SparklesIcon, UserIcon, SearchIcon, CloudIcon, MoonIcon } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import {
   providers,
   models,
@@ -44,6 +45,20 @@ interface ProviderFormDialogProps {
   trigger?: React.ReactElement | null;
 }
 
+interface DraftModel {
+  tempId: string;
+  name: string;
+  is_default: boolean;
+}
+
+function normalizeModelName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function buildModelId(providerId: string, modelName: string) {
+  return `${providerId}:${modelName.trim().replace(/[/\s]/g, "-")}`;
+}
+
 export function ProviderFormDialog({
   provider,
   onSubmit,
@@ -62,11 +77,23 @@ export function ProviderFormDialog({
     provider?.id || null,
   );
   const [modelList, setModelList] = React.useState<LlmModelRecord[]>([]);
+  const [draftModels, setDraftModels] = React.useState<DraftModel[]>([]);
   const [newModelName, setNewModelName] = React.useState("");
   const [addingModel, setAddingModel] = React.useState(false);
+  const [modelError, setModelError] = React.useState<string | null>(null);
 
   const isEditing = !!provider;
   const open = openProp ?? internalOpen;
+
+  const loadPersistedModels = React.useCallback(async (providerId: string) => {
+    try {
+      const list = await models.listByProvider(providerId);
+      setModelList(list);
+    } catch (error) {
+      console.error("Failed to load models:", error);
+      setModelList([]);
+    }
+  }, []);
 
   const handleOpenChange = React.useCallback(
     (nextOpen: boolean) => {
@@ -76,7 +103,9 @@ export function ProviderFormDialog({
       onOpenChange?.(nextOpen);
       if (!nextOpen) {
         setSavedProviderId(provider?.id || null);
+        setDraftModels([]);
         setNewModelName("");
+        setModelError(null);
       }
     },
     [onOpenChange, openProp, provider?.id],
@@ -101,19 +130,13 @@ export function ProviderFormDialog({
     const loadModels = async () => {
       const targetId = savedProviderId || provider?.id;
       if (targetId) {
-        try {
-          const list = await models.listByProvider(targetId);
-          setModelList(list);
-        } catch (error) {
-          console.error("Failed to load models:", error);
-          setModelList([]);
-        }
+        await loadPersistedModels(targetId);
       } else {
         setModelList([]);
       }
     };
     void loadModels();
-  }, [savedProviderId, provider?.id]);
+  }, [loadPersistedModels, savedProviderId, provider?.id]);
 
   React.useEffect(() => {
     if (provider) {
@@ -132,20 +155,66 @@ export function ProviderFormDialog({
       });
       setSavedProviderId(null);
     }
+    setDraftModels([]);
     setTestingConnection(false);
     setTestDialogOpen(false);
     setTestResult(null);
     setNewModelName("");
+    setModelError(null);
   }, [provider]);
+
+  const visibleModels = savedProviderId
+    ? modelList.map((model) => ({
+        key: model.id,
+        id: model.id,
+        name: model.name,
+        is_default: model.is_default,
+        persisted: true,
+      }))
+    : draftModels.map((model) => ({
+        key: model.tempId,
+        id: model.tempId,
+        name: model.name,
+        is_default: model.is_default,
+        persisted: false,
+      }));
+
+  const defaultModelName =
+    visibleModels.find((model) => model.is_default)?.name ?? "";
+
+  const persistDraftModels = React.useCallback(
+    async (providerId: string) => {
+      for (const model of draftModels) {
+        const input: ModelInput = {
+          id: buildModelId(providerId, model.name),
+          provider_id: providerId,
+          name: model.name,
+          is_default: model.is_default,
+        };
+        await models.upsert(input);
+      }
+      setDraftModels([]);
+      await loadPersistedModels(providerId);
+    },
+    [draftModels, loadPersistedModels],
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
+    setModelError(null);
     try {
       await onSubmit(formData);
       setSavedProviderId(formData.id);
+      if (draftModels.length > 0) {
+        await persistDraftModels(formData.id);
+      } else {
+        await loadPersistedModels(formData.id);
+      }
     } catch (error) {
-      console.error("Failed to save provider:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      setModelError(message);
+      console.error("Failed to save provider or models:", error);
     } finally {
       setSaving(false);
     }
@@ -153,9 +222,7 @@ export function ProviderFormDialog({
 
   const handleTestConnection = async () => {
     const record: ProviderInput = { ...formData };
-    // Use the default model or first model from the list
-    const defaultModel = modelList.find((m) => m.is_default) || modelList[0];
-    const modelName = defaultModel?.name || newModelName.trim();
+    const modelName = defaultModelName || newModelName.trim();
 
     if (!modelName) {
       setTestResult({
@@ -194,24 +261,42 @@ export function ProviderFormDialog({
   };
 
   const handleAddModel = async () => {
-    if (!newModelName.trim() || !savedProviderId) return;
+    const trimmedModelName = newModelName.trim();
+    if (!trimmedModelName) return;
+
+    const existingNames = new Set(
+      visibleModels.map((model) => normalizeModelName(model.name)),
+    );
+    if (existingNames.has(normalizeModelName(trimmedModelName))) {
+      setModelError(`模型 "${trimmedModelName}" 已存在`);
+      return;
+    }
 
     setAddingModel(true);
+    setModelError(null);
     try {
-      const isFirst = modelList.length === 0;
-      const modelId = `${savedProviderId}:${newModelName.trim().replace(/[/\s]/g, "-")}`;
+      if (!savedProviderId) {
+        const nextDraftModel: DraftModel = {
+          tempId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          name: trimmedModelName,
+          is_default: draftModels.length === 0,
+        };
+        setDraftModels((current) => [...current, nextDraftModel]);
+        setNewModelName("");
+        return;
+      }
+
       const input: ModelInput = {
-        id: modelId,
+        id: buildModelId(savedProviderId, trimmedModelName),
         provider_id: savedProviderId,
-        name: newModelName.trim(),
-        is_default: isFirst,
+        name: trimmedModelName,
+        is_default: modelList.length === 0,
       };
       await models.upsert(input);
       setNewModelName("");
-      // Reload models
-      const list = await models.listByProvider(savedProviderId);
-      setModelList(list);
+      await loadPersistedModels(savedProviderId);
     } catch (error) {
+      setModelError(error instanceof Error ? error.message : String(error));
       console.error("Failed to add model:", error);
     } finally {
       setAddingModel(false);
@@ -220,20 +305,49 @@ export function ProviderFormDialog({
 
   const handleDeleteModel = async (modelId: string) => {
     try {
+      setModelError(null);
+      if (!savedProviderId) {
+        setDraftModels((current) => {
+          const next = current.filter((model) => model.tempId !== modelId);
+          if (next.length > 0 && !next.some((model) => model.is_default)) {
+            next[0] = { ...next[0], is_default: true };
+          }
+          return next;
+        });
+        return;
+      }
+
       await models.delete(modelId);
-      setModelList((prev) => prev.filter((m) => m.id !== modelId));
+      const nextModels = modelList.filter((model) => model.id !== modelId);
+      setModelList(nextModels);
+      if (nextModels.length > 0 && !nextModels.some((model) => model.is_default)) {
+        await handleSetDefaultModel(nextModels[0].id);
+      }
     } catch (error) {
+      setModelError(error instanceof Error ? error.message : String(error));
       console.error("Failed to delete model:", error);
     }
   };
 
   const handleSetDefaultModel = async (modelId: string) => {
     try {
+      setModelError(null);
+      if (!savedProviderId) {
+        setDraftModels((current) =>
+          current.map((model) => ({
+            ...model,
+            is_default: model.tempId === modelId,
+          })),
+        );
+        return;
+      }
+
       await models.setDefault(modelId);
       setModelList((prev) =>
         prev.map((m) => ({ ...m, is_default: m.id === modelId })),
       );
     } catch (error) {
+      setModelError(error instanceof Error ? error.message : String(error));
       console.error("Failed to set default model:", error);
     }
   };
@@ -241,7 +355,7 @@ export function ProviderFormDialog({
   const canTest = Boolean(
     formData.base_url.trim() &&
     formData.api_key.trim() &&
-    (modelList.length > 0 || newModelName.trim()),
+    (visibleModels.length > 0 || newModelName.trim()),
   );
 
   const defaultTrigger = isEditing ? (
@@ -268,7 +382,7 @@ export function ProviderFormDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       {dialogTrigger ? <DialogTrigger render={dialogTrigger} /> : null}
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
             {isEditing ? "Edit Provider" : "Add Provider"}
@@ -348,79 +462,101 @@ export function ProviderFormDialog({
           </DialogFooter>
         </form>
 
-        {/* Model Management Section - shown after provider is saved */}
-        {savedProviderId && (
-          <div className="border-t pt-4 mt-4">
-            <h4 className="text-sm font-medium mb-3">模型列表</h4>
-            <div className="flex gap-2 mb-3">
-              <Input
-                value={newModelName}
-                onChange={(e) => setNewModelName(e.target.value)}
-                placeholder="gpt-4o, claude-3-opus..."
-                className="flex-1"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void handleAddModel();
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => void handleAddModel()}
-                disabled={!newModelName.trim() || addingModel}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
+        <div className="mt-4 border-t pt-4">
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-medium">模型列表</h4>
+              <p className="text-xs text-muted-foreground">
+                一个 Provider 可以配置多个模型，其中一个作为默认模型。
+              </p>
             </div>
-            {modelList.length > 0 ? (
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {modelList.map((model) => (
-                  <div
-                    key={model.id}
-                    className="flex items-center justify-between p-2 rounded bg-muted/50 text-sm"
-                  >
-                    <div className="flex items-center gap-2">
-                      {model.is_default && (
-                        <Star className="h-3 w-3 text-yellow-500 fill-yellow-500" />
-                      )}
-                      <span className="font-mono text-xs">{model.name}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      {!model.is_default && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6"
-                          onClick={() => void handleSetDefaultModel(model.id)}
-                          title="设为默认"
-                        >
-                          <Star className="h-3 w-3" />
-                        </Button>
-                      )}
+            {!savedProviderId ? (
+              <span className="rounded-full border border-dashed px-2 py-1 text-[11px] text-muted-foreground">
+                保存 Provider 后写入
+              </span>
+            ) : null}
+          </div>
+
+          <div className="mb-3 flex gap-2">
+            <Input
+              value={newModelName}
+              onChange={(e) => setNewModelName(e.target.value)}
+              placeholder="gpt-4o, claude-3-opus..."
+              className="flex-1"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleAddModel();
+                }
+              }}
+            />
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void handleAddModel()}
+              disabled={!newModelName.trim() || addingModel}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+          </div>
+
+          {modelError ? (
+            <div className="mb-3 rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {modelError}
+            </div>
+          ) : null}
+
+          {visibleModels.length > 0 ? (
+            <div className="space-y-1">
+              {visibleModels.map((model) => (
+                <div
+                  key={model.key}
+                  className="flex items-center justify-between rounded bg-muted/50 p-2 text-sm"
+                >
+                  <div className="flex items-center gap-2">
+                    {model.is_default ? (
+                      <Star className="h-3 w-3 fill-yellow-500 text-yellow-500" />
+                    ) : null}
+                    <span className="font-mono text-xs">{model.name}</span>
+                    {!model.persisted ? (
+                      <span className="rounded-full bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        草稿
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {!model.is_default ? (
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="h-6 w-6 text-destructive hover:text-destructive"
-                        onClick={() => void handleDeleteModel(model.id)}
-                        title="删除"
+                        className="h-6 w-6"
+                        onClick={() => void handleSetDefaultModel(model.id)}
+                        title="设为默认"
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Star className="h-3 w-3" />
                       </Button>
-                    </div>
+                    ) : null}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-destructive hover:text-destructive"
+                      onClick={() => void handleDeleteModel(model.id)}
+                      title="删除"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                添加模型后才能使用此 Provider
-              </p>
-            )}
-          </div>
-        )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              先添加至少一个模型。新建 Provider 时，这些模型会在保存后一起创建。
+            </p>
+          )}
+        </div>
 
         <ProviderTestDialog
           open={testDialogOpen}
@@ -435,4 +571,33 @@ export function ProviderFormDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+// 根据 provider 名称返回对应的图标
+export function getProviderIcon(providerName: string, providerId: string): LucideIcon {
+  const searchTarget = `${providerId} ${providerName}`.toLowerCase();
+
+  if (searchTarget.includes("z.ai") || searchTarget.includes("z-ai") || searchTarget.includes("智谱")) {
+    return BotIcon;
+  }
+  if (searchTarget.includes("openai") || searchTarget.includes("gpt")) {
+    return SparklesIcon;
+  }
+  if (searchTarget.includes("anthropic") || searchTarget.includes("claude")) {
+    return UserIcon;
+  }
+  if (searchTarget.includes("google") || searchTarget.includes("gemini")) {
+    return SearchIcon;
+  }
+  if (searchTarget.includes("azure") || searchTarget.includes("microsoft") || searchTarget.includes("aws") || searchTarget.includes("amazon")) {
+    return CloudIcon;
+  }
+  if (searchTarget.includes("moonshot") || searchTarget.includes("月之暗面")) {
+    return MoonIcon;
+  }
+  if (searchTarget.includes("deepseek")) {
+    return SearchIcon;
+  }
+
+  return CloudIcon;
 }
