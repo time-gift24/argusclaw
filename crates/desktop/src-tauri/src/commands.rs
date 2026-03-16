@@ -180,6 +180,16 @@ pub async fn test_provider_connection(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn test_provider_input(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    record: ProviderInput,
+) -> Result<ProviderTestResult, String> {
+    ctx.test_provider_record(record.into())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // === Agent Commands ===
 
 #[tauri::command]

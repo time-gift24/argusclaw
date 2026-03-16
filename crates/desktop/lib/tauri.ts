@@ -81,6 +81,9 @@ export const providers = {
 
   testConnection: (id: string) =>
     invoke<ProviderTestResult>("test_provider_connection", { id }),
+
+  testInput: (record: ProviderInput) =>
+    invoke<ProviderTestResult>("test_provider_input", { record }),
 };
 
 // Agent API

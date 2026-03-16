@@ -237,6 +237,28 @@ async fn llm_manager_reports_successful_provider_connection_tests() {
 
 #[cfg(feature = "openai-compatible")]
 #[tokio::test]
+async fn llm_manager_can_test_unsaved_provider_configurations() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let base_url = spawn_single_response_server(
+        "200 OK",
+        r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        &[],
+    );
+    let manager = LLMManager::new(Arc::new(repository));
+    let mut record = build_record("", "Draft Provider", false);
+    record.base_url = base_url;
+
+    let result = manager
+        .test_provider_record(record)
+        .await
+        .expect("draft provider test should succeed");
+
+    assert_eq!(result.status, ProviderTestStatus::Success);
+    assert_eq!(result.provider_id, "");
+}
+
+#[cfg(feature = "openai-compatible")]
+#[tokio::test]
 async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
     let base_url = spawn_single_response_server("401 Unauthorized", r#"{"error":"bad key"}"#, &[]);
