@@ -18,13 +18,16 @@ import {
   BranchPickerPrimitive,
   ComposerPrimitive,
   ErrorPrimitive,
+  MessagePartPrimitive,
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
 } from "@assistant-ui/react";
 import {
+  ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -38,15 +41,13 @@ import type { FC } from "react";
 export const Thread: FC = () => {
   return (
     <ThreadPrimitive.Root
-      className="aui-root aui-thread-root @container flex h-full flex-col bg-background"
+      className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background"
       style={{
-        ["--thread-max-width" as string]: "44rem",
+        ["--thread-max-width" as string]: "52rem",
+        ["--composer-max-width" as string]: "44rem",
       }}
     >
-      <ThreadPrimitive.Viewport
-        turnAnchor="top"
-        className="aui-thread-viewport relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth px-4 pt-4 pb-32"
-      >
+      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-32">
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
@@ -58,11 +59,19 @@ export const Thread: FC = () => {
             AssistantMessage,
           }}
         />
+
+        <div className="pointer-events-none sticky bottom-24 z-40 mx-auto mt-4 flex w-fit">
+          <ThreadPrimitive.ScrollToBottom asChild>
+            <button className="pointer-events-auto flex size-8 items-center justify-center rounded-full border border-border/60 bg-background/80 text-muted-foreground shadow-md backdrop-blur-sm transition-all hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-0">
+              <ArrowDownIcon className="size-4" />
+            </button>
+          </ThreadPrimitive.ScrollToBottom>
+        </div>
       </ThreadPrimitive.Viewport>
 
       {/* Fixed bottom composer */}
       <div className="fixed bottom-0 left-0 right-0 z-50 bg-background">
-        <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-2 px-4 pb-4 pt-2">
+        <div className="mx-auto flex w-full max-w-(--composer-max-width) flex-col gap-2 px-4 pb-4 pt-2">
           <ChatStatusBanner />
           <ApprovalPrompt />
           <Composer />
@@ -234,14 +243,35 @@ const AssistantActionBar: FC = () => {
 
 const ReasoningBlock: FC = () => {
   return (
-    <details className="aui-reasoning-block mb-3 overflow-hidden rounded-xl border border-border/60 bg-muted/40 text-sm">
-      <summary className="cursor-pointer list-none px-3 py-2 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
-        Reasoning
-      </summary>
-      <div className="border-border/60 border-t px-3 py-2 text-muted-foreground">
-        <MarkdownText />
-      </div>
-    </details>
+    <div className="aui-reasoning-block mb-2 text-sm">
+      {/* 运行中: 展开显示，无边框 */}
+      <MessagePartPrimitive.InProgress>
+        <div className="flex w-full items-center gap-2 px-1 py-1 font-medium text-muted-foreground">
+          <span className="relative flex size-2 items-center justify-center">
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/40 opacity-75"></span>
+            <span className="relative inline-flex size-2 rounded-full bg-primary/60"></span>
+          </span>
+          <span className="opacity-70">思考中...</span>
+        </div>
+        <div className="px-1 py-1 text-muted-foreground">
+          <MarkdownText />
+        </div>
+      </MessagePartPrimitive.InProgress>
+
+      {/* 完成后: 收缩成可展开的小标签，无边框 */}
+      <AuiIf condition={(s) => s.part.status.type !== "running"}>
+        <details className="group w-full" open={false}>
+          <summary className="flex w-full cursor-pointer list-none items-center gap-2 px-1 py-1 text-muted-foreground transition-colors hover:bg-muted/30 rounded-md [&::-webkit-details-marker]:hidden">
+            <span className="size-2 rounded-full bg-primary/40"></span>
+            <span className="opacity-70">思考完成</span>
+            <ChevronDownIcon className="ml-auto size-4 shrink-0 opacity-50 transition-transform duration-200 group-open:rotate-180" />
+          </summary>
+          <div className="px-1 py-1 text-muted-foreground">
+            <MarkdownText />
+          </div>
+        </details>
+      </AuiIf>
+    </div>
   );
 };
 

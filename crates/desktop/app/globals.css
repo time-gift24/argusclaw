@@ -122,10 +122,15 @@
   * {
     @apply border-border outline-ring/50;
     }
+  html,
+  body {
+    height: 100%;
+  }
+  html {
+    @apply font-sans text-sm;
+    font-size: 14px;
+    }
   body {
     @apply bg-background text-foreground;
-    }
-  html {
-    @apply font-sans;
     }
 }
