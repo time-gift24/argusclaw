@@ -1,12 +1,12 @@
 "use client"
 
 import * as React from "react"
+import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
 import { ArrowLeft, Save } from "lucide-react"
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
 import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 
+import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Breadcrumb } from "@/components/settings"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -35,6 +35,24 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     max_tokens: undefined,
     temperature: undefined,
   })
+
+  const previewMessage = React.useMemo<ThreadAssistantMessage>(
+    () => ({
+      id: "agent-prompt-preview",
+      role: "assistant",
+      createdAt: new Date(0),
+      content: [{ type: "text", text: formData.system_prompt }],
+      status: { type: "complete", reason: "unknown" },
+      metadata: {
+        unstable_state: null,
+        unstable_annotations: [],
+        unstable_data: [],
+        steps: [],
+        custom: {},
+      },
+    }),
+    [formData.system_prompt],
+  )
 
   // Load providers and agent data (if editing)
   React.useEffect(() => {
@@ -234,11 +252,13 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           <div className="bg-muted/50 px-4 py-2 border-b text-xs font-medium text-muted-foreground">
             预览
           </div>
-          <div className="flex-1 overflow-y-auto p-4 prose prose-sm dark:prose-invert max-w-none">
+          <div className="flex-1 overflow-y-auto p-4">
             {formData.system_prompt ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {formData.system_prompt}
-              </ReactMarkdown>
+              <MessageProvider message={previewMessage} index={0} isLast>
+                <div className="wrap-break-word px-2 text-[14px] text-foreground leading-relaxed [&_.aui-md-h3]:text-[14px]">
+                  <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+                </div>
+              </MessageProvider>
             ) : (
               <div className="text-muted-foreground text-sm">
                 在左侧输入系统提示词，这里将实时显示渲染效果
