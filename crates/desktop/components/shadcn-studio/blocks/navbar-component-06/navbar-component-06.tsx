@@ -23,6 +23,7 @@ import {
 import LogoSvg from '@/assets/svg/logo'
 import NotificationDropdown from '@/components/shadcn-studio/blocks/dropdown-notification'
 import ProfileDropdown from '@/components/shadcn-studio/blocks/dropdown-profile'
+import { useAuthStore } from '@/components/auth/use-auth-store'
 
 type NavigationItem = {
   title: string
@@ -36,6 +37,13 @@ const Navbar = ({
   navigationItems: NavigationItem
 }) => {
   const { resolvedTheme, setTheme } = useTheme()
+  const { username, isLoggedIn } = useAuthStore()
+
+  // Get avatar fallback based on auth state
+  const avatarFallback = isLoggedIn && username ? username.charAt(0).toUpperCase() : '?'
+  const avatarClassName = isLoggedIn
+    ? 'size-9.5 rounded-lg bg-primary text-primary-foreground'
+    : 'size-9.5 rounded-lg bg-muted text-muted-foreground'
 
   const toggleTheme = () => {
     setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')
@@ -102,12 +110,9 @@ const Navbar = ({
           <ProfileDropdown
             trigger={
               <Button variant='ghost' className='h-full rounded-lg p-0'>
-                <Avatar className='size-9.5 rounded-lg'>
-                  <AvatarImage
-                    src='https://cdn.shadcnstudio.com/ss-assets/avatar/avatar-1.png'
-                    className='rounded-lg'
-                  />
-                  <AvatarFallback>JD</AvatarFallback>
+                <Avatar className={avatarClassName}>
+                  <AvatarImage src='' className='rounded-lg' />
+                  <AvatarFallback>{avatarFallback}</AvatarFallback>
                 </Avatar>
               </Button>
             }
