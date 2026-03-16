@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::agents::Agent;
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
-use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
+use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
 use crate::db::sqlite::{
     SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
     migrate,
@@ -206,6 +206,13 @@ impl AppContext {
     /// 列出所有 provider 摘要
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
         self.llm_manager.list_providers().await
+    }
+
+    pub async fn test_provider_connection(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<ProviderTestResult, AgentError> {
+        self.llm_manager.test_provider_connection(id).await
     }
 
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {

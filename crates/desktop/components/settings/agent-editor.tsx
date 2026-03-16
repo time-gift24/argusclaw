@@ -16,6 +16,10 @@ interface AgentEditorProps {
   agentId?: string
 }
 
+function getPreferredProviderId(providersData: LlmProviderSummary[]): string {
+  return providersData.find((p) => p.is_default)?.id || providersData[0]?.id || ""
+}
+
 export function AgentEditor({ agentId }: AgentEditorProps) {
   const router = useRouter()
   const isEditing = !!agentId
@@ -54,6 +58,12 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     [formData.system_prompt],
   )
 
+  const canSave = Boolean(
+    formData.id.trim() &&
+      formData.display_name.trim() &&
+      formData.system_prompt.trim(),
+  )
+
   // Load providers and agent data (if editing)
   React.useEffect(() => {
     const loadData = async () => {
@@ -67,10 +77,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             setFormData(agent)
           }
         } else {
-          // Set default provider for new agent
-          const defaultProvider = providersData.find(p => p.is_default)
-          if (defaultProvider) {
-            setFormData(prev => ({ ...prev, provider_id: defaultProvider.id }))
+          const preferredProviderId = getPreferredProviderId(providersData)
+          if (preferredProviderId) {
+            setFormData((prev) =>
+              prev.provider_id ? prev : { ...prev, provider_id: preferredProviderId },
+            )
           }
         }
       } catch (error) {
@@ -83,7 +94,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   }, [agentId])
 
   const handleSave = async () => {
-    if (!formData.id || !formData.display_name || !formData.provider_id || !formData.system_prompt) {
+    if (!canSave) {
       return
     }
 
@@ -125,7 +136,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             {isEditing ? "编辑智能体" : "新建智能体"}
           </h1>
         </div>
-        <Button size="sm" onClick={handleSave} disabled={saving}>
+        <Button size="sm" onClick={handleSave} disabled={saving || !canSave}>
           <Save className="h-4 w-4 mr-1" />
           {saving ? "保存中..." : "保存"}
         </Button>
@@ -180,15 +191,14 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="provider_id">LLM 提供者</Label>
+              <Label htmlFor="provider_id">LLM 提供者（可选）</Label>
               <select
                 id="provider_id"
                 value={formData.provider_id}
                 onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
                 className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
-                required
               >
-                <option value="">选择提供者</option>
+                <option value="">不指定提供者</option>
                 {providerList.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.display_name} {p.is_default ? "(默认)" : ""}

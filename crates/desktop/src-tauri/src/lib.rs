@@ -17,6 +17,7 @@ pub fn run() {
             commands::upsert_provider,
             commands::delete_provider,
             commands::set_default_provider,
+            commands::test_provider_connection,
             commands::list_agent_templates,
             commands::get_agent_template,
             commands::upsert_agent_template,

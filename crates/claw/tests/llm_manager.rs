@@ -2,10 +2,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+};
 
 use claw::{
     LLMManager, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
-    SecretString, SqliteLlmProviderRepository, migrate,
+    ProviderTestStatus, SecretString, SqliteLlmProviderRepository, migrate,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -40,6 +45,36 @@ async fn setup_repository() -> (tempfile::TempDir, SqlitePool, SqliteLlmProvider
     );
 
     (temp_dir, pool, repository)
+}
+
+fn spawn_single_response_server(
+    status_line: &str,
+    body: &str,
+    extra_headers: &[(&str, &str)],
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener should have addr");
+    let status_line = status_line.to_string();
+    let body = body.to_string();
+    let extra_headers = extra_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
+
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should be accepted");
+        let mut buffer = [0_u8; 4096];
+        let _ = stream.read(&mut buffer);
+        let response = format!(
+            "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("response should be written");
+    });
+
+    format!("http://{addr}")
 }
 
 #[tokio::test]
@@ -168,4 +203,121 @@ async fn llm_manager_deletes_provider_records() {
         missing,
         Err(claw::AgentError::ProviderNotFound { id }) if id == "openai"
     ));
+}
+
+#[cfg(feature = "openai-compatible")]
+#[tokio::test]
+async fn llm_manager_reports_successful_provider_connection_tests() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let base_url = spawn_single_response_server(
+        "200 OK",
+        r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        &[],
+    );
+    let manager = LLMManager::new(Arc::new(repository));
+    let mut record = build_record("openai", "OpenAI", true);
+    record.base_url = base_url.clone();
+
+    manager
+        .upsert_provider(record.clone())
+        .await
+        .expect("provider should be stored");
+
+    let result = manager
+        .test_provider_connection(&record.id)
+        .await
+        .expect("test should succeed");
+
+    assert_eq!(result.provider_id, "openai");
+    assert_eq!(result.model, "gpt-4o-mini");
+    assert_eq!(result.base_url, base_url);
+    assert_eq!(result.status, ProviderTestStatus::Success);
+    assert_eq!(result.message, "Provider connection test succeeded.");
+}
+
+#[cfg(feature = "openai-compatible")]
+#[tokio::test]
+async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let base_url = spawn_single_response_server("401 Unauthorized", r#"{"error":"bad key"}"#, &[]);
+    let manager = LLMManager::new(Arc::new(repository));
+    let mut record = build_record("openai", "OpenAI", true);
+    record.base_url = base_url;
+
+    manager
+        .upsert_provider(record.clone())
+        .await
+        .expect("provider should be stored");
+
+    let result = manager
+        .test_provider_connection(&record.id)
+        .await
+        .expect("test result should be returned");
+
+    assert_eq!(result.status, ProviderTestStatus::AuthFailed);
+}
+
+#[cfg(feature = "openai-compatible")]
+#[tokio::test]
+async fn llm_manager_reports_missing_providers_in_connection_tests() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let manager = LLMManager::new(Arc::new(repository));
+
+    let result = manager
+        .test_provider_connection(&LlmProviderId::new("missing"))
+        .await
+        .expect("missing provider should return a structured result");
+
+    assert_eq!(result.provider_id, "missing");
+    assert_eq!(result.status, ProviderTestStatus::ProviderNotFound);
+}
+
+#[cfg(feature = "openai-compatible")]
+#[tokio::test]
+async fn llm_manager_maps_model_availability_failures_for_provider_connection_tests() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let base_url =
+        spawn_single_response_server("404 Not Found", r#"{"error":"model not available"}"#, &[]);
+    let manager = LLMManager::new(Arc::new(repository));
+    let mut record = build_record("openai", "OpenAI", true);
+    record.base_url = base_url;
+
+    manager
+        .upsert_provider(record.clone())
+        .await
+        .expect("provider should be stored");
+
+    let result = manager
+        .test_provider_connection(&record.id)
+        .await
+        .expect("test result should be returned");
+
+    assert_eq!(result.status, ProviderTestStatus::ModelNotAvailable);
+}
+
+#[cfg(feature = "openai-compatible")]
+#[tokio::test]
+async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let base_url = spawn_single_response_server(
+        "500 Internal Server Error",
+        r#"{"error":"upstream exploded"}"#,
+        &[],
+    );
+    let manager = LLMManager::new(Arc::new(repository));
+    let mut record = build_record("openai", "OpenAI", true);
+    record.base_url = base_url;
+
+    manager
+        .upsert_provider(record.clone())
+        .await
+        .expect("provider should be stored");
+
+    let result = manager
+        .test_provider_connection(&record.id)
+        .await
+        .expect("test result should be returned");
+
+    assert_eq!(result.status, ProviderTestStatus::RequestFailed);
+    assert!(result.message.contains("HTTP 500"));
 }

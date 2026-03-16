@@ -1,14 +1,19 @@
 use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::Utc;
 
 use crate::db::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
+    ProviderTestResult, ProviderTestStatus,
 };
 use crate::error::AgentError;
-#[cfg(feature = "dev")]
 use crate::llm::ChatMessage;
+use crate::llm::LlmError;
 use crate::llm::LlmProvider;
+use crate::llm::provider::CompletionRequest;
 #[cfg(feature = "dev")]
-use crate::llm::provider::{CompletionRequest, LlmEventStream};
+use crate::llm::provider::LlmEventStream;
 
 pub struct LLMManager {
     repository: Arc<dyn LlmProviderRepository>,
@@ -93,6 +98,66 @@ impl LLMManager {
         Ok(())
     }
 
+    pub async fn test_provider_connection(
+        &self,
+        id: &LlmProviderId,
+    ) -> Result<ProviderTestResult, AgentError> {
+        let Some(record) = self.repository.get_provider(id).await? else {
+            return Ok(build_provider_test_result(
+                id.to_string(),
+                String::new(),
+                String::new(),
+                Duration::ZERO,
+                ProviderTestStatus::ProviderNotFound,
+                AgentError::ProviderNotFound { id: id.to_string() }.to_string(),
+            ));
+        };
+
+        let provider_id = record.id.to_string();
+        let model = record.model.clone();
+        let base_url = record.base_url.clone();
+        let provider = match self.build_provider(record) {
+            Ok(provider) => provider,
+            Err(AgentError::UnsupportedProviderKind { kind }) => {
+                return Ok(build_provider_test_result(
+                    provider_id,
+                    model,
+                    base_url,
+                    Duration::ZERO,
+                    ProviderTestStatus::UnsupportedProviderKind,
+                    AgentError::UnsupportedProviderKind { kind }.to_string(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+
+        let started = std::time::Instant::now();
+        let request = CompletionRequest::new(vec![ChatMessage::user("Reply with exactly OK.")])
+            .with_max_tokens(8)
+            .with_temperature(0.0);
+
+        let result = match provider.complete(request).await {
+            Ok(_) => build_provider_test_result(
+                provider_id,
+                model,
+                base_url,
+                started.elapsed(),
+                ProviderTestStatus::Success,
+                "Provider connection test succeeded.".to_string(),
+            ),
+            Err(error) => build_provider_test_result(
+                provider_id,
+                model.clone(),
+                base_url,
+                started.elapsed(),
+                map_llm_error_to_test_status(&error),
+                error.to_string(),
+            ),
+        };
+
+        Ok(result)
+    }
+
     #[cfg(feature = "dev")]
     pub async fn complete_text(
         &self,
@@ -160,5 +225,97 @@ impl LLMManager {
                 }
             }
         }
+    }
+}
+
+fn build_provider_test_result(
+    provider_id: String,
+    model: String,
+    base_url: String,
+    latency: Duration,
+    status: ProviderTestStatus,
+    message: String,
+) -> ProviderTestResult {
+    ProviderTestResult {
+        provider_id,
+        model,
+        base_url,
+        checked_at: Utc::now(),
+        latency_ms: duration_to_millis(latency),
+        status,
+        message,
+    }
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn map_llm_error_to_test_status(error: &LlmError) -> ProviderTestStatus {
+    match error {
+        LlmError::AuthFailed { .. } => ProviderTestStatus::AuthFailed,
+        LlmError::ModelNotAvailable { .. } => ProviderTestStatus::ModelNotAvailable,
+        LlmError::RateLimited { .. } => ProviderTestStatus::RateLimited,
+        LlmError::InvalidResponse { .. } => ProviderTestStatus::InvalidResponse,
+        LlmError::RequestFailed { .. }
+        | LlmError::ContextLengthExceeded { .. }
+        | LlmError::SessionExpired { .. }
+        | LlmError::SessionRenewalFailed { .. }
+        | LlmError::UnsupportedCapability { .. } => ProviderTestStatus::RequestFailed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::db::llm::ProviderTestStatus;
+    use crate::llm::LlmError;
+
+    use super::{duration_to_millis, map_llm_error_to_test_status};
+
+    #[test]
+    fn duration_to_millis_saturates_at_u64_max() {
+        let duration = Duration::from_millis(u64::MAX).saturating_add(Duration::from_millis(1));
+
+        assert_eq!(duration_to_millis(duration), u64::MAX);
+    }
+
+    #[test]
+    fn provider_test_status_maps_from_llm_errors() {
+        assert_eq!(
+            map_llm_error_to_test_status(&LlmError::AuthFailed {
+                provider: "openai-compatible".to_string(),
+            }),
+            ProviderTestStatus::AuthFailed
+        );
+        assert_eq!(
+            map_llm_error_to_test_status(&LlmError::ModelNotAvailable {
+                provider: "openai-compatible".to_string(),
+                model: "gpt-4.1".to_string(),
+            }),
+            ProviderTestStatus::ModelNotAvailable
+        );
+        assert_eq!(
+            map_llm_error_to_test_status(&LlmError::RateLimited {
+                provider: "openai-compatible".to_string(),
+                retry_after: None,
+            }),
+            ProviderTestStatus::RateLimited
+        );
+        assert_eq!(
+            map_llm_error_to_test_status(&LlmError::InvalidResponse {
+                provider: "openai-compatible".to_string(),
+                reason: "bad payload".to_string(),
+            }),
+            ProviderTestStatus::InvalidResponse
+        );
+        assert_eq!(
+            map_llm_error_to_test_status(&LlmError::RequestFailed {
+                provider: "openai-compatible".to_string(),
+                reason: "boom".to_string(),
+            }),
+            ProviderTestStatus::RequestFailed
+        );
     }
 }
