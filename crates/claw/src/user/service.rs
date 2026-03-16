@@ -11,6 +11,7 @@ pub struct UserInfo {
     pub username: String,
 }
 
+#[derive(Clone)]
 pub struct UserService {
     pool: SqlitePool,
 }
