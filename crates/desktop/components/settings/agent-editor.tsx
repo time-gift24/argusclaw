@@ -282,7 +282,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           <div className="flex-1 overflow-y-auto p-4">
             {formData.system_prompt ? (
               <MessageProvider message={previewMessage} index={0} isLast>
-                <div className="wrap-break-word px-2 text-[14px] text-foreground leading-relaxed [&_.aui-md-h3]:text-[14px]">
+                <div className="wrap-break-word px-2 text-foreground leading-relaxed [&_.aui-md-h3]:text-sm">
                   <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
                 </div>
               </MessageProvider>
