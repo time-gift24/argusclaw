@@ -4,30 +4,30 @@ help:
 	@printf '%s\n' \
 		'Available targets:' \
 		'  build            Build both CLI binaries' \
-		'  build-prod       Build argusclaw (production CLI)' \
-		'  build-dev        Build argusclaw-dev (development CLI)' \
+		'  build-prod       Build arguswing (production CLI)' \
+		'  build-dev        Build arguswing-dev (development CLI)' \
 		'  test             Run tests with all features' \
-		'  run-prod         Run argusclaw provider list' \
-		'  run-dev          Run argusclaw-dev --help' \
+		'  run-prod         Run arguswing provider list' \
+		'  run-dev          Run arguswing-dev --help' \
 		'  clean            Clean build artifacts' \
 		'  install          Install required tools (sqlx-cli, prek)'
 
 build: build-prod build-dev
 
 build-prod:
-	cargo build --bin argusclaw
+	cargo build --bin arguswing
 
 build-dev:
-	cargo build --bin argusclaw-dev --features dev
+	cargo build --bin arguswing-dev --features dev
 
 test:
 	cargo test -p cli --all-features
 
 run-prod:
-	cargo run --bin argusclaw -- provider list
+	cargo run --bin arguswing -- provider list
 
 run-dev:
-	cargo run --bin argusclaw-dev --features dev -- --help
+	cargo run --bin arguswing-dev --features dev -- --help
 
 clean:
 	cargo clean

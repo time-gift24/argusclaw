@@ -30,7 +30,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
 
 async fn setup_repository() -> (tempfile::TempDir, SqlitePool, SqliteLlmProviderRepository) {
     let temp_dir = tempfile::tempdir().expect("tempdir should be created");
-    let database_path = temp_dir.path().join("argusclaw.db");
+    let database_path = temp_dir.path().join("arguswing.db");
     let options = SqliteConnectOptions::new()
         .filename(&database_path)
         .create_if_missing(true);

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "argusclaw",
+  "productName": "arguswing",
   "version": "0.1.0",
-  "identifier": "com.argusclaw.com",
+  "identifier": "com.arguswing.com",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:3000",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "argusclaw",
+        "title": "arguswing",
         "width": 1200,
         "height": 900
       }

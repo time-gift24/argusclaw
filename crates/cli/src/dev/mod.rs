@@ -1,4 +1,4 @@
-//! Dev commands module - entry point for argusclaw-dev.
+//! Dev commands module - entry point for arguswing-dev.
 //!
 //! This module aggregates all development-only commands:
 //! - llm: LLM completion testing
@@ -27,7 +27,7 @@ use crate::provider::ProviderCommand;
 /// Approval dev migrator for CLI testing.
 pub static APPROVAL_DEV_MIGRATOR: Migrator = sqlx::migrate!("./src/dev/migrations");
 
-/// Dev CLI for argusclaw-dev.
+/// Dev CLI for arguswing-dev.
 #[derive(Debug, Parser)]
 pub struct DevCli {
     #[command(subcommand)]

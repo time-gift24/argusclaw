@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn approval_database_url_defaults_to_tmp_under_current_directory() {
         let run_dir =
-            std::env::temp_dir().join(format!("argusclaw-dev-cli-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("arguswing-dev-cli-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&run_dir).expect("should create run dir");
 
         let resolved = super::resolve_approval_dev_database_url(None, Some(&run_dir))

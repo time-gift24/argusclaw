@@ -47,7 +47,7 @@ const Navbar = ({
         <Link href='/'>
           <div className='flex items-center gap-3'>
             <LogoSvg className='size-8' />
-            <span className='text-xl font-semibold max-sm:hidden'>ArgusClaw</span>
+            <span className='text-xl font-semibold max-sm:hidden'>ArgusWing</span>
           </div>
         </Link>
 

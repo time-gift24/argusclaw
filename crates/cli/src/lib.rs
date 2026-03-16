@@ -1,4 +1,4 @@
-//! CLI shared library for argusclaw and argusclaw-dev binaries.
+//! CLI shared library for arguswing and arguswing-dev binaries.
 
 use std::collections::HashMap;
 use std::env;
@@ -18,26 +18,26 @@ pub mod dev;
 
 /// Resolve database path based on CLI mode (production vs development).
 ///
-/// # Production (argusclaw)
-/// - Default: `~/.argusclaw/sqlite.db`
-/// - Override: `ARGUSCLAW_DB` environment variable
+/// # Production (arguswing)
+/// - Default: `~/.arguswing/sqlite.db`
+/// - Override: `ARGUSWING_DB` environment variable
 ///
-/// # Development (argusclaw-dev)
-/// - Default: `./tmp/argusclaw-dev.db`
-/// - Override: `ARGUSCLAW_DEV_DB` environment variable
+/// # Development (arguswing-dev)
+/// - Default: `./tmp/arguswing-dev.db`
+/// - Override: `ARGUSWING_DEV_DB` environment variable
 pub fn resolve_db_path(is_dev: bool) -> PathBuf {
     let (env_var, default_path) = if is_dev {
-        ("ARGUSCLAW_DEV_DB", {
+        ("ARGUSWING_DEV_DB", {
             let cwd = env::current_dir().expect("failed to resolve current working directory");
             let tmp_dir = cwd.join("tmp");
             std::fs::create_dir_all(&tmp_dir).expect("failed to create tmp directory");
-            tmp_dir.join("argusclaw-dev.db")
+            tmp_dir.join("arguswing-dev.db")
         })
     } else {
-        ("ARGUSCLAW_DB", {
+        ("ARGUSWING_DB", {
             let home = dirs::home_dir().expect("failed to resolve home directory");
-            let data_dir = home.join(".argusclaw");
-            std::fs::create_dir_all(&data_dir).expect("failed to create .argusclaw directory");
+            let data_dir = home.join(".arguswing");
+            std::fs::create_dir_all(&data_dir).expect("failed to create .arguswing directory");
             data_dir.join("sqlite.db")
         })
     };
@@ -166,13 +166,13 @@ mod tests {
     fn resolve_db_path_production_defaults_to_home() {
         let path = resolve_db_path(false);
         assert!(path.to_string_lossy().ends_with("sqlite.db"));
-        assert!(path.to_string_lossy().contains(".argusclaw"));
+        assert!(path.to_string_lossy().contains(".arguswing"));
     }
 
     #[test]
     fn resolve_db_path_dev_defaults_to_tmp() {
         let path = resolve_db_path(true);
-        assert!(path.to_string_lossy().ends_with("argusclaw-dev.db"));
+        assert!(path.to_string_lossy().ends_with("arguswing-dev.db"));
         assert!(path.to_string_lossy().contains("tmp"));
     }
 
