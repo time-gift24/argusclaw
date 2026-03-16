@@ -40,7 +40,7 @@ function DetailRow({ label, children }: DetailRowProps) {
       <span className="text-[11px] font-medium text-muted-foreground">
         {label}
       </span>
-      <div className="min-w-0">{children}</div>
+      <div className="min-w-0 text-xs">{children}</div>
     </div>
   )
 }
