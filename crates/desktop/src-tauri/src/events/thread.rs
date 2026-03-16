@@ -22,25 +22,25 @@ pub struct ThreadEventEnvelope {
 
 impl ThreadEventEnvelope {
     /// Create an envelope from a claw ThreadEvent.
-    pub fn from_thread_event(runtime_agent_id: String, event: ThreadEvent) -> Self {
+    pub fn from_thread_event(runtime_agent_id: String, event: ThreadEvent) -> Option<Self> {
         match event {
             ThreadEvent::Processing {
                 thread_id,
                 turn_number,
                 event,
-            } => Self {
+            } => ThreadEventPayload::from_llm_event(event).map(|payload| Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: Some(turn_number),
-                payload: ThreadEventPayload::from_llm_event(event),
-            },
+                payload,
+            }),
             ThreadEvent::ToolStarted {
                 thread_id,
                 turn_number,
                 tool_call_id,
                 tool_name,
                 arguments,
-            } => Self {
+            } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: Some(turn_number),
@@ -49,28 +49,36 @@ impl ThreadEventEnvelope {
                     tool_name,
                     arguments,
                 },
-            },
+            }),
             ThreadEvent::ToolCompleted {
                 thread_id,
                 turn_number,
                 tool_call_id,
                 tool_name,
                 result,
-            } => Self {
-                runtime_agent_id,
-                thread_id: thread_id.to_string(),
-                turn_number: Some(turn_number),
-                payload: ThreadEventPayload::ToolCompleted {
-                    tool_call_id,
-                    tool_name,
-                    result: result.unwrap_or(serde_json::Value::Null),
-                },
-            },
+            } => {
+                let (result, is_error) = match result {
+                    Ok(result) => (result, false),
+                    Err(error) => (serde_json::Value::String(error), true),
+                };
+
+                Some(Self {
+                    runtime_agent_id,
+                    thread_id: thread_id.to_string(),
+                    turn_number: Some(turn_number),
+                    payload: ThreadEventPayload::ToolCompleted {
+                        tool_call_id,
+                        tool_name,
+                        result,
+                        is_error,
+                    },
+                })
+            }
             ThreadEvent::TurnCompleted {
                 thread_id,
                 turn_number,
                 token_usage,
-            } => Self {
+            } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: Some(turn_number),
@@ -79,56 +87,56 @@ impl ThreadEventEnvelope {
                     output_tokens: token_usage.output_tokens,
                     total_tokens: token_usage.total_tokens,
                 },
-            },
+            }),
             ThreadEvent::TurnFailed {
                 thread_id,
                 turn_number,
                 error,
-            } => Self {
+            } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: Some(turn_number),
                 payload: ThreadEventPayload::TurnFailed { error },
-            },
-            ThreadEvent::Idle { thread_id } => Self {
+            }),
+            ThreadEvent::Idle { thread_id } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: None,
                 payload: ThreadEventPayload::Idle,
-            },
+            }),
             ThreadEvent::Compacted {
                 thread_id,
                 new_token_count,
-            } => Self {
+            } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: None,
                 payload: ThreadEventPayload::Compacted { new_token_count },
-            },
+            }),
             ThreadEvent::WaitingForApproval {
                 thread_id,
                 turn_number,
                 request,
-            } => Self {
+            } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: Some(turn_number),
                 payload: ThreadEventPayload::WaitingForApproval {
                     request: serde_json::to_value(&request).unwrap_or_default(),
                 },
-            },
+            }),
             ThreadEvent::ApprovalResolved {
                 thread_id,
                 turn_number,
                 response,
-            } => Self {
+            } => Some(Self {
                 runtime_agent_id,
                 thread_id: thread_id.to_string(),
                 turn_number: Some(turn_number),
                 payload: ThreadEventPayload::ApprovalResolved {
                     response: serde_json::to_value(&response).unwrap_or_default(),
                 },
-            },
+            }),
         }
     }
 }
@@ -162,6 +170,7 @@ pub enum ThreadEventPayload {
         tool_call_id: String,
         tool_name: String,
         result: serde_json::Value,
+        is_error: bool,
     },
     TurnCompleted {
         input_tokens: u32,
@@ -185,27 +194,24 @@ pub enum ThreadEventPayload {
 
 impl ThreadEventPayload {
     /// Convert an LLM stream event to a payload.
-    pub fn from_llm_event(event: LlmStreamEvent) -> Self {
+    pub fn from_llm_event(event: LlmStreamEvent) -> Option<Self> {
         match event {
-            LlmStreamEvent::ReasoningDelta { delta } => Self::ReasoningDelta { delta },
-            LlmStreamEvent::ContentDelta { delta } => Self::ContentDelta { delta },
-            LlmStreamEvent::ToolCallDelta(delta) => Self::ToolCallDelta {
+            LlmStreamEvent::ReasoningDelta { delta } => Some(Self::ReasoningDelta { delta }),
+            LlmStreamEvent::ContentDelta { delta } => Some(Self::ContentDelta { delta }),
+            LlmStreamEvent::ToolCallDelta(delta) => Some(Self::ToolCallDelta {
                 index: delta.index,
                 id: delta.id,
                 name: delta.name,
                 arguments_delta: delta.arguments_delta,
-            },
+            }),
             LlmStreamEvent::Usage {
                 input_tokens,
                 output_tokens,
-            } => Self::LlmUsage {
+            } => Some(Self::LlmUsage {
                 input_tokens,
                 output_tokens,
-            },
-            LlmStreamEvent::Finished { .. } => {
-                // Finished events are handled at the turn level, not forwarded as individual events
-                Self::Idle
-            }
+            }),
+            LlmStreamEvent::Finished { .. } => None,
         }
     }
 }
@@ -228,7 +234,8 @@ mod tests {
             },
         };
 
-        let envelope = ThreadEventEnvelope::from_thread_event(runtime_agent_id.clone(), event);
+        let envelope = ThreadEventEnvelope::from_thread_event(runtime_agent_id.clone(), event)
+            .expect("content delta should forward");
 
         assert_eq!(envelope.runtime_agent_id, runtime_agent_id);
         assert_eq!(envelope.thread_id, thread_id.to_string());
@@ -236,6 +243,33 @@ mod tests {
         assert!(matches!(
             envelope.payload,
             ThreadEventPayload::ContentDelta { ref delta } if delta == "hello"
+        ));
+    }
+
+    #[test]
+    fn tool_completed_error_conversion_preserves_error_text() {
+        let envelope = ThreadEventEnvelope::from_thread_event(
+            "agent-runtime-1".to_string(),
+            claw::ThreadEvent::ToolCompleted {
+                thread_id: ThreadId::new(),
+                turn_number: 1,
+                tool_call_id: "call-1".to_string(),
+                tool_name: "shell".to_string(),
+                result: Err("command failed".to_string()),
+            },
+        )
+        .expect("tool completed errors should still forward");
+
+        assert!(matches!(
+            envelope.payload,
+            ThreadEventPayload::ToolCompleted {
+                ref tool_call_id,
+                ref tool_name,
+                ref result,
+                is_error: true,
+            } if tool_call_id == "call-1"
+                && tool_name == "shell"
+                && result == &serde_json::Value::String("command failed".to_string())
         ));
     }
 }

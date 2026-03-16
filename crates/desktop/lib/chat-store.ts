@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { agents, chat, providers } from "@/lib/tauri";
 import type {
-  ChatSessionPayload,
+  ApprovalRequestPayload,
   ThreadEventEnvelope,
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
@@ -23,7 +23,10 @@ export interface ChatSessionState {
   pendingApprovalRequest: {
     id: string;
     tool_name: string;
-    arguments: unknown;
+    action: string;
+    risk_level: ApprovalRequestPayload["risk_level"];
+    requested_at: string;
+    timeout_secs: number;
   } | null;
   error: string | null;
 }
@@ -61,6 +64,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       providers.list(),
     ]);
     set({ templates: templateList, providers: providerList });
+
+    // Auto-activate first template if available
+    if (templateList.length > 0) {
+      const firstTemplate = templateList[0];
+      await get().activateSession(firstTemplate.id);
+    }
+
     if (!get()._unlisten) {
       const unlisten = await listen<ThreadEventEnvelope>("thread:event", (event) => {
         get()._handleThreadEvent(event.payload);
@@ -166,7 +176,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   _handleThreadEvent(envelope: ThreadEventEnvelope) {
     const state = get();
     const sessionKey = Object.keys(state.sessionsByKey).find(
-      (key) => state.sessionsByKey[key].threadId === envelope.thread_id,
+      (key) =>
+        state.sessionsByKey[key].threadId === envelope.thread_id &&
+        state.sessionsByKey[key].runtimeAgentId === envelope.runtime_agent_id,
     );
 
     if (!sessionKey) return;
@@ -174,7 +186,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const { payload } = envelope;
 
     switch (payload.type) {
-      case "ContentDelta":
+      case "content_delta":
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
           if (!session?.pendingAssistant) return {};
@@ -192,28 +204,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         });
         break;
 
-      case "TurnCompleted":
-      case "TurnFailed":
+      case "turn_completed":
         void get().refreshSnapshot(sessionKey);
         break;
 
-      case "WaitingForApproval":
+      case "turn_failed":
+        set((store) => ({
+          sessionsByKey: {
+            ...store.sessionsByKey,
+            [sessionKey]: {
+              ...store.sessionsByKey[sessionKey],
+              error: payload.error,
+            },
+          },
+        }));
+        void get().refreshSnapshot(sessionKey);
+        break;
+
+      case "waiting_for_approval":
         set((state) => ({
           sessionsByKey: {
             ...state.sessionsByKey,
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
               pendingApprovalRequest: {
-                id: (payload.request as { id?: string })?.id ?? "",
-                tool_name: (payload.request as { tool_name?: string })?.tool_name ?? "",
-                arguments: (payload.request as { arguments?: unknown })?.arguments,
+                id: payload.request.id,
+                tool_name: payload.request.tool_name,
+                action: payload.request.action,
+                risk_level: payload.request.risk_level,
+                requested_at: payload.request.requested_at,
+                timeout_secs: payload.request.timeout_secs,
               },
             },
           },
         }));
         break;
 
-      case "ApprovalResolved":
+      case "approval_resolved":
         set((state) => ({
           sessionsByKey: {
             ...state.sessionsByKey,
@@ -225,7 +252,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }));
         break;
 
-      case "Idle":
+      case "idle":
         set((state) => ({
           sessionsByKey: {
             ...state.sessionsByKey,

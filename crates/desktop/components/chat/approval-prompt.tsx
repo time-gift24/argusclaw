@@ -41,8 +41,11 @@ export function ApprovalPrompt() {
         <CardTitle className="text-base">需要审批: {pendingRequest.tool_name}</CardTitle>
       </CardHeader>
       <CardContent className="pb-2">
+        <p className="mb-2 text-sm text-muted-foreground">
+          风险等级: {pendingRequest.risk_level}
+        </p>
         <pre className="overflow-auto rounded bg-muted p-2 text-xs">
-          {JSON.stringify(pendingRequest.arguments, null, 2)}
+          {pendingRequest.action}
         </pre>
       </CardContent>
       <CardFooter className="gap-2">
