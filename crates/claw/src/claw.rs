@@ -477,4 +477,23 @@ mod tests {
         assert!(providers.is_empty());
         assert!(database_path.exists());
     }
+
+    #[tokio::test]
+    async fn init_creates_default_arguswing_agent() {
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        let default_agent = ctx
+            .get_default_agent_template()
+            .await
+            .expect("default agent should exist");
+
+        assert_eq!(default_agent.id.as_ref(), "arguswing");
+        assert_eq!(default_agent.display_name, "ArgusWing");
+        assert!(default_agent.provider_id.is_empty());
+    }
 }
