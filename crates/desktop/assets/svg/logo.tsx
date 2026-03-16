@@ -26,7 +26,7 @@ const Logo = ({ className }: LogoProps) => {
   return (
     <Image
       src={src}
-      alt="ArgusClaw"
+      alt="ArgusWing"
       className={className}
       width={32}
       height={32}

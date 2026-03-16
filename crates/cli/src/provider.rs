@@ -1,4 +1,4 @@
-//! Provider command - shared between argusclaw and argusclaw-dev.
+//! Provider command - shared between arguswing and arguswing-dev.
 //!
 //! This module contains the provider management commands that are common
 //! to both the production and development CLI binaries.

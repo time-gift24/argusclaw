@@ -8,9 +8,9 @@ cd "$(dirname "$0")/.."
 
 # 构建带 dev feature 的 CLI
 echo "Building CLI with dev feature..."
-cargo build --features dev -p cli --bin argusclaw-dev --quiet
+cargo build --features dev -p cli --bin arguswing-dev --quiet
 
-CLI="./target/debug/argusclaw-dev"
+CLI="./target/debug/arguswing-dev"
 DB_PATH="$(pwd)/tmp/workflow-dev.sqlite"
 
 # 清理之前的测试数据并创建 tmp 目录

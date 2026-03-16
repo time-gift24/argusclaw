@@ -374,7 +374,7 @@ fn resolve_database_target(configured: Option<String>) -> Result<DatabaseTarget,
 }
 
 fn default_database_target() -> String {
-    env::var("DATABASE_URL").unwrap_or_else(|_| "~/.argusclaw/sqlite.db".to_string())
+    env::var("DATABASE_URL").unwrap_or_else(|_| "~/.arguswing/sqlite.db".to_string())
 }
 
 fn expand_home_path(path: &str) -> Result<PathBuf, AgentError> {
@@ -416,9 +416,9 @@ mod tests {
 
     #[test]
     fn expand_home_path_resolves_tilde_prefix() {
-        let path = expand_home_path("~/.argusclaw/sqlite.db").expect("home path should resolve");
+        let path = expand_home_path("~/.arguswing/sqlite.db").expect("home path should resolve");
 
-        assert!(path.ends_with(".argusclaw/sqlite.db"));
+        assert!(path.ends_with(".arguswing/sqlite.db"));
     }
 
     #[tokio::test]

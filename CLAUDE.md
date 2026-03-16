@@ -1,4 +1,4 @@
-# ArgusClaw 开发指南
+# ArgusWing 开发指南
 
 ## 构建与测试
 务必使用 `cargo install prek && prek install` 初始化项目
@@ -9,7 +9,7 @@ prek                                           # 静态检查基线
                                                # - fmt 问题会自动修复，无需改动再次提交
                                                # - clippy 相关问题务必做修复
 cargo deny check                               # 发起 PR 前使用，检测下静态基线
-RUST_LOG=argusclaw=debug,claw=debug cargo run  # 开启日志运行
+RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 ```
 
 ## 设计与检视原则(非常重要)
@@ -88,7 +88,7 @@ Tauri + React + TypeScript + Vite + Tailwind CSS v4。Rust 后端通过 Tauri Co
 
 ## 数据库
 
-- 默认 `DATABASE_URL` 为 `~/.argusclaw/sqlite.db`
+- 默认 `DATABASE_URL` 为 `~/.arguswing/sqlite.db`
 - 使用 `sqlx::migrate!()` 宏，迁移在**编译时嵌入**到二进制文件中
 
 ### 迁移规范
