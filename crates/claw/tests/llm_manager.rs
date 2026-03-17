@@ -103,7 +103,6 @@ async fn llm_manager_lists_provider_summaries_for_user_selection() {
     assert!(providers[1].is_default);
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_builds_a_provider_from_the_stored_default_configuration() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
@@ -207,7 +206,6 @@ async fn llm_manager_deletes_provider_records() {
     ));
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_reports_successful_provider_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
@@ -237,7 +235,6 @@ async fn llm_manager_reports_successful_provider_connection_tests() {
     assert_eq!(result.message, "Provider connection test succeeded.");
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_can_test_unsaved_provider_configurations() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
@@ -259,7 +256,6 @@ async fn llm_manager_can_test_unsaved_provider_configurations() {
     assert_eq!(result.provider_id, "");
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
@@ -281,7 +277,6 @@ async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
     assert_eq!(result.status, ProviderTestStatus::AuthFailed);
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_reports_missing_providers_in_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
@@ -296,7 +291,6 @@ async fn llm_manager_reports_missing_providers_in_connection_tests() {
     assert_eq!(result.status, ProviderTestStatus::ProviderNotFound);
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_maps_model_availability_failures_for_provider_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
@@ -319,7 +313,6 @@ async fn llm_manager_maps_model_availability_failures_for_provider_connection_te
     assert_eq!(result.status, ProviderTestStatus::ModelNotAvailable);
 }
 
-#[cfg(feature = "openai-compatible")]
 #[tokio::test]
 async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;

@@ -246,31 +246,21 @@ impl LLMManager {
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
         match record.kind {
             LlmProviderKind::OpenAiCompatible => {
-                #[cfg(feature = "openai-compatible")]
-                {
-                    let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
-                        record.base_url,
-                        record.api_key.expose_secret().to_string(),
-                        model.to_string(),
-                    );
+                let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
+                    record.base_url,
+                    record.api_key.expose_secret().to_string(),
+                    model.to_string(),
+                );
 
-                    for (name, value) in &record.extra_headers {
-                        config = config.with_extra_header(name, value);
-                    }
-
-                    let factory_config =
-                        crate::llm::providers::OpenAiCompatibleFactoryConfig::new(config);
-
-                    crate::llm::providers::create_openai_compatible_provider(factory_config)
-                        .map_err(AgentError::from)
+                for (name, value) in &record.extra_headers {
+                    config = config.with_extra_header(name, value);
                 }
 
-                #[cfg(not(feature = "openai-compatible"))]
-                {
-                    Err(AgentError::UnsupportedProviderKind {
-                        kind: record.kind.to_string(),
-                    })
-                }
+                let factory_config =
+                    crate::llm::providers::OpenAiCompatibleFactoryConfig::new(config);
+
+                crate::llm::providers::create_openai_compatible_provider(factory_config)
+                    .map_err(AgentError::from)
             }
         }
     }
