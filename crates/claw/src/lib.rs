@@ -39,7 +39,7 @@ pub use agents::{AgentRecord, AgentRuntimeInfo, ThreadInfo};
 pub use protocol::{
     ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmStreamEvent, RiskLevel,
     RuntimeAgentHandle, ThreadEvent, ThreadId, ThreadMessageSnapshot, ThreadSnapshot, TokenUsage,
-    ToolCallSnapshot,
+    ToolCallSnapshot, ToolInfo,
 };
 
 // LLM Provider Types (DTO)

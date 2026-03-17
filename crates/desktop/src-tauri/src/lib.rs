@@ -42,6 +42,7 @@ pub fn run() {
             commands::delete_agent_template,
             commands::get_default_agent_template,
             commands::create_default_agent,
+            commands::list_tools,
             commands::get_current_user,
             commands::has_any_user,
             commands::setup_account,

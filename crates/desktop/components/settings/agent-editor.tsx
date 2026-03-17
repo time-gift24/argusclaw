@@ -3,8 +3,8 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
-import { ArrowLeft, Save } from "lucide-react"
-import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
+import { ArrowLeft, Save, X } from "lucide-react"
+import { agents, providers, tools, type AgentRecord, type LlmProviderSummary, type ToolInfo } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Breadcrumb } from "@/components/settings"
@@ -24,6 +24,36 @@ function getPreferredProviderId(providersData: LlmProviderSummary[]): string {
   )
 }
 
+function getRiskLevelColor(riskLevel: string): string {
+  switch (riskLevel) {
+    case "low":
+      return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400"
+    case "medium":
+      return "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400"
+    case "high":
+      return "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400"
+    case "critical":
+      return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+    default:
+      return "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
+  }
+}
+
+function getRiskLevelLabel(riskLevel: string): string {
+  switch (riskLevel) {
+    case "low":
+      return "低"
+    case "medium":
+      return "中"
+    case "high":
+      return "高"
+    case "critical":
+      return "严重"
+    default:
+      return riskLevel
+  }
+}
+
 export function AgentEditor({ agentId }: AgentEditorProps) {
   const router = useRouter()
   const isEditing = !!agentId
@@ -31,6 +61,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const [loading, setLoading] = React.useState(isEditing)
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
+  const [availableTools, setAvailableTools] = React.useState<ToolInfo[]>([])
 
   const [formData, setFormData] = React.useState<AgentRecord>({
     id: "",
@@ -76,8 +107,12 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   React.useEffect(() => {
     const loadData = async () => {
       try {
-        const providersData = await providers.list()
+        const [providersData, toolsData] = await Promise.all([
+          providers.list(),
+          tools.list(),
+        ])
         setProviderList(providersData)
+        setAvailableTools(toolsData)
 
         if (agentId) {
           const agent = await agents.get(agentId)
@@ -270,6 +305,73 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 }
                 placeholder="0.7"
               />
+            </div>
+          </div>
+
+          {/* Tool Selection */}
+          <div className="space-y-2">
+            <Label>工具</Label>
+            <div className="space-y-2">
+              {/* Selected tools as badges */}
+              <div className="flex flex-wrap gap-2">
+                {formData.tool_names.map((toolName) => {
+                  const tool = availableTools.find((t) => t.name === toolName)
+                  return (
+                    <div
+                      key={toolName}
+                      className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs bg-muted"
+                    >
+                      <span className="font-medium">{toolName}</span>
+                      {tool && (
+                        <span className={`px-1 py-0.5 rounded text-[10px] ${getRiskLevelColor(tool.risk_level)}`}>
+                          {getRiskLevelLabel(tool.risk_level)}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFormData({
+                            ...formData,
+                            tool_names: formData.tool_names.filter((n) => n !== toolName),
+                          })
+                        }
+                        className="ml-1 hover:text-destructive transition-colors"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+              {/* Add tool dropdown */}
+              {availableTools.filter((t) => !formData.tool_names.includes(t.name)).length > 0 && (
+                <select
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value && !formData.tool_names.includes(e.target.value)) {
+                      setFormData({
+                        ...formData,
+                        tool_names: [...formData.tool_names, e.target.value],
+                      })
+                    }
+                  }}
+                  className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
+                >
+                  <option value="">添加工具...</option>
+                  {availableTools
+                    .filter((t) => !formData.tool_names.includes(t.name))
+                    .map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {t.name} - {t.description.slice(0, 50)}...
+                      </option>
+                    ))}
+                </select>
+              )}
+              {formData.tool_names.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  未选择任何工具时，将使用所有可用工具
+                </p>
+              )}
             </div>
           </div>
         </div>

@@ -11,6 +11,7 @@ mod thread_event;
 mod thread_id;
 mod thread_snapshot;
 mod token_usage;
+mod tool_info;
 
 pub use approval::{
     ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_ACTION_LEN,
@@ -26,6 +27,7 @@ pub use thread_event::ThreadEvent;
 pub use thread_id::ThreadId;
 pub use thread_snapshot::{ThreadMessageSnapshot, ThreadSnapshot, ToolCallSnapshot};
 pub use token_usage::TokenUsage;
+pub use tool_info::ToolInfo;
 
 // Convenience re-export
 pub use crate::llm::LlmStreamEvent;

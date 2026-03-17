@@ -21,7 +21,7 @@ use crate::job::JobRepository;
 #[cfg(feature = "dev")]
 use crate::llm::provider::LlmEventStream;
 use crate::llm::{LLMManager, LlmProvider};
-use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
+use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId, ToolInfo};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use crate::user::UserService;
@@ -167,6 +167,21 @@ impl AppContext {
     #[must_use]
     pub fn tool_manager(&self) -> Arc<ToolManager> {
         Arc::clone(&self.tool_manager)
+    }
+
+    /// List all available tools with their metadata.
+    pub fn list_tools(&self) -> Vec<ToolInfo> {
+        self.tool_manager
+            .list_ids()
+            .into_iter()
+            .filter_map(|id| {
+                self.tool_manager.get(&id).map(|tool| ToolInfo {
+                    name: tool.name().to_string(),
+                    description: tool.definition().description,
+                    risk_level: tool.risk_level(),
+                })
+            })
+            .collect()
     }
 
     /// Get the user service for authentication operations.

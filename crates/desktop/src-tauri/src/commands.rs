@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use claw::{
     AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
     LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
+    ToolInfo,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -268,6 +269,13 @@ pub async fn delete_agent_template(
     ctx.delete_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
+}
+
+// === Tool Commands ===
+
+#[tauri::command]
+pub fn list_tools(ctx: State<'_, std::sync::Arc<AppContext>>) -> Vec<ToolInfo> {
+    ctx.list_tools()
 }
 
 #[tauri::command]

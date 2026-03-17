@@ -73,6 +73,14 @@ export interface AgentRecord {
   temperature?: number;
 }
 
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface ToolInfo {
+  name: string;
+  description: string;
+  risk_level: RiskLevel;
+}
+
 // LLMProvider API
 export const providers = {
   list: () => invoke<LlmProviderSummary[]>("list_providers"),
@@ -103,6 +111,11 @@ export const agents = {
     invoke<void>("upsert_agent_template", { record }),
 
   delete: (id: string) => invoke<boolean>("delete_agent_template", { id }),
+};
+
+// Tool API
+export const tools = {
+  list: () => invoke<ToolInfo[]>("list_tools"),
 };
 
 // Chat API
