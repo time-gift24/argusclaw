@@ -38,13 +38,12 @@ tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-eventsource-stream = { version = "0.2", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"], optional = true }
+eventsource-stream = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
 
 [features]
 default = []
 dev = []
-openai-compatible = ["dep:eventsource-stream", "dep:reqwest"]
 
 [dev-dependencies]
 mockall = "0.14"
