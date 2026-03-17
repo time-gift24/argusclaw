@@ -35,17 +35,6 @@ interface ProviderTestPanelProps {
   canTest: boolean;
 }
 
-const statusColors: Record<string, string> = {
-  success: "text-emerald-600",
-  auth_failed: "text-red-600",
-  model_not_available: "text-red-600",
-  rate_limited: "text-amber-600",
-  request_failed: "text-red-600",
-  invalid_response: "text-red-600",
-  provider_not_found: "text-red-600",
-  unsupported_provider_kind: "text-red-600",
-};
-
 const statusLabels: Record<ProviderTestStatus, string> = {
   success: "成功",
   auth_failed: "认证失败",

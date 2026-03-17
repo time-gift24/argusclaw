@@ -3,11 +3,10 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
-import { ArrowLeft, Save } from "lucide-react"
+import { Save } from "lucide-react"
 import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
-import { Breadcrumb } from "@/components/settings"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -126,24 +125,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
-      <Breadcrumb
-        items={[
-          { label: "设置", href: "/settings" },
-          { label: "智能体", href: "/settings/agents" },
-          ...(isEditing ? [{ label: formData.display_name || "新建" }] : []),
-        ]}
-      />
-
+    <div className="w-full space-y-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" onClick={() => router.back()}>
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h1 className="text-sm font-semibold">
-            {isEditing ? "编辑智能体" : "新建智能体"}
-          </h1>
-        </div>
+        <h1 className="text-sm font-semibold">
+          {isEditing ? "编辑智能体" : "新建智能体"}
+        </h1>
         <Button size="sm" onClick={handleSave} disabled={saving || !canSave}>
           <Save className="h-4 w-4 mr-1" />
           {saving ? "保存中..." : "保存"}

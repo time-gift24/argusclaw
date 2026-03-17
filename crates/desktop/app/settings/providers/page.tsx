@@ -12,9 +12,7 @@ import {
 import {
   ProviderCard,
   ProviderTestDialog,
-  type ProviderTestResult,
   DeleteConfirmDialog,
-  Breadcrumb,
 } from "@/components/settings";
 
 export default function ProvidersPage() {
@@ -151,11 +149,7 @@ export default function ProvidersPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl px-6 py-6 space-y-4">
-      <Breadcrumb
-        items={[{ label: "设置", href: "/settings" }, { label: "LLM 提供者" }]}
-      />
-
+    <div className="w-full space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-sm font-semibold">LLM 提供者</h1>
