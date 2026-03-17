@@ -33,7 +33,7 @@ echo ""
 
 # 2. 插入测试 agent 和 provider (绕过外键约束)
 echo "2. Setting up test agents..."
-sqlite3 "$DB_PATH" "INSERT INTO llm_providers (id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce) VALUES ('test-provider', 'openai_compatible', 'Test Provider', 'https://api.test.com', 'test-model', X'00', X'00');"
+sqlite3 "$DB_PATH" "INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce) VALUES ('test-provider', 'openai_compatible', 'Test Provider', 'https://api.test.com', '[\"test-model\"]', 'test-model', X'00', X'00');"
 
 sqlite3 "$DB_PATH" "INSERT INTO agents (id, display_name, provider_id, system_prompt) VALUES ('fetcher', 'Fetcher Agent', 'test-provider', 'You are a fetcher.');"
 sqlite3 "$DB_PATH" "INSERT INTO agents (id, display_name, provider_id, system_prompt) VALUES ('validator', 'Validator Agent', 'test-provider', 'You are a validator.');"
