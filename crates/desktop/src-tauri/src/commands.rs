@@ -97,7 +97,7 @@ impl From<ProviderInput> for LlmProviderRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSummary {
-    pub id: String,
+    pub id: i64,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
@@ -111,7 +111,7 @@ pub struct ProviderSummary {
 impl From<LlmProviderSummary> for ProviderSummary {
     fn from(summary: LlmProviderSummary) -> Self {
         Self {
-            id: summary.id.to_string(),
+            id: summary.id.into_inner(),
             kind: summary.kind.into(),
             display_name: summary.display_name,
             base_url: summary.base_url,
@@ -126,7 +126,7 @@ impl From<LlmProviderSummary> for ProviderSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderRecord {
-    pub id: String,
+    pub id: i64,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
@@ -141,7 +141,7 @@ pub struct ProviderRecord {
 impl From<LlmProviderRecord> for ProviderRecord {
     fn from(record: LlmProviderRecord) -> Self {
         Self {
-            id: record.id.to_string(),
+            id: record.id.into_inner(),
             kind: record.kind.into(),
             display_name: record.display_name,
             base_url: record.base_url,
@@ -157,7 +157,7 @@ impl From<LlmProviderRecord> for ProviderRecord {
 
 fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord {
     ProviderRecord {
-        id: summary.id.to_string(),
+        id: summary.id.into_inner(),
         kind: summary.kind.into(),
         display_name: summary.display_name,
         base_url: summary.base_url,

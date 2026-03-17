@@ -79,6 +79,8 @@ export default function ProvidersPage() {
   const runConnectionTest = React.useCallback(
     async (id: number, model: string) => {
       const provider = providerList.find((item) => item.id === id);
+      console.log(provider);
+      console.log(id);
       setTestingProviderId(id);
       try {
         const result = await providers.testConnection(id, model);
