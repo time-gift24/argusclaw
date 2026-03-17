@@ -8,13 +8,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuPortal,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { UnfoldMoreIcon } from "@hugeicons/core-free-icons";
+import { UnfoldMoreIcon, Tick02Icon } from "@hugeicons/core-free-icons";
 
 export function ProviderSelector() {
   const providers = useChatStore((state) => state.providers);
@@ -40,6 +37,7 @@ export function ProviderSelector() {
   const effectiveModel =
     selectedModelOverride ??
     selectedProvider?.default_model ??
+    providers.find((p) => p.is_default)?.default_model ??
     "默认模型";
 
   // Display text: Provider name / Model name
@@ -53,8 +51,19 @@ export function ProviderSelector() {
     void selectModelOverride(model);
   };
 
-  // Get default provider's default model for "系统默认" option
+  // Get default provider for "系统默认" section
   const defaultProvider = providers.find((p) => p.is_default);
+
+  // Check if current selection is the default provider
+  const isUsingDefault = !selectedProviderPreferenceId;
+
+  // Check if a specific item is selected
+  const isSelected = (providerId: string | null, model: string) => {
+    if (providerId === null) {
+      return isUsingDefault && selectedModelOverride === model;
+    }
+    return selectedProviderPreferenceId === providerId && selectedModelOverride === model;
+  };
 
   return (
     <DropdownMenu>
@@ -72,86 +81,63 @@ export function ProviderSelector() {
         }
       />
       <DropdownMenuPortal>
-        <DropdownMenuContent align="start" className="min-w-48">
-          {/* 系统默认 option with nested models */}
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>
-              <span className={selectedProvider ? "" : "font-medium"}>
-                系统默认
-              </span>
-            </DropdownMenuSubTrigger>
-            <DropdownMenuPortal>
-              <DropdownMenuSubContent>
-                <DropdownMenuLabel>选择模型</DropdownMenuLabel>
-                {defaultProvider?.models.map((model) => (
-                  <DropdownMenuItem
-                    key={model}
-                    onClick={() => handleSelectModel(null, model)}
-                  >
-                    {model}
-                    {model === defaultProvider.default_model && (
-                      <span className="ml-auto text-muted-foreground text-[10px]">
-                        默认
-                      </span>
-                    )}
-                    {!selectedProviderPreferenceId &&
-                      model === selectedModelOverride && (
-                        <HugeiconsIcon
-                          icon={UnfoldMoreIcon}
-                          strokeWidth={2}
-                          className="ml-auto size-3"
-                        />
-                      )}
-                  </DropdownMenuItem>
-                ))}
-                {!defaultProvider && (
-                  <DropdownMenuItem disabled>
-                    无可用模型
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuSubContent>
-            </DropdownMenuPortal>
-          </DropdownMenuSub>
+        <DropdownMenuContent align="start" className="max-h-80 min-w-48 overflow-y-auto">
+          {/* 系统默认 section */}
+          <DropdownMenuLabel className="text-muted-foreground">
+            系统默认 {defaultProvider && `(${defaultProvider.display_name})`}
+          </DropdownMenuLabel>
+          {defaultProvider?.models.map((model) => (
+            <DropdownMenuItem
+              key={`default-${model}`}
+              onClick={() => handleSelectModel(null, model)}
+              className="pl-6"
+            >
+              <span className="flex-1 truncate">{model}</span>
+              {model === defaultProvider.default_model && (
+                <span className="text-muted-foreground text-[10px]">默认</span>
+              )}
+              {isSelected(null, model) && (
+                <HugeiconsIcon
+                  icon={Tick02Icon}
+                  strokeWidth={2}
+                  className="size-3.5 text-primary"
+                />
+              )}
+            </DropdownMenuItem>
+          ))}
+          {!defaultProvider && (
+            <DropdownMenuItem disabled className="pl-6">
+              无可用模型
+            </DropdownMenuItem>
+          )}
 
-          <DropdownMenuSeparator />
-
-          {/* Provider list with nested models */}
-          {providers.map((provider) => (
-            <DropdownMenuSub key={provider.id}>
-              <DropdownMenuSubTrigger>
-                <span
-                  className={
-                    selectedProviderPreferenceId === provider.id
-                      ? "font-medium"
-                      : ""
-                  }
+          {/* Provider sections */}
+          {providers.map((provider, index) => (
+            <div key={provider.id}>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-muted-foreground">
+                {provider.display_name}
+              </DropdownMenuLabel>
+              {provider.models.map((model) => (
+                <DropdownMenuItem
+                  key={`${provider.id}-${model}`}
+                  onClick={() => handleSelectModel(provider.id, model)}
+                  className="pl-6"
                 >
-                  {provider.display_name}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuPortal>
-                <DropdownMenuSubContent>
-                  <DropdownMenuLabel>选择模型</DropdownMenuLabel>
-                  {provider.models.map((model) => (
-                    <DropdownMenuItem
-                      key={model}
-                      onClick={() => handleSelectModel(provider.id, model)}
-                    >
-                      {model}
-                      {model === provider.default_model && (
-                        <span className="ml-auto text-muted-foreground text-[10px]">
-                          默认
-                        </span>
-                      )}
-                      {selectedProviderPreferenceId === provider.id &&
-                        model === selectedModelOverride && (
-                          <span className="ml-auto text-primary">✓</span>
-                        )}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuSubContent>
-              </DropdownMenuPortal>
-            </DropdownMenuSub>
+                  <span className="flex-1 truncate">{model}</span>
+                  {model === provider.default_model && (
+                    <span className="text-muted-foreground text-[10px]">默认</span>
+                  )}
+                  {isSelected(provider.id, model) && (
+                    <HugeiconsIcon
+                      icon={Tick02Icon}
+                      strokeWidth={2}
+                      className="size-3.5 text-primary"
+                    />
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </div>
           ))}
         </DropdownMenuContent>
       </DropdownMenuPortal>
