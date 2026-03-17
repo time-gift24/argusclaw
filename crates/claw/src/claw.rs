@@ -13,9 +13,10 @@ use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
 use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
 use crate::db::sqlite::{
-    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
-    migrate,
+    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, SqliteThreadRepository,
+    connect, connect_path, migrate,
 };
+use crate::db::thread::ThreadRepository;
 use crate::error::AgentError;
 use crate::job::JobRepository;
 #[cfg(feature = "dev")]
@@ -25,6 +26,17 @@ use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use crate::user::UserService;
+
+/// Context usage information for a thread.
+#[derive(Debug, Clone)]
+pub struct ContextUsage {
+    pub model_context_window: u32,
+    pub input_tokens: u32,
+    pub cached_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+    pub usage_ratio: f64,
+}
 
 /// Ensures the default ArgusWing agent exists in the database.
 async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentError> {
@@ -50,6 +62,7 @@ pub struct AppContext {
     agent_manager: Arc<AgentManager>,
     tool_manager: Arc<ToolManager>,
     job_repository: Arc<dyn JobRepository>,
+    thread_repository: Arc<dyn ThreadRepository>,
     shutdown: CancellationToken,
     user: UserService,
 }
@@ -70,6 +83,8 @@ impl AppContext {
         let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
         let job_repository: Arc<dyn JobRepository> =
             Arc::new(SqliteJobRepository::new(pool.clone()));
+        let thread_repository: Arc<dyn ThreadRepository> =
+            Arc::new(SqliteThreadRepository::new(pool.clone()));
 
         let user = UserService::new(pool.clone());
 
@@ -107,6 +122,7 @@ impl AppContext {
             agent_manager,
             tool_manager,
             job_repository,
+            thread_repository,
             shutdown,
             user,
         })
@@ -127,6 +143,7 @@ impl AppContext {
             agent_manager,
             tool_manager,
             job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
+            thread_repository: Arc::new(SqliteThreadRepository::new(pool.clone())),
             shutdown: CancellationToken::new(),
             user: UserService::new(pool),
         }
@@ -146,6 +163,7 @@ impl AppContext {
             agent_manager,
             tool_manager,
             job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
+            thread_repository: Arc::new(SqliteThreadRepository::new(pool.clone())),
             shutdown: CancellationToken::new(),
             user: UserService::new(pool),
         }
@@ -511,6 +529,55 @@ impl AppContext {
             .ok_or(AgentError::ThreadNotFound { id: *thread_id })
     }
 
+    /// Get context usage for a thread.
+    pub async fn get_thread_context_usage(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<ContextUsage, AgentError> {
+        let thread_record = self
+            .thread_repository
+            .get_thread(thread_id)
+            .await
+            .map_err(|_e| AgentError::ThreadNotFound { id: *thread_id })?;
+
+        let Some(thread) = thread_record else {
+            return Err(AgentError::ThreadNotFound { id: *thread_id });
+        };
+
+        // Get the provider to find the model's context_window
+        let provider = self
+            .llm_manager
+            .get_provider_record(&thread.provider_id)
+            .await?;
+
+        // Find the default model's context_window
+        let model_context_window = provider
+            .models
+            .iter()
+            .find(|m| m.id == provider.default_model)
+            .map(|m| m.context_window)
+            .unwrap_or(128_000);
+
+        let usage_ratio = if model_context_window > 0 {
+            thread.token_count as f64 / model_context_window as f64
+        } else {
+            0.0
+        };
+
+        // For now, we use the stored token_count as total_tokens
+        // In a full implementation, we'd track input/output/cached tokens separately
+        let total_tokens = thread.token_count;
+
+        Ok(ContextUsage {
+            model_context_window,
+            input_tokens: total_tokens / 2,
+            cached_tokens: 0,
+            output_tokens: total_tokens / 2,
+            total_tokens,
+            usage_ratio,
+        })
+    }
+
     // === Dev-Only Methods ===
 
     #[cfg(feature = "dev")]
@@ -646,7 +713,7 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            models: vec!["gpt-4.1".to_string()],
+            models: vec![crate::Model::new("gpt-4.1")],
             default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
@@ -691,7 +758,7 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            models: vec!["gpt-4.1".to_string()],
+            models: vec![crate::Model::new("gpt-4.1")],
             default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
@@ -741,7 +808,7 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            models: vec!["gpt-4.1".to_string()],
+            models: vec![crate::Model::new("gpt-4.1")],
             default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),

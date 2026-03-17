@@ -1,6 +1,9 @@
 // crates/claw/src/api/query.rs
-use super::types::{Job, Workflow};
+use super::types::{ContextUsage, Job, Workflow};
+use crate::db::thread::ThreadRepository;
+use crate::db::llm::LlmProviderRepository;
 use crate::job::JobRepository;
+use crate::protocol::ThreadId;
 use crate::workflow::{WorkflowId, WorkflowRepository};
 use async_graphql::{Context, ID, Object};
 
@@ -82,5 +85,46 @@ impl QueryRoot {
         }
 
         Ok(workflows)
+    }
+
+    async fn thread_context_usage(&self, ctx: &Context<'_>, thread_id: ID) -> async_graphql::Result<Option<ContextUsage>> {
+        let thread_repo = ctx.data::<Box<dyn ThreadRepository>>()?;
+        let provider_repo = ctx.data::<Box<dyn LlmProviderRepository>>()?;
+
+        let thread_id = ThreadId::parse(thread_id.as_ref()).map_err(|e| async_graphql::Error::new(e.to_string()))?;
+        let thread_record = thread_repo.get_thread(&thread_id).await?;
+
+        let Some(thread) = thread_record else { return Ok(None) };
+
+        // Get the provider to find the model's context_window
+        let provider = provider_repo.get_provider(&thread.provider_id).await?;
+        let Some(provider) = provider else { return Ok(None) };
+
+        // Find the default model's context_window
+        let model_context_window = provider
+            .models
+            .iter()
+            .find(|m| m.id == provider.default_model)
+            .map(|m| m.context_window)
+            .unwrap_or(128_000);
+
+        let usage_ratio = if model_context_window > 0 {
+            thread.token_count as f64 / model_context_window as f64
+        } else {
+            0.0
+        };
+
+        // For now, we use the stored token_count as total_tokens
+        // In a full implementation, we'd track input/output/cached tokens separately
+        let total_tokens = thread.token_count as i32;
+
+        Ok(Some(ContextUsage {
+            model_context_window: model_context_window as i32,
+            input_tokens: total_tokens / 2,
+            cached_tokens: 0,
+            output_tokens: total_tokens / 2,
+            total_tokens,
+            usage_ratio,
+        }))
     }
 }

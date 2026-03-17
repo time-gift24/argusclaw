@@ -54,7 +54,7 @@ impl LLMManager {
             .await?
             .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })?;
 
-        if !record.models.contains(&model.to_string()) {
+        if !record.models.iter().any(|m| m.id == model) {
             return Err(AgentError::ModelNotAvailable {
                 provider: id.to_string(),
                 model: model.to_string(),
@@ -243,13 +243,22 @@ impl LLMManager {
         record: LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        // Find the model's context_window from the record
+        let context_window = record
+            .models
+            .iter()
+            .find(|m| m.id == model)
+            .map(|m| m.context_window)
+            .unwrap_or(128_000);
+
         match record.kind {
             LlmProviderKind::OpenAiCompatible => {
                 let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
                     record.base_url,
                     record.api_key.expose_secret().to_string(),
                     model.to_string(),
-                );
+                )
+                .with_context_window(context_window);
 
                 for (name, value) in &record.extra_headers {
                     config = config.with_extra_header(name, value);

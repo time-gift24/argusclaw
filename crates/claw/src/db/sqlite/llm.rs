@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
+use crate::db::llm::Model;
 use crate::db::DbError;
 use crate::db::llm::{
     LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
@@ -25,7 +26,7 @@ type SharedProviderFields = (
     crate::db::llm::LlmProviderKind,
     String,                  // display_name
     String,                  // base_url
-    Vec<String>,             // models
+    Vec<Model>,              // models
     String,                  // default_model
     bool,                    // is_default
     HashMap<String, String>, // extra_headers
@@ -93,6 +94,24 @@ impl SqliteLlmProviderRepository {
         }
     }
 
+    /// Parse models from JSON with backward compatibility.
+    /// Supports both old format (Vec<String>) and new format (Vec<Model>).
+    fn parse_models(models_json: &str) -> Result<Vec<Model>, DbError> {
+        // First try parsing as new format (Vec<Model>)
+        if let Ok(models) = serde_json::from_str::<Vec<Model>>(models_json) {
+            return Ok(models);
+        }
+
+        // Fall back to old format (Vec<String>) and convert
+        let string_models: Vec<String> = serde_json::from_str(models_json).map_err(|e| {
+            DbError::QueryFailed {
+                reason: format!("failed to parse models: {e}"),
+            }
+        })?;
+
+        Ok(string_models.into_iter().map(Model::new).collect())
+    }
+
     fn parse_shared_fields(row: sqlx::sqlite::SqliteRow) -> Result<SharedProviderFields, DbError> {
         let nonce: Vec<u8> = row
             .try_get("api_key_nonce")
@@ -118,10 +137,7 @@ impl SqliteLlmProviderRepository {
         let models_json: String = row.try_get("models").map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
-        let models: Vec<String> =
-            serde_json::from_str(&models_json).map_err(|e| DbError::QueryFailed {
-                reason: format!("failed to parse models: {e}"),
-            })?;
+        let models = Self::parse_models(&models_json)?;
 
         Ok((
             LlmProviderId::new(
@@ -245,7 +261,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                 reason: "At least one model is required".to_string(),
             });
         }
-        if !record.models.contains(&record.default_model) {
+        if !record.models.iter().any(|m| m.id == record.default_model) {
             return Err(DbError::QueryFailed {
                 reason: format!(
                     "Default model '{}' must be in models list",

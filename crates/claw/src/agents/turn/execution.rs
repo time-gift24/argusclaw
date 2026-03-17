@@ -91,13 +91,15 @@ fn process_finish_reason(
         input_tokens,
         output_tokens,
         finish_reason,
-        ..
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
     } = response;
 
     // Track token usage
     token_usage.input_tokens += input_tokens;
     token_usage.output_tokens += output_tokens;
     token_usage.total_tokens += input_tokens + output_tokens;
+    token_usage.cached_tokens += cache_read_input_tokens + cache_creation_input_tokens;
 
     match finish_reason {
         FinishReason::Stop => {

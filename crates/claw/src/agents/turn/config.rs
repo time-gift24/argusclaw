@@ -237,6 +237,7 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             total_tokens: 150,
+            cached_tokens: 20,
         };
         let output = TurnOutputBuilder::default()
             .messages(Vec::new())

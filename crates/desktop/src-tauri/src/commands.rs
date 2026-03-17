@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use claw::{
     AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
+    LlmProviderRecord, LlmProviderSummary, Model, ProviderSecretStatus, ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -32,6 +32,17 @@ impl From<LlmProviderKind> for ProviderKind {
             LlmProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
         }
     }
+}
+
+/// Context usage information for a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub model_context_window: i32,
+    pub input_tokens: i32,
+    pub cached_tokens: i32,
+    pub output_tokens: i32,
+    pub total_tokens: i32,
+    pub usage_ratio: f64,
 }
 
 /// Input type for creating/updating an agent (all IDs as i64).
@@ -86,7 +97,7 @@ impl From<ProviderInput> for LlmProviderRecord {
             display_name: input.display_name,
             base_url: input.base_url,
             api_key: SecretString::new(input.api_key),
-            models: input.models,
+            models: input.models.into_iter().map(Model::new).collect(),
             default_model: input.default_model,
             is_default: input.is_default,
             extra_headers: input.extra_headers,
@@ -115,7 +126,7 @@ impl From<LlmProviderSummary> for ProviderSummary {
             kind: summary.kind.into(),
             display_name: summary.display_name,
             base_url: summary.base_url,
-            models: summary.models,
+            models: summary.models.iter().map(|m| m.id.clone()).collect(),
             default_model: summary.default_model,
             is_default: summary.is_default,
             extra_headers: summary.extra_headers,
@@ -146,7 +157,7 @@ impl From<LlmProviderRecord> for ProviderRecord {
             display_name: record.display_name,
             base_url: record.base_url,
             api_key: record.api_key.expose_secret().to_string(),
-            models: record.models,
+            models: record.models.iter().map(|m| m.id.clone()).collect(),
             default_model: record.default_model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
@@ -162,7 +173,7 @@ fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord 
         display_name: summary.display_name,
         base_url: summary.base_url,
         api_key: String::new(),
-        models: summary.models,
+        models: summary.models.iter().map(|m| m.id.clone()).collect(),
         default_model: summary.default_model,
         is_default: summary.is_default,
         extra_headers: summary.extra_headers,
@@ -430,7 +441,7 @@ pub async fn create_chat_session(
         .unwrap_or_else(|| provider_record.default_model.clone());
 
     // Validate model is in provider's list
-    if !provider_record.models.contains(&effective_model) {
+    if !provider_record.models.iter().any(|m| m.id == effective_model) {
         return Err(format!(
             "Model '{}' is not available in provider '{}'",
             effective_model, provider_record.id
@@ -498,6 +509,26 @@ pub async fn get_thread_snapshot(
     ctx.get_thread_snapshot(&AgentId::new(runtime_agent_id), &thread_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_thread_context_usage(
+    ctx: State<'_, std::sync::Arc<AppContext>>,
+    thread_id: String,
+) -> Result<ContextUsage, String> {
+    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    let usage = ctx
+        .get_thread_context_usage(&thread_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(ContextUsage {
+        model_context_window: usage.model_context_window as i32,
+        input_tokens: usage.input_tokens as i32,
+        cached_tokens: usage.cached_tokens as i32,
+        output_tokens: usage.output_tokens as i32,
+        total_tokens: usage.total_tokens as i32,
+        usage_ratio: usage.usage_ratio,
+    })
 }
 
 #[tauri::command]

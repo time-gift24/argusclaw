@@ -50,6 +50,7 @@ pub fn run() {
             commands::create_chat_session,
             commands::send_message,
             commands::get_thread_snapshot,
+            commands::get_thread_context_usage,
             commands::resolve_approval,
         ])
         .run(tauri::generate_context!())

@@ -26,3 +26,13 @@ pub struct Job {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
 }
+
+#[derive(Clone, async_graphql::SimpleObject)]
+pub struct ContextUsage {
+    pub model_context_window: i32,
+    pub input_tokens: i32,
+    pub cached_tokens: i32,
+    pub output_tokens: i32,
+    pub total_tokens: i32,
+    pub usage_ratio: f64,
+}

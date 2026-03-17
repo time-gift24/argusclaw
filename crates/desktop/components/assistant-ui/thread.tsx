@@ -10,6 +10,8 @@ import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { Button } from "@/components/ui/button";
+import { chat } from "@/lib/tauri";
+import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -37,6 +39,56 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import type { FC } from "react";
+import React from "react";
+
+/// Custom Context Ring component to display token usage
+const ContextRing: FC<{
+  modelContextWindow: number;
+  usage: {
+    inputTokens: number;
+    cachedTokens: number;
+    outputTokens: number;
+  };
+  className?: string;
+}> = ({ modelContextWindow, usage, className }) => {
+  const totalTokens = usage.inputTokens + usage.outputTokens;
+  const ratio = modelContextWindow > 0 ? totalTokens / modelContextWindow : 0;
+  const percentage = Math.min(ratio * 100, 100);
+
+  // Calculate stroke color based on usage
+  const strokeColor = ratio < 0.65 ? "#10b981" : ratio < 0.85 ? "#f59e0b" : "#ef4444";
+  const strokeDasharray = `${percentage * 2.51327} 251.327`;
+
+  return (
+    <div className="flex items-center gap-1" title={`${totalTokens} / ${modelContextWindow} tokens (${percentage.toFixed(1)}%)`}>
+      <svg width="24" height="24" viewBox="0 0 24 24" className={className}>
+        <circle
+          cx="12"
+          cy="12"
+          r="10"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className="text-muted-foreground/20"
+        />
+        <circle
+          cx="12"
+          cy="12"
+          r="10"
+          fill="none"
+          stroke={strokeColor}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray={strokeDasharray}
+          transform="rotate(-90 12 12)"
+        />
+      </svg>
+      <span className="text-xs text-muted-foreground">
+        {percentage.toFixed(0)}%
+      </span>
+    </div>
+  );
+};
 
 export const Thread: FC = () => {
   return (
@@ -147,11 +199,60 @@ const Composer: FC = () => {
 };
 
 const ComposerAction: FC = () => {
+  const session = useActiveChatSession();
+  const [contextUsage, setContextUsage] = React.useState<{
+    modelContextWindow: number;
+    inputTokens: number;
+    cachedTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    usageRatio: number;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!session?.threadId) {
+      setContextUsage(null);
+      return;
+    }
+
+    const fetchContextUsage = async () => {
+      try {
+        const usage = await chat.getThreadContextUsage(session.threadId);
+        setContextUsage({
+          modelContextWindow: usage.model_context_window,
+          inputTokens: usage.input_tokens,
+          cachedTokens: usage.cached_tokens,
+          outputTokens: usage.output_tokens,
+          totalTokens: usage.total_tokens,
+          usageRatio: usage.usage_ratio,
+        });
+      } catch {
+        // Silently ignore errors - context display is optional
+        setContextUsage(null);
+      }
+    };
+
+    fetchContextUsage();
+    // Refresh context usage periodically
+    const interval = setInterval(fetchContextUsage, 5000);
+    return () => clearInterval(interval);
+  }, [session?.threadId]);
+
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
       <div className="flex items-center gap-2">
         <AgentSelector />
         <ProviderSelector />
+        {contextUsage && (
+          <ContextRing
+            modelContextWindow={contextUsage.modelContextWindow}
+            usage={{
+              inputTokens: contextUsage.inputTokens,
+              cachedTokens: contextUsage.cachedTokens,
+              outputTokens: contextUsage.outputTokens,
+            }}
+          />
+        )}
       </div>
       <ComposerPrimitive.Send asChild>
         <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">

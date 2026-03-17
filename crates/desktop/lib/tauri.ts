@@ -170,4 +170,14 @@ export const chat = {
       decision,
       resolvedBy,
     }),
+
+  getThreadContextUsage: (threadId: string) =>
+    invoke<{
+      model_context_window: number;
+      input_tokens: number;
+      cached_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+      usage_ratio: number;
+    }>("get_thread_context_usage", { threadId }),
 };

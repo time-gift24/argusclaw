@@ -9,6 +9,8 @@ pub struct TokenUsage {
     pub output_tokens: u32,
     /// Total tokens (input + output).
     pub total_tokens: u32,
+    /// Number of tokens read from cache.
+    pub cached_tokens: u32,
 }
 
 #[cfg(test)]
@@ -21,6 +23,7 @@ mod tests {
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
         assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.cached_tokens, 0);
     }
 
     #[test]
@@ -29,16 +32,19 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             total_tokens: 150,
+            cached_tokens: 20,
         };
         let usage2 = TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
             total_tokens: 150,
+            cached_tokens: 20,
         };
         let usage3 = TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
             total_tokens: 200,
+            cached_tokens: 20,
         };
         assert_eq!(usage1, usage2);
         assert_ne!(usage1, usage3);

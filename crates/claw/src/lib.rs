@@ -28,6 +28,7 @@ pub(crate) mod approval;
 
 // 核心入口
 pub use claw::AppContext;
+pub use claw::ContextUsage;
 pub use error::AgentError;
 
 // Agent API (稳定对话接口)
@@ -44,7 +45,7 @@ pub use protocol::{
 // LLM Provider Types (DTO)
 pub use db::DbError;
 pub use db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, Model, ProviderSecretStatus,
     ProviderTestResult, ProviderTestStatus, SecretString,
 };
 

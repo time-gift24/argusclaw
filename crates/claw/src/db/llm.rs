@@ -106,6 +106,30 @@ pub enum ProviderSecretStatus {
     RequiresReentry,
 }
 
+/// Model configuration with context window support.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Model {
+    /// Model identifier (e.g., "gpt-4.1").
+    pub id: String,
+    /// Human-readable model name (e.g., "GPT-4.1").
+    pub name: String,
+    /// Context window size in tokens.
+    pub context_window: u32,
+}
+
+impl Model {
+    /// Create a new Model with the given id and default context window.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        let id = id.into();
+        Self {
+            id: id.clone(),
+            name: id,
+            context_window: 128_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmProviderRecord {
     pub id: LlmProviderId,
@@ -113,7 +137,7 @@ pub struct LlmProviderRecord {
     pub display_name: String,
     pub base_url: String,
     pub api_key: SecretString,
-    pub models: Vec<String>,
+    pub models: Vec<Model>,
     pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
@@ -126,7 +150,7 @@ pub struct LlmProviderSummary {
     pub kind: LlmProviderKind,
     pub display_name: String,
     pub base_url: String,
-    pub models: Vec<String>,
+    pub models: Vec<Model>,
     pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
@@ -208,7 +232,10 @@ mod multi_model_tests {
             display_name: "Test".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
-            models: vec!["gpt-4.1".to_string(), "gpt-4.1-mini".to_string()],
+            models: vec![
+                Model { id: "gpt-4.1".to_string(), name: "GPT-4.1".to_string(), context_window: 128000 },
+                Model { id: "gpt-4.1-mini".to_string(), name: "GPT-4.1 Mini".to_string(), context_window: 64000 },
+            ],
             default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
@@ -226,14 +253,14 @@ mod multi_model_tests {
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Test".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
-            models: vec!["o3".to_string()],
+            models: vec![Model { id: "o3".to_string(), name: "o3".to_string(), context_window: 200000 }],
             default_model: "o3".to_string(),
             is_default: false,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
         };
 
-        assert_eq!(summary.models, vec!["o3"]);
+        assert_eq!(summary.models, vec![Model { id: "o3".to_string(), name: "o3".to_string(), context_window: 200000 }]);
     }
 }
 
