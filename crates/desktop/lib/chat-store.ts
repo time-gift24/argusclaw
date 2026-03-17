@@ -33,6 +33,7 @@ export interface ChatSessionState {
     timeout_secs: number;
   } | null;
   error: string | null;
+  tokenCount: number;
 }
 
 export interface ChatStore {
@@ -124,6 +125,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingAssistant: null,
         pendingApprovalRequest: null,
         error: null,
+        tokenCount: snapshot.token_count,
       };
 
       set((state) => ({
@@ -249,6 +251,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: snapshot.messages,
             pendingAssistant: null,
             status: "idle",
+            tokenCount: snapshot.token_count,
           },
         },
       }));
@@ -329,6 +332,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break;
 
       case "turn_completed":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              tokenCount: payload.total_tokens,
+            },
+          },
+        }));
         break;
 
       case "turn_failed":
@@ -372,6 +384,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
               pendingApprovalRequest: null,
+            },
+          },
+        }));
+        break;
+
+      case "compacted":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              tokenCount: payload.new_token_count,
             },
           },
         }));

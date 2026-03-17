@@ -7,6 +7,7 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
+import { ContextStatus } from "@/components/assistant-ui/context-status";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { Button } from "@/components/ui/button";
@@ -153,11 +154,14 @@ const ComposerAction: FC = () => {
         <AgentSelector />
         <ProviderSelector />
       </div>
-      <ComposerPrimitive.Send asChild>
-        <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
-          <ArrowUpIcon className="aui-composer-send-icon size-4" />
-        </TooltipIconButton>
-      </ComposerPrimitive.Send>
+      <div className="flex items-center gap-2">
+        <ContextStatus />
+        <ComposerPrimitive.Send asChild>
+          <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
+            <ArrowUpIcon className="aui-composer-send-icon size-4" />
+          </TooltipIconButton>
+        </ComposerPrimitive.Send>
+      </div>
     </div>
   );
 };
