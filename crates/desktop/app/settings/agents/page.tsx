@@ -8,7 +8,6 @@ import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/
 import {
   AgentCard,
   DeleteConfirmDialog,
-  Breadcrumb,
 } from "@/components/settings"
 import { Button } from "@/components/ui/button"
 
@@ -64,12 +63,7 @@ export default function AgentsPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-7xl px-6 py-6 space-y-4">
-      <Breadcrumb items={[
-        { label: "设置", href: "/settings" },
-        { label: "智能体" },
-      ]} />
-
+    <div className="w-full space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-sm font-semibold">智能体</h1>
