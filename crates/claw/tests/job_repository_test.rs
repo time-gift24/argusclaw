@@ -18,15 +18,17 @@ use claw::{
 async fn setup() -> SqliteJobRepository {
     let pool = connect("sqlite::memory:").await.unwrap();
     migrate(&pool).await.unwrap();
-    // Insert dummy provider + agent for FK constraints
+    // Insert dummy provider + agent for FK constraints (using INTEGER IDs)
     sqlx::query(
-        "INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce) VALUES ('prov-1', 'openai', 'Test', 'http://localhost', '[\"gpt-4\"]', 'gpt-4', X'00', X'00')"
+        r#"INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default)
+           VALUES (1, 'openai_compatible', 'Test Provider', 'http://localhost', '["gpt-4"]', 'gpt-4', X'00', X'00', 0)"#,
     )
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO agents (id, display_name, provider_id, system_prompt) VALUES ('agent-1', 'Test Agent', 'prov-1', 'You are a test agent')"
+        r#"INSERT INTO agents (id, display_name, provider_id, system_prompt)
+           VALUES (1, 'Test Agent', 1, 'You are a test agent')"#,
     )
     .execute(&pool)
     .await
@@ -35,9 +37,9 @@ async fn setup() -> SqliteJobRepository {
 }
 
 /// Helper to create a minimal job record for testing.
-fn make_job(id: &str, agent_id: &str, name: &str, prompt: &str) -> JobRecord {
+fn make_job(id: &str, agent_id: i64, name: &str, prompt: &str) -> JobRecord {
     JobRecord {
-        id: JobId::new(id),
+        id: JobId::new(id.to_string()),
         job_type: JobType::Standalone,
         name: name.to_string(),
         status: WorkflowStatus::Pending,
@@ -58,7 +60,7 @@ fn make_job(id: &str, agent_id: &str, name: &str, prompt: &str) -> JobRecord {
 async fn test_create_and_get_standalone_job() {
     let repo = setup().await;
 
-    let job = make_job("job-1", "agent-1", "Test Job", "Do something");
+    let job = make_job("job-1", 1, "Test Job", "Do something");
     repo.create(&job).await.unwrap();
 
     let fetched = repo.get(&job.id).await.unwrap();
@@ -77,11 +79,7 @@ async fn test_create_and_get_standalone_job() {
         WorkflowStatus::Pending,
         "Status should be Pending"
     );
-    assert_eq!(
-        fetched.agent_id.as_ref(),
-        "agent-1",
-        "Agent ID should match"
-    );
+    assert_eq!(fetched.agent_id.into_inner(), 1, "Agent ID should match");
     assert_eq!(fetched.prompt, "Do something", "Prompt should match");
     assert!(
         fetched.thread_id.is_none(),
@@ -95,7 +93,7 @@ async fn test_find_ready_jobs_no_dependencies() {
     let repo = setup().await;
 
     // Create a standalone job with no dependencies
-    let job = make_job("job-ready", "agent-1", "Ready Job", "Do it");
+    let job = make_job("job-ready", 1, "Ready Job", "Do it");
     repo.create(&job).await.unwrap();
 
     let ready = repo.find_ready_jobs(10).await.unwrap();
@@ -112,14 +110,14 @@ async fn test_find_ready_jobs_respects_dependencies() {
     let repo = setup().await;
 
     // Create job A (no dependencies)
-    let mut job_a = make_job("job-a", "agent-1", "Job A", "Do A");
+    let mut job_a = make_job("job-a", 1, "Job A", "Do A");
     job_a.job_type = JobType::Workflow;
     repo.create(&job_a).await.unwrap();
 
     // Create job B (depends on A)
-    let mut job_b = make_job("job-b", "agent-1", "Job B", "Do B");
+    let mut job_b = make_job("job-b", 1, "Job B", "Do B");
     job_b.job_type = JobType::Workflow;
-    job_b.depends_on = vec![JobId::new("job-a")];
+    job_b.depends_on = vec![JobId::new("job-a".to_string())];
     repo.create(&job_b).await.unwrap();
 
     // Initially, only A should be ready
@@ -153,14 +151,14 @@ async fn test_find_ready_jobs_skips_cron_templates() {
     let repo = setup().await;
 
     // Create a cron job (template, not a concrete instance)
-    let mut cron_job = make_job("cron-job", "agent-1", "Cron Job", "Do cron");
+    let mut cron_job = make_job("cron-job", 1, "Cron Job", "Do cron");
     cron_job.job_type = JobType::Cron;
     cron_job.cron_expr = Some("0 * * * *".to_string());
     cron_job.scheduled_at = Some("2024-01-01T00:00:00Z".to_string());
     repo.create(&cron_job).await.unwrap();
 
     // Create a standalone job
-    let standalone_job = make_job("standalone-job", "agent-1", "Standalone", "Do it");
+    let standalone_job = make_job("standalone-job", 1, "Standalone", "Do it");
     repo.create(&standalone_job).await.unwrap();
 
     // Cron jobs should NOT appear in ready jobs (they are templates, not executable)
@@ -177,7 +175,7 @@ async fn test_find_ready_jobs_skips_cron_templates() {
 async fn test_update_status_prevents_terminal_transition() {
     let repo = setup().await;
 
-    let job = make_job("job-terminal", "agent-1", "Terminal Job", "Do it");
+    let job = make_job("job-terminal", 1, "Terminal Job", "Do it");
     repo.create(&job).await.unwrap();
 
     // Mark as succeeded
@@ -219,15 +217,15 @@ async fn test_list_by_group() {
     let repo = setup().await;
 
     // Create jobs with different groups
-    let mut job1 = make_job("job-g1-1", "agent-1", "Job in Group A", "Do 1");
+    let mut job1 = make_job("job-g1-1", 1, "Job in Group A", "Do 1");
     job1.group_id = Some("group-a".to_string());
     repo.create(&job1).await.unwrap();
 
-    let mut job2 = make_job("job-g1-2", "agent-1", "Job in Group A", "Do 2");
+    let mut job2 = make_job("job-g1-2", 1, "Job in Group A", "Do 2");
     job2.group_id = Some("group-a".to_string());
     repo.create(&job2).await.unwrap();
 
-    let mut job3 = make_job("job-g2-1", "agent-1", "Job in Group B", "Do 3");
+    let mut job3 = make_job("job-g2-1", 1, "Job in Group B", "Do 3");
     job3.group_id = Some("group-b".to_string());
     repo.create(&job3).await.unwrap();
 
@@ -261,7 +259,7 @@ async fn test_list_by_group() {
 async fn test_delete_job() {
     let repo = setup().await;
 
-    let job = make_job("job-to-delete", "agent-1", "Delete Me", "Do it");
+    let job = make_job("job-to-delete", 1, "Delete Me", "Do it");
     repo.create(&job).await.unwrap();
 
     // Verify it exists
@@ -277,7 +275,7 @@ async fn test_delete_job() {
     assert!(fetched.is_none(), "Job should be deleted");
 
     // Delete non-existent job should return false
-    let deleted = repo.delete(&JobId::new("non-existent")).await.unwrap();
+    let deleted = repo.delete(&JobId::new("non-existent".to_string())).await.unwrap();
     assert!(!deleted, "Delete should return false for non-existent job");
 }
 
@@ -285,7 +283,7 @@ async fn test_delete_job() {
 async fn test_update_thread_id() {
     let repo = setup().await;
 
-    let job = make_job("job-with-thread", "agent-1", "Thread Job", "Do it");
+    let job = make_job("job-with-thread", 1, "Thread Job", "Do it");
     repo.create(&job).await.unwrap();
 
     // Initially no thread
@@ -317,12 +315,12 @@ async fn test_depends_on_json_serialization() {
     let repo = setup().await;
 
     // Create job with dependencies
-    let mut job = make_job("job-with-deps", "agent-1", "Dependent Job", "Do it");
+    let mut job = make_job("job-with-deps", 1, "Dependent Job", "Do it");
     job.job_type = JobType::Workflow;
     job.depends_on = vec![
-        JobId::new("dep-1"),
-        JobId::new("dep-2"),
-        JobId::new("dep-3"),
+        JobId::new("dep-1".to_string()),
+        JobId::new("dep-2".to_string()),
+        JobId::new("dep-3".to_string()),
     ];
     repo.create(&job).await.unwrap();
 

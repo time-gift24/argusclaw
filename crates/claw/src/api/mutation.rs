@@ -61,7 +61,11 @@ impl MutationRoot {
     async fn add_job(&self, ctx: &Context<'_>, input: AddJobInput) -> async_graphql::Result<Job> {
         let job_repo = ctx.data::<Box<dyn JobRepository>>()?;
         let id = crate::workflow::JobId::new(Uuid::new_v4().to_string());
-        let agent_id = crate::agents::AgentId::new(input.agent_id.clone());
+        let agent_id: i64 = input
+            .agent_id
+            .parse()
+            .map_err(|e| async_graphql::Error::new(format!("Invalid agent_id: {}", e)))?;
+        let agent_id = crate::agents::AgentId::new(agent_id);
 
         let job_type = input
             .job_type

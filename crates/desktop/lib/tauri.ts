@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type ProviderSecretStatus = "ready" | "requires_reentry";
 
 export interface LlmProviderSummary {
-  id: string;
+  id: number;
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
@@ -17,7 +17,7 @@ export interface LlmProviderSummary {
 }
 
 export interface LlmProviderRecord {
-  id: string;
+  id: number;
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
@@ -30,7 +30,7 @@ export interface LlmProviderRecord {
 }
 
 export interface ProviderInput {
-  id: string;
+  id: number;
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
@@ -62,11 +62,11 @@ export interface ProviderTestResult {
 }
 
 export interface AgentRecord {
-  id: string;
+  id: number;
   display_name: string;
   description: string;
   version: string;
-  provider_id: string;
+  provider_id: number | null;
   system_prompt: string;
   tool_names: string[];
   max_tokens?: number;
@@ -77,41 +77,52 @@ export interface AgentRecord {
 export const providers = {
   list: () => invoke<LlmProviderSummary[]>("list_providers"),
 
-  get: (id: string) => invoke<LlmProviderRecord | null>("get_provider", { id }),
+  get: (id: number) => invoke<LlmProviderRecord | null>("get_provider", { id: id.toString() }),
 
   upsert: (record: ProviderInput) =>
-    invoke<void>("upsert_provider", { record }),
+    invoke<void>("upsert_provider", {
+      record: {
+        ...record,
+        id: record.id.toString(),
+      },
+    }),
 
-  delete: (id: string) => invoke<boolean>("delete_provider", { id }),
+  delete: (id: number) => invoke<boolean>("delete_provider", { id: id.toString() }),
 
-  setDefault: (id: string) => invoke<void>("set_default_provider", { id }),
+  setDefault: (id: number) => invoke<void>("set_default_provider", { id: id.toString() }),
 
-  testConnection: (id: string, model: string) =>
-    invoke<ProviderTestResult>("test_provider_connection", { id, model }),
+  testConnection: (id: number, model: string) =>
+    invoke<ProviderTestResult>("test_provider_connection", { id: id.toString(), model }),
 
   testInput: (record: ProviderInput, model: string) =>
-    invoke<ProviderTestResult>("test_provider_input", { record, model }),
+    invoke<ProviderTestResult>("test_provider_input", { record: { ...record, id: record.id.toString() }, model }),
 };
 
 // Agent API
 export const agents = {
   list: () => invoke<AgentRecord[]>("list_agent_templates"),
 
-  get: (id: string) => invoke<AgentRecord | null>("get_agent_template", { id }),
+  get: (id: number) => invoke<AgentRecord | null>("get_agent_template", { id: id.toString() }),
 
   upsert: (record: AgentRecord) =>
-    invoke<void>("upsert_agent_template", { record }),
+    invoke<void>("upsert_agent_template", {
+      record: {
+        ...record,
+        id: record.id.toString(),
+        provider_id: record.provider_id?.toString() ?? null,
+      },
+    }),
 
-  delete: (id: string) => invoke<boolean>("delete_agent_template", { id }),
+  delete: (id: number) => invoke<boolean>("delete_agent_template", { id: id.toString() }),
 };
 
 // Chat API
 export interface ChatSessionPayload {
   session_key: string;
-  template_id: string;
-  runtime_agent_id: string;
+  template_id: number;
+  runtime_agent_id: number;
   thread_id: string;
-  effective_provider_id: string;
+  effective_provider_id: number;
   effective_model: string;
 }
 
@@ -134,13 +145,13 @@ export type ApprovalDecision = "approved" | "denied" | "timed_out";
 
 export const chat = {
   createChatSession: (
-    templateId: string,
-    providerPreferenceId: string | null,
+    templateId: number,
+    providerPreferenceId: number | null,
     modelOverride: string | null,
   ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
-      templateId,
-      providerPreferenceId,
+      templateId: templateId.toString(),
+      providerPreferenceId: providerPreferenceId?.toString() ?? null,
       modelOverride,
     }),
 

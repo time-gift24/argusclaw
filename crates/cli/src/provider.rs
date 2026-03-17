@@ -3,14 +3,11 @@
 //! This module contains the provider management commands that are common
 //! to both the production and development CLI binaries.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use claw::AppContext;
 use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString};
 use std::collections::HashMap;
-
-#[cfg(feature = "dev")]
-use anyhow::Context;
 
 #[cfg(feature = "dev")]
 use std::path::Path;
@@ -134,8 +131,11 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
     type Error = claw::DbError;
 
     fn try_from(value: ProviderUpsertArgs) -> Result<Self, Self::Error> {
+        // Note: With INTEGER auto-increment IDs, the ID field should be removed
+        // and the database should generate it. For now, we use a placeholder.
+        // TODO: Split into insert (no ID) and update (with ID) operations.
         Ok(Self {
-            id: LlmProviderId::new(value.id),
+            id: LlmProviderId::new(0), // Placeholder - will be set by database or update
             kind: value.kind.parse::<LlmProviderKind>()?,
             display_name: value.display_name,
             base_url: value.base_url,
@@ -209,14 +209,20 @@ pub async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> 
             }
         }
         ProviderCommand::Get { id } => {
+            let id: i64 = id.parse().context("provider id must be an integer")?;
             let provider = ctx.get_provider_record(&LlmProviderId::new(id)).await?;
             println!("{}", render_provider_output(&provider.into()));
         }
         ProviderCommand::Upsert(args) => {
-            let record = LlmProviderRecord::try_from(args).map_err(|e| anyhow!(e.to_string()))?;
+            // TODO: With INTEGER auto-increment IDs, upsert should be split into
+            // insert (no ID) and update (requires ID). For now, parse ID as i64.
+            let id: i64 = args.id.parse().context("provider id must be an integer")?;
+            let mut record = LlmProviderRecord::try_from(args)?;
+            record.id = LlmProviderId::new(id);
             ctx.upsert_provider(record).await?;
         }
         ProviderCommand::SetDefault { id } => {
+            let id: i64 = id.parse().context("provider id must be an integer")?;
             ctx.set_default_provider(&LlmProviderId::new(id)).await?;
         }
         ProviderCommand::GetDefault => {
@@ -225,20 +231,22 @@ pub async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> 
         }
         ProviderCommand::SetHeader { id, name, value } => {
             validate_header_name(&name)?;
-            let provider_id = LlmProviderId::new(&id);
+            let provider_id: i64 = id.parse().context("provider id must be an integer")?;
+            let provider_id = LlmProviderId::new(provider_id);
             let mut record = ctx.get_provider_record(&provider_id).await?;
             record.extra_headers.insert(name.clone(), value);
             ctx.upsert_provider(record).await?;
-            println!("Set header `{name}` on provider `{id}`");
+            println!("Set header `{name}` on provider `{provider_id}`");
         }
         ProviderCommand::RemoveHeader { id, name } => {
-            let provider_id = LlmProviderId::new(&id);
+            let provider_id: i64 = id.parse().context("provider id must be an integer")?;
+            let provider_id = LlmProviderId::new(provider_id);
             let mut record = ctx.get_provider_record(&provider_id).await?;
             if record.extra_headers.remove(&name).is_some() {
                 ctx.upsert_provider(record).await?;
-                println!("Removed header `{name}` from provider `{id}`");
+                println!("Removed header `{name}` from provider `{provider_id}`");
             } else {
-                println!("Header `{name}` not found on provider `{id}`");
+                println!("Header `{name}` not found on provider `{provider_id}`");
             }
         }
         #[cfg(feature = "dev")]
@@ -281,7 +289,7 @@ mod tests {
     #[test]
     fn provider_upsert_args_reject_invalid_provider_kinds() {
         let args = ProviderUpsertArgs {
-            id: "test".to_string(),
+            id: "1".to_string(), // Now a string that will be parsed to i64
             display_name: "Test".to_string(),
             kind: "invalid-kind".to_string(),
             base_url: "https://example.com/v1".to_string(),

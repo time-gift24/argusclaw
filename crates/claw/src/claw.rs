@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 #[cfg(feature = "dev")]
 use crate::agents::Agent;
-use crate::agents::builtins::load_arguswing;
+use crate::agents::builtins::{DEFAULT_AGENT_DISPLAY_NAME, load_arguswing};
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
 use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
@@ -26,15 +26,20 @@ use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use crate::user::UserService;
 
-/// The ID of the default built-in agent.
-pub const DEFAULT_AGENT_ID: &str = "arguswing";
-
 /// Ensures the default ArgusWing agent exists in the database.
 async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentError> {
     let default_agent = load_arguswing().map_err(|e| AgentError::BuiltinAgentLoadFailed {
         reason: e.to_string(),
     })?;
-    agent_manager.upsert_template(default_agent).await?;
+    // Look up by display_name to see if it already exists
+    let existing = agent_manager
+        .find_template_by_display_name(&default_agent.display_name)
+        .await?;
+
+    if existing.is_none() {
+        // Insert the default agent (ID will be auto-generated)
+        agent_manager.upsert_template(default_agent).await?;
+    }
     Ok(())
 }
 
@@ -297,7 +302,8 @@ impl AppContext {
     ///
     /// This agent is guaranteed to exist after `AppContext::init()`.
     pub async fn get_default_agent_template(&self) -> Result<AgentRecord, AgentError> {
-        self.get_template(&AgentId::new(DEFAULT_AGENT_ID))
+        self.agent_manager
+            .find_template_by_display_name(DEFAULT_AGENT_DISPLAY_NAME)
             .await?
             .ok_or(AgentError::DefaultAgentNotFound)
     }
@@ -313,7 +319,7 @@ impl AppContext {
         let template = self.get_default_agent_template().await?;
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
-        record.provider_id = default_provider.id.to_string();
+        record.provider_id = Some(default_provider.id);
         self.agent_manager.create_agent(&record).await
     }
 
@@ -332,7 +338,7 @@ impl AppContext {
         let template = self.get_default_agent_template().await?;
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
-        record.provider_id = default_provider.id.to_string();
+        record.provider_id = Some(default_provider.id);
         self.agent_manager
             .create_agent_with_approval(&record, approval_tools, auto_approve)
             .await
@@ -340,8 +346,8 @@ impl AppContext {
 
     /// Create a runtime agent from a template with an optional provider override.
     ///
-    /// This method clones the template, assigns a unique runtime ID, and binds
-    /// to either the specified provider or the default provider.
+    /// This method clones the template and binds to either the specified provider
+    /// or the default provider.
     ///
     /// # Arguments
     ///
@@ -357,22 +363,21 @@ impl AppContext {
         template_id: &AgentId,
         provider_override: Option<&LlmProviderId>,
     ) -> Result<crate::RuntimeAgentHandle, AgentError> {
-        let mut record =
-            self.get_template(template_id)
-                .await?
-                .ok_or_else(|| AgentError::AgentNotFound {
-                    id: template_id.clone(),
-                })?;
+        let record = self
+            .get_template(template_id)
+            .await?
+            .ok_or(AgentError::AgentNotFound { id: *template_id })?;
 
         let effective_provider = match provider_override {
-            Some(provider_id) => provider_id.clone(),
+            Some(provider_id) => *provider_id,
             None => self.get_default_provider_record().await?.id,
         };
 
-        record.provider_id = effective_provider.to_string();
-        record.id = AgentId::new(format!("{template_id}--{}", Uuid::new_v4()));
+        let mut runtime_record = record;
+        runtime_record.provider_id = Some(effective_provider);
 
-        let approval_tools: Vec<String> = record
+        // Collect high/critical risk tools for approval
+        let approval_tools: Vec<String> = runtime_record
             .tool_names
             .iter()
             .filter(|tool_name| match self.tool_manager.get(tool_name) {
@@ -388,15 +393,15 @@ impl AppContext {
             .collect();
 
         let runtime_agent_id = if approval_tools.is_empty() {
-            self.agent_manager.create_agent(&record).await?
+            self.agent_manager.create_agent(&runtime_record).await?
         } else {
             self.agent_manager
-                .create_agent_with_approval(&record, approval_tools, false)
+                .create_agent_with_approval(&runtime_record, approval_tools, false)
                 .await?
         };
         Ok(crate::RuntimeAgentHandle {
             runtime_agent_id,
-            template_id: template_id.clone(),
+            template_id: *template_id,
             effective_provider_id: effective_provider,
         })
     }
@@ -621,9 +626,8 @@ mod tests {
             .await
             .expect("default agent should exist");
 
-        assert_eq!(default_agent.id.as_ref(), "arguswing");
         assert_eq!(default_agent.display_name, "ArgusWing");
-        assert!(default_agent.provider_id.is_empty());
+        assert!(default_agent.provider_id.is_none());
     }
 
     #[tokio::test]
@@ -637,7 +641,7 @@ mod tests {
             .expect("app context init should succeed");
 
         ctx.upsert_provider(crate::LlmProviderRecord {
-            id: crate::LlmProviderId::new("openai"),
+            id: crate::LlmProviderId::new(1),
             kind: crate::LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -651,24 +655,23 @@ mod tests {
         .await
         .expect("provider should save");
 
+        let default_template = ctx
+            .get_default_agent_template()
+            .await
+            .expect("default agent should exist");
+
         let first = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(&default_template.id, None)
             .await
             .expect("first runtime agent should be created");
         let second = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(&default_template.id, None)
             .await
             .expect("second runtime agent should be created");
 
         assert_ne!(first.runtime_agent_id, second.runtime_agent_id);
-        assert_eq!(
-            first.template_id,
-            crate::AgentId::new(crate::DEFAULT_AGENT_ID)
-        );
-        assert_eq!(
-            second.template_id,
-            crate::AgentId::new(crate::DEFAULT_AGENT_ID)
-        );
+        assert_eq!(first.template_id, default_template.id);
+        assert_eq!(second.template_id, default_template.id);
         assert_eq!(ctx.list_active_agents().len(), 2);
     }
 
@@ -683,7 +686,7 @@ mod tests {
             .expect("app context init should succeed");
 
         ctx.upsert_provider(crate::LlmProviderRecord {
-            id: crate::LlmProviderId::new("openai"),
+            id: crate::LlmProviderId::new(1),
             kind: crate::LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -697,8 +700,13 @@ mod tests {
         .await
         .expect("provider should save");
 
+        let default_template = ctx
+            .get_default_agent_template()
+            .await
+            .expect("default agent should exist");
+
         let runtime = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(&default_template.id, None)
             .await
             .expect("runtime agent should be created");
         let thread_id = ctx
@@ -728,7 +736,7 @@ mod tests {
             .expect("app context init should succeed");
 
         ctx.upsert_provider(crate::LlmProviderRecord {
-            id: crate::LlmProviderId::new("openai"),
+            id: crate::LlmProviderId::new(1),
             kind: crate::LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -742,8 +750,13 @@ mod tests {
         .await
         .expect("provider should save");
 
+        let default_template = ctx
+            .get_default_agent_template()
+            .await
+            .expect("default agent should exist");
+
         let runtime = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(&default_template.id, None)
             .await
             .expect("runtime agent should be created");
 

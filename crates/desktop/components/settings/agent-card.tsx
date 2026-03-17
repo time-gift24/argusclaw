@@ -9,11 +9,11 @@ import { Badge } from "@/components/ui/badge"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 export interface AgentRecord {
-  id: string
+  id: number
   display_name: string
   description: string
   version: string
-  provider_id: string
+  provider_id: number | null
   system_prompt: string
   tool_names: string[]
   max_tokens?: number
@@ -23,8 +23,8 @@ export interface AgentRecord {
 interface AgentCardProps {
   agent: AgentRecord
   providers: LlmProviderSummary[]
-  onEdit: (id: string) => void
-  onDelete: (id: string) => void
+  onEdit: (id: number) => void
+  onDelete: (id: number) => void
 }
 
 interface DetailRowProps {

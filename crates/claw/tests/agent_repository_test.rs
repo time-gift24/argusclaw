@@ -2,15 +2,17 @@
 
 //! Integration tests for SqliteAgentRepository.
 
-use claw::{AgentId, AgentRecord, AgentRepository, SqliteAgentRepository, connect, migrate};
+use claw::{
+    AgentId, AgentRecord, AgentRepository, LlmProviderId, SqliteAgentRepository, connect, migrate,
+};
 
-fn create_test_record(id: &str, provider_id: &str) -> AgentRecord {
+fn create_test_record(id: i64, provider_id: Option<LlmProviderId>) -> AgentRecord {
     AgentRecord {
         id: AgentId::new(id),
         display_name: format!("Agent {id}"),
         description: "Integration test agent".to_string(),
         version: "1.0.0".to_string(),
-        provider_id: provider_id.to_string(),
+        provider_id,
         system_prompt: "You are a test agent.".to_string(),
         tool_names: vec!["tool1".to_string(), "tool2".to_string()],
         max_tokens: Some(2000),
@@ -25,7 +27,7 @@ async fn setup_test_db() -> SqliteAgentRepository {
 }
 
 /// Insert a minimal LLM provider to satisfy foreign key constraints.
-async fn insert_test_provider(pool: &sqlx::SqlitePool, provider_id: &str) {
+async fn insert_test_provider(pool: &sqlx::SqlitePool, provider_id: i64) {
     sqlx::query(
         r#"INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default)
            VALUES (?1, 'openai_compatible', 'Test Provider', 'https://api.example.com', '["gpt-4"]', 'gpt-4', X'00', X'00', 0)"#,
@@ -39,15 +41,15 @@ async fn insert_test_provider(pool: &sqlx::SqlitePool, provider_id: &str) {
 #[tokio::test]
 async fn upsert_and_get_agent() {
     let repo = setup_test_db().await;
-    insert_test_provider(repo.pool(), "provider-1").await;
+    insert_test_provider(repo.pool(), 1).await;
 
-    let record = create_test_record("test-agent-1", "provider-1");
+    let record = create_test_record(1, Some(LlmProviderId::new(1)));
     repo.upsert(&record).await.unwrap();
 
-    let retrieved = repo.get(&AgentId::new("test-agent-1")).await.unwrap();
+    let retrieved = repo.get(&AgentId::new(1)).await.unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
-    assert_eq!(retrieved.id.as_ref(), "test-agent-1");
+    assert_eq!(retrieved.id.into_inner(), 1);
     assert_eq!(retrieved.tool_names, vec!["tool1", "tool2"]);
 }
 
@@ -55,79 +57,71 @@ async fn upsert_and_get_agent() {
 async fn get_returns_none_for_missing() {
     let repo = setup_test_db().await;
 
-    let result = repo.get(&AgentId::new("missing")).await.unwrap();
+    let result = repo.get(&AgentId::new(999)).await.unwrap();
     assert!(result.is_none());
 }
 
 #[tokio::test]
 async fn upsert_updates_existing() {
     let repo = setup_test_db().await;
-    insert_test_provider(repo.pool(), "provider-1").await;
+    insert_test_provider(repo.pool(), 1).await;
 
-    let mut record = create_test_record("update-test", "provider-1");
+    let mut record = create_test_record(1, Some(LlmProviderId::new(1)));
     repo.upsert(&record).await.unwrap();
 
     record.display_name = "Updated Name".to_string();
     record.version = "2.0.0".to_string();
     repo.upsert(&record).await.unwrap();
 
-    let retrieved = repo
-        .get(&AgentId::new("update-test"))
-        .await
-        .unwrap()
-        .unwrap();
+    let retrieved = repo.get(&AgentId::new(1)).await.unwrap().unwrap();
     assert_eq!(retrieved.display_name, "Updated Name");
     assert_eq!(retrieved.version, "2.0.0");
 }
 
 #[tokio::test]
-async fn upsert_allows_empty_provider_id() {
+async fn upsert_allows_null_provider_id() {
     let repo = setup_test_db().await;
 
-    let record = create_test_record("empty-provider", "");
+    let record = create_test_record(1, None);
     repo.upsert(&record).await.unwrap();
 
-    let retrieved = repo
-        .get(&AgentId::new("empty-provider"))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(retrieved.provider_id, "");
+    let retrieved = repo.get(&AgentId::new(1)).await.unwrap().unwrap();
+    assert!(retrieved.provider_id.is_none());
 }
 
 #[tokio::test]
 async fn list_returns_summaries() {
     let repo = setup_test_db().await;
-    insert_test_provider(repo.pool(), "provider-1").await;
+    insert_test_provider(repo.pool(), 1).await;
 
-    repo.upsert(&create_test_record("list-1", "provider-1"))
+    repo.upsert(&create_test_record(1, Some(LlmProviderId::new(1))))
         .await
         .unwrap();
-    repo.upsert(&create_test_record("list-2", "provider-1"))
+    repo.upsert(&create_test_record(2, Some(LlmProviderId::new(1))))
         .await
         .unwrap();
 
     let summaries = repo.list().await.unwrap();
     assert_eq!(summaries.len(), 2);
 
-    let ids: Vec<&str> = summaries.iter().map(|s| s.id.as_ref()).collect();
-    assert!(ids.contains(&"list-1"));
-    assert!(ids.contains(&"list-2"));
+    let ids: Vec<i64> = summaries.iter().map(|s| s.id.into_inner()).collect();
+    assert!(ids.contains(&1));
+    assert!(ids.contains(&2));
 }
 
 #[tokio::test]
 async fn delete_removes_agent() {
     let repo = setup_test_db().await;
-    insert_test_provider(repo.pool(), "provider-1").await;
+    insert_test_provider(repo.pool(), 1).await;
 
-    repo.upsert(&create_test_record("delete-test", "provider-1"))
+    repo.upsert(&create_test_record(1, Some(LlmProviderId::new(1))))
         .await
         .unwrap();
 
-    let deleted = repo.delete(&AgentId::new("delete-test")).await.unwrap();
+    let deleted = repo.delete(&AgentId::new(1)).await.unwrap();
     assert!(deleted);
 
-    let result = repo.get(&AgentId::new("delete-test")).await.unwrap();
+    let result = repo.get(&AgentId::new(1)).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -135,20 +129,20 @@ async fn delete_removes_agent() {
 async fn delete_returns_false_for_missing() {
     let repo = setup_test_db().await;
 
-    let deleted = repo.delete(&AgentId::new("missing")).await.unwrap();
+    let deleted = repo.delete(&AgentId::new(999)).await.unwrap();
     assert!(!deleted);
 }
 
 #[tokio::test]
 async fn temperature_precision_preserved() {
     let repo = setup_test_db().await;
-    insert_test_provider(repo.pool(), "provider-1").await;
+    insert_test_provider(repo.pool(), 1).await;
 
-    let mut record = create_test_record("temp-test", "provider-1");
+    let mut record = create_test_record(1, Some(LlmProviderId::new(1)));
     record.temperature = Some(0.73);
     repo.upsert(&record).await.unwrap();
 
-    let retrieved = repo.get(&AgentId::new("temp-test")).await.unwrap().unwrap();
+    let retrieved = repo.get(&AgentId::new(1)).await.unwrap().unwrap();
     // Allow small floating point error (stored as integer / 100)
     assert!((retrieved.temperature.unwrap() - 0.73).abs() < 0.01);
 }
@@ -156,18 +150,18 @@ async fn temperature_precision_preserved() {
 #[tokio::test]
 async fn summary_excludes_large_fields() {
     let repo = setup_test_db().await;
-    insert_test_provider(repo.pool(), "provider-1").await;
+    insert_test_provider(repo.pool(), 1).await;
 
-    let record = create_test_record("summary-test", "provider-1");
+    let record = create_test_record(1, Some(LlmProviderId::new(1)));
     repo.upsert(&record).await.unwrap();
 
     let summaries = repo.list().await.unwrap();
     let summary = summaries
         .iter()
-        .find(|s| s.id.as_ref() == "summary-test")
+        .find(|s| s.id.into_inner() == 1)
         .unwrap();
 
     // Summary should have display_name but not system_prompt
     // (This is enforced at compile time by the type system)
-    assert_eq!(summary.display_name, "Agent summary-test");
+    assert_eq!(summary.display_name, "Agent 1");
 }

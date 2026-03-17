@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::db::DbError;
+use crate::db::llm::LlmProviderId;
 use crate::db::thread::{MessageId, MessageRecord, ThreadRecord, ThreadRepository};
 use crate::protocol::ThreadId;
 
@@ -37,7 +38,7 @@ impl SqliteThreadRepository {
                     reason: format!("invalid thread id: {e}"),
                 }
             })?,
-            provider_id: Self::get::<String>(&row, "provider_id")?,
+            provider_id: LlmProviderId::new(Self::get::<i64>(&row, "provider_id")?),
             title: Self::get::<Option<String>>(&row, "title")?,
             token_count: Self::get::<i64>(&row, "token_count")? as u32,
             turn_count: Self::get::<i64>(&row, "turn_count")? as u32,
@@ -81,7 +82,7 @@ impl ThreadRepository for SqliteThreadRepository {
             "#,
         )
         .bind(thread.id.to_string())
-        .bind(&thread.provider_id)
+        .bind(thread.provider_id.into_inner())
         .bind(&thread.title)
         .bind(thread.token_count as i64)
         .bind(thread.turn_count as i64)

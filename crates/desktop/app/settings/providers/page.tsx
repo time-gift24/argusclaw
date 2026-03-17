@@ -21,17 +21,17 @@ export default function ProvidersPage() {
     [],
   );
   const [loading, setLoading] = React.useState(true);
-  const [deleteId, setDeleteId] = React.useState<string | null>(null);
+  const [deleteId, setDeleteId] = React.useState<number | null>(null);
   const [deleteLoading, setDeleteLoading] = React.useState(false);
   const [testResultsByProviderId, setTestResultsByProviderId] = React.useState<
-    Record<string, ProviderTestResult>
+    Record<number, ProviderTestResult>
   >({});
-  const [activeProviderId, setActiveProviderId] = React.useState<string | null>(
+  const [activeProviderId, setActiveProviderId] = React.useState<number | null>(
     null,
   );
   const [testDialogOpen, setTestDialogOpen] = React.useState(false);
   const [testingProviderId, setTestingProviderId] = React.useState<
-    string | null
+    number | null
   >(null);
   const [testSelectedModel, setTestSelectedModel] = React.useState<string | null>(null);
 
@@ -51,7 +51,7 @@ export default function ProvidersPage() {
   }, [loadProviders]);
 
   const handleDelete = async () => {
-    if (!deleteId) return;
+    if (deleteId === null) return;
     setDeleteLoading(true);
     try {
       await providers.delete(deleteId);
@@ -71,13 +71,13 @@ export default function ProvidersPage() {
     }
   };
 
-  const handleSetDefault = async (id: string) => {
+  const handleSetDefault = async (id: number) => {
     await providers.setDefault(id);
     await loadProviders();
   };
 
   const runConnectionTest = React.useCallback(
-    async (id: string, model: string) => {
+    async (id: number, model: string) => {
       const provider = providerList.find((item) => item.id === id);
       setTestingProviderId(id);
       try {
@@ -85,7 +85,7 @@ export default function ProvidersPage() {
         setTestResultsByProviderId((current) => ({ ...current, [id]: result }));
       } catch (error) {
         const fallbackResult: ProviderTestResult = {
-          provider_id: id,
+          provider_id: id.toString(),
           model,
           base_url: provider?.base_url ?? "",
           checked_at: new Date().toISOString(),
@@ -106,7 +106,7 @@ export default function ProvidersPage() {
   );
 
   const handleTestConnection = React.useCallback(
-    (id: string) => {
+    (id: number) => {
       const provider = providerList.find((item) => item.id === id);
       if (provider?.secret_status === "requires_reentry") {
         return;
@@ -119,7 +119,7 @@ export default function ProvidersPage() {
     [providerList, runConnectionTest],
   );
 
-  const handleViewStatus = React.useCallback((id: string) => {
+  const handleViewStatus = React.useCallback((id: number) => {
     const provider = providerList.find((item) => item.id === id);
     setActiveProviderId(id);
     setTestSelectedModel(provider?.default_model || null);

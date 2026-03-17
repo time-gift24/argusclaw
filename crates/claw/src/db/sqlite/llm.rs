@@ -124,11 +124,12 @@ impl SqliteLlmProviderRepository {
             })?;
 
         Ok((
-            LlmProviderId::new(row.try_get::<String, _>("id").map_err(|e| {
-                DbError::QueryFailed {
-                    reason: e.to_string(),
-                }
-            })?),
+            LlmProviderId::new(
+                row.try_get::<i64, _>("id")
+                    .map_err(|e| DbError::QueryFailed {
+                        reason: e.to_string(),
+                    })?,
+            ),
             row.try_get::<String, _>("kind")
                 .map_err(|e| DbError::QueryFailed {
                     reason: e.to_string(),
@@ -268,7 +269,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
         if record.is_default {
             sqlx::query("update llm_providers set is_default = 0, updated_at = CURRENT_TIMESTAMP where id != ?1 and is_default = 1")
-                .bind(record.id.as_ref())
+                .bind(record.id.into_inner())
                 .execute(&mut *transaction)
                 .await
                 .map_err(|e| DbError::QueryFailed {
@@ -276,36 +277,58 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                 })?;
         }
 
-        sqlx::query(
-            "insert into llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             on conflict(id) do update set
-                 kind = excluded.kind,
-                 display_name = excluded.display_name,
-                 base_url = excluded.base_url,
-                 models = excluded.models,
-                 default_model = excluded.default_model,
-                 encrypted_api_key = excluded.encrypted_api_key,
-                 api_key_nonce = excluded.api_key_nonce,
-                 is_default = excluded.is_default,
-                 extra_headers = excluded.extra_headers,
-                 updated_at = CURRENT_TIMESTAMP",
-        )
-        .bind(record.id.as_ref())
-        .bind(record.kind.as_str())
-        .bind(&record.display_name)
-        .bind(&record.base_url)
-        .bind(&models_json)
-        .bind(&record.default_model)
-        .bind(encrypted_secret.ciphertext)
-        .bind(encrypted_secret.nonce)
-        .bind(i64::from(record.is_default))
-        .bind(&extra_headers_json)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+        // If ID is 0 (placeholder), do an INSERT without the id column to let SQLite auto-generate
+        if record.id.into_inner() == 0 {
+            sqlx::query(
+                "insert into llm_providers (kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )
+            .bind(record.kind.as_str())
+            .bind(&record.display_name)
+            .bind(&record.base_url)
+            .bind(&models_json)
+            .bind(&record.default_model)
+            .bind(encrypted_secret.ciphertext)
+            .bind(encrypted_secret.nonce)
+            .bind(i64::from(record.is_default))
+            .bind(&extra_headers_json)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+        } else {
+            sqlx::query(
+                "insert into llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 on conflict(id) do update set
+                     kind = excluded.kind,
+                     display_name = excluded.display_name,
+                     base_url = excluded.base_url,
+                     models = excluded.models,
+                     default_model = excluded.default_model,
+                     encrypted_api_key = excluded.encrypted_api_key,
+                     api_key_nonce = excluded.api_key_nonce,
+                     is_default = excluded.is_default,
+                     extra_headers = excluded.extra_headers,
+                     updated_at = CURRENT_TIMESTAMP",
+            )
+            .bind(record.id.into_inner())
+            .bind(record.kind.as_str())
+            .bind(&record.display_name)
+            .bind(&record.base_url)
+            .bind(&models_json)
+            .bind(&record.default_model)
+            .bind(encrypted_secret.ciphertext)
+            .bind(encrypted_secret.nonce)
+            .bind(i64::from(record.is_default))
+            .bind(&extra_headers_json)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+        }
 
         transaction
             .commit()
@@ -324,7 +347,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
         let exists =
             sqlx::query_scalar::<_, i64>("select count(1) from llm_providers where id = ?1")
-                .bind(id.as_ref())
+                .bind(id.into_inner())
                 .fetch_one(&mut *transaction)
                 .await
                 .map_err(|e| DbError::QueryFailed {
@@ -347,7 +370,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         sqlx::query(
             "update llm_providers set is_default = 1, updated_at = CURRENT_TIMESTAMP where id = ?1",
         )
-        .bind(id.as_ref())
+        .bind(id.into_inner())
         .execute(&mut *transaction)
         .await
         .map_err(|e| DbError::QueryFailed {
@@ -366,7 +389,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, DbError> {
         let result = sqlx::query("delete from llm_providers where id = ?1")
-            .bind(id.as_ref())
+            .bind(id.into_inner())
             .execute(&self.pool)
             .await
             .map_err(|e| DbError::QueryFailed {
@@ -382,7 +405,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
              from llm_providers
              where id = ?1",
         )
-        .bind(id.as_ref())
+        .bind(id.into_inner())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| DbError::QueryFailed {
@@ -401,7 +424,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
              from llm_providers
              where id = ?1",
         )
-        .bind(id.as_ref())
+        .bind(id.into_inner())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| DbError::QueryFailed {

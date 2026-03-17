@@ -28,7 +28,6 @@ pub(crate) mod approval;
 
 // 核心入口
 pub use claw::AppContext;
-pub use claw::DEFAULT_AGENT_ID;
 pub use error::AgentError;
 
 // Agent API (稳定对话接口)

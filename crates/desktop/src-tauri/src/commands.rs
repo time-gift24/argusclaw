@@ -48,10 +48,16 @@ pub struct ProviderInput {
     pub extra_headers: HashMap<String, String>,
 }
 
-impl From<ProviderInput> for LlmProviderRecord {
-    fn from(input: ProviderInput) -> Self {
-        Self {
-            id: LlmProviderId::new(input.id),
+impl TryFrom<ProviderInput> for LlmProviderRecord {
+    type Error = String;
+
+    fn try_from(input: ProviderInput) -> Result<Self, Self::Error> {
+        let id: i64 = input
+            .id
+            .parse()
+            .map_err(|e| format!("Invalid provider id: {}", e))?;
+        Ok(Self {
+            id: LlmProviderId::new(id),
             kind: input.kind.into(),
             display_name: input.display_name,
             base_url: input.base_url,
@@ -61,7 +67,7 @@ impl From<ProviderInput> for LlmProviderRecord {
             is_default: input.is_default,
             extra_headers: input.extra_headers,
             secret_status: ProviderSecretStatus::Ready,
-        }
+        })
     }
 }
 
@@ -166,6 +172,9 @@ pub async fn get_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<Option<ProviderRecord>, String> {
+    let id: i64 = id
+        .parse()
+        .map_err(|e| format!("Invalid provider id: {}", e))?;
     let provider_id = LlmProviderId::new(id);
     match ctx.get_provider_record(&provider_id).await {
         Ok(record) => Ok(Some(record.into())),
@@ -186,9 +195,8 @@ pub async fn upsert_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: ProviderInput,
 ) -> Result<(), String> {
-    ctx.upsert_provider(record.into())
-        .await
-        .map_err(|e| e.to_string())
+    let record = record.try_into()?;
+    ctx.upsert_provider(record).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -196,6 +204,9 @@ pub async fn delete_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<bool, String> {
+    let id: i64 = id
+        .parse()
+        .map_err(|e| format!("Invalid provider id: {}", e))?;
     ctx.delete_provider(&LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -206,6 +217,9 @@ pub async fn set_default_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<(), String> {
+    let id: i64 = id
+        .parse()
+        .map_err(|e| format!("Invalid provider id: {}", e))?;
     ctx.set_default_provider(&LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -217,6 +231,9 @@ pub async fn test_provider_connection(
     id: String,
     model: String,
 ) -> Result<ProviderTestResult, String> {
+    let id: i64 = id
+        .parse()
+        .map_err(|e| format!("Invalid provider id: {}", e))?;
     ctx.test_provider_connection(&LlmProviderId::new(id), &model)
         .await
         .map_err(|e| e.to_string())
@@ -228,7 +245,8 @@ pub async fn test_provider_input(
     record: ProviderInput,
     model: String,
 ) -> Result<ProviderTestResult, String> {
-    ctx.test_provider_record(record.into(), &model)
+    let record = record.try_into()?;
+    ctx.test_provider_record(record, &model)
         .await
         .map_err(|e| e.to_string())
 }
@@ -247,6 +265,7 @@ pub async fn get_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<Option<AgentRecord>, String> {
+    let id: i64 = id.parse().map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.get_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -265,6 +284,7 @@ pub async fn delete_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
 ) -> Result<bool, String> {
+    let id: i64 = id.parse().map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.delete_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -364,13 +384,21 @@ pub async fn create_chat_session(
     provider_preference_id: Option<String>,
     model_override: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
+    let template_id_i64: i64 = template_id
+        .parse()
+        .map_err(|e| format!("Invalid template id: {}", e))?;
     let provider_override = provider_preference_id
         .as_ref()
-        .map(|id| LlmProviderId::new(id.clone()));
+        .map(|id| {
+            id.parse::<i64>()
+                .map(LlmProviderId::new)
+                .map_err(|e| format!("Invalid provider id: {}", e))
+        })
+        .transpose()?;
 
     let runtime = ctx
         .create_runtime_agent_from_template(
-            &AgentId::new(template_id.clone()),
+            &AgentId::new(template_id_i64),
             provider_override.as_ref(),
         )
         .await
@@ -437,6 +465,9 @@ pub async fn send_message(
     content: String,
 ) -> Result<(), String> {
     let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    let runtime_agent_id: i64 = runtime_agent_id
+        .parse()
+        .map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.send_message(&AgentId::new(runtime_agent_id), &thread_id, content)
         .await
         .map_err(|e| e.to_string())
@@ -449,6 +480,9 @@ pub async fn get_thread_snapshot(
     thread_id: String,
 ) -> Result<claw::ThreadSnapshot, String> {
     let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    let runtime_agent_id: i64 = runtime_agent_id
+        .parse()
+        .map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.get_thread_snapshot(&AgentId::new(runtime_agent_id), &thread_id)
         .await
         .map_err(|e| e.to_string())
@@ -463,6 +497,9 @@ pub fn resolve_approval(
     resolved_by: Option<String>,
 ) -> Result<(), String> {
     let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
+    let runtime_agent_id: i64 = runtime_agent_id
+        .parse()
+        .map_err(|e| format!("Invalid agent id: {}", e))?;
     let decision = match decision.as_str() {
         "approved" => claw::ApprovalDecision::Approved,
         "denied" => claw::ApprovalDecision::Denied,
@@ -496,7 +533,7 @@ mod tests {
     #[test]
     fn provider_input_converts_into_domain_record() {
         let record: LlmProviderRecord = ProviderInput {
-            id: "openai".to_string(),
+            id: "1".to_string(),
             kind: ProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -506,9 +543,10 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
         }
-        .into();
+        .try_into()
+        .expect("conversion should succeed");
 
-        assert_eq!(record.id, LlmProviderId::new("openai"));
+        assert_eq!(record.id, LlmProviderId::new(1));
         assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);
         assert_eq!(record.api_key.expose_secret(), "sk-test");
         assert_eq!(record.secret_status, ProviderSecretStatus::Ready);
@@ -517,7 +555,7 @@ mod tests {
     #[test]
     fn provider_lookup_returns_none_for_missing_provider() {
         let result = map_provider_lookup_result(Err(AgentError::ProviderNotFound {
-            id: "missing".to_string(),
+            id: "999".to_string(),
         }))
         .expect("missing providers should map to None");
 
@@ -527,7 +565,7 @@ mod tests {
     #[test]
     fn provider_record_conversion_exposes_plain_api_key() {
         let record = LlmProviderRecord {
-            id: LlmProviderId::new("openai"),
+            id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -541,7 +579,7 @@ mod tests {
 
         let output = ProviderRecord::from(record);
 
-        assert_eq!(output.id, "openai");
+        assert_eq!(output.id, "1");
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
@@ -550,7 +588,7 @@ mod tests {
     #[test]
     fn provider_summary_can_build_a_reentry_record_with_a_blank_api_key() {
         let record = build_provider_reentry_record(LlmProviderSummary {
-            id: LlmProviderId::new("legacy"),
+            id: LlmProviderId::new(2),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Legacy".to_string(),
             base_url: "https://legacy.example.com/v1".to_string(),
@@ -561,7 +599,7 @@ mod tests {
             secret_status: ProviderSecretStatus::RequiresReentry,
         });
 
-        assert_eq!(record.id, "legacy");
+        assert_eq!(record.id, "2");
         assert_eq!(record.api_key, "");
         assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
     }
@@ -569,7 +607,7 @@ mod tests {
     #[test]
     fn provider_summary_conversion_exposes_secret_status_for_frontend() {
         let output = ProviderSummary::from(LlmProviderSummary {
-            id: LlmProviderId::new("openai"),
+            id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -580,7 +618,7 @@ mod tests {
             secret_status: ProviderSecretStatus::Ready,
         });
 
-        assert_eq!(output.id, "openai");
+        assert_eq!(output.id, "1");
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 

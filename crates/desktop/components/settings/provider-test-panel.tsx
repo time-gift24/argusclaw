@@ -20,9 +20,9 @@ export type ModelTestState = {
 interface ProviderTestPanelProps {
   models: string[];
   defaultModel: string;
-  providerId?: string;
+  providerId?: number;
   getTestInput: () => {
-    id: string;
+    id: number;
     kind: "openai-compatible";
     display_name: string;
     base_url: string;
@@ -84,7 +84,7 @@ export function ProviderTestPanel({
             model,
             status: "error",
             result: {
-              provider_id: input.id,
+              provider_id: input.id.toString(),
               model,
               base_url: input.base_url,
               checked_at: new Date().toISOString(),

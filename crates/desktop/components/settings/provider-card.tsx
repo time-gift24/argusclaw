@@ -13,26 +13,18 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import type { ProviderSecretStatus, ProviderTestResult } from "@/lib/tauri";
-
-export interface LlmProviderSummary {
-  id: string;
-  kind: string;
-  display_name: string;
-  base_url: string;
-  models: string[];
-  default_model: string;
-  is_default: boolean;
-  extra_headers: Record<string, string>;
-  secret_status: ProviderSecretStatus;
-}
+import type {
+  LlmProviderSummary,
+  ProviderSecretStatus,
+  ProviderTestResult,
+} from "@/lib/tauri";
 
 interface ProviderCardProps {
   provider: LlmProviderSummary;
-  onDelete: (id: string) => void;
-  onSetDefault: (id: string) => void;
-  onTestConnection: (id: string) => void;
-  onViewStatus: (id: string) => void;
+  onDelete: (id: number) => void;
+  onSetDefault: (id: number) => void;
+  onTestConnection: (id: number) => void;
+  onViewStatus: (id: number) => void;
   testResult?: ProviderTestResult;
   isTesting?: boolean;
 }

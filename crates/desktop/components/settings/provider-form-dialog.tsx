@@ -24,7 +24,7 @@ import { Label } from "@/components/ui/label";
 import { ProviderTestDialog } from "./provider-test-dialog";
 
 export interface LlmProviderRecord {
-  id: string;
+  id: number;
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
@@ -46,7 +46,7 @@ interface ProviderFormDialogProps {
 
 function createDefaultFormData(): LlmProviderRecord {
   return {
-    id: "",
+    id: 0,
     kind: "openai-compatible",
     display_name: "",
     base_url: "",
@@ -160,7 +160,7 @@ export function ProviderFormDialog({
       setTestResult(result);
     } catch (error) {
       setTestResult({
-        provider_id: record.id,
+        provider_id: record.id.toString(),
         model: record.default_model,
         base_url: record.base_url,
         checked_at: new Date().toISOString(),
@@ -223,17 +223,6 @@ export function ProviderFormDialog({
               当前保存的密钥已无法解密，请重新填写 API Key 后再保存。
             </div>
           )}
-          <div className="space-y-2">
-            <Label htmlFor="id">ID</Label>
-            <Input
-              id="id"
-              value={formData.id}
-              onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-              placeholder="unique-provider-id"
-              required
-              disabled={isEditing}
-            />
-          </div>
           <div className="space-y-2">
             <Label htmlFor="display_name">Display Name</Label>
             <Input

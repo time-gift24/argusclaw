@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn test_agent_runtime_info() {
-        let info = AgentRuntimeInfo::new(AgentId::new("test"), 5, "gpt-4".to_string());
+        let info = AgentRuntimeInfo::new(AgentId::new(1), 5, "gpt-4".to_string());
         assert_eq!(info.thread_count, 5);
     }
 
@@ -445,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_persists_history_before_idle_snapshot_reads_it() {
         let agent = AgentBuilder::new()
-            .id(AgentId::new("test-agent"))
+            .id(AgentId::new(1))
             .system_prompt("You are helpful".to_string())
             .provider(Arc::new(SingleResponseProvider))
             .build()

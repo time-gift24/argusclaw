@@ -47,13 +47,13 @@ export function ProviderSelector() {
       : `无提供商 / ${effectiveModel}`;
 
   // Handle selecting a model from a provider
-  const handleSelectModel = (providerId: string, model: string) => {
+  const handleSelectModel = (providerId: number, model: string) => {
     void selectProviderPreference(providerId);
     void selectModelOverride(model);
   };
 
   // Check if a specific item is selected
-  const isSelected = (providerId: string, model: string) => {
+  const isSelected = (providerId: number, model: string) => {
     // If no preference set, use the default provider
     const effectiveProviderId = selectedProviderPreferenceId ?? providers.find((p) => p.is_default)?.id;
     return effectiveProviderId === providerId && selectedModelOverride === model;

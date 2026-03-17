@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbError;
+use crate::db::llm::LlmProviderId;
 use crate::protocol::ThreadId;
 
 /// Unique identifier for a stored message.
@@ -54,7 +55,7 @@ pub struct ThreadRecord {
     /// Thread ID.
     pub id: ThreadId,
     /// LLM provider ID.
-    pub provider_id: String,
+    pub provider_id: LlmProviderId,
     /// Thread title (optional, can be auto-generated).
     pub title: Option<String>,
     /// Total token count.

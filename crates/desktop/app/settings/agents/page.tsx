@@ -16,7 +16,7 @@ export default function AgentsPage() {
   const [agentList, setAgentList] = React.useState<AgentRecord[]>([])
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [loading, setLoading] = React.useState(true)
-  const [deleteId, setDeleteId] = React.useState<string | null>(null)
+  const [deleteId, setDeleteId] = React.useState<number | null>(null)
   const [deleteLoading, setDeleteLoading] = React.useState(false)
 
   const loadData = React.useCallback(async () => {
@@ -38,7 +38,7 @@ export default function AgentsPage() {
     loadData()
   }, [loadData])
 
-  const handleEdit = (id: string) => {
+  const handleEdit = (id: number) => {
     router.push(`/settings/agents/${id}`)
   }
 

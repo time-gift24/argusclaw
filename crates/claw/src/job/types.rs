@@ -67,7 +67,7 @@ pub struct JobRecord {
 impl JobRecord {
     /// Creates a minimal job record for testing.
     #[must_use]
-    pub fn for_test(id: &str, agent_id: &str, name: &str, prompt: &str) -> Self {
+    pub fn for_test(id: &str, agent_id: i64, name: &str, prompt: &str) -> Self {
         Self {
             id: JobId::new(id),
             job_type: JobType::Standalone,
@@ -119,11 +119,11 @@ mod tests {
 
     #[test]
     fn job_record_for_test_defaults() {
-        let record = JobRecord::for_test("j-1", "agent-1", "test job", "do something");
+        let record = JobRecord::for_test("j-1", 1, "test job", "do something");
         assert_eq!(record.id.as_ref(), "j-1");
         assert_eq!(record.job_type, JobType::Standalone);
         assert_eq!(record.status, WorkflowStatus::Pending);
-        assert_eq!(record.agent_id.as_ref(), "agent-1");
+        assert_eq!(record.agent_id.into_inner(), 1);
         assert_eq!(record.prompt, "do something");
         assert!(record.depends_on.is_empty());
         assert!(record.thread_id.is_none());

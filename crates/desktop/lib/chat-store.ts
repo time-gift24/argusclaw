@@ -8,7 +8,7 @@ import type {
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
 
-const toSessionKey = (templateId: string, providerPreferenceId: string | null) =>
+const toSessionKey = (templateId: number, providerPreferenceId: number | null) =>
   `${templateId}::${providerPreferenceId ?? "__default__"}`;
 
 const toErrorMessage = (error: unknown) =>
@@ -16,10 +16,10 @@ const toErrorMessage = (error: unknown) =>
 
 export interface ChatSessionState {
   sessionKey: string;
-  templateId: string;
+  templateId: number;
   runtimeAgentId: string;
   threadId: string;
-  effectiveProviderId: string;
+  effectiveProviderId: number;
   effectiveModel: string;
   status: "idle" | "running" | "error";
   messages: ThreadSnapshotPayload["messages"];
@@ -36,8 +36,8 @@ export interface ChatSessionState {
 }
 
 export interface ChatStore {
-  selectedTemplateId: string | null;
-  selectedProviderPreferenceId: string | null;
+  selectedTemplateId: number | null;
+  selectedProviderPreferenceId: number | null;
   selectedModelOverride: string | null;
   activeSessionKey: string | null;
   errorMessage: string | null;
@@ -47,8 +47,8 @@ export interface ChatStore {
   _unlisten: UnlistenFn | null;
 
   initialize: () => Promise<void>;
-  activateSession: (templateId: string) => Promise<void>;
-  selectProviderPreference: (providerId: string | null) => Promise<void>;
+  activateSession: (templateId: number) => Promise<void>;
+  selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   refreshSnapshot: (sessionKey: string) => Promise<void>;
@@ -94,7 +94,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async activateSession(templateId: string) {
+  async activateSession(templateId: number) {
     const state = get();
     const sessionKey = toSessionKey(templateId, state.selectedProviderPreferenceId);
 
@@ -110,12 +110,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     try {
       const session = await chat.createChatSession(templateId, state.selectedProviderPreferenceId, state.selectedModelOverride);
-      const snapshot = await chat.getThreadSnapshot(session.runtime_agent_id, session.thread_id);
+      const snapshot = await chat.getThreadSnapshot(session.runtime_agent_id.toString(), session.thread_id);
 
       const newSessionState: ChatSessionState = {
         sessionKey: session.session_key,
         templateId: session.template_id,
-        runtimeAgentId: session.runtime_agent_id,
+        runtimeAgentId: session.runtime_agent_id.toString(),
         threadId: session.thread_id,
         effectiveProviderId: session.effective_provider_id,
         effectiveModel: session.effective_model,
@@ -144,7 +144,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async selectProviderPreference(providerId: string | null) {
+  async selectProviderPreference(providerId: number | null) {
     set({ selectedProviderPreferenceId: providerId, errorMessage: null });
 
     const state = get();

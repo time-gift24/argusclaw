@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { Plus, Pencil } from "lucide-react"
+import { agents, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -15,25 +16,27 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { LlmProviderSummary } from "./provider-card"
-
-export interface AgentRecord {
-  id: string
-  display_name: string
-  description: string
-  version: string
-  provider_id: string
-  system_prompt: string
-  tool_names: string[]
-  max_tokens?: number
-  temperature?: number
-}
 
 interface AgentFormDialogProps {
   agent?: AgentRecord | null
   providers: LlmProviderSummary[]
   onSubmit: (record: AgentRecord) => Promise<void>
   trigger?: React.ReactElement
+}
+
+function createDefaultFormData(providers: LlmProviderSummary[]): AgentRecord {
+  const defaultProvider = providers.find((p) => p.is_default)
+  return {
+    id: 0,
+    display_name: "",
+    description: "",
+    version: "1.0.0",
+    provider_id: defaultProvider?.id ?? null,
+    system_prompt: "",
+    tool_names: [],
+    max_tokens: undefined,
+    temperature: undefined,
+  }
 }
 
 export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFormDialogProps) {
@@ -45,34 +48,14 @@ export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFo
     if (agent) {
       return agent
     }
-    return {
-      id: "",
-      display_name: "",
-      description: "",
-      version: "1.0.0",
-      provider_id: providers.find((p) => p.is_default)?.id || providers[0]?.id || "",
-      system_prompt: "",
-      tool_names: [],
-      max_tokens: undefined,
-      temperature: undefined,
-    }
+    return createDefaultFormData(providers)
   })
 
   React.useEffect(() => {
     if (agent) {
       setFormData(agent)
     } else {
-      setFormData({
-        id: "",
-        display_name: "",
-        description: "",
-        version: "1.0.0",
-        provider_id: providers.find((p) => p.is_default)?.id || providers[0]?.id || "",
-        system_prompt: "",
-        tool_names: [],
-        max_tokens: undefined,
-        temperature: undefined,
-      })
+      setFormData(createDefaultFormData(providers))
     }
   }, [agent, providers])
 
@@ -102,37 +85,26 @@ export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFo
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={trigger ? trigger : defaultTrigger} />
-      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+      {trigger === undefined ? <DialogTrigger render={defaultTrigger} /> : trigger ? <DialogTrigger render={trigger} /> : null}
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>{isEditing ? "Edit Agent" : "Add Agent"}</DialogTitle>
           <DialogDescription>
-            {isEditing ? "Update the agent configuration." : "Configure a new agent."}
+            {isEditing
+              ? "Update the agent configuration."
+              : "Configure a new agent."}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="id">ID</Label>
-              <Input
-                id="id"
-                value={formData.id}
-                onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-                placeholder="my-agent"
-                required
-                disabled={isEditing}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="display_name">Display Name</Label>
-              <Input
-                id="display_name"
-                value={formData.display_name}
-                onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                placeholder="My Agent"
-                required
-              />
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="display_name">Display Name</Label>
+            <Input
+              id="display_name"
+              value={formData.display_name}
+              onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+              placeholder="My Agent"
+              required
+            />
           </div>
           <div className="space-y-2">
             <Label htmlFor="description">Description</Label>
@@ -140,37 +112,24 @@ export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFo
               id="description"
               value={formData.description}
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              placeholder="A helpful agent"
+              placeholder="A helpful assistant"
             />
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="version">Version</Label>
-              <Input
-                id="version"
-                value={formData.version}
-                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                placeholder="1.0.0"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="provider_id">Provider</Label>
-              <select
-                id="provider_id"
-                value={formData.provider_id}
-                onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
-                className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
-                required
-              >
-                <option value="">Select a provider</option>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.display_name} {p.is_default ? "(Default)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="provider_id">Provider</Label>
+            <select
+              id="provider_id"
+              value={formData.provider_id ?? ""}
+              onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="">No provider</option>
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.display_name} {p.is_default ? "(Default)" : ""}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="system_prompt">System Prompt</Label>
