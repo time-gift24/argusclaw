@@ -85,13 +85,7 @@ export default function AgentsPage() {
         </Link>
       </div>
 
-      {providerList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-32 border rounded-lg border-dashed">
-          <p className="text-muted-foreground text-sm">
-            请先配置 LLM 提供者
-          </p>
-        </div>
-      ) : agentList.length === 0 ? (
+      {agentList.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-64 border rounded-lg border-dashed">
           <p className="text-muted-foreground mb-4">暂无智能体配置</p>
           <Link href="/settings/agents/new">
