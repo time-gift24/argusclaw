@@ -28,7 +28,8 @@ export interface LlmProviderRecord {
   display_name: string;
   base_url: string;
   api_key: string;
-  model: string;
+  models: string[];
+  default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -77,7 +78,8 @@ export function ProviderFormDialog({
         display_name: "",
         base_url: "",
         api_key: "",
-        model: "",
+        models: [],
+        default_model: "",
         is_default: false,
         extra_headers: {},
         secret_status: "ready",
@@ -94,7 +96,8 @@ export function ProviderFormDialog({
         display_name: "",
         base_url: "",
         api_key: "",
-        model: "",
+        models: [],
+        default_model: "",
         is_default: false,
         extra_headers: {},
         secret_status: "ready",
@@ -124,12 +127,12 @@ export function ProviderFormDialog({
     setTestingConnection(true);
     setTestResult(null);
     try {
-      const result = await providers.testInput(record);
+      const result = await providers.testInput(record, record.default_model);
       setTestResult(result);
     } catch (error) {
       setTestResult({
         provider_id: record.id,
-        model: record.model,
+        model: record.default_model,
         base_url: record.base_url,
         checked_at: new Date().toISOString(),
         latency_ms: 0,
@@ -145,7 +148,7 @@ export function ProviderFormDialog({
   const canTest = Boolean(
     formData.base_url.trim() &&
     formData.api_key.trim() &&
-    formData.model.trim(),
+    formData.default_model.trim(),
   );
 
   const defaultTrigger = isEditing ? (
@@ -164,7 +167,8 @@ export function ProviderFormDialog({
     kind: formData.kind,
     display_name: formData.display_name || "未命名 Provider",
     base_url: formData.base_url,
-    model: formData.model,
+    models: formData.models,
+    default_model: formData.default_model,
     is_default: formData.is_default,
     extra_headers: formData.extra_headers,
     secret_status: formData.secret_status,
@@ -239,12 +243,27 @@ export function ProviderFormDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="model">Model</Label>
+            <Label htmlFor="models">Models (comma-separated)</Label>
             <Input
-              id="model"
-              value={formData.model}
+              id="models"
+              value={formData.models.join(", ")}
               onChange={(e) =>
-                setFormData({ ...formData, model: e.target.value })
+                setFormData({
+                  ...formData,
+                  models: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                })
+              }
+              placeholder="gpt-4, gpt-4o, gpt-3.5-turbo"
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="default_model">Default Model</Label>
+            <Input
+              id="default_model"
+              value={formData.default_model}
+              onChange={(e) =>
+                setFormData({ ...formData, default_model: e.target.value })
               }
               placeholder="gpt-4"
               required

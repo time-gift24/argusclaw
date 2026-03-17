@@ -19,7 +19,8 @@ export interface LlmProviderSummary {
   kind: string;
   display_name: string;
   base_url: string;
-  model: string;
+  models: string[];
+  default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -94,9 +95,15 @@ export function ProviderCard({
           </span>
         </div>
         <div className="flex justify-between">
-          <span className="text-muted-foreground">Model:</span>
+          <span className="text-muted-foreground">Default Model:</span>
           <span className="font-mono text-xs break-all bg-muted px-2 py-1 rounded">
-            {provider.model}
+            {provider.default_model}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-muted-foreground">Models:</span>
+          <span className="font-mono text-xs break-all bg-muted px-2 py-1 rounded max-w-[200px]">
+            {provider.models.join(", ")}
           </span>
         </div>
         <div className="flex justify-between">
