@@ -35,6 +35,7 @@ export default function ProvidersPage() {
   const [testingProviderId, setTestingProviderId] = React.useState<
     string | null
   >(null);
+  const [testSelectedModel, setTestSelectedModel] = React.useState<string | null>(null);
 
   const loadProviders = React.useCallback(async () => {
     try {
@@ -118,16 +119,16 @@ export default function ProvidersPage() {
   };
 
   const runConnectionTest = React.useCallback(
-    async (id: string) => {
+    async (id: string, model: string) => {
       const provider = providerList.find((item) => item.id === id);
       setTestingProviderId(id);
       try {
-        const result = await providers.testConnection(id, provider?.default_model ?? "");
+        const result = await providers.testConnection(id, model);
         setTestResultsByProviderId((current) => ({ ...current, [id]: result }));
       } catch (error) {
         const fallbackResult: ProviderTestResult = {
           provider_id: id,
-          model: provider?.default_model ?? "",
+          model,
           base_url: provider?.base_url ?? "",
           checked_at: new Date().toISOString(),
           latency_ms: 0,
@@ -153,21 +154,24 @@ export default function ProvidersPage() {
         return;
       }
       setActiveProviderId(id);
+      setTestSelectedModel(provider?.default_model || null);
       setTestDialogOpen(true);
-      void runConnectionTest(id);
+      void runConnectionTest(id, provider?.default_model || "");
     },
     [providerList, runConnectionTest],
   );
 
   const handleViewStatus = React.useCallback((id: string) => {
+    const provider = providerList.find((item) => item.id === id);
     setActiveProviderId(id);
+    setTestSelectedModel(provider?.default_model || null);
     setTestDialogOpen(true);
-  }, []);
+  }, [providerList]);
 
   const handleRetest = React.useCallback(() => {
-    if (!activeProviderId) return;
-    void runConnectionTest(activeProviderId);
-  }, [activeProviderId, runConnectionTest]);
+    if (!activeProviderId || !testSelectedModel) return;
+    void runConnectionTest(activeProviderId, testSelectedModel);
+  }, [activeProviderId, testSelectedModel, runConnectionTest]);
 
   const activeProvider = React.useMemo(
     () =>
@@ -252,10 +256,13 @@ export default function ProvidersPage() {
           setTestDialogOpen(open);
           if (!open) {
             setActiveProviderId(null);
+            setTestSelectedModel(null);
           }
         }}
         provider={activeProvider}
         result={activeTestResult}
+        selectedModel={testSelectedModel || undefined}
+        onModelChange={(model) => setTestSelectedModel(model)}
         testing={
           activeProviderId !== null && testingProviderId === activeProviderId
         }

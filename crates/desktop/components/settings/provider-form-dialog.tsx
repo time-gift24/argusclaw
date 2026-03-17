@@ -8,6 +8,7 @@ import {
   type ProviderInput,
   type ProviderTestResult,
 } from "@/lib/tauri";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -43,6 +44,21 @@ interface ProviderFormDialogProps {
   trigger?: React.ReactElement | null;
 }
 
+function createDefaultFormData(): LlmProviderRecord {
+  return {
+    id: "",
+    kind: "openai-compatible",
+    display_name: "",
+    base_url: "",
+    api_key: "",
+    models: [],
+    default_model: "",
+    is_default: false,
+    extra_headers: {},
+    secret_status: "ready",
+  };
+}
+
 export function ProviderFormDialog({
   provider,
   onSubmit,
@@ -57,8 +73,25 @@ export function ProviderFormDialog({
   const [testResult, setTestResult] = React.useState<ProviderTestResult | null>(
     null,
   );
+  const [newModel, setNewModel] = React.useState("");
   const isEditing = !!provider;
   const open = openProp ?? internalOpen;
+
+  const [formData, setFormData] = React.useState<LlmProviderRecord>(
+    () => provider || createDefaultFormData(),
+  );
+
+  React.useEffect(() => {
+    if (provider) {
+      setFormData(provider);
+    } else {
+      setFormData(createDefaultFormData());
+    }
+    setTestingConnection(false);
+    setTestDialogOpen(false);
+    setTestResult(null);
+    setNewModel("");
+  }, [provider]);
 
   const handleOpenChange = React.useCallback(
     (nextOpen: boolean) => {
@@ -70,43 +103,39 @@ export function ProviderFormDialog({
     [onOpenChange, openProp],
   );
 
-  const [formData, setFormData] = React.useState<LlmProviderRecord>(
-    () =>
-      provider || {
-        id: "",
-        kind: "openai-compatible",
-        display_name: "",
-        base_url: "",
-        api_key: "",
-        models: [],
-        default_model: "",
-        is_default: false,
-        extra_headers: {},
-        secret_status: "ready",
-      },
-  );
+  const handleAddModel = React.useCallback(() => {
+    const trimmed = newModel.trim();
+    if (!trimmed) return;
+    setFormData((prev) => {
+      if (prev.models.includes(trimmed)) {
+        return prev;
+      }
+      const newModels = [...prev.models, trimmed];
+      return {
+        ...prev,
+        models: newModels,
+        default_model: prev.default_model || trimmed,
+      };
+    });
+    setNewModel("");
+  }, [newModel]);
 
-  React.useEffect(() => {
-    if (provider) {
-      setFormData(provider);
-    } else {
-      setFormData({
-        id: "",
-        kind: "openai-compatible",
-        display_name: "",
-        base_url: "",
-        api_key: "",
-        models: [],
-        default_model: "",
-        is_default: false,
-        extra_headers: {},
-        secret_status: "ready",
-      });
-    }
-    setTestingConnection(false);
-    setTestDialogOpen(false);
-    setTestResult(null);
-  }, [provider]);
+  const handleRemoveModel = React.useCallback((model: string) => {
+    setFormData((prev) => {
+      const newModels = prev.models.filter((m) => m !== model);
+      return {
+        ...prev,
+        models: newModels,
+        default_model: newModels.includes(prev.default_model)
+          ? prev.default_model
+          : newModels[0] || "",
+      };
+    });
+  }, []);
+
+  const handleSetDefaultModel = React.useCallback((model: string) => {
+    setFormData((prev) => ({ ...prev, default_model: model }));
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -148,7 +177,7 @@ export function ProviderFormDialog({
   const canTest = Boolean(
     formData.base_url.trim() &&
     formData.api_key.trim() &&
-    formData.default_model.trim(),
+    formData.models.length > 0,
   );
 
   const defaultTrigger = isEditing ? (
@@ -243,31 +272,57 @@ export function ProviderFormDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="models">Models (comma-separated)</Label>
-            <Input
-              id="models"
-              value={formData.models.join(", ")}
-              onChange={(e) =>
-                setFormData({
-                  ...formData,
-                  models: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
-                })
-              }
-              placeholder="gpt-4, gpt-4o, gpt-3.5-turbo"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="default_model">Default Model</Label>
-            <Input
-              id="default_model"
-              value={formData.default_model}
-              onChange={(e) =>
-                setFormData({ ...formData, default_model: e.target.value })
-              }
-              placeholder="gpt-4"
-              required
-            />
+            <Label>Models</Label>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {formData.models.map((model) => (
+                <Badge
+                  key={model}
+                  variant={model === formData.default_model ? "default" : "secondary"}
+                  className="cursor-pointer pr-1"
+                  onClick={() => handleSetDefaultModel(model)}
+                >
+                  {model}
+                  {model === formData.default_model && (
+                    <span className="ml-1 text-[10px] opacity-70">默认</span>
+                  )}
+                  <button
+                    type="button"
+                    className="ml-1 hover:text-destructive"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRemoveModel(model);
+                    }}
+                  >
+                    ×
+                  </button>
+                </Badge>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={newModel}
+                onChange={(e) => setNewModel(e.target.value)}
+                placeholder="输入模型名称"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleAddModel();
+                  }
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleAddModel}
+                disabled={!newModel.trim()}
+              >
+                添加
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              点击标签设为默认模型
+            </p>
           </div>
           <DialogFooter className="gap-2 sm:gap-0">
             <Button

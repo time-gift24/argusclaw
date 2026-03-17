@@ -13,6 +13,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface ProviderTestDialogProps {
   open: boolean;
@@ -20,6 +28,8 @@ interface ProviderTestDialogProps {
   provider: LlmProviderSummary | null;
   result?: ProviderTestResult | null;
   testing?: boolean;
+  selectedModel?: string;
+  onModelChange?: (model: string) => void;
   onRetest: () => void;
 }
 
@@ -35,6 +45,8 @@ export function ProviderTestDialog({
   provider,
   result,
   testing = false,
+  selectedModel,
+  onModelChange,
   onRetest,
 }: ProviderTestDialogProps) {
   const statusTone = testing
@@ -47,6 +59,8 @@ export function ProviderTestDialog({
     : result?.status === "success"
       ? "成功"
       : "失败";
+
+  const displayModel = selectedModel ?? provider?.default_model ?? result?.model ?? "-";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -83,9 +97,9 @@ export function ProviderTestDialog({
 
             <div className="mt-4 grid gap-3 text-xs">
               <div className="flex items-start justify-between gap-3">
-                <span className="text-muted-foreground">Default Model</span>
+                <span className="text-muted-foreground">Model</span>
                 <span className="font-mono text-right">
-                  {provider?.default_model ?? result?.model ?? "-"}
+                  {displayModel}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-3">
@@ -96,6 +110,30 @@ export function ProviderTestDialog({
               </div>
             </div>
           </div>
+
+          {provider && provider.models.length > 0 && onModelChange && (
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">选择测试模型</Label>
+              <Select
+                value={selectedModel || provider.default_model}
+                onValueChange={(value) => {
+                  if (value) onModelChange(value);
+                }}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="选择模型" />
+                </SelectTrigger>
+                <SelectContent>
+                  {provider.models.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                      {model === provider.default_model && " (默认)"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div className="rounded-lg border border-border/60 p-4">
             <p className="mb-2 text-xs font-medium text-muted-foreground">
