@@ -80,12 +80,12 @@ export const providers = {
   get: (id: number) => invoke<LlmProviderRecord | null>("get_provider", { id: id.toString() }),
 
   upsert: (record: ProviderInput) =>
-    invoke<void>("upsert_provider", {
+    invoke<string>("upsert_provider", {
       record: {
         ...record,
         id: record.id.toString(),
       },
-    }),
+    }).then((id) => parseInt(id, 10)),
 
   delete: (id: number) => invoke<boolean>("delete_provider", { id: id.toString() }),
 

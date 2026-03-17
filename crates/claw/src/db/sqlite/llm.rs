@@ -238,7 +238,7 @@ impl SqliteLlmProviderRepository {
 
 #[async_trait]
 impl LlmProviderRepository for SqliteLlmProviderRepository {
-    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError> {
+    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<LlmProviderId, DbError> {
         // Validate models
         if record.models.is_empty() {
             return Err(DbError::QueryFailed {
@@ -277,8 +277,8 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                 })?;
         }
 
-        // If ID is 0 (placeholder), do an INSERT without the id column to let SQLite auto-generate
-        if record.id.into_inner() == 0 {
+        let provider_id = if record.id.into_inner() == 0 {
+            // INSERT without id - let SQLite auto-generate
             sqlx::query(
                 "insert into llm_providers (kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
                  values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -297,6 +297,16 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
+
+            // Get the newly generated ID
+            let new_id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: format!("failed to get last_insert_rowid: {e}"),
+                })?;
+
+            LlmProviderId::new(new_id)
         } else {
             sqlx::query(
                 "insert into llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
@@ -328,7 +338,9 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
-        }
+
+            record.id
+        };
 
         transaction
             .commit()
@@ -337,7 +349,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                 reason: e.to_string(),
             })?;
 
-        Ok(())
+        Ok(provider_id)
     }
 
     async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), DbError> {

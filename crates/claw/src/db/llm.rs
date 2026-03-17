@@ -175,7 +175,9 @@ pub struct ProviderTestResult {
 
 #[async_trait]
 pub trait LlmProviderRepository: Send + Sync {
-    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError>;
+    /// Upserts a provider record. Returns the provider ID (newly generated for inserts, or the
+    /// existing ID for updates).
+    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<LlmProviderId, DbError>;
 
     async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, DbError>;
 

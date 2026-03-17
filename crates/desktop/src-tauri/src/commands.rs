@@ -194,9 +194,10 @@ pub async fn get_provider(
 pub async fn upsert_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: ProviderInput,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let record = record.try_into()?;
-    ctx.upsert_provider(record).await.map_err(|e| e.to_string())
+    let id = ctx.upsert_provider(record).await.map_err(|e| e.to_string())?;
+    Ok(id.to_string())
 }
 
 #[tauri::command]

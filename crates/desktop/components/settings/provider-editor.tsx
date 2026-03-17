@@ -153,7 +153,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     setTestingModels((prev) => new Set(prev).add(model))
 
     try {
-      // Save first to ensure provider exists
       const input: ProviderInput = {
         id: formData.id,
         kind: formData.kind,
@@ -165,9 +164,13 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         is_default: formData.is_default,
         extra_headers: formData.extra_headers,
       }
-      await providers.upsert(input)
 
-      const result = await providers.testConnection(formData.id, model)
+      // For existing providers, test the saved record
+      // For new providers, test the input without saving
+      const result = formData.id > 0
+        ? await providers.testConnection(formData.id, model)
+        : await providers.testInput(input, model)
+
       setTestResults((prev) => ({ ...prev, [model]: result }))
     } catch (error) {
       const fallbackResult: ProviderTestResult = {

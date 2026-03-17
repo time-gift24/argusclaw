@@ -190,7 +190,7 @@ impl AppContext {
         self.shutdown.cancel();
     }
 
-    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
+    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId, AgentError> {
         self.llm_manager.upsert_provider(record).await
     }
 
