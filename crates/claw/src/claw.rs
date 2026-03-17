@@ -19,11 +19,12 @@ use crate::db::sqlite::{
 use crate::error::AgentError;
 use crate::job::JobRepository;
 #[cfg(feature = "dev")]
-use crate::llm::provider::LlmEventStream;
-use crate::llm::{LLMManager, LlmProvider};
+use argus_protocol::llm::LlmEventStream;
+use crate::llm::LLMManager;
+use argus_protocol::LlmProvider;
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
-use crate::tool::ToolManager;
+use argus_tool::ToolManager;
 use crate::user::UserService;
 
 // Session layer - use existing protocol types
@@ -279,7 +280,7 @@ impl AppContext {
             .map_err(|e| AgentError::Session { reason: e.to_string() })?;
 
         // Convert back to claw's ThreadId
-        Ok(ThreadId::parse(thread_id.inner()).map_err(|e| AgentError::Session { reason: e.to_string() })?)
+        Ok(ThreadId::parse(&thread_id.inner().to_string()).map_err(|e| AgentError::Session { reason: e.to_string() })?)
     }
 
     /// Delete a thread from a session.
@@ -289,7 +290,8 @@ impl AppContext {
         thread_id: &ThreadId,
     ) -> Result<(), AgentError> {
         // Convert to argus-protocol ThreadId
-        let thread_id_proto = argus_protocol::ThreadId::new(thread_id.to_string());
+        let thread_id_proto = argus_protocol::ThreadId::parse(&thread_id.to_string())
+            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
 
         self.session_manager
             .delete_thread(session_id, &thread_id_proto)

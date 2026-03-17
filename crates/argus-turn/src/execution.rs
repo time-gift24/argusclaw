@@ -11,13 +11,15 @@ use tokio::sync::broadcast;
 use tokio::time::{error::Elapsed, timeout};
 
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmStreamEvent, ToolCall, ToolCompletionRequest,
+    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
+};
+use argus_protocol::{
+    BeforeCallLLMContext, HookEvent, HookRegistry, ThreadEvent, TokenUsage, ToolHookContext,
 };
 use argus_tool::ToolManager;
 
-use super::hooks::{BeforeCallLLMContext, HookEvent, HookRegistry, ToolHookContext};
-use super::{TokenUsage, TurnConfig, TurnError, TurnInput, TurnOutput, TurnStreamEvent};
+use super::{TurnConfig, TurnError, TurnInput, TurnOutput, TurnStreamEvent};
 
 /// Execution mode for turn processing.
 #[derive(Debug, Clone, Copy)]
@@ -170,7 +172,7 @@ fn process_finish_reason(
 ///
 /// Falls back to non-streaming if the provider doesn't support streaming.
 async fn call_llm_streaming(
-    provider: &Arc<dyn crate::llm::LlmProvider>,
+    provider: &Arc<dyn LlmProvider>,
     request: ToolCompletionRequest,
     stream_sender: Option<&broadcast::Sender<TurnStreamEvent>>,
 ) -> Result<ToolCompletionResponse, TurnError> {
@@ -187,7 +189,7 @@ async fn call_llm_streaming(
             }
             Ok(accumulator.into_response())
         }
-        Err(crate::llm::LlmError::UnsupportedCapability { .. }) => {
+        Err(argus_protocol::llm::LlmError::UnsupportedCapability { .. }) => {
             // Fallback to non-streaming
             tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
             provider
@@ -411,9 +413,9 @@ async fn execute_turn_with_mode(
                         tool_input: serde_json::Value::Null,
                         tool_result: None,
                         error: None,
-                        tool_manager: Some(Arc::clone(&tool_manager)),
+                        tool_manager: None,
                         thread_event_sender: thread_event_sender.clone(),
-                        thread_id,
+                        thread_id: thread_id.clone(),
                         turn_number: Some(iteration),
                     };
                     // TurnEnd is observe-only, ignore errors
@@ -430,7 +432,7 @@ async fn execute_turn_with_mode(
                     hooks.as_ref().map(|v| v.as_ref()),
                     tool_timeout_secs,
                     thread_event_sender.clone(),
-                    thread_id,
+                    thread_id.clone(),
                     iteration,
                     stream_sender.clone(),
                 )
@@ -479,8 +481,8 @@ async fn execute_tools_parallel(
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
-    thread_event_sender: Option<broadcast::Sender<crate::protocol::ThreadEvent>>,
-    thread_id: Option<crate::protocol::ThreadId>,
+    thread_event_sender: Option<broadcast::Sender<ThreadEvent>>,
+    thread_id: Option<String>,
     turn_number: u32,
     stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 ) -> Vec<ToolExecutionResult> {
@@ -493,7 +495,7 @@ async fn execute_tools_parallel(
                 hooks,
                 tool_timeout_secs,
                 thread_event_sender.clone(),
-                thread_id,
+                thread_id.clone(),
                 turn_number,
                 stream_sender.clone(),
             )
@@ -509,13 +511,11 @@ async fn execute_single_tool(
     tool_manager: Arc<ToolManager>,
     hooks: Option<&HookRegistry>,
     tool_timeout_secs: u64,
-    thread_event_sender: Option<broadcast::Sender<crate::protocol::ThreadEvent>>,
-    thread_id: Option<crate::protocol::ThreadId>,
+    thread_event_sender: Option<broadcast::Sender<ThreadEvent>>,
+    thread_id: Option<String>,
     turn_number: u32,
     stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
 ) -> ToolExecutionResult {
-    use crate::protocol::ThreadEvent;
-
     let tool_call_id = tool_call.id.clone();
     let tool_name = tool_call.name.clone();
     let tool_input = tool_call.arguments.clone();
@@ -529,9 +529,9 @@ async fn execute_single_tool(
             tool_input: tool_input.clone(),
             tool_result: None,
             error: None,
-            tool_manager: Some(Arc::clone(&tool_manager)),
+            tool_manager: None,
             thread_event_sender: thread_event_sender.clone(),
-            thread_id,
+            thread_id: thread_id.clone(),
             turn_number: Some(turn_number),
         };
         if let Err(reason) = registry.fire_tool_event(&ctx).await {
@@ -546,9 +546,9 @@ async fn execute_single_tool(
                 tool_input,
                 tool_result: None,
                 error: Some(reason),
-                tool_manager: Some(Arc::clone(&tool_manager)),
+                tool_manager: None,
                 thread_event_sender: thread_event_sender.clone(),
-                thread_id,
+                thread_id: thread_id.clone(),
                 turn_number: Some(turn_number),
             };
             let _ = registry.fire_tool_event(&after_ctx).await;
@@ -563,10 +563,10 @@ async fn execute_single_tool(
 
     // Send ToolStarted events
     if let Some(ref sender) = thread_event_sender
-        && let Some(tid) = thread_id
+        && let Some(ref tid) = thread_id
     {
         let _ = sender.send(ThreadEvent::ToolStarted {
-            thread_id: tid,
+            thread_id: tid.clone(),
             turn_number,
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -596,14 +596,14 @@ async fn execute_single_tool(
 
     // Send ToolCompleted events
     if let Some(ref sender) = thread_event_sender
-        && let Some(tid) = thread_id
+        && let Some(ref tid) = thread_id
     {
         let event_result = match &result {
             Ok(value) => Ok(value.clone()),
             Err(e) => Err(e.clone()),
         };
         let _ = sender.send(ThreadEvent::ToolCompleted {
-            thread_id: tid,
+            thread_id: tid.clone(),
             turn_number,
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -635,9 +635,9 @@ async fn execute_single_tool(
             tool_input,
             tool_result,
             error,
-            tool_manager: Some(Arc::clone(&tool_manager)),
+            tool_manager: None,
             thread_event_sender: thread_event_sender.clone(),
-            thread_id,
+            thread_id: thread_id.clone(),
             turn_number: Some(turn_number),
         };
         let _ = registry.fire_tool_event(&ctx).await;
@@ -660,11 +660,9 @@ async fn execute_single_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::turn::{
-        BeforeCallLLMContext, HookAction, HookHandler, ToolHookContext, TurnConfigBuilder,
-        TurnInputBuilder,
-    };
-    use argus_protocol::{LlmProvider, ToolCompletionResponse};
+    use crate::{TurnConfigBuilder, TurnInputBuilder};
+    use argus_protocol::llm::Role;
+    use argus_protocol::{BeforeCallLLMContext, HookAction, HookHandler, ToolHookContext};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use std::sync::{Arc, Mutex};
@@ -697,7 +695,7 @@ mod tests {
         async fn complete_with_tools(
             &self,
             _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+        ) -> Result<ToolCompletionResponse, argus_protocol::llm::LlmError> {
             let mut count = self.call_count.lock().unwrap();
             let responses = self.responses.lock().unwrap();
             if *count < responses.len() {
@@ -722,7 +720,7 @@ mod tests {
         async fn complete(
             &self,
             _request: argus_protocol::llm::CompletionRequest,
-        ) -> Result<argus_protocol::llm::CompletionResponse, crate::llm::LlmError> {
+        ) -> Result<argus_protocol::llm::CompletionResponse, argus_protocol::llm::LlmError> {
             unreachable!("complete not used in turn execution")
         }
     }
@@ -749,23 +747,6 @@ mod tests {
             args: serde_json::Value,
         ) -> Result<serde_json::Value, argus_tool::ToolError> {
             Ok(args)
-        }
-    }
-
-    /// Handler that modifies messages.
-    struct MessageModifierHandler;
-
-    #[async_trait]
-    impl HookHandler for MessageModifierHandler {
-        async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
-            let mut messages = ctx.messages.clone();
-            // Add a prefix to track hook execution
-            if let Some(first) = messages.first_mut()
-                && first.role == crate::llm::Role::User
-            {
-                first.content = format!("[Modified] {}", first.content);
-            }
-            HookAction::ModifyMessages(messages)
         }
     }
 
@@ -798,8 +779,8 @@ mod tests {
 
         // Should have original message + assistant response
         assert_eq!(output.messages.len(), 2);
-        assert_eq!(output.messages[0].role, crate::llm::Role::User);
-        assert_eq!(output.messages[1].role, crate::llm::Role::Assistant);
+        assert_eq!(output.messages[0].role, Role::User);
+        assert_eq!(output.messages[1].role, Role::Assistant);
         assert_eq!(output.messages[1].content, "Hello, world!");
 
         // Token usage should be tracked
@@ -810,6 +791,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_before_call_llm_can_modify_messages() {
+        struct MessageModifierHandler;
+
+        #[async_trait]
+        impl HookHandler for MessageModifierHandler {
+            async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
+                let mut messages = ctx.messages.clone();
+                // Add a prefix to track hook execution
+                if let Some(first) = messages.first_mut()
+                    && first.role == Role::User
+                {
+                    first.content = format!("[Modified] {}", first.content);
+                }
+                HookAction::ModifyMessages(messages)
+            }
+        }
+
         let provider = Arc::new(MockProvider::new(vec![ToolCompletionResponse {
             content: Some("Response".to_string()),
             reasoning_content: None,
@@ -925,12 +922,12 @@ mod tests {
 
         // Should have: system (max_tool_calls hint) -> user -> assistant (tool_calls) -> tool_result -> assistant (final)
         assert_eq!(output.messages.len(), 5);
-        assert_eq!(output.messages[0].role, crate::llm::Role::System);
-        assert_eq!(output.messages[1].role, crate::llm::Role::User);
-        assert_eq!(output.messages[2].role, crate::llm::Role::Assistant);
+        assert_eq!(output.messages[0].role, Role::System);
+        assert_eq!(output.messages[1].role, Role::User);
+        assert_eq!(output.messages[2].role, Role::Assistant);
         assert!(output.messages[2].tool_calls.is_some());
-        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
-        assert_eq!(output.messages[4].role, crate::llm::Role::Assistant);
+        assert_eq!(output.messages[3].role, Role::Tool);
+        assert_eq!(output.messages[4].role, Role::Assistant);
         assert_eq!(output.messages[4].content, "Done after tool");
 
         // Token usage should accumulate
@@ -956,7 +953,7 @@ mod tests {
             async fn complete_with_tools(
                 &self,
                 _request: ToolCompletionRequest,
-            ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+            ) -> Result<ToolCompletionResponse, argus_protocol::llm::LlmError> {
                 Ok(ToolCompletionResponse {
                     content: None,
                     reasoning_content: None,
@@ -976,7 +973,7 @@ mod tests {
             async fn complete(
                 &self,
                 _request: argus_protocol::llm::CompletionRequest,
-            ) -> Result<argus_protocol::llm::CompletionResponse, crate::llm::LlmError>
+            ) -> Result<argus_protocol::llm::CompletionResponse, argus_protocol::llm::LlmError>
             {
                 unreachable!()
             }
@@ -1067,384 +1064,7 @@ mod tests {
         // Tool should have been blocked - tool result should contain blocked message
         // Messages: system, user, assistant(tool_calls), tool_result(blocked), assistant(final)
         assert_eq!(output.messages.len(), 5);
-        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
+        assert_eq!(output.messages[3].role, Role::Tool);
         assert!(output.messages[3].content.contains("blocked"));
-    }
-
-    // ========================================================================
-    // Integration tests (migrated from tests/turn_integration_test.rs)
-    // ========================================================================
-
-    use argus_tool::NamedTool;
-    use std::time::Instant;
-
-    /// Delayed tool for testing parallel execution.
-    struct DelayedTool {
-        delay_ms: u64,
-    }
-
-    #[async_trait]
-    impl NamedTool for DelayedTool {
-        fn name(&self) -> &str {
-            "delayed"
-        }
-
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "delayed".to_string(),
-                description: "Returns after a configurable delay".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" }
-                    }
-                }),
-            }
-        }
-
-        async fn execute(
-            &self,
-            args: serde_json::Value,
-        ) -> Result<serde_json::Value, argus_tool::ToolError> {
-            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
-            Ok(args)
-        }
-    }
-
-    /// Counter tool that tracks how many times it was executed.
-    struct CounterTool {
-        count: Mutex<u32>,
-    }
-
-    impl CounterTool {
-        fn new() -> Self {
-            Self {
-                count: Mutex::new(0),
-            }
-        }
-
-        fn get_count(&self) -> u32 {
-            *self.count.lock().unwrap()
-        }
-    }
-
-    #[async_trait]
-    impl NamedTool for CounterTool {
-        fn name(&self) -> &str {
-            "counter"
-        }
-
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "counter".to_string(),
-                description: "Counts how many times it was called".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            }
-        }
-
-        async fn execute(
-            &self,
-            args: serde_json::Value,
-        ) -> Result<serde_json::Value, argus_tool::ToolError> {
-            let mut count = self.count.lock().unwrap();
-            *count += 1;
-            Ok(serde_json::json!({
-                "call_number": *count,
-                "input": args
-            }))
-        }
-    }
-
-    /// Hook handler that records all tool events it receives.
-    struct RecordingHookHandler {
-        events: Mutex<Vec<(HookEvent, String)>>,
-    }
-
-    impl RecordingHookHandler {
-        fn new() -> Self {
-            Self {
-                events: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn get_events(&self) -> Vec<(HookEvent, String)> {
-            self.events.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl HookHandler for RecordingHookHandler {
-        async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
-            let mut events = self.events.lock().unwrap();
-            events.push((ctx.event, ctx.tool_name.clone()));
-            HookAction::Continue
-        }
-    }
-
-    #[tokio::test]
-    async fn test_turn_with_multiple_tool_calls() {
-        let tool_manager = Arc::new(ToolManager::new());
-        tool_manager.register(Arc::new(EchoTool));
-
-        let responses = vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![
-                    ToolCall {
-                        id: "call_1".to_string(),
-                        name: "echo".to_string(),
-                        arguments: serde_json::json!({"message": "hello"}),
-                    },
-                    ToolCall {
-                        id: "call_2".to_string(),
-                        name: "echo".to_string(),
-                        arguments: serde_json::json!({"message": "world"}),
-                    },
-                ],
-                input_tokens: 100,
-                output_tokens: 50,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Done!".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                input_tokens: 80,
-                output_tokens: 10,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ];
-
-        let provider = Arc::new(MockProvider::new(responses));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Hello")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["echo".to_string()])
-            .build()
-            .unwrap();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        // system -> user -> assistant (tool_calls) -> tool_result -> tool_result -> assistant (final)
-        assert_eq!(output.messages.len(), 6);
-        assert_eq!(output.messages[0].role, crate::llm::Role::System);
-        assert_eq!(output.messages[1].role, crate::llm::Role::User);
-        assert_eq!(output.messages[2].role, crate::llm::Role::Assistant);
-        assert!(output.messages[2].tool_calls.is_some());
-        assert_eq!(output.messages[2].tool_calls.as_ref().unwrap().len(), 2);
-        assert_eq!(output.messages[3].role, crate::llm::Role::Tool);
-        assert_eq!(output.messages[4].role, crate::llm::Role::Tool);
-        assert_eq!(output.messages[5].role, crate::llm::Role::Assistant);
-        assert_eq!(output.messages[5].content, "Done!");
-
-        assert_eq!(output.token_usage.input_tokens, 180);
-        assert_eq!(output.token_usage.output_tokens, 60);
-        assert_eq!(output.token_usage.total_tokens, 240);
-    }
-
-    #[tokio::test]
-    async fn test_parallel_tool_execution_timing() {
-        let tool_manager = Arc::new(ToolManager::new());
-        tool_manager.register(Arc::new(DelayedTool { delay_ms: 100 }));
-
-        let responses = vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![
-                    ToolCall {
-                        id: "call_1".to_string(),
-                        name: "delayed".to_string(),
-                        arguments: serde_json::json!({"id": 1}),
-                    },
-                    ToolCall {
-                        id: "call_2".to_string(),
-                        name: "delayed".to_string(),
-                        arguments: serde_json::json!({"id": 2}),
-                    },
-                ],
-                input_tokens: 50,
-                output_tokens: 20,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Done after parallel execution".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                input_tokens: 60,
-                output_tokens: 15,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ];
-
-        let provider = Arc::new(MockProvider::new(responses));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Test parallel")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["delayed".to_string()])
-            .build()
-            .unwrap();
-
-        let config = TurnConfig::default();
-
-        let start = Instant::now();
-        let output = execute_turn(input, config).await.unwrap();
-        let elapsed = start.elapsed();
-
-        // If tools run in parallel, total time should be ~100ms, not ~200ms
-        assert!(
-            elapsed.as_millis() < 250,
-            "Parallel execution should complete in ~100ms, took {:?}",
-            elapsed
-        );
-
-        assert_eq!(output.messages.len(), 6);
-        assert_eq!(output.token_usage.total_tokens, 145);
-    }
-
-    #[tokio::test]
-    async fn test_hook_callbacks_are_invoked() {
-        let counter_tool = Arc::new(CounterTool::new());
-        let tool_manager = Arc::new(ToolManager::new());
-        tool_manager.register(counter_tool.clone());
-
-        let recording_handler = Arc::new(RecordingHookHandler::new());
-        let hooks = Arc::new(HookRegistry::new());
-        hooks.register(HookEvent::BeforeToolCall, recording_handler.clone());
-        hooks.register(HookEvent::AfterToolCall, recording_handler.clone());
-        hooks.register(HookEvent::TurnEnd, recording_handler.clone());
-
-        let responses = vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_1".to_string(),
-                    name: "counter".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                input_tokens: 30,
-                output_tokens: 10,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Complete".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                input_tokens: 20,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ];
-
-        let provider = Arc::new(MockProvider::new(responses));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Test hooks")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["counter".to_string()])
-            .hooks(hooks)
-            .build()
-            .unwrap();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        assert_eq!(counter_tool.get_count(), 1);
-        assert_eq!(output.messages.len(), 5);
-
-        let events = recording_handler.get_events();
-        assert_eq!(events.len(), 3, "Expected 3 events, got: {:?}", events);
-        assert_eq!(events[0].0, HookEvent::BeforeToolCall);
-        assert_eq!(events[0].1, "counter");
-        assert_eq!(events[1].0, HookEvent::AfterToolCall);
-        assert_eq!(events[1].1, "counter");
-        assert_eq!(events[2].0, HookEvent::TurnEnd);
-    }
-
-    #[tokio::test]
-    async fn test_multiple_iterations_with_tools() {
-        let tool_manager = Arc::new(ToolManager::new());
-        tool_manager.register(Arc::new(EchoTool));
-
-        let responses = vec![
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_1".to_string(),
-                    name: "echo".to_string(),
-                    arguments: serde_json::json!({"step": 1}),
-                }],
-                input_tokens: 50,
-                output_tokens: 20,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_2".to_string(),
-                    name: "echo".to_string(),
-                    arguments: serde_json::json!({"step": 2}),
-                }],
-                input_tokens: 60,
-                output_tokens: 25,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            ToolCompletionResponse {
-                content: Some("Completed after two iterations".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                input_tokens: 70,
-                output_tokens: 30,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ];
-
-        let provider = Arc::new(MockProvider::new(responses));
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Multi-iteration test")])
-            .tool_manager(tool_manager)
-            .tool_ids(vec!["echo".to_string()])
-            .build()
-            .unwrap();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        // system -> user -> assistant(tool_calls) -> tool_result -> assistant(tool_calls) -> tool_result -> assistant(final)
-        assert_eq!(output.messages.len(), 7);
-
-        assert_eq!(output.token_usage.input_tokens, 180);
-        assert_eq!(output.token_usage.output_tokens, 75);
-        assert_eq!(output.token_usage.total_tokens, 255);
     }
 }

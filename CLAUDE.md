@@ -18,7 +18,7 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 - DRY (Don't Repeat Yourself, 禁止重复你自身)
 
 ## 编码前检查
-- 务必使用 using-git-worktrees 去独立分支工作
+- 禁止在 main (极其重要) 分支工作，如果在 main 分支则使用 using-git-worktrees 去独立分支工作
 - 完成工作后无需提问直接发起 PR
 
 ## 代码风格

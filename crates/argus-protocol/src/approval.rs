@@ -167,6 +167,42 @@ pub enum ApprovalEvent {
 }
 
 // ---------------------------------------------------------------------------
+// ApprovalManager Trait
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+
+/// Trait for approval management.
+///
+/// This trait allows argus-thread to work with approval without depending on claw.
+#[async_trait]
+pub trait ApprovalManager: Send + Sync {
+    /// Check if a tool requires approval based on current policy.
+    fn requires_approval(&self, tool_name: &str) -> bool;
+
+    /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
+    async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision;
+
+    /// Resolve a pending approval request.
+    fn resolve(&self, request_id: Uuid, decision: ApprovalDecision);
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalPolicy (placeholder - to be moved from claw)
+// ---------------------------------------------------------------------------
+
+/// Placeholder for ApprovalPolicy - actual implementation is in claw.
+#[derive(Debug, Clone)]
+pub struct ApprovalPolicy;
+
+impl ApprovalPolicy {
+    /// Check if a tool requires approval.
+    pub fn requires_approval(&self, _tool_name: &str) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

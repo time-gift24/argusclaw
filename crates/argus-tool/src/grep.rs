@@ -16,9 +16,9 @@ use regex::RegexBuilder;
 use serde_json::json;
 use std::path::Path;
 
-use crate::llm::ToolDefinition;
-use crate::protocol::RiskLevel;
-use crate::tool::{NamedTool, ToolError};
+use argus_protocol::llm::ToolDefinition;
+use argus_protocol::risk_level::RiskLevel;
+use argus_protocol::{NamedTool, ToolError};
 
 /// Maximum number of matches to return.
 const MAX_MATCHES: usize = 100;

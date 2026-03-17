@@ -7,14 +7,14 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::agents::compact::{Compactor, CompactorManager};
-use crate::agents::thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
+use argus_thread::compact::{Compactor, CompactorManager};
+use argus_thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord};
 use crate::approval::{ApprovalHook, ApprovalManager, ApprovalPolicy};
 use crate::error::AgentError;
-use crate::llm::{ChatMessage, LlmProvider};
-use crate::protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadEvent, ThreadId};
-use crate::tool::ToolManager;
+use argus_protocol::{ChatMessage, LlmProvider};
+use crate::protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadId};
+use argus_tool::ToolManager;
 
 /// Runtime information about an agent.
 #[derive(Debug, Clone)]
@@ -196,10 +196,6 @@ impl Agent {
             builder = builder.hooks(Arc::clone(hooks));
         }
 
-        if let Some(manager) = &self.approval_manager {
-            builder = builder.approval_manager(Arc::clone(manager));
-        }
-
         let mut thread = builder.build().map_err(|e| AgentError::ThreadBuildFailed {
             reason: e.to_string(),
         })?;
@@ -211,7 +207,10 @@ impl Agent {
                 .push(ChatMessage::system(&self.system_prompt));
         }
 
-        let id = *thread.id();
+        // Convert String ID to ThreadId
+        let id = ThreadId::parse(thread.id()).map_err(|e| AgentError::ThreadBuildFailed {
+            reason: format!("Invalid thread ID: {}", e),
+        })?;
         self.threads
             .insert(id, Arc::new(tokio::sync::Mutex::new(thread)));
         Ok(id)
@@ -252,7 +251,7 @@ impl Agent {
     pub async fn subscribe(
         &self,
         thread_id: &ThreadId,
-    ) -> Option<broadcast::Receiver<ThreadEvent>> {
+    ) -> Option<broadcast::Receiver<argus_protocol::ThreadEvent>> {
         let thread_arc = self.threads.get(thread_id)?.value().clone();
         Some(thread_arc.lock().await.subscribe())
     }
@@ -323,16 +322,16 @@ impl Agent {
         let thread = thread_arc.lock().await;
         Some(crate::protocol::ThreadSnapshot {
             runtime_agent_id: self.id.clone(),
-            thread_id: *thread.id(),
+            thread_id: ThreadId::parse(thread.id()).unwrap_or_default(),
             messages: thread
                 .history()
                 .iter()
                 .map(|message| crate::protocol::ThreadMessageSnapshot {
                     role: match message.role {
-                        crate::llm::Role::System => "system".to_string(),
-                        crate::llm::Role::User => "user".to_string(),
-                        crate::llm::Role::Assistant => "assistant".to_string(),
-                        crate::llm::Role::Tool => "tool".to_string(),
+                        argus_protocol::Role::System => "system".to_string(),
+                        argus_protocol::Role::User => "user".to_string(),
+                        argus_protocol::Role::Assistant => "assistant".to_string(),
+                        argus_protocol::Role::Tool => "tool".to_string(),
                     },
                     content: message.content.clone(),
                     reasoning_content: message.reasoning_content.clone(),
@@ -390,8 +389,8 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
-    use crate::llm::provider::{CompletionRequest, CompletionResponse};
-    use crate::llm::{
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse};
+    use argus_protocol::{
         FinishReason, LlmError, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
     };
     use crate::protocol::ThreadEvent;
@@ -469,7 +468,7 @@ mod tests {
                 match subscription.recv().await {
                     Ok(ThreadEvent::Idle {
                         thread_id: idle_thread_id,
-                    }) if idle_thread_id == thread_id => {
+                    }) if idle_thread_id == thread_id.inner().to_string() => {
                         break;
                     }
                     Ok(_) => {}

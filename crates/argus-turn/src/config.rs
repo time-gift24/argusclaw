@@ -8,8 +8,8 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
-use crate::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
-use crate::protocol::{HookRegistry, ThreadEvent, ThreadId, TokenUsage};
+use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
+use argus_protocol::{HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
 
 /// Turn execution configuration.
@@ -111,7 +111,7 @@ pub struct TurnInput {
     pub thread_event_sender: Option<broadcast::Sender<ThreadEvent>>,
     /// Thread ID for event context.
     #[builder(default, setter(strip_option))]
-    pub thread_id: Option<ThreadId>,
+    pub thread_id: Option<String>,
     /// Stream event sender for real-time updates during streaming execution.
     #[builder(default, setter(strip_option))]
     pub stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
@@ -174,7 +174,7 @@ pub struct TurnOutput {
     pub messages: Vec<ChatMessage>,
     /// Token usage statistics.
     #[builder(default)]
-    pub token_usage: TokenUsage,
+    pub token_usage: argus_protocol::TokenUsage,
 }
 
 #[cfg(test)]
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_turn_output_with_token_usage() {
-        let token_usage = TokenUsage {
+        let token_usage = argus_protocol::TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
             total_tokens: 150,

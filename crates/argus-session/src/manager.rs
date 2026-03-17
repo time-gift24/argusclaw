@@ -109,7 +109,7 @@ impl SessionManager {
                 .unwrap_or_else(|_| chrono::Utc::now());
 
             let thread = crate::session::Thread {
-                id: ThreadId::new(thread_row.get::<String, _>("id")),
+                id: ThreadId::parse(&thread_row.get::<String, _>("id")).unwrap_or_default(),
                 session_id,
                 template_id: AgentId::new(thread_row.get("template_id")),
                 provider_id: ProviderId::new(thread_row.get("provider_id")),
@@ -180,7 +180,7 @@ impl SessionManager {
             .ok_or(ArgusError::TemplateNotFound(template_id.inner()))?;
 
         // Generate thread ID (UUID)
-        let thread_id = ThreadId::new(uuid::Uuid::new_v4().to_string());
+        let thread_id = ThreadId::new();
 
         // Insert into DB
         sqlx::query(
@@ -189,7 +189,7 @@ impl SessionManager {
             VALUES (?, ?, ?, ?, 0, 0, datetime('now'), datetime('now'))
             "#,
         )
-        .bind(thread_id.inner())
+        .bind(thread_id.inner().to_string())
         .bind(session_id.inner())
         .bind(template_id.inner())
         .bind(provider_id.inner())
@@ -217,7 +217,7 @@ impl SessionManager {
     ) -> Result<()> {
         // Delete from DB
         sqlx::query("DELETE FROM threads WHERE id = ? AND session_id = ?")
-            .bind(thread_id.inner())
+            .bind(thread_id.inner().to_string())
             .bind(session_id.inner())
             .execute(&self.pool)
             .await
@@ -260,7 +260,7 @@ impl SessionManager {
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 ThreadSummary {
-                    id: ThreadId::new(row.get::<String, _>("id")),
+                    id: ThreadId::parse(&row.get::<String, _>("id")).unwrap_or_default(),
                     title: row.get("title"),
                     token_count: row.get("token_count"),
                     turn_count: row.get("turn_count"),

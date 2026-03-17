@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
-use crate::agents::compact::CompactorManager;
+use crate::agents::CompactorManager;
 use crate::agents::thread::{ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
 use crate::approval::ApprovalManager;
@@ -16,7 +16,7 @@ use crate::db::DbError;
 use crate::error::AgentError;
 use crate::llm::LLMManager;
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
-use crate::tool::ToolManager;
+use argus_tool::ToolManager;
 
 /// Starting ID for runtime agents (to distinguish from template IDs which start from 1).
 const RUNTIME_AGENT_ID_START: i64 = 1_000_000_000;

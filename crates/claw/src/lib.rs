@@ -3,13 +3,12 @@
 #![allow(clippy::too_many_arguments)]
 
 // === 内部模块 (不对外暴露) ===
-pub(crate) mod agents;
+pub mod agents; // Public for argus-thread
 pub(crate) mod api;
 pub(crate) mod db;
 pub(crate) mod job;
-pub(crate) mod llm;
+pub mod llm; // Public for argus-turn and argus-thread (LLMManager, secret)
 pub(crate) mod scheduler;
-pub(crate) mod tool;
 pub(crate) mod workflow;
 
 // === 公开模块 ===
@@ -18,11 +17,8 @@ pub mod error; // AgentError
 pub mod protocol; // 稳定 DTO
 pub mod user; // User management
 
-// approval: dev feature 下公开，否则 crate 内部
-#[cfg(feature = "dev")]
+// approval: public for argus-thread
 pub mod approval;
-#[cfg(not(feature = "dev"))]
-pub(crate) mod approval;
 
 // === 稳定公共 API 重导出 ===
 
@@ -48,8 +44,12 @@ pub use db::llm::{
     ProviderTestResult, ProviderTestStatus, SecretString,
 };
 
-// Tool Types
-pub use tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
+// Tool Types - from argus-tool
+pub use argus_tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
+
+// LLM Types - from argus-protocol (types) and internal llm module (LLMManager)
+pub use argus_protocol::{ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition};
+pub use llm::LLMManager;
 
 // User Types
 pub use user::UserInfo;
@@ -77,8 +77,8 @@ pub use db::{ApprovalRepository, SqliteJobRepository, SqliteWorkflowRepository};
 #[cfg(feature = "dev")]
 pub use job::{JobRecord, JobRepository, JobType};
 #[cfg(feature = "dev")]
-pub use llm::provider::LlmEventStream;
+pub use argus_protocol::llm::LlmEventStream;
 #[cfg(feature = "dev")]
-pub use llm::{ChatMessage, LLMManager, LlmProvider, Role};
+pub use llm::LLMManager;
 #[cfg(feature = "dev")]
 pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};

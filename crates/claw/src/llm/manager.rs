@@ -8,12 +8,11 @@ use crate::db::llm::{
     ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
 };
 use crate::error::AgentError;
-use crate::llm::ChatMessage;
-use crate::llm::LlmError;
-use crate::llm::LlmProvider;
-use crate::llm::provider::CompletionRequest;
+
+// Use re-exports from mod.rs
+use super::{ChatMessage, CompletionRequest, LlmError, LlmProvider};
 #[cfg(feature = "dev")]
-use crate::llm::provider::LlmEventStream;
+use super::LlmEventStream;
 
 pub struct LLMManager {
     repository: Arc<dyn LlmProviderRepository>,
@@ -245,7 +244,7 @@ impl LLMManager {
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
         match record.kind {
             LlmProviderKind::OpenAiCompatible => {
-                let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
+                let mut config = super::OpenAiCompatibleConfig::new(
                     record.base_url,
                     record.api_key.expose_secret().to_string(),
                     model.to_string(),
@@ -255,10 +254,9 @@ impl LLMManager {
                     config = config.with_extra_header(name, value);
                 }
 
-                let factory_config =
-                    crate::llm::providers::OpenAiCompatibleFactoryConfig::new(config);
+                let factory_config = super::OpenAiCompatibleFactoryConfig::new(config);
 
-                crate::llm::providers::create_openai_compatible_provider(factory_config)
+                super::create_openai_compatible_provider(factory_config)
                     .map_err(AgentError::from)
             }
         }

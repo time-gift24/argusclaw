@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Session ID - INTEGER auto-increment from database
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -8,27 +9,46 @@ impl SessionId {
     pub fn new(id: i64) -> Self {
         Self(id)
     }
+
     pub fn inner(&self) -> i64 {
         self.0
     }
 }
 
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+/// Thread ID - UUID wrapper for thread identification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ThreadId(pub Uuid);
+
+impl ThreadId {
+    /// Create a new unique ThreadId.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Parse a ThreadId from a string representation.
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+
+    /// Parse a ThreadId from a string, returning a default value on error.
+    pub fn parse_or_default(s: &str) -> Self {
+        Self::parse(s).unwrap_or_default()
+    }
+
+    /// Get the inner UUID value.
+    pub fn inner(&self) -> &Uuid {
+        &self.0
+    }
+
+    /// Convert to a string representation.
+    pub fn to_string(&self) -> String {
+        self.0.to_string()
     }
 }
 
-/// Thread ID - TEXT (UUID string)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ThreadId(pub String);
-
-impl ThreadId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-    pub fn inner(&self) -> &str {
-        &self.0
+impl Default for ThreadId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -38,7 +58,7 @@ impl std::fmt::Display for ThreadId {
     }
 }
 
-/// Agent/Template ID - INTEGER auto-increment from database
+/// Agent ID - INTEGER auto-increment from database
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub i64);
 
@@ -46,6 +66,7 @@ impl AgentId {
     pub fn new(id: i64) -> Self {
         Self(id)
     }
+
     pub fn inner(&self) -> i64 {
         self.0
     }
@@ -65,6 +86,7 @@ impl ProviderId {
     pub fn new(id: i64) -> Self {
         Self(id)
     }
+
     pub fn inner(&self) -> i64 {
         self.0
     }

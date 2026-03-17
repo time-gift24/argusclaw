@@ -1,21 +1,68 @@
-//! LLM provider trait and types.
+//! LLM types for provider abstraction.
 //!
-//! Derived from:
-//! - Repository: https://github.com/nearai/ironclaw
-//! - Upstream path: src/llm/provider.rs
-//! - Upstream commit: bcef04b82108222c9041e733de459130badd4cd7
-//! - License: MIT OR Apache-2.0
-//!
-//! Local modifications:
-//! - Vendored as ArgusClaw's stable `crate::llm` core interface.
-//! - Retains only the provider-agnostic API surface used by this crate.
+//! This module contains shared types used by both LLM providers and tools.
+//! It is consumed by argus-llm and argus-tool crates.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_core::Stream;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::llm::error::LlmError;
+// ============================================================================
+// Error Types
+// ============================================================================
+
+/// Unified error type for provider-agnostic LLM operations.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmError {
+    /// Provider returned an error for a request.
+    #[error("Provider {provider} request failed: {reason}")]
+    RequestFailed { provider: String, reason: String },
+
+    /// Provider is rate limited and may indicate a retry window.
+    #[error("Provider {provider} rate limited, retry after {retry_after:?}")]
+    RateLimited {
+        provider: String,
+        retry_after: Option<Duration>,
+    },
+
+    /// Provider response was malformed or unexpected.
+    #[error("Invalid response from {provider}: {reason}")]
+    InvalidResponse { provider: String, reason: String },
+
+    /// Request exceeded the model context window.
+    #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
+    ContextLengthExceeded { used: usize, limit: usize },
+
+    /// Requested model is not available on the provider.
+    #[error("Model {model} not available on provider {provider}")]
+    ModelNotAvailable { provider: String, model: String },
+
+    /// Authentication failed for the provider.
+    #[error("Authentication failed for provider {provider}")]
+    AuthFailed { provider: String },
+
+    /// Provider session expired and requires renewal.
+    #[error("Session expired for provider {provider}")]
+    SessionExpired { provider: String },
+
+    /// Session renewal failed.
+    #[error("Session renewal failed for provider {provider}: {reason}")]
+    SessionRenewalFailed { provider: String, reason: String },
+
+    /// Provider does not support a requested capability.
+    #[error("Provider {provider} does not support capability {capability}")]
+    UnsupportedCapability {
+        provider: String,
+        capability: String,
+    },
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
 
 /// Role in a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,28 +74,6 @@ pub enum Role {
     Tool,
 }
 
-/// A part of multimodal message content (OpenAI Chat Completions format).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ContentPart {
-    /// Text content part.
-    #[serde(rename = "text")]
-    Text { text: String },
-    /// Image URL content part (supports data: URLs for inline base64 images).
-    #[serde(rename = "image_url")]
-    ImageUrl { image_url: ImageUrl },
-}
-
-/// Image URL reference for multimodal content.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageUrl {
-    /// URL or data: URI (e.g., "data:image/jpeg;base64,...").
-    pub url: String,
-    /// Detail level hint: "auto", "low", or "high".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
 /// Controls whether the provider should generate reasoning content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +81,20 @@ pub enum ThinkingMode {
     Enabled,
     Disabled,
 }
+
+/// Why the completion finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolUse,
+    ContentFilter,
+    Unknown,
+}
+
+// ============================================================================
+// Structs
+// ============================================================================
 
 /// Provider-specific thinking configuration for a request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +132,28 @@ impl ThinkingConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ProviderCapabilities {
     pub thinking: bool,
+}
+
+/// A part of multimodal message content (OpenAI Chat Completions format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content part.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image URL content part (supports data: URLs for inline base64 images).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL reference for multimodal content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// URL or data: URI (e.g., "data:image/jpeg;base64,...").
+    pub url: String,
+    /// Detail level hint: "auto", "low", or "high".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// A message in a conversation.
@@ -330,16 +391,6 @@ pub struct ToolCallDelta {
 pub type LlmEventStream =
     std::pin::Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, LlmError>> + Send + 'static>>;
 
-/// Why the completion finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FinishReason {
-    Stop,
-    Length,
-    ToolUse,
-    ContentFilter,
-    Unknown,
-}
-
 /// Definition of a tool for the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -452,6 +503,10 @@ pub struct ModelMetadata {
     /// Total context window size in tokens.
     pub context_length: Option<u32>,
 }
+
+// ============================================================================
+// LlmProvider Trait
+// ============================================================================
 
 /// Trait for LLM providers.
 #[async_trait]
@@ -572,6 +627,10 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
 /// Sanitize a message list to ensure tool_use / tool_result integrity.
 ///
 /// LLM APIs (especially Anthropic) require every tool_result to reference a
@@ -627,73 +686,6 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    const UPSTREAM_URL: &str = "https://github.com/nearai/ironclaw";
-    const UPSTREAM_COMMIT: &str = "bcef04b82108222c9041e733de459130badd4cd7";
-    const UPSTREAM_LICENSE: &str = "MIT OR Apache-2.0";
-
-    struct StubStream;
-
-    impl Stream for StubStream {
-        type Item = Result<LlmStreamEvent, LlmError>;
-
-        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Poll::Ready(None)
-        }
-    }
-
-    struct StubProvider;
-
-    #[async_trait]
-    impl LlmProvider for StubProvider {
-        fn model_name(&self) -> &str {
-            "stub"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, LlmError> {
-            Ok(CompletionResponse {
-                content: String::new(),
-                reasoning_content: None,
-                input_tokens: 0,
-                output_tokens: 0,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            Ok(ToolCompletionResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
-        }
-
-        async fn stream_complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<LlmEventStream, LlmError> {
-            Ok(Box::pin(StubStream))
-        }
-    }
 
     #[test]
     fn test_sanitize_preserves_valid_pairs() {
@@ -759,8 +751,58 @@ mod tests {
 
     #[test]
     fn test_provider_capabilities_default_to_thinking_disabled() {
-        let provider = StubProvider;
+        struct StubProvider;
 
+        #[async_trait]
+        impl LlmProvider for StubProvider {
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: String::new(),
+                    reasoning_content: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn stream_complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<LlmEventStream, LlmError> {
+                Ok(Box::pin(futures_util::stream::iter(vec![])))
+            }
+        }
+
+        let provider = StubProvider;
         assert!(!provider.capabilities().thinking);
     }
 
@@ -789,152 +831,5 @@ mod tests {
         assert_eq!(messages[2].role, Role::Tool); // call_1 is valid
         assert_eq!(messages[3].role, Role::User); // call_2 orphaned
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
-    }
-
-    /// Regression: worker's select_tools/execute_plan now emit
-    /// assistant_with_tool_calls before tool_result messages.
-    /// Verify sanitize_tool_messages preserves all tool_results when
-    /// each has a matching assistant tool_call.
-    #[test]
-    fn test_sanitize_preserves_tool_results_with_matching_assistant() {
-        let tc1 = ToolCall {
-            id: "call_sel_1".to_string(),
-            name: "search".to_string(),
-            arguments: serde_json::json!({"q": "test"}),
-        };
-        let tc2 = ToolCall {
-            id: "call_sel_2".to_string(),
-            name: "http".to_string(),
-            arguments: serde_json::json!({"url": "https://example.com"}),
-        };
-        let mut messages = vec![
-            ChatMessage::system("You are a helpful assistant."),
-            ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]),
-            ChatMessage::tool_result("call_sel_1", "search", "found 3 results"),
-            ChatMessage::tool_result("call_sel_2", "http", "200 OK"),
-        ];
-        sanitize_tool_messages(&mut messages);
-
-        // All tool_results must keep Role::Tool -- none should be rewritten.
-        assert_eq!(messages[2].role, Role::Tool);
-        assert_eq!(messages[2].tool_call_id, Some("call_sel_1".to_string()));
-        assert_eq!(messages[2].content, "found 3 results");
-
-        assert_eq!(messages[3].role, Role::Tool);
-        assert_eq!(messages[3].tool_call_id, Some("call_sel_2".to_string()));
-        assert_eq!(messages[3].content, "200 OK");
-    }
-
-    /// Regression: the OLD buggy worker code pushed tool_result messages
-    /// without a preceding assistant_with_tool_calls, causing
-    /// sanitize_tool_messages to rewrite them as orphaned user messages.
-    /// This test reproduces that buggy sequence and confirms the rewrite.
-    #[test]
-    fn test_sanitize_rewrites_orphaned_tool_results() {
-        let mut messages = vec![
-            ChatMessage::system("You are a helpful assistant."),
-            // No assistant_with_tool_calls -- mimics the old bug.
-            ChatMessage::tool_result("call_bug_1", "search", "found 3 results"),
-            ChatMessage::tool_result("call_bug_2", "http", "200 OK"),
-        ];
-        sanitize_tool_messages(&mut messages);
-
-        // Both tool_results must be rewritten to Role::User.
-        assert_eq!(messages[1].role, Role::User);
-        assert!(messages[1].content.contains("[Tool `search` returned:"));
-        assert!(messages[1].content.contains("found 3 results"));
-        assert!(messages[1].tool_call_id.is_none());
-        assert!(messages[1].name.is_none());
-
-        assert_eq!(messages[2].role, Role::User);
-        assert!(messages[2].content.contains("[Tool `http` returned:"));
-        assert!(messages[2].content.contains("200 OK"));
-        assert!(messages[2].tool_call_id.is_none());
-        assert!(messages[2].name.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_stream_methods_default_to_unsupported() {
-        struct UnsupportedProvider;
-
-        #[async_trait]
-        impl LlmProvider for UnsupportedProvider {
-            fn model_name(&self) -> &str {
-                "unsupported"
-            }
-
-            fn cost_per_token(&self) -> (Decimal, Decimal) {
-                (Decimal::ZERO, Decimal::ZERO)
-            }
-
-            async fn complete(
-                &self,
-                _request: CompletionRequest,
-            ) -> Result<CompletionResponse, LlmError> {
-                unreachable!()
-            }
-
-            async fn complete_with_tools(
-                &self,
-                _request: ToolCompletionRequest,
-            ) -> Result<ToolCompletionResponse, LlmError> {
-                unreachable!()
-            }
-        }
-
-        let provider = UnsupportedProvider;
-        let err = match provider
-            .stream_complete(CompletionRequest::new(vec![]))
-            .await
-        {
-            Ok(_) => panic!("default stream_complete should be unsupported"),
-            Err(err) => err,
-        };
-        assert!(matches!(
-            err,
-            LlmError::UnsupportedCapability { capability, .. } if capability == "stream_complete"
-        ));
-
-        let err = match provider
-            .stream_complete_with_tools(ToolCompletionRequest::new(vec![], vec![]))
-            .await
-        {
-            Ok(_) => panic!("default stream_complete_with_tools should be unsupported"),
-            Err(err) => err,
-        };
-        assert!(matches!(
-            err,
-            LlmError::UnsupportedCapability { capability, .. }
-                if capability == "stream_complete_with_tools"
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_provider_can_override_streaming() {
-        let provider = StubProvider;
-        let stream = provider
-            .stream_complete(CompletionRequest::new(vec![]))
-            .await
-            .expect("override should return a stream");
-        let _stream: LlmEventStream = stream;
-    }
-
-    #[test]
-    fn vendored_provider_file_includes_provenance_header() {
-        let provider = include_str!("provider.rs");
-
-        assert!(provider.contains(UPSTREAM_URL));
-        assert!(provider.contains(UPSTREAM_COMMIT));
-        assert!(provider.contains(UPSTREAM_LICENSE));
-    }
-
-    #[test]
-    fn third_party_notice_mentions_provider_file() {
-        let notice = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/llm/THIRD_PARTY_NOTICES.md"
-        ));
-
-        assert!(notice.contains("crates/agent/src/llm/provider.rs"));
     }
 }

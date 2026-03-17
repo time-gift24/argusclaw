@@ -227,7 +227,7 @@ mod tests {
         let runtime_agent_id = "agent-runtime-1".to_string();
         let thread_id = ThreadId::new();
         let event = claw::ThreadEvent::Processing {
-            thread_id,
+            thread_id: thread_id.inner().to_string(),
             turn_number: 3,
             event: LlmStreamEvent::ContentDelta {
                 delta: "hello".to_string(),
@@ -238,7 +238,7 @@ mod tests {
             .expect("content delta should forward");
 
         assert_eq!(envelope.runtime_agent_id, runtime_agent_id);
-        assert_eq!(envelope.thread_id, thread_id.to_string());
+        assert_eq!(envelope.thread_id, thread_id.inner().to_string());
         assert_eq!(envelope.turn_number, Some(3));
         assert!(matches!(
             envelope.payload,
@@ -248,10 +248,11 @@ mod tests {
 
     #[test]
     fn tool_completed_error_conversion_preserves_error_text() {
+        let thread_id = ThreadId::new();
         let envelope = ThreadEventEnvelope::from_thread_event(
             "agent-runtime-1".to_string(),
             claw::ThreadEvent::ToolCompleted {
-                thread_id: ThreadId::new(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: 1,
                 tool_call_id: "call-1".to_string(),
                 tool_name: "shell".to_string(),

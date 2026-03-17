@@ -12,9 +12,9 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::llm::ToolDefinition;
-use crate::protocol::RiskLevel;
-use crate::tool::{NamedTool, ToolError};
+use argus_protocol::llm::ToolDefinition;
+use argus_protocol::risk_level::RiskLevel;
+use argus_protocol::{NamedTool, ToolError};
 
 /// Maximum number of results to return.
 const MAX_RESULTS: usize = 1000;

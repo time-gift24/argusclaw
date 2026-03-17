@@ -40,7 +40,7 @@ impl TurnLogRepository for SqliteTurnLogRepository {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(log.thread_id.inner())
+        .bind(log.thread_id.inner().to_string())
         .bind(log.turn_seq)
         .bind(log.input_tokens)
         .bind(log.output_tokens)
@@ -64,7 +64,7 @@ impl TurnLogRepository for SqliteTurnLogRepository {
             ORDER BY turn_seq ASC
             "#,
         )
-        .bind(thread_id.inner())
+        .bind(thread_id.inner().to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -78,7 +78,7 @@ impl TurnLogRepository for SqliteTurnLogRepository {
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 TurnLog {
-                    thread_id: ThreadId::new(row.get::<String, _>("thread_id")),
+                    thread_id: ThreadId::parse(&row.get::<String, _>("thread_id")).unwrap_or_default(),
                     turn_seq: row.get("turn_seq"),
                     input_tokens: row.get("input_tokens"),
                     output_tokens: row.get("output_tokens"),
@@ -111,7 +111,7 @@ impl TurnLogRepository for SqliteTurnLogRepository {
             .into_iter()
             .map(|row| {
                 let thread_id: String = row.get("thread_id");
-                ThreadId::new(thread_id)
+                ThreadId::parse(&thread_id).unwrap_or_default()
             })
             .collect();
 
@@ -140,7 +140,7 @@ impl TurnLogRepository for SqliteTurnLogRepository {
 
         let mut query = sqlx::query(&query);
         for id in keep_thread_ids {
-            query = query.bind(id.inner());
+            query = query.bind(id.inner().to_string());
         }
 
         let result = query

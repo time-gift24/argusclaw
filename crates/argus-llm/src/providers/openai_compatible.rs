@@ -11,15 +11,13 @@ use reqwest::header::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, ContentPart, LlmEventStream, ProviderCapabilities,
-    ThinkingConfig, ToolCallDelta,
-};
-use crate::llm::retry::{RetryConfig, RetryProvider};
-use crate::llm::{
-    ChatMessage, FinishReason, LlmError, LlmProvider, LlmStreamEvent, Role, ToolCall,
+use argus_protocol::llm::{
+    CompletionRequest, CompletionResponse, ContentPart, LlmEventStream, LlmError, LlmProvider,
+    LlmStreamEvent, ProviderCapabilities, Role, ThinkingConfig, ToolCall, ToolCallDelta,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
+
+use crate::retry::{RetryConfig, RetryProvider};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleConfig {
@@ -84,7 +82,8 @@ impl OpenAiCompatibleFactoryConfig {
 pub fn create_openai_compatible_provider(
     config: OpenAiCompatibleFactoryConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let provider: Arc<dyn LlmProvider> = Arc::new(OpenAiCompatibleProvider::new(config.provider)?);
+    let provider: Arc<dyn LlmProvider> =
+        Arc::new(OpenAiCompatibleProvider::new(config.provider)?);
     if let Some(retry) = config.retry {
         Ok(Arc::new(RetryProvider::new(provider, retry)))
     } else {
@@ -148,14 +147,14 @@ impl OpenAiCompatibleProvider {
         &self,
         body: &ChatCompletionsRequest,
     ) -> Result<reqwest::Response, LlmError> {
-        let response =
-            self.build_chat_request(body)
-                .send()
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: "openai-compatible".to_string(),
-                    reason: e.to_string(),
-                })?;
+        let response = self
+            .build_chat_request(body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "openai-compatible".to_string(),
+                reason: e.to_string(),
+            })?;
 
         if response.status().is_success() {
             return Ok(response);
@@ -205,24 +204,21 @@ impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let body = ChatCompletionsRequest::from_completion_request(&self.model, request, false);
         let response = self.send_chat_request(&body).await?;
-        let payload: ChatCompletionResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| LlmError::InvalidResponse {
-                    provider: "openai-compatible".to_string(),
-                    reason: e.to_string(),
-                })?;
+        let payload: ChatCompletionResponse = response.json().await.map_err(|e| {
+            LlmError::InvalidResponse {
+                provider: "openai-compatible".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
 
-        let choice =
-            payload
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
-                    provider: "openai-compatible".to_string(),
-                    reason: "response had no choices".to_string(),
-                })?;
+        let choice = payload
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| LlmError::InvalidResponse {
+                provider: "openai-compatible".to_string(),
+                reason: "response had no choices".to_string(),
+            })?;
         let usage = payload.usage.unwrap_or_default();
 
         Ok(CompletionResponse {
@@ -243,24 +239,21 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let body =
             ChatCompletionsRequest::from_tool_completion_request(&self.model, request, false);
         let response = self.send_chat_request(&body).await?;
-        let payload: ChatCompletionResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| LlmError::InvalidResponse {
-                    provider: "openai-compatible".to_string(),
-                    reason: e.to_string(),
-                })?;
+        let payload: ChatCompletionResponse = response.json().await.map_err(|e| {
+            LlmError::InvalidResponse {
+                provider: "openai-compatible".to_string(),
+                reason: e.to_string(),
+            }
+        })?;
 
-        let choice =
-            payload
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
-                    provider: "openai-compatible".to_string(),
-                    reason: "response had no choices".to_string(),
-                })?;
+        let choice = payload
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| LlmError::InvalidResponse {
+                provider: "openai-compatible".to_string(),
+                reason: "response had no choices".to_string(),
+            })?;
         let usage = payload.usage.unwrap_or_default();
 
         Ok(ToolCompletionResponse {
@@ -306,7 +299,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
-        let body = ChatCompletionsRequest::from_tool_completion_request(&self.model, request, true);
+        let body =
+            ChatCompletionsRequest::from_tool_completion_request(&self.model, request, true);
         let response = self.send_chat_request(&body).await?;
         let stream = response
             .bytes_stream()
@@ -362,9 +356,7 @@ impl ChatCompletionsRequest {
             tools: None,
             tool_choice: None,
             stream,
-            stream_options: stream.then_some(StreamOptions {
-                include_usage: true,
-            }),
+            stream_options: stream.then_some(StreamOptions { include_usage: true }),
         }
     }
 
@@ -393,9 +385,7 @@ impl ChatCompletionsRequest {
             ),
             tool_choice: request.tool_choice,
             stream,
-            stream_options: stream.then_some(StreamOptions {
-                include_usage: true,
-            }),
+            stream_options: stream.then_some(StreamOptions { include_usage: true }),
         }
     }
 }
@@ -444,8 +434,8 @@ struct OpenAiMessage {
     tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
-impl From<ChatMessage> for OpenAiMessage {
-    fn from(value: ChatMessage) -> Self {
+impl From<argus_protocol::llm::ChatMessage> for OpenAiMessage {
+    fn from(value: argus_protocol::llm::ChatMessage) -> Self {
         let content = if value.content_parts.is_empty() {
             OpenAiContent::Text(value.content)
         } else {
@@ -582,7 +572,7 @@ struct ChatCompletionChunkFunction {
     arguments: Option<String>,
 }
 
-fn parse_stream_frame(data: &str) -> Vec<Result<crate::llm::LlmStreamEvent, LlmError>> {
+fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
     if data == "[DONE]" {
         return Vec::new();
     }
@@ -607,15 +597,11 @@ fn parse_stream_frame(data: &str) -> Vec<Result<crate::llm::LlmStreamEvent, LlmE
     }
 
     for choice in chunk.choices {
-        if let Some(reasoning) = choice.delta.reasoning_content
-            && !reasoning.is_empty()
-        {
+        if let Some(reasoning) = choice.delta.reasoning_content && !reasoning.is_empty() {
             events.push(Ok(LlmStreamEvent::ReasoningDelta { delta: reasoning }));
         }
 
-        if let Some(content) = choice.delta.content
-            && !content.is_empty()
-        {
+        if let Some(content) = choice.delta.content && !content.is_empty() {
             events.push(Ok(LlmStreamEvent::ContentDelta { delta: content }));
         }
 
@@ -643,13 +629,13 @@ fn parse_stream_frame(data: &str) -> Vec<Result<crate::llm::LlmStreamEvent, LlmE
     events
 }
 
-fn parse_finish_reason(reason: Option<&str>) -> FinishReason {
+fn parse_finish_reason(reason: Option<&str>) -> argus_protocol::llm::FinishReason {
     match reason {
-        Some("stop") => FinishReason::Stop,
-        Some("length") => FinishReason::Length,
-        Some("tool_calls") => FinishReason::ToolUse,
-        Some("content_filter") => FinishReason::ContentFilter,
-        _ => FinishReason::Unknown,
+        Some("stop") => argus_protocol::llm::FinishReason::Stop,
+        Some("length") => argus_protocol::llm::FinishReason::Length,
+        Some("tool_calls") => argus_protocol::llm::FinishReason::ToolUse,
+        Some("content_filter") => argus_protocol::llm::FinishReason::ContentFilter,
+        _ => argus_protocol::llm::FinishReason::Unknown,
     }
 }
 
@@ -699,7 +685,7 @@ mod tests {
 
     #[test]
     fn chat_completions_request_serializes_thinking() {
-        let request = CompletionRequest::new(vec![ChatMessage::user("hi")])
+        let request = CompletionRequest::new(vec![argus_protocol::llm::ChatMessage::user("hi")])
             .with_thinking(ThinkingConfig::enabled().with_clear_thinking(false));
 
         let body = ChatCompletionsRequest::from_completion_request("glm-5", request, false);
@@ -719,7 +705,7 @@ mod tests {
         .expect("provider should build");
         let body = ChatCompletionsRequest::from_completion_request(
             "glm-5",
-            CompletionRequest::new(vec![ChatMessage::user("hi")]),
+            CompletionRequest::new(vec![argus_protocol::llm::ChatMessage::user("hi")]),
             true,
         );
 
@@ -837,7 +823,7 @@ mod tests {
                     output_tokens: 5,
                 },
                 LlmStreamEvent::Finished {
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: argus_protocol::llm::FinishReason::Stop,
                 },
             ]
         );

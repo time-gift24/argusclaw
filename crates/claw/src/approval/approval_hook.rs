@@ -77,7 +77,7 @@ impl HookHandler for ApprovalHook {
         let risk_level = ctx
             .tool_manager
             .as_ref()
-            .map(|tm| tm.get_risk_level(&ctx.tool_name))
+            .map(|tm| tm.risk_level())
             .unwrap_or(RiskLevel::Low);
 
         // Create approval request
@@ -92,7 +92,7 @@ impl HookHandler for ApprovalHook {
 
         // Send WaitingForApproval event to thread subscribers
         if let (Some(sender), Some(thread_id), Some(turn_number)) =
-            (&ctx.thread_event_sender, ctx.thread_id, ctx.turn_number)
+            (&ctx.thread_event_sender, ctx.thread_id.clone(), ctx.turn_number)
         {
             let _ = sender.send(ThreadEvent::WaitingForApproval {
                 thread_id,
@@ -106,7 +106,7 @@ impl HookHandler for ApprovalHook {
 
         // Send ApprovalResolved event to thread subscribers
         if let (Some(sender), Some(thread_id), Some(turn_number)) =
-            (&ctx.thread_event_sender, ctx.thread_id, ctx.turn_number)
+            (&ctx.thread_event_sender, ctx.thread_id.clone(), ctx.turn_number)
         {
             let response = ApprovalResponse {
                 request_id: req.id,
@@ -206,11 +206,11 @@ mod tests {
     use rust_decimal::Decimal;
 
     use crate::agents::turn::{TurnConfig, TurnInputBuilder, execute_turn};
-    use crate::llm::{
+    use argus_protocol::llm::{
         ChatMessage, FinishReason, LlmError, LlmProvider, ToolCall, ToolCompletionRequest,
         ToolCompletionResponse, ToolDefinition,
     };
-    use crate::tool::{NamedTool, ToolError, ToolManager};
+    use argus_tool::{NamedTool, ToolError, ToolManager};
 
     struct SequentialMockProvider {
         responses: Mutex<Vec<ToolCompletionResponse>>,
@@ -238,8 +238,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: crate::llm::provider::CompletionRequest,
-        ) -> Result<crate::llm::provider::CompletionResponse, LlmError> {
+            _request: argus_protocol::llm::CompletionRequest,
+        ) -> Result<argus_protocol::llm::CompletionResponse, LlmError> {
             unimplemented!("complete not used in turn execution")
         }
 
@@ -628,7 +628,7 @@ mod tests {
             .tool_ids(vec!["dangerous_tool".to_string()])
             .hooks(hooks)
             .thread_event_sender(thread_event_tx)
-            .thread_id(thread_id)
+            .thread_id(thread_id.inner().to_string())
             .build()
             .unwrap();
 

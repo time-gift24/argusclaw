@@ -2,9 +2,9 @@ use thiserror::Error;
 
 use crate::agents::AgentId;
 use crate::db::DbError;
-use crate::llm::LlmError;
+use argus_protocol::LlmError;
 use crate::protocol::ThreadId;
-use crate::tool::ToolError;
+use argus_tool::ToolError;
 use crate::user::UserError;
 
 #[derive(Debug, Error)]

@@ -1,53 +1,27 @@
-//! Tool module: defines NamedTool trait and ToolError for agent/LLM tool management.
-
-mod glob;
-mod grep;
-mod read;
-mod shell;
+//! Argus Tool crate - Tool system for agents and LLMs.
+//!
+//! This crate provides the tool system including the NamedTool trait, ToolManager,
+//! and built-in tool implementations.
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use dashmap::DashMap;
 
-use crate::llm::ToolDefinition;
-use crate::protocol::RiskLevel;
+use argus_protocol::llm::ToolDefinition;
+use argus_protocol::risk_level::RiskLevel;
+
+// Re-export from argus_protocol
+pub use argus_protocol::{NamedTool, ToolError};
+
+pub mod glob;
+pub mod grep;
+pub mod read;
+pub mod shell;
 
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use read::ReadTool;
 pub use shell::ShellTool;
-
-/// Error type for tool operations.
-#[derive(Debug, thiserror::Error)]
-pub enum ToolError {
-    /// Tool not found in registry.
-    #[error("Tool not found: {id}")]
-    NotFound { id: String },
-
-    /// Tool execution failed.
-    #[error("Tool '{tool_name}' execution failed: {reason}")]
-    ExecutionFailed { tool_name: String, reason: String },
-}
-
-/// Trait for defining tools that can be used by agents and LLMs.
-#[async_trait]
-pub trait NamedTool: Send + Sync {
-    /// Returns the unique name of the tool.
-    fn name(&self) -> &str;
-
-    /// Returns the tool definition for LLM consumption.
-    fn definition(&self) -> ToolDefinition;
-
-    /// Execute the tool with the provided arguments.
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
-
-    /// Returns the risk level of this tool for approval gating.
-    /// Default is `RiskLevel::Low` for read-only/safe operations.
-    fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Low
-    }
-}
 
 /// Registry for tools with concurrent access support.
 pub struct ToolManager {
@@ -119,6 +93,9 @@ impl Default for ToolManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Import async_trait to implement NamedTool from argus_protocol
+    use async_trait::async_trait;
 
     /// A test tool that echoes back its input arguments.
     struct EchoTool;
@@ -361,10 +338,6 @@ mod tests {
         manager.register(Arc::new(EchoTool));
         assert!(manager.get("echo").is_some());
     }
-
-    // -----------------------------------------------------------------------
-    // risk_level tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn default_risk_level_is_low() {

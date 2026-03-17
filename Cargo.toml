@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/argus-protocol", "crates/argus-log", "crates/argus-template", "crates/argus-session", "crates/claw", "crates/cli", "crates/desktop/src-tauri"]
+members = ["crates/argus-protocol", "crates/argus-log", "crates/argus-template", "crates/argus-session", "crates/argus-turn", "crates/argus-thread", "crates/argus-llm", "crates/argus-tool", "crates/claw", "crates/cli", "crates/desktop/src-tauri"]
 resolver = "3"

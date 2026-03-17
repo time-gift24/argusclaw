@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn provider_input_converts_into_domain_record() {
         let record: LlmProviderRecord = ProviderInput {
-            id: "1".to_string(),
+            id: 1,
             kind: ProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -591,7 +591,7 @@ mod tests {
 
         let output = ProviderRecord::from(record);
 
-        assert_eq!(output.id, "1");
+        assert_eq!(output.id, 1);
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
@@ -611,7 +611,7 @@ mod tests {
             secret_status: ProviderSecretStatus::RequiresReentry,
         });
 
-        assert_eq!(record.id, "2");
+        assert_eq!(record.id, 2);
         assert_eq!(record.api_key, "");
         assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
     }
@@ -630,7 +630,7 @@ mod tests {
             secret_status: ProviderSecretStatus::Ready,
         });
 
-        assert_eq!(output.id, "1");
+        assert_eq!(output.id, 1);
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 

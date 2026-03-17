@@ -18,9 +18,8 @@ use async_trait::async_trait;
 use rand::RngExt;
 use rust_decimal::Decimal;
 
-use crate::llm::error::LlmError;
-use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmEventStream, LlmProvider, ModelMetadata,
+use argus_protocol::llm::{
+    CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider, ModelMetadata,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 
@@ -216,15 +215,13 @@ impl LlmProvider for RetryProvider {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use futures_core::Stream;
+    use futures_util::Stream;
 
     use super::*;
-    use crate::llm::provider::FinishReason;
-    use crate::llm::provider::LlmStreamEvent;
+    use argus_protocol::llm::{FinishReason, LlmStreamEvent};
 
     const UPSTREAM_URL: &str = "https://github.com/nearai/ironclaw";
     const UPSTREAM_COMMIT: &str = "bcef04b82108222c9041e733de459130badd4cd7";
@@ -410,15 +407,5 @@ mod tests {
         assert!(retry.contains(UPSTREAM_URL));
         assert!(retry.contains(UPSTREAM_COMMIT));
         assert!(retry.contains(UPSTREAM_LICENSE));
-    }
-
-    #[test]
-    fn third_party_notice_mentions_retry_file() {
-        let notice = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/llm/THIRD_PARTY_NOTICES.md"
-        ));
-
-        assert!(notice.contains("crates/agent/src/llm/retry.rs"));
     }
 }

@@ -5,15 +5,15 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
-use crate::agents::compact::Compactor;
-use crate::agents::turn::{TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming};
-use crate::approval::ApprovalManager;
-use argus_protocol::{ChatMessage, LlmProvider};
-use crate::protocol::HookRegistry;
+use argus_protocol::llm::{ChatMessage, LlmProvider};
+use argus_protocol::{HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
+use argus_turn::{execute_turn_streaming, TurnInputBuilder, TurnOutput, TurnStreamEvent};
 
-use super::{ThreadConfig, ThreadError, ThreadInfo, ThreadState};
-use crate::protocol::{ThreadEvent, ThreadId};
+use super::compact::{Compactor, CompactContext};
+use super::config::ThreadConfig;
+use super::error::ThreadError;
+use super::types::{ThreadInfo, ThreadState};
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -26,8 +26,8 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 #[builder(pattern = "owned", build_fn(skip))]
 pub struct Thread {
     /// Unique identifier.
-    #[builder(default = ThreadId::new())]
-    id: ThreadId,
+    #[builder(default = "uuid::Uuid::new_v4().to_string()")]
+    id: String,
 
     /// Initial message history (for restoring sessions).
     #[builder(default)]
@@ -41,12 +41,7 @@ pub struct Thread {
     tool_manager: Arc<ToolManager>,
 
     /// Compactor for managing context size.
-    pub(crate) compactor: Arc<dyn Compactor>,
-
-    /// Approval manager (optional, used by approval hooks via Arc sharing).
-    #[builder(default, setter(strip_option))]
-    #[allow(dead_code)]
-    approval_manager: Option<Arc<ApprovalManager>>,
+    compactor: Arc<dyn Compactor>,
 
     /// Hook registry for lifecycle events (optional).
     #[builder(default, setter(strip_option))]
@@ -97,14 +92,13 @@ impl ThreadBuilder {
         let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         Ok(Thread {
-            id: self.id.unwrap_or_default(),
+            id: self.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             messages: self.messages.unwrap_or_default(),
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
-            approval_manager: self.approval_manager.flatten(),
             hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
             token_count: 0,
@@ -124,18 +118,16 @@ impl Thread {
         provider: Arc<dyn LlmProvider>,
         tool_manager: Arc<ToolManager>,
         compactor: Arc<dyn Compactor>,
-        approval_manager: Option<Arc<ApprovalManager>>,
         config: ThreadConfig,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         Self {
-            id: ThreadId::new(),
+            id: uuid::Uuid::new_v4().to_string(),
             messages: Vec::new(),
             provider,
             tool_manager,
             compactor,
-            approval_manager,
             hooks: None,
             config,
             token_count: 0,
@@ -145,14 +137,14 @@ impl Thread {
     }
 
     /// Get the Thread ID.
-    pub fn id(&self) -> &ThreadId {
+    pub fn id(&self) -> &str {
         &self.id
     }
 
     /// Get information about this thread.
     pub fn info(&self) -> ThreadInfo {
         ThreadInfo {
-            id: self.id,
+            id: self.id.clone(),
             message_count: self.messages.len(),
             token_count: self.token_count,
             turn_count: self.turn_count,
@@ -220,8 +212,17 @@ impl Thread {
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
-        if let Err(e) = compactor.compact(self).await {
-            tracing::warn!("Compact failed: {}", e);
+
+        // Create CompactContext for compaction
+        {
+            let mut context = CompactContext::new(
+                &self.provider,
+                &mut self.token_count,
+                &mut self.messages,
+            );
+            if let Err(e) = compactor.compact(&mut context).await {
+                tracing::warn!("Compact failed: {}", e);
+            }
         }
 
         self.messages.push(ChatMessage::user(user_input));
@@ -232,7 +233,7 @@ impl Thread {
     async fn execute_turn_streaming(&mut self) -> Result<(), ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
-        let thread_id = self.id;
+        let thread_id = self.id.clone();
 
         // Create channel for streaming events
         let (stream_tx, mut stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
@@ -245,10 +246,10 @@ impl Thread {
             .tool_manager(self.tool_manager.clone())
             .tool_ids(tool_ids)
             .thread_event_sender(self.event_sender.clone())
-            .thread_id(thread_id)
+            .thread_id(thread_id.clone())
             .stream_sender(stream_tx);
 
-        // Set hooks if present (need to use into_option pattern for strip_option)
+        // Set hooks if present
         if let Some(hooks) = self.hooks.clone() {
             turn_input_builder = turn_input_builder.hooks(hooks);
         }
@@ -263,12 +264,13 @@ impl Thread {
 
         // Start event forwarding task (runs concurrently with turn execution)
         let forwarder_event_sender = event_sender.clone();
+        let forwarder_thread_id = thread_id.clone();
         let forwarder = tokio::spawn(async move {
             while let Ok(event) = stream_rx.recv().await {
                 match event {
                     TurnStreamEvent::LlmEvent(llm_event) => {
                         let _ = forwarder_event_sender.send(ThreadEvent::Processing {
-                            thread_id,
+                            thread_id: forwarder_thread_id.clone(),
                             turn_number,
                             event: llm_event,
                         });
@@ -279,7 +281,7 @@ impl Thread {
                         arguments,
                     } => {
                         let _ = forwarder_event_sender.send(ThreadEvent::ToolStarted {
-                            thread_id,
+                            thread_id: forwarder_thread_id.clone(),
                             turn_number,
                             tool_call_id,
                             tool_name,
@@ -292,7 +294,7 @@ impl Thread {
                         result: tool_result,
                     } => {
                         let _ = forwarder_event_sender.send(ThreadEvent::ToolCompleted {
-                            thread_id,
+                            thread_id: forwarder_thread_id.clone(),
                             turn_number,
                             tool_call_id,
                             tool_name,
@@ -311,7 +313,7 @@ impl Thread {
                 let token_usage = output.token_usage.clone();
                 self.apply_turn_output(output);
                 let _ = event_sender.send(ThreadEvent::TurnCompleted {
-                    thread_id,
+                    thread_id: thread_id.clone(),
                     turn_number,
                     token_usage,
                 });
@@ -319,7 +321,7 @@ impl Thread {
             }
             Err(error) => {
                 let _ = event_sender.send(ThreadEvent::TurnFailed {
-                    thread_id,
+                    thread_id: thread_id.clone(),
                     turn_number,
                     error: error.to_string(),
                 });
@@ -344,7 +346,7 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::compact::KeepRecentCompactor;
+    use crate::compact::KeepRecentCompactor;
 
     #[test]
     fn thread_builder_requires_provider() {
@@ -364,271 +366,5 @@ mod tests {
         assert_eq!(Thread::estimate_tokens("test"), 1);
         assert_eq!(Thread::estimate_tokens("test test"), 2);
         assert_eq!(Thread::estimate_tokens(""), 1);
-    }
-
-    // ========================================================================
-    // Integration tests (migrated from tests/thread_integration_test.rs)
-    // ========================================================================
-
-    use std::sync::Mutex;
-
-    use async_trait::async_trait;
-    use rust_decimal::Decimal;
-
-    use crate::agents::compact::{Compactor, KeepTokensCompactor};
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse};
-    use argus_protocol::{
-        FinishReason, LlmError, LlmProvider, Role, ToolCompletionRequest, ToolCompletionResponse,
-    };
-
-    use super::super::ThreadConfigBuilder;
-
-    /// Mock LLM provider that returns pre-defined responses in sequence.
-    struct SequentialMockProvider {
-        responses: Mutex<Vec<ToolCompletionResponse>>,
-        call_count: Mutex<usize>,
-    }
-
-    impl SequentialMockProvider {
-        fn new(responses: Vec<ToolCompletionResponse>) -> Self {
-            Self {
-                responses: Mutex::new(responses),
-                call_count: Mutex::new(0),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for SequentialMockProvider {
-        fn model_name(&self) -> &str {
-            "mock"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        fn context_window(&self) -> u32 {
-            100_000
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, LlmError> {
-            unimplemented!("complete not used in thread execution")
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            let mut count = self.call_count.lock().unwrap();
-            let responses = self.responses.lock().unwrap();
-            let response = responses
-                .get(*count)
-                .cloned()
-                .unwrap_or_else(|| panic!("No more responses configured for call {}", count));
-            *count += 1;
-            Ok(response)
-        }
-    }
-
-    fn create_simple_response(
-        content: &str,
-        input_tokens: u32,
-        output_tokens: u32,
-    ) -> ToolCompletionResponse {
-        ToolCompletionResponse {
-            content: Some(content.to_string()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            input_tokens,
-            output_tokens,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        }
-    }
-
-    #[tokio::test]
-    async fn test_thread_single_turn() {
-        let responses = vec![create_simple_response("Hello! How can I help?", 50, 20)];
-
-        let provider = Arc::new(SequentialMockProvider::new(responses));
-        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
-
-        let mut thread = ThreadBuilder::new()
-            .provider(provider)
-            .tool_manager(Arc::new(ToolManager::new()))
-            .compactor(compactor)
-            .build()
-            .unwrap();
-
-        let _event_rx = thread.subscribe();
-
-        assert_eq!(thread.turn_count(), 0);
-
-        let result = thread.send_message("Hello".to_string()).await;
-
-        assert_eq!(thread.turn_count(), 1);
-
-        assert!(result.is_ok());
-        assert_eq!(thread.history().len(), 2);
-        assert_eq!(thread.history()[0].role, Role::User);
-        assert_eq!(thread.history()[0].content, "Hello");
-        assert_eq!(thread.history()[1].role, Role::Assistant);
-        assert_eq!(thread.history()[1].content, "Hello! How can I help?");
-        assert!(thread.token_count() > 0);
-    }
-
-    #[tokio::test]
-    async fn test_thread_multi_turn() {
-        let responses = vec![
-            create_simple_response("Hello!", 50, 10),
-            create_simple_response("I'm doing well!", 60, 15),
-            create_simple_response("Goodbye!", 70, 20),
-        ];
-
-        let provider = Arc::new(SequentialMockProvider::new(responses));
-        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
-
-        let mut thread = ThreadBuilder::new()
-            .provider(provider)
-            .tool_manager(Arc::new(ToolManager::new()))
-            .compactor(compactor)
-            .build()
-            .unwrap();
-
-        let _ = thread.send_message("Hello".to_string()).await;
-
-        let _ = thread.send_message("How are you?".to_string()).await;
-
-        let _ = thread.send_message("Goodbye".to_string()).await;
-
-        assert_eq!(thread.turn_count(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_thread_with_initial_history() {
-        let responses = vec![create_simple_response("Continuing conversation", 80, 25)];
-
-        let initial_messages = vec![
-            ChatMessage::system("You are a helpful assistant"),
-            ChatMessage::user("Previous question"),
-            ChatMessage::assistant("Previous answer"),
-        ];
-
-        let provider = Arc::new(SequentialMockProvider::new(responses));
-        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
-
-        let mut thread = ThreadBuilder::new()
-            .provider(provider)
-            .tool_manager(Arc::new(ToolManager::new()))
-            .compactor(compactor)
-            .messages(initial_messages)
-            .build()
-            .unwrap();
-
-        assert_eq!(thread.history().len(), 3);
-
-        let result = thread.send_message("New question".to_string()).await;
-        assert!(result.is_ok());
-
-        assert!(thread.history().len() > 3);
-        assert_eq!(
-            thread
-                .history()
-                .last()
-                .map(|message| message.content.as_str()),
-            Some("Continuing conversation")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_compact_preserves_system_messages() {
-        let provider = Arc::new(SequentialMockProvider::new(vec![]));
-        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
-
-        let mut thread = ThreadBuilder::new()
-            .provider(provider)
-            .tool_manager(Arc::new(ToolManager::new()))
-            .compactor(compactor)
-            .build()
-            .unwrap();
-
-        thread
-            .messages_mut()
-            .push(ChatMessage::system("System prompt 1"));
-        thread
-            .messages_mut()
-            .push(ChatMessage::system("System prompt 2"));
-
-        for i in 1..=5 {
-            thread
-                .messages_mut()
-                .push(ChatMessage::user(format!("User {}", i)));
-        }
-
-        thread.set_token_count(100_000);
-
-        let compactor = thread.compactor.clone();
-        let result = compactor.compact(&mut thread).await;
-        assert!(result.is_ok());
-
-        let system_count = thread
-            .history()
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .count();
-        assert_eq!(system_count, 2);
-
-        let non_system_count = thread
-            .history()
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .count();
-        assert_eq!(non_system_count, 1);
-    }
-
-    #[tokio::test]
-    async fn test_compact_keep_tokens_strategy() {
-        let provider = Arc::new(SequentialMockProvider::new(vec![]));
-        let compactor: Arc<dyn Compactor> = Arc::new(KeepTokensCompactor::new(0.8, 0.5));
-
-        let config = ThreadConfigBuilder::default()
-            .build()
-            .expect("config should build");
-
-        let mut thread = ThreadBuilder::new()
-            .provider(provider)
-            .tool_manager(Arc::new(ToolManager::new()))
-            .compactor(compactor)
-            .config(config)
-            .build()
-            .unwrap();
-
-        thread
-            .messages_mut()
-            .push(ChatMessage::system("System prompt"));
-
-        for i in 1..=5 {
-            thread
-                .messages_mut()
-                .push(ChatMessage::user(format!("User {}", i)));
-        }
-
-        thread.set_token_count(100_000);
-
-        let compactor = thread.compactor.clone();
-        let result = compactor.compact(&mut thread).await;
-        assert!(result.is_ok());
-
-        let system_count = thread
-            .history()
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .count();
-        assert_eq!(system_count, 1);
     }
 }

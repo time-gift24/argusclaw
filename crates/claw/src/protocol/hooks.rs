@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 
 use super::{ThreadEvent, ThreadId};
 use crate::llm::{ChatMessage, ToolDefinition};
-use crate::tool::ToolManager;
+use argus_tool::ToolManager;
 
 /// Hook event types that can be intercepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
