@@ -174,7 +174,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
       setTestResults((prev) => ({ ...prev, [model]: result }))
     } catch (error) {
       const fallbackResult: ProviderTestResult = {
-        provider_id: formData.id.toString(),
+        provider_id: String(formData.id),
         model,
         base_url: formData.base_url,
         checked_at: new Date().toISOString(),

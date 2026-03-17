@@ -160,7 +160,7 @@ export function ProviderFormDialog({
       setTestResult(result);
     } catch (error) {
       setTestResult({
-        provider_id: record.id.toString(),
+        provider_id: String(record.id),
         model: record.default_model,
         base_url: record.base_url,
         checked_at: new Date().toISOString(),

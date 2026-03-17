@@ -84,7 +84,7 @@ export function ProviderTestPanel({
             model,
             status: "error",
             result: {
-              provider_id: input.id.toString(),
+              provider_id: String(input.id),
               model,
               base_url: input.base_url,
               checked_at: new Date().toISOString(),
