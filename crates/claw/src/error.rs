@@ -71,6 +71,9 @@ pub enum AgentError {
 
     #[error(transparent)]
     User(#[from] UserError),
+
+    #[error("session error: {reason}")]
+    Session { reason: String },
 }
 
 #[cfg(test)]

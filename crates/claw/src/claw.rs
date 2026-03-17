@@ -26,6 +26,12 @@ use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::tool::ToolManager;
 use crate::user::UserService;
 
+// Session layer - use existing protocol types
+use argus_session::{SessionManager, SessionSummary, ThreadSummary};
+use argus_template::TemplateManager;
+use argus_log::SqliteTurnLogRepository;
+use argus_protocol::SessionId;
+
 /// Ensures the default ArgusWing agent exists in the database.
 async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentError> {
     let default_agent = load_arguswing().map_err(|e| AgentError::BuiltinAgentLoadFailed {
@@ -52,6 +58,9 @@ pub struct AppContext {
     job_repository: Arc<dyn JobRepository>,
     shutdown: CancellationToken,
     user: UserService,
+    // Session layer
+    session_manager: Arc<SessionManager>,
+    turn_log_repository: Arc<SqliteTurnLogRepository>,
 }
 
 impl AppContext {
@@ -101,6 +110,14 @@ impl AppContext {
             }
         });
 
+        // Initialize session layer
+        let template_manager = Arc::new(TemplateManager::new(pool.clone()));
+        let session_manager = Arc::new(SessionManager::new(
+            pool.clone(),
+            template_manager,
+        ));
+        let turn_log_repository = Arc::new(SqliteTurnLogRepository::new(pool.clone()));
+
         Ok(Self {
             db_pool: pool,
             llm_manager,
@@ -109,6 +126,8 @@ impl AppContext {
             job_repository,
             shutdown,
             user,
+            session_manager,
+            turn_log_repository,
         })
     }
 
@@ -128,7 +147,12 @@ impl AppContext {
             tool_manager,
             job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
             shutdown: CancellationToken::new(),
-            user: UserService::new(pool),
+            user: UserService::new(pool.clone()),
+            session_manager: Arc::new(SessionManager::new(
+                pool.clone(),
+                Arc::new(TemplateManager::new(pool.clone())),
+            )),
+            turn_log_repository: Arc::new(SqliteTurnLogRepository::new(pool.clone())),
         }
     }
 
@@ -147,7 +171,12 @@ impl AppContext {
             tool_manager,
             job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
             shutdown: CancellationToken::new(),
-            user: UserService::new(pool),
+            user: UserService::new(pool.clone()),
+            session_manager: Arc::new(SessionManager::new(
+                pool.clone(),
+                Arc::new(TemplateManager::new(pool.clone())),
+            )),
+            turn_log_repository: Arc::new(SqliteTurnLogRepository::new(pool.clone())),
         }
     }
 
@@ -188,6 +217,109 @@ impl AppContext {
     /// Trigger graceful shutdown of the scheduler.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
+    }
+
+    // === Session Management API ===
+
+    /// List all sessions.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AgentError> {
+        self.session_manager
+            .list_sessions()
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })
+    }
+
+    /// Create a new session.
+    pub async fn create_session(&self, name: String) -> Result<SessionId, AgentError> {
+        self.session_manager
+            .create(name)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })
+    }
+
+    /// Load a session into memory.
+    pub async fn load_session(&self, session_id: SessionId) -> Result<(), AgentError> {
+        self.session_manager
+            .load(session_id)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+        Ok(())
+    }
+
+    /// Unload a session from memory.
+    pub async fn unload_session(&self, session_id: SessionId) -> Result<(), AgentError> {
+        self.session_manager
+            .unload(session_id)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })
+    }
+
+    /// Delete a session.
+    pub async fn delete_session(&self, session_id: SessionId) -> Result<(), AgentError> {
+        self.session_manager
+            .delete(session_id)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })
+    }
+
+    /// Create a new thread in a session.
+    pub async fn create_thread_in_session(
+        &self,
+        session_id: SessionId,
+        template_id: AgentId,
+        provider_id: LlmProviderId,
+    ) -> Result<ThreadId, AgentError> {
+        // Convert to argus-protocol types for session manager
+        let template_id_proto = argus_protocol::AgentId::new(template_id.into_inner());
+        let provider_id_proto = argus_protocol::ProviderId::new(provider_id.into_inner());
+
+        let thread_id = self.session_manager
+            .create_thread(session_id, template_id_proto, provider_id_proto)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+
+        // Convert back to claw's ThreadId
+        Ok(ThreadId::parse(thread_id.inner()).map_err(|e| AgentError::Session { reason: e.to_string() })?)
+    }
+
+    /// Delete a thread from a session.
+    pub async fn delete_thread_from_session(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<(), AgentError> {
+        // Convert to argus-protocol ThreadId
+        let thread_id_proto = argus_protocol::ThreadId::new(thread_id.to_string());
+
+        self.session_manager
+            .delete_thread(session_id, &thread_id_proto)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })
+    }
+
+    /// List threads in a session.
+    pub async fn list_threads_in_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<ThreadSummary>, AgentError> {
+        self.session_manager
+            .list_threads(session_id)
+            .await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })
+    }
+
+    /// Run log cleanup (LRU-based).
+    pub async fn cleanup_turn_logs(&self) -> Result<i64, AgentError> {
+        use argus_log::LogCleaner;
+        use std::sync::Arc;
+
+        // Create a new cleaner with the right type
+        let pool = self.db_pool.clone();
+        let repo = Arc::new(SqliteTurnLogRepository::new(pool));
+        let cleaner = LogCleaner::new(repo, 20);
+        let report = cleaner.cleanup().await
+            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+        Ok(report.deleted_count)
     }
 
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId, AgentError> {
