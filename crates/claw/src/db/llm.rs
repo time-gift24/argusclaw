@@ -8,25 +8,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::DbError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LlmProviderId(String);
+/// Unique identifier for an LLM provider (auto-increment INTEGER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LlmProviderId(i64);
 
 impl LlmProviderId {
+    /// Creates a new provider ID from a database-generated i64.
     #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+    pub const fn new(id: i64) -> Self {
+        Self(id)
+    }
+
+    /// Returns the underlying i64 value.
+    #[must_use]
+    pub const fn into_inner(self) -> i64 {
+        self.0
     }
 }
 
-impl AsRef<str> for LlmProviderId {
-    fn as_ref(&self) -> &str {
-        &self.0
+impl From<i64> for LlmProviderId {
+    fn from(id: i64) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<LlmProviderId> for i64 {
+    fn from(id: LlmProviderId) -> Self {
+        id.into_inner()
     }
 }
 
 impl fmt::Display for LlmProviderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_ref())
+        write!(f, "{}", self.0)
     }
 }
 
@@ -160,7 +175,9 @@ pub struct ProviderTestResult {
 
 #[async_trait]
 pub trait LlmProviderRepository: Send + Sync {
-    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<(), DbError>;
+    /// Upserts a provider record. Returns the provider ID (newly generated for inserts, or the
+    /// existing ID for updates).
+    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<LlmProviderId, DbError>;
 
     async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, DbError>;
 
@@ -186,7 +203,7 @@ mod multi_model_tests {
     #[test]
     fn llm_provider_record_has_models_and_default_model() {
         let record = LlmProviderRecord {
-            id: LlmProviderId::new("test"),
+            id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Test".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
@@ -205,7 +222,7 @@ mod multi_model_tests {
     #[test]
     fn llm_provider_summary_has_models_and_default_model() {
         let summary = LlmProviderSummary {
-            id: LlmProviderId::new("test"),
+            id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Test".to_string(),
             base_url: "https://api.example.com/v1".to_string(),

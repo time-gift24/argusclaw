@@ -7,5 +7,5 @@ export default async function EditAgentPage({
 }) {
   const { id } = await params
 
-  return <AgentEditor agentId={id} />
+  return <AgentEditor agentId={parseInt(id)} />
 }

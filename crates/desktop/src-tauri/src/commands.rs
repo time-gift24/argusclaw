@@ -34,10 +34,40 @@ impl From<LlmProviderKind> for ProviderKind {
     }
 }
 
+/// Input type for creating/updating an agent (all IDs as i64).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInput {
+    pub id: i64,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub provider_id: Option<i64>,
+    pub system_prompt: String,
+    pub tool_names: Vec<String>,
+    pub max_tokens: Option<i64>,
+    pub temperature: Option<f32>,
+}
+
+impl From<AgentInput> for AgentRecord {
+    fn from(input: AgentInput) -> Self {
+        Self {
+            id: AgentId::new(input.id),
+            display_name: input.display_name,
+            description: input.description,
+            version: input.version,
+            provider_id: input.provider_id.map(LlmProviderId::new),
+            system_prompt: input.system_prompt,
+            tool_names: input.tool_names,
+            max_tokens: input.max_tokens.map(|t| t as u32),
+            temperature: input.temperature,
+        }
+    }
+}
+
 /// Input type for creating/updating a provider (api_key as plain string).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInput {
-    pub id: String,
+    pub id: i64,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
@@ -67,7 +97,7 @@ impl From<ProviderInput> for LlmProviderRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSummary {
-    pub id: String,
+    pub id: i64,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
@@ -81,7 +111,7 @@ pub struct ProviderSummary {
 impl From<LlmProviderSummary> for ProviderSummary {
     fn from(summary: LlmProviderSummary) -> Self {
         Self {
-            id: summary.id.to_string(),
+            id: summary.id.into_inner(),
             kind: summary.kind.into(),
             display_name: summary.display_name,
             base_url: summary.base_url,
@@ -96,7 +126,7 @@ impl From<LlmProviderSummary> for ProviderSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderRecord {
-    pub id: String,
+    pub id: i64,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
@@ -111,7 +141,7 @@ pub struct ProviderRecord {
 impl From<LlmProviderRecord> for ProviderRecord {
     fn from(record: LlmProviderRecord) -> Self {
         Self {
-            id: record.id.to_string(),
+            id: record.id.into_inner(),
             kind: record.kind.into(),
             display_name: record.display_name,
             base_url: record.base_url,
@@ -127,7 +157,7 @@ impl From<LlmProviderRecord> for ProviderRecord {
 
 fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord {
     ProviderRecord {
-        id: summary.id.to_string(),
+        id: summary.id.into_inner(),
         kind: summary.kind.into(),
         display_name: summary.display_name,
         base_url: summary.base_url,
@@ -164,7 +194,7 @@ pub async fn list_providers(
 #[tauri::command]
 pub async fn get_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<Option<ProviderRecord>, String> {
     let provider_id = LlmProviderId::new(id);
     match ctx.get_provider_record(&provider_id).await {
@@ -185,16 +215,16 @@ pub async fn get_provider(
 pub async fn upsert_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: ProviderInput,
-) -> Result<(), String> {
-    ctx.upsert_provider(record.into())
-        .await
-        .map_err(|e| e.to_string())
+) -> Result<String, String> {
+    let record: LlmProviderRecord = record.into();
+    let id = ctx.upsert_provider(record).await.map_err(|e| e.to_string())?;
+    Ok(id.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<bool, String> {
     ctx.delete_provider(&LlmProviderId::new(id))
         .await
@@ -204,7 +234,7 @@ pub async fn delete_provider(
 #[tauri::command]
 pub async fn set_default_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<(), String> {
     ctx.set_default_provider(&LlmProviderId::new(id))
         .await
@@ -214,7 +244,7 @@ pub async fn set_default_provider(
 #[tauri::command]
 pub async fn test_provider_connection(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
     model: String,
 ) -> Result<ProviderTestResult, String> {
     ctx.test_provider_connection(&LlmProviderId::new(id), &model)
@@ -228,7 +258,8 @@ pub async fn test_provider_input(
     record: ProviderInput,
     model: String,
 ) -> Result<ProviderTestResult, String> {
-    ctx.test_provider_record(record.into(), &model)
+    let record: LlmProviderRecord = record.into();
+    ctx.test_provider_record(record, &model)
         .await
         .map_err(|e| e.to_string())
 }
@@ -245,7 +276,7 @@ pub async fn list_agent_templates(
 #[tauri::command]
 pub async fn get_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<Option<AgentRecord>, String> {
     ctx.get_template(&AgentId::new(id))
         .await
@@ -255,15 +286,16 @@ pub async fn get_agent_template(
 #[tauri::command]
 pub async fn upsert_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    record: AgentRecord,
+    record: AgentInput,
 ) -> Result<(), String> {
+    let record: AgentRecord = record.into();
     ctx.upsert_template(record).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<bool, String> {
     ctx.delete_template(&AgentId::new(id))
         .await
@@ -364,13 +396,21 @@ pub async fn create_chat_session(
     provider_preference_id: Option<String>,
     model_override: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
+    let template_id_i64: i64 = template_id
+        .parse()
+        .map_err(|e| format!("Invalid template id: {}", e))?;
     let provider_override = provider_preference_id
         .as_ref()
-        .map(|id| LlmProviderId::new(id.clone()));
+        .map(|id| {
+            id.parse::<i64>()
+                .map(LlmProviderId::new)
+                .map_err(|e| format!("Invalid provider id: {}", e))
+        })
+        .transpose()?;
 
     let runtime = ctx
         .create_runtime_agent_from_template(
-            &AgentId::new(template_id.clone()),
+            &AgentId::new(template_id_i64),
             provider_override.as_ref(),
         )
         .await
@@ -437,6 +477,9 @@ pub async fn send_message(
     content: String,
 ) -> Result<(), String> {
     let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    let runtime_agent_id: i64 = runtime_agent_id
+        .parse()
+        .map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.send_message(&AgentId::new(runtime_agent_id), &thread_id, content)
         .await
         .map_err(|e| e.to_string())
@@ -449,6 +492,9 @@ pub async fn get_thread_snapshot(
     thread_id: String,
 ) -> Result<claw::ThreadSnapshot, String> {
     let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    let runtime_agent_id: i64 = runtime_agent_id
+        .parse()
+        .map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.get_thread_snapshot(&AgentId::new(runtime_agent_id), &thread_id)
         .await
         .map_err(|e| e.to_string())
@@ -463,6 +509,9 @@ pub fn resolve_approval(
     resolved_by: Option<String>,
 ) -> Result<(), String> {
     let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
+    let runtime_agent_id: i64 = runtime_agent_id
+        .parse()
+        .map_err(|e| format!("Invalid agent id: {}", e))?;
     let decision = match decision.as_str() {
         "approved" => claw::ApprovalDecision::Approved,
         "denied" => claw::ApprovalDecision::Denied,
@@ -496,7 +545,7 @@ mod tests {
     #[test]
     fn provider_input_converts_into_domain_record() {
         let record: LlmProviderRecord = ProviderInput {
-            id: "openai".to_string(),
+            id: "1".to_string(),
             kind: ProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -506,9 +555,10 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
         }
-        .into();
+        .try_into()
+        .expect("conversion should succeed");
 
-        assert_eq!(record.id, LlmProviderId::new("openai"));
+        assert_eq!(record.id, LlmProviderId::new(1));
         assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);
         assert_eq!(record.api_key.expose_secret(), "sk-test");
         assert_eq!(record.secret_status, ProviderSecretStatus::Ready);
@@ -517,7 +567,7 @@ mod tests {
     #[test]
     fn provider_lookup_returns_none_for_missing_provider() {
         let result = map_provider_lookup_result(Err(AgentError::ProviderNotFound {
-            id: "missing".to_string(),
+            id: "999".to_string(),
         }))
         .expect("missing providers should map to None");
 
@@ -527,7 +577,7 @@ mod tests {
     #[test]
     fn provider_record_conversion_exposes_plain_api_key() {
         let record = LlmProviderRecord {
-            id: LlmProviderId::new("openai"),
+            id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -541,7 +591,7 @@ mod tests {
 
         let output = ProviderRecord::from(record);
 
-        assert_eq!(output.id, "openai");
+        assert_eq!(output.id, "1");
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
@@ -550,7 +600,7 @@ mod tests {
     #[test]
     fn provider_summary_can_build_a_reentry_record_with_a_blank_api_key() {
         let record = build_provider_reentry_record(LlmProviderSummary {
-            id: LlmProviderId::new("legacy"),
+            id: LlmProviderId::new(2),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Legacy".to_string(),
             base_url: "https://legacy.example.com/v1".to_string(),
@@ -561,7 +611,7 @@ mod tests {
             secret_status: ProviderSecretStatus::RequiresReentry,
         });
 
-        assert_eq!(record.id, "legacy");
+        assert_eq!(record.id, "2");
         assert_eq!(record.api_key, "");
         assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
     }
@@ -569,7 +619,7 @@ mod tests {
     #[test]
     fn provider_summary_conversion_exposes_secret_status_for_frontend() {
         let output = ProviderSummary::from(LlmProviderSummary {
-            id: LlmProviderId::new("openai"),
+            id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -580,7 +630,7 @@ mod tests {
             secret_status: ProviderSecretStatus::Ready,
         });
 
-        assert_eq!(output.id, "openai");
+        assert_eq!(output.id, "1");
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 

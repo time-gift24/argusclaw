@@ -75,13 +75,12 @@ impl LLMManager {
         self.build_provider_with_model(record, &default_model)
     }
 
-    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
+    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId, AgentError> {
         let record = LlmProviderRecord {
             secret_status: ProviderSecretStatus::Ready,
             ..record
         };
-        self.repository.upsert_provider(&record).await?;
-        Ok(())
+        self.repository.upsert_provider(&record).await.map_err(Into::into)
     }
 
     pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, AgentError> {

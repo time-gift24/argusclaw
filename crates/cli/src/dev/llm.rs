@@ -33,7 +33,13 @@ pub async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()>
             stream,
             prompt,
         } => {
-            let provider_id = provider.map(LlmProviderId::new);
+            let provider_id = provider
+                .map(|id| {
+                    id.parse::<i64>()
+                        .map(LlmProviderId::new)
+                        .with_context(|| format!("Invalid provider id: {}", id))
+                })
+                .transpose()?;
             if stream {
                 let mut events = ctx.stream_text(provider_id.as_ref(), prompt).await?;
                 let mut render_state = StreamRenderState::default();

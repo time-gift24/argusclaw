@@ -1,6 +1,7 @@
 //! AgentManager - manages global managers and creates runtime Agent instances.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use dashmap::DashMap;
 use tokio::sync::broadcast;
@@ -16,6 +17,9 @@ use crate::error::AgentError;
 use crate::llm::LLMManager;
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::tool::ToolManager;
+
+/// Starting ID for runtime agents (to distinguish from template IDs which start from 1).
+const RUNTIME_AGENT_ID_START: i64 = 1_000_000_000;
 
 /// AgentManager creates and manages runtime Agent instances.
 ///
@@ -34,6 +38,8 @@ pub struct AgentManager {
     tool_manager: Arc<ToolManager>,
     /// Active agents indexed by agent ID.
     agents: DashMap<AgentId, Agent>,
+    /// Counter for generating unique runtime agent IDs.
+    runtime_id_counter: AtomicI64,
 }
 
 impl AgentManager {
@@ -51,7 +57,13 @@ impl AgentManager {
             approval_manager,
             tool_manager,
             agents: DashMap::new(),
+            runtime_id_counter: AtomicI64::new(RUNTIME_AGENT_ID_START),
         }
+    }
+
+    /// Generate a unique runtime agent ID.
+    fn next_runtime_id(&self) -> AgentId {
+        AgentId::new(self.runtime_id_counter.fetch_add(1, Ordering::SeqCst))
     }
 
     /// Get the compactor manager.
@@ -76,20 +88,24 @@ impl AgentManager {
     ///
     /// Returns the `AgentId` for accessing the agent.
     pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentId, AgentError> {
-        use crate::db::llm::LlmProviderId;
-        let provider = self
-            .llm_manager
-            .get_provider(&LlmProviderId::new(&record.provider_id))
-            .await?;
+        let provider_id = record.provider_id.ok_or(AgentError::ProviderNotConfigured {
+            agent_id: record.id,
+        })?;
+
+        let provider = self.llm_manager.get_provider(&provider_id).await?;
+
+        // Generate a unique runtime agent ID
+        let runtime_id = self.next_runtime_id();
 
         let agent = AgentBuilder::from_record(record, provider)
+            .id(runtime_id)
             .tool_manager(self.tool_manager.clone())
             .compactor_manager(self.compactor_manager.clone())
             .approval_manager(self.approval_manager.clone())
             .build()?;
 
-        let id = agent.id().clone();
-        self.agents.insert(id.clone(), agent);
+        let id = *agent.id();
+        self.agents.insert(id, agent);
         Ok(id)
     }
 
@@ -102,21 +118,25 @@ impl AgentManager {
         approval_tools: Vec<String>,
         auto_approve: bool,
     ) -> Result<AgentId, AgentError> {
-        use crate::db::llm::LlmProviderId;
-        let provider = self
-            .llm_manager
-            .get_provider(&LlmProviderId::new(&record.provider_id))
-            .await?;
+        let provider_id = record.provider_id.ok_or(AgentError::ProviderNotConfigured {
+            agent_id: record.id,
+        })?;
+
+        let provider = self.llm_manager.get_provider(&provider_id).await?;
+
+        // Generate a unique runtime agent ID
+        let runtime_id = self.next_runtime_id();
 
         let agent = AgentBuilder::from_record(record, provider)
+            .id(runtime_id)
             .tool_manager(self.tool_manager.clone())
             .compactor_manager(self.compactor_manager.clone())
             .approval_tools(approval_tools)
             .auto_approve(auto_approve)
             .build()?;
 
-        let id = agent.id().clone();
-        self.agents.insert(id.clone(), agent);
+        let id = *agent.id();
+        self.agents.insert(id, agent);
         Ok(id)
     }
 
@@ -243,6 +263,14 @@ impl AgentManager {
     /// Get an agent template by ID.
     pub async fn get_template(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError> {
         self.repository.get(id).await
+    }
+
+    /// Find an agent template by display name.
+    pub async fn find_template_by_display_name(
+        &self,
+        display_name: &str,
+    ) -> Result<Option<AgentRecord>, DbError> {
+        self.repository.find_by_display_name(display_name).await
     }
 
     /// List all agent templates.

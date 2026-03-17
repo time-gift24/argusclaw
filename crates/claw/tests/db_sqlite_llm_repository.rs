@@ -9,13 +9,13 @@ use claw::{
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 
-fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRecord {
+fn build_record(id: i64, display_name: &str, is_default: bool) -> LlmProviderRecord {
     LlmProviderRecord {
         id: LlmProviderId::new(id),
         kind: LlmProviderKind::OpenAiCompatible,
         display_name: display_name.to_string(),
-        base_url: format!("https://{id}.example.com/v1"),
-        api_key: SecretString::new(format!("sk-{id}")),
+        base_url: format!("https://provider{id}.example.com/v1"),
+        api_key: SecretString::new(format!("sk-provider{id}")),
         models: vec!["gpt-4o-mini".to_string()],
         default_model: "gpt-4o-mini".to_string(),
         is_default,
@@ -25,7 +25,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
 }
 
 fn build_record_with_headers(
-    id: &str,
+    id: i64,
     display_name: &str,
     is_default: bool,
     headers: HashMap<String, String>,
@@ -34,8 +34,8 @@ fn build_record_with_headers(
         id: LlmProviderId::new(id),
         kind: LlmProviderKind::OpenAiCompatible,
         display_name: display_name.to_string(),
-        base_url: format!("https://{id}.example.com/v1"),
-        api_key: SecretString::new(format!("sk-{id}")),
+        base_url: format!("https://provider{id}.example.com/v1"),
+        api_key: SecretString::new(format!("sk-provider{id}")),
         models: vec!["gpt-4o-mini".to_string()],
         default_model: "gpt-4o-mini".to_string(),
         is_default,
@@ -66,7 +66,7 @@ async fn setup_repository() -> (tempfile::TempDir, SqlitePool, SqliteLlmProvider
 #[tokio::test]
 async fn sqlite_repository_round_trips_provider_records_and_encrypts_api_keys() {
     let (_temp_dir, pool, repository) = setup_repository().await;
-    let record = build_record("openai", "OpenAI", true);
+    let record = build_record(1, "OpenAI", true);
 
     repository
         .upsert_provider(&record)
@@ -81,16 +81,16 @@ async fn sqlite_repository_round_trips_provider_records_and_encrypts_api_keys() 
 
     assert_eq!(stored.id, record.id);
     assert_eq!(stored.display_name, "OpenAI");
-    assert_eq!(stored.api_key.expose_secret(), "sk-openai");
+    assert_eq!(stored.api_key.expose_secret(), "sk-provider1");
 
     let encrypted_api_key: Vec<u8> =
         sqlx::query_scalar("select encrypted_api_key from llm_providers where id = ?1")
-            .bind("openai")
+            .bind(1i64)
             .fetch_one(&pool)
             .await
             .expect("encrypted api key should be stored");
 
-    assert_ne!(encrypted_api_key, b"sk-openai");
+    assert_ne!(encrypted_api_key, b"sk-provider1");
 }
 
 #[tokio::test]
@@ -99,7 +99,7 @@ async fn sqlite_repository_round_trips_extra_headers() {
     let mut headers = HashMap::new();
     headers.insert("x-provider".to_string(), "deepseek".to_string());
     headers.insert("x-custom-header".to_string(), "custom-value".to_string());
-    let record = build_record_with_headers("deepseek", "DeepSeek", true, headers);
+    let record = build_record_with_headers(1, "DeepSeek", true, headers);
 
     repository
         .upsert_provider(&record)
@@ -126,8 +126,8 @@ async fn sqlite_repository_round_trips_extra_headers() {
 #[tokio::test]
 async fn sqlite_repository_reassigns_the_default_provider() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let first = build_record("openai", "OpenAI", true);
-    let second = build_record("deepseek", "DeepSeek", true);
+    let first = build_record(1, "OpenAI", true);
+    let second = build_record(2, "DeepSeek", true);
 
     repository
         .upsert_provider(&first)
@@ -162,8 +162,8 @@ async fn sqlite_repository_reassigns_the_default_provider() {
 #[tokio::test]
 async fn sqlite_repository_can_set_the_default_provider_by_id() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let first = build_record("openai", "OpenAI", true);
-    let second = build_record("deepseek", "DeepSeek", false);
+    let first = build_record(1, "OpenAI", true);
+    let second = build_record(2, "DeepSeek", false);
 
     repository
         .upsert_provider(&first)
@@ -197,7 +197,7 @@ async fn sqlite_repository_can_set_the_default_provider_by_id() {
 #[tokio::test]
 async fn sqlite_repository_deletes_providers_by_id() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let record = build_record("openai", "OpenAI", false);
+    let record = build_record(1, "OpenAI", false);
 
     repository
         .upsert_provider(&record)
@@ -220,7 +220,7 @@ async fn sqlite_repository_deletes_providers_by_id() {
 #[tokio::test]
 async fn sqlite_repository_lists_summaries_even_when_a_secret_can_not_be_decrypted() {
     let (_temp_dir, pool, repository) = setup_repository().await;
-    let readable = build_record("openai", "OpenAI", true);
+    let readable = build_record(1, "OpenAI", true);
 
     repository
         .upsert_provider(&readable)
@@ -231,7 +231,7 @@ async fn sqlite_repository_lists_summaries_even_when_a_secret_can_not_be_decrypt
         pool.clone(),
         b"legacy-test-key".to_vec(),
     );
-    let unreadable = build_record("legacy", "Legacy", false);
+    let unreadable = build_record(2, "Legacy", false);
 
     legacy_repository
         .upsert_provider(&unreadable)
@@ -260,7 +260,7 @@ async fn sqlite_repository_can_read_provider_records_encrypted_with_legacy_fallb
         pool.clone(),
         b"legacy-test-key".to_vec(),
     );
-    let record = build_record("legacy", "Legacy", true);
+    let record = build_record(1, "Legacy", true);
 
     legacy_repository
         .upsert_provider(&record)
@@ -280,6 +280,6 @@ async fn sqlite_repository_can_read_provider_records_encrypted_with_legacy_fallb
         .expect("legacy provider should exist");
 
     assert_eq!(stored.id, record.id);
-    assert_eq!(stored.api_key.expose_secret(), "sk-legacy");
+    assert_eq!(stored.api_key.expose_secret(), "sk-provider1");
     assert_eq!(stored.secret_status, ProviderSecretStatus::Ready);
 }

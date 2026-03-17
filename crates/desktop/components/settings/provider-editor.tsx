@@ -14,10 +14,9 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
-import { cn } from "@/lib/utils"
 
 export interface LlmProviderRecord {
-  id: string
+  id: number
   kind: "openai-compatible"
   display_name: string
   base_url: string
@@ -30,12 +29,12 @@ export interface LlmProviderRecord {
 }
 
 interface ProviderEditorProps {
-  providerId?: string
+  providerId?: number
 }
 
 function createDefaultFormData(): LlmProviderRecord {
   return {
-    id: "",
+    id: 0,
     kind: "openai-compatible",
     display_name: "",
     base_url: "",
@@ -97,7 +96,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   }, [providerId])
 
   const canSave = Boolean(
-    formData.id.trim() &&
     formData.display_name.trim() &&
     formData.base_url.trim() &&
     formData.api_key.trim() &&
@@ -146,7 +144,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     setNewModel("")
 
     // Auto-test the new model if we have all required fields
-    if (formData.id.trim() && formData.base_url.trim() && formData.api_key.trim()) {
+    if (formData.id > 0 && formData.base_url.trim() && formData.api_key.trim()) {
       await testModel(model, newModels)
     }
   }
@@ -155,7 +153,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     setTestingModels((prev) => new Set(prev).add(model))
 
     try {
-      // Save first to ensure provider exists
       const input: ProviderInput = {
         id: formData.id,
         kind: formData.kind,
@@ -167,13 +164,17 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         is_default: formData.is_default,
         extra_headers: formData.extra_headers,
       }
-      await providers.upsert(input)
 
-      const result = await providers.testConnection(formData.id, model)
+      // For existing providers, test the saved record
+      // For new providers, test the input without saving
+      const result = formData.id > 0
+        ? await providers.testConnection(formData.id, model)
+        : await providers.testInput(input, model)
+
       setTestResults((prev) => ({ ...prev, [model]: result }))
     } catch (error) {
       const fallbackResult: ProviderTestResult = {
-        provider_id: formData.id,
+        provider_id: String(formData.id),
         model,
         base_url: formData.base_url,
         checked_at: new Date().toISOString(),
@@ -236,28 +237,15 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         {/* Left: Basic Info + Models */}
         <div className="space-y-4">
           {/* Basic Info */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="id">ID</Label>
-              <Input
-                id="id"
-                value={formData.id}
-                onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-                placeholder="my-provider"
-                required
-                disabled={isEditing}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="display_name">名称</Label>
-              <Input
-                id="display_name"
-                value={formData.display_name}
-                onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                placeholder="我的提供者"
-                required
-              />
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="display_name">名称</Label>
+            <Input
+              id="display_name"
+              value={formData.display_name}
+              onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+              placeholder="我的提供者"
+              required
+            />
           </div>
 
           <div className="space-y-2">

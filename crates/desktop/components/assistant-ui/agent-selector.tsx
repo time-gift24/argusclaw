@@ -24,7 +24,7 @@ export function AgentSelector() {
 
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId);
 
-  const handleSelect = (templateId: string) => {
+  const handleSelect = (templateId: number) => {
     void activateSession(templateId);
     setOpen(false);
   };

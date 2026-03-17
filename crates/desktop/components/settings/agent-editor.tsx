@@ -12,15 +12,29 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 
 interface AgentEditorProps {
-  agentId?: string
+  agentId?: number
 }
 
-function getPreferredProviderId(providersData: LlmProviderSummary[]): string {
+function getPreferredProviderId(providersData: LlmProviderSummary[]): number | null {
   return (
-    providersData.find((p) => p.is_default && p.secret_status !== "requires_reentry")?.id ||
-    providersData.find((p) => p.secret_status !== "requires_reentry")?.id ||
-    ""
+    providersData.find((p) => p.is_default && p.secret_status !== "requires_reentry")?.id ??
+    providersData.find((p) => p.secret_status !== "requires_reentry")?.id ??
+    null
   )
+}
+
+function createDefaultFormData(preferredProviderId: number | null): AgentRecord {
+  return {
+    id: 0,
+    display_name: "",
+    description: "",
+    version: "1.0.0",
+    provider_id: preferredProviderId,
+    system_prompt: "",
+    tool_names: [],
+    max_tokens: undefined,
+    temperature: undefined,
+  }
 }
 
 export function AgentEditor({ agentId }: AgentEditorProps) {
@@ -31,17 +45,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
 
-  const [formData, setFormData] = React.useState<AgentRecord>({
-    id: "",
-    display_name: "",
-    description: "",
-    version: "1.0.0",
-    provider_id: "",
-    system_prompt: "",
-    tool_names: [],
-    max_tokens: undefined,
-    temperature: undefined,
-  })
+  const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
   const previewMessage = React.useMemo<ThreadAssistantMessage>(
     () => ({
@@ -66,8 +70,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   )
 
   const canSave = Boolean(
-    formData.id.trim() &&
-      formData.display_name.trim() &&
+    formData.display_name.trim() &&
       formData.system_prompt.trim(),
   )
 
@@ -85,11 +88,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           }
         } else {
           const preferredProviderId = getPreferredProviderId(providersData)
-          if (preferredProviderId) {
-            setFormData((prev) =>
-              prev.provider_id ? prev : { ...prev, provider_id: preferredProviderId },
-            )
-          }
+          setFormData(createDefaultFormData(preferredProviderId))
         }
       } catch (error) {
         console.error("Failed to load data:", error)
@@ -141,23 +140,22 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         <div className="space-y-4 overflow-y-auto pr-2">
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="id">ID</Label>
-              <Input
-                id="id"
-                value={formData.id}
-                onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-                placeholder="my-agent"
-                required
-                disabled={isEditing}
-              />
-            </div>
-            <div className="space-y-2">
               <Label htmlFor="display_name">名称</Label>
               <Input
                 id="display_name"
                 value={formData.display_name}
                 onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
                 placeholder="我的智能体"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="version">版本</Label>
+              <Input
+                id="version"
+                value={formData.version}
+                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
+                placeholder="1.0.0"
                 required
               />
             </div>
@@ -173,42 +171,30 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="version">版本</Label>
-              <Input
-                id="version"
-                value={formData.version}
-                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                placeholder="1.0.0"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="provider_id">LLM 提供者（可选）</Label>
-              <select
-                id="provider_id"
-                value={formData.provider_id}
-                onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
-                className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
-              >
-                <option value="">不指定提供者</option>
-                {providerList.map((p) => (
-                  <option
-                    key={p.id}
-                    value={p.id}
-                    disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
-                  >
-                    {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写 API Key)" : ""}
-                  </option>
-                ))}
-              </select>
-              {selectedProvider?.secret_status === "requires_reentry" && (
-                <p className="text-xs text-amber-700">
-                  当前 Provider 的密钥需要重新填写，修复前无法正常用于新会话。
-                </p>
-              )}
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="provider_id">LLM 提供者（可选）</Label>
+            <select
+              id="provider_id"
+              value={formData.provider_id ?? ""}
+              onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
+              className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
+            >
+              <option value="">不指定提供者</option>
+              {providerList.map((p) => (
+                <option
+                  key={p.id}
+                  value={p.id}
+                  disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
+                >
+                  {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写 API Key)" : ""}
+                </option>
+              ))}
+            </select>
+            {selectedProvider?.secret_status === "requires_reentry" && (
+              <p className="text-xs text-amber-700">
+                当前 Provider 的密钥需要重新填写，修复前无法正常用于新会话。
+              </p>
+            )}
           </div>
 
           <div className="space-y-2">

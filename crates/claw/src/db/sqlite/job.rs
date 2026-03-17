@@ -11,22 +11,23 @@ use crate::protocol::ThreadId;
 use crate::workflow::{JobId, WorkflowStatus};
 
 /// Row type for jobs table (14 columns, excluding created_at/updated_at).
+/// agent_id is now INTEGER (i64).
 #[allow(dead_code)]
 type JobRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
+    String,         // id
+    String,         // job_type
+    String,         // name
+    String,         // status
+    i64,            // agent_id (INTEGER)
+    Option<String>, // context
+    String,         // prompt
+    Option<String>, // thread_id
+    Option<String>, // group_id
+    String,         // depends_on
+    Option<String>, // cron_expr
+    Option<String>, // scheduled_at
+    Option<String>, // started_at
+    Option<String>, // finished_at
 );
 
 /// SQLite-backed job repository.
@@ -105,7 +106,7 @@ impl SqliteJobRepository {
             job_type: Self::parse_job_type(&job_type)?,
             name,
             status: Self::parse_status(&status)?,
-            agent_id: AgentId::new(&agent_id),
+            agent_id: AgentId::new(agent_id),
             context,
             prompt,
             thread_id: Self::parse_thread_id(thread_id),
@@ -132,7 +133,7 @@ impl JobRepository for SqliteJobRepository {
         .bind(job.job_type.as_str())
         .bind(&job.name)
         .bind(job.status.as_str())
-        .bind(job.agent_id.to_string())
+        .bind(job.agent_id.into_inner())
         .bind(&job.context)
         .bind(&job.prompt)
         .bind(job.thread_id.map(|t| t.to_string()))

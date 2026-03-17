@@ -5,6 +5,9 @@ use super::types::{AgentId, AgentRecord};
 /// Default ArgusWing agent definition embedded at compile time.
 const ARGUSWING_TOML: &str = include_str!("../../../../agents/arguswing.toml");
 
+/// Default agent display name for lookup.
+pub const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
+
 /// Load the built-in ArgusWing agent record.
 ///
 /// # Errors
@@ -13,7 +16,6 @@ const ARGUSWING_TOML: &str = include_str!("../../../../agents/arguswing.toml");
 pub fn load_arguswing() -> Result<AgentRecord, toml::de::Error> {
     #[derive(serde::Deserialize)]
     struct AgentDef {
-        id: String,
         display_name: String,
         description: String,
         version: String,
@@ -23,11 +25,11 @@ pub fn load_arguswing() -> Result<AgentRecord, toml::de::Error> {
 
     let def: AgentDef = toml::from_str(ARGUSWING_TOML)?;
     Ok(AgentRecord {
-        id: AgentId::new(def.id),
+        id: AgentId::new(0), // Placeholder ID; will be assigned by database
         display_name: def.display_name,
         description: def.description,
         version: def.version,
-        provider_id: String::new(),
+        provider_id: None, // Provider is bound at runtime
         system_prompt: def.system_prompt,
         tool_names: def.tool_names,
         max_tokens: None,
@@ -42,9 +44,8 @@ mod tests {
     #[test]
     fn load_arguswing_parses_embedded_toml() {
         let agent = load_arguswing().expect("embedded TOML should parse");
-        assert_eq!(agent.id.as_ref(), "arguswing");
         assert_eq!(agent.display_name, "ArgusWing");
         assert_eq!(agent.tool_names, vec!["shell", "read", "grep", "glob"]);
-        assert!(agent.provider_id.is_empty());
+        assert!(agent.provider_id.is_none());
     }
 }

@@ -223,7 +223,8 @@ pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) ->
                 .ok_or_else(|| anyhow!("Workflow not found: {}", workflow))?;
 
             let job_id = JobId::new(uuid::Uuid::new_v4().to_string());
-            let agent_id = AgentId::new(agent.clone());
+            let agent_id: i64 = agent.parse().map_err(|e| anyhow!("Invalid agent id: {}", e))?;
+            let agent_id = AgentId::new(agent_id);
 
             // Parse depends_on
             let depends_on_ids: Vec<JobId> = depends_on

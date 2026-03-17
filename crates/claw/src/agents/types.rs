@@ -1,51 +1,47 @@
 //! Agent domain types.
 
 use std::fmt;
-use std::str::FromStr;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbError;
+use crate::db::LlmProviderId;
 
-/// Unique identifier for an agent template.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId(String);
+/// Unique identifier for an agent (auto-increment INTEGER).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentId(i64);
 
 impl AgentId {
-    /// Creates a new agent ID.
-    ///
-    /// # Panics
-    /// Panics in debug mode if `id` is empty.
+    /// Creates a new agent ID from a database-generated i64.
     #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        debug_assert!(!id.is_empty(), "AgentId cannot be empty");
+    pub const fn new(id: i64) -> Self {
         Self(id)
+    }
+
+    /// Returns the underlying i64 value.
+    #[must_use]
+    pub const fn into_inner(self) -> i64 {
+        self.0
     }
 }
 
-impl AsRef<str> for AgentId {
-    fn as_ref(&self) -> &str {
-        &self.0
+impl From<i64> for AgentId {
+    fn from(id: i64) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<AgentId> for i64 {
+    fn from(id: AgentId) -> Self {
+        id.into_inner()
     }
 }
 
 impl fmt::Display for AgentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_ref())
-    }
-}
-
-/// Parses an agent ID from a string.
-///
-/// This implementation is intentionally infallible to match the behavior of `AgentId::new()`.
-/// If validation is needed in the future, use `AgentId::try_from_str()` instead.
-impl FromStr for AgentId {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::new(s))
+        write!(f, "{}", self.0)
     }
 }
 
@@ -56,7 +52,7 @@ pub struct AgentRecord {
     pub display_name: String,
     pub description: String,
     pub version: String,
-    pub provider_id: String,
+    pub provider_id: Option<LlmProviderId>,
     pub system_prompt: String,
     pub tool_names: Vec<String>,
     pub max_tokens: Option<u32>,
@@ -67,13 +63,13 @@ pub struct AgentRecord {
 impl AgentRecord {
     /// Create a minimal agent record for testing.
     #[cfg(test)]
-    pub fn for_test(id: &str, provider_id: &str) -> Self {
+    pub fn for_test(id: i64, provider_id: i64) -> Self {
         Self {
             id: AgentId::new(id),
             display_name: format!("Test Agent {id}"),
             description: "A test agent".to_string(),
             version: "1.0.0".to_string(),
-            provider_id: provider_id.to_string(),
+            provider_id: Some(LlmProviderId::new(provider_id)),
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
             max_tokens: None,
@@ -90,6 +86,12 @@ pub trait AgentRepository: Send + Sync {
 
     /// Get an agent by ID.
     async fn get(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError>;
+
+    /// Find an agent by display name.
+    async fn find_by_display_name(
+        &self,
+        display_name: &str,
+    ) -> Result<Option<AgentRecord>, DbError>;
 
     /// List all agents.
     async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;

@@ -13,7 +13,7 @@ pub struct ProviderImportFile {
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderImportRecord {
-    pub id: String,
+    /// Display name for the provider (used as human-readable identifier).
     pub display_name: String,
     pub kind: String,
     pub base_url: String,
@@ -51,7 +51,7 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
                 return Err(DbError::QueryFailed {
                     reason: format!(
                         "Default model '{}' must be in models list for provider '{}'",
-                        default, value.id
+                        default, value.display_name
                     ),
                 });
             }
@@ -60,13 +60,14 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
             return Err(DbError::QueryFailed {
                 reason: format!(
                     "Provider '{}' must have either 'model' or 'models' field",
-                    value.id
+                    value.display_name
                 ),
             });
         };
 
+        // Use placeholder ID (0) - database will auto-generate the actual ID
         Ok(Self {
-            id: LlmProviderId::new(value.id),
+            id: LlmProviderId::new(0),
             kind: value.kind.parse::<LlmProviderKind>()?,
             display_name: value.display_name,
             base_url: value.base_url,
@@ -95,7 +96,6 @@ mod tests {
         let config: ProviderImportFile = toml::from_str(
             r#"
             [[providers]]
-            id = "openai"
             display_name = "OpenAI"
             kind = "openai-compatible"
             base_url = "https://api.openai.com/v1"
@@ -107,7 +107,7 @@ mod tests {
         .expect("provider import toml should parse");
 
         assert_eq!(config.providers.len(), 1);
-        assert_eq!(config.providers[0].id, "openai");
+        assert_eq!(config.providers[0].display_name, "OpenAI");
         assert!(config.providers[0].is_default);
     }
 
@@ -116,7 +116,6 @@ mod tests {
         let config: ProviderImportFile = toml::from_str(
             r#"
             [[providers]]
-            id = "deepseek"
             display_name = "DeepSeek"
             kind = "openai-compatible"
             base_url = "https://api.deepseek.com/v1"

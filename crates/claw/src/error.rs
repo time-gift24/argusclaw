@@ -30,6 +30,9 @@ pub enum AgentError {
     #[error("provider `{id}` was not found")]
     ProviderNotFound { id: String },
 
+    #[error("agent `{agent_id}` has no provider configured")]
+    ProviderNotConfigured { agent_id: AgentId },
+
     #[error("no default provider is configured")]
     DefaultProviderNotConfigured,
 

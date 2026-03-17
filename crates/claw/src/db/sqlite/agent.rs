@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 
 use crate::agents::{AgentId, AgentRecord, AgentRepository};
-use crate::db::DbError;
+use crate::db::{DbError, LlmProviderId};
 
 pub struct SqliteAgentRepository {
     pool: SqlitePool,
@@ -45,12 +45,14 @@ impl SqliteAgentRepository {
         let temperature: Option<f32> =
             Self::get::<Option<i64>>(&row, "temperature")?.map(|t| t as f32 / 100.0);
 
+        let provider_id: Option<i64> = Self::get::<Option<i64>>(&row, "provider_id")?;
+
         Ok(AgentRecord {
-            id: AgentId::new(Self::get::<String>(&row, "id")?),
+            id: AgentId::new(Self::get::<i64>(&row, "id")?),
             display_name: Self::get::<String>(&row, "display_name")?,
             description: Self::get::<String>(&row, "description")?,
             version: Self::get::<String>(&row, "version")?,
-            provider_id: Self::get::<Option<String>>(&row, "provider_id")?.unwrap_or_default(),
+            provider_id: provider_id.map(LlmProviderId::new),
             system_prompt: Self::get::<String>(&row, "system_prompt")?,
             tool_names,
             max_tokens: Self::get::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
@@ -69,40 +71,55 @@ impl AgentRepository for SqliteAgentRepository {
 
         let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
 
-        let provider_id = if record.provider_id.is_empty() {
-            None
+        // If ID is 0 (placeholder), do an INSERT without the id column to let SQLite auto-generate
+        if record.id.into_inner() == 0 {
+            sqlx::query(
+                r#"INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+            )
+            .bind(&record.display_name)
+            .bind(&record.description)
+            .bind(&record.version)
+            .bind(record.provider_id.as_ref().map(|id| id.into_inner()))
+            .bind(&record.system_prompt)
+            .bind(&tool_names_json)
+            .bind(record.max_tokens.map(|t| t as i64))
+            .bind(temperature_int)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
         } else {
-            Some(record.provider_id.as_str())
-        };
-
-        sqlx::query(
-            r#"INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-               ON CONFLICT(id) DO UPDATE SET
-                   display_name = excluded.display_name,
-                   description = excluded.description,
-                   version = excluded.version,
-                   provider_id = excluded.provider_id,
-                   system_prompt = excluded.system_prompt,
-                   tool_names = excluded.tool_names,
-                   max_tokens = excluded.max_tokens,
-                   temperature = excluded.temperature,
-                   updated_at = CURRENT_TIMESTAMP"#,
-        )
-        .bind(record.id.as_ref())
-        .bind(&record.display_name)
-        .bind(&record.description)
-        .bind(&record.version)
-        .bind(provider_id)
-        .bind(&record.system_prompt)
-        .bind(&tool_names_json)
-        .bind(record.max_tokens.map(|t| t as i64))
-        .bind(temperature_int)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+            sqlx::query(
+                r#"INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                   ON CONFLICT(id) DO UPDATE SET
+                       display_name = excluded.display_name,
+                       description = excluded.description,
+                       version = excluded.version,
+                       provider_id = excluded.provider_id,
+                       system_prompt = excluded.system_prompt,
+                       tool_names = excluded.tool_names,
+                       max_tokens = excluded.max_tokens,
+                       temperature = excluded.temperature,
+                       updated_at = CURRENT_TIMESTAMP"#,
+            )
+            .bind(record.id.into_inner())
+            .bind(&record.display_name)
+            .bind(&record.description)
+            .bind(&record.version)
+            .bind(record.provider_id.as_ref().map(|id| id.into_inner()))
+            .bind(&record.system_prompt)
+            .bind(&tool_names_json)
+            .bind(record.max_tokens.map(|t| t as i64))
+            .bind(temperature_int)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+        }
 
         Ok(())
     }
@@ -113,7 +130,27 @@ impl AgentRepository for SqliteAgentRepository {
                FROM agents
                WHERE id = ?1"#,
         )
-        .bind(id.as_ref())
+        .bind(id.into_inner())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        row.map(Self::map_record).transpose()
+    }
+
+    async fn find_by_display_name(
+        &self,
+        display_name: &str,
+    ) -> Result<Option<AgentRecord>, DbError> {
+        let row = sqlx::query(
+            r#"SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+               FROM agents
+               WHERE display_name = ?1
+               LIMIT 1"#,
+        )
+        .bind(display_name)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| DbError::QueryFailed {
@@ -140,7 +177,7 @@ impl AgentRepository for SqliteAgentRepository {
 
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError> {
         let result = sqlx::query("DELETE FROM agents WHERE id = ?1")
-            .bind(id.as_ref())
+            .bind(id.into_inner())
             .execute(&self.pool)
             .await
             .map_err(|e| DbError::QueryFailed {

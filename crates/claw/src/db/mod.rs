@@ -12,6 +12,8 @@ pub use approval::ApprovalRepository;
 #[allow(unused_imports)]
 pub use sqlite::SqliteJobRepository;
 
+pub use llm::LlmProviderId;
+
 #[cfg(feature = "dev")]
 pub use workflow::SqliteWorkflowRepository;
 
