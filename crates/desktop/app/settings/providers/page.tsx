@@ -191,7 +191,7 @@ export default function ProvidersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="mx-auto w-full max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb
         items={[{ label: "设置", href: "/settings" }, { label: "LLM 提供者" }]}
       />
@@ -207,7 +207,7 @@ export default function ProvidersPage() {
       </div>
 
       {providerList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-64 border rounded-lg border-dashed">
+        <div className="flex flex-col items-center justify-center w-full h-64 border rounded-lg border-dashed">
           <p className="text-muted-foreground mb-4">No providers configured</p>
           <ProviderFormDialog onSubmit={handleSubmit} />
         </div>
