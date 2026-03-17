@@ -18,7 +18,15 @@ pub struct ProviderImportRecord {
     pub kind: String,
     pub base_url: String,
     pub api_key: String,
-    pub model: String,
+    /// Single model (for backward compatibility). If provided, this becomes the only model and default_model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// List of models. Required if `model` is not provided.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// Default model. Required if `models` is provided. Ignored if `model` is provided.
+    #[serde(default)]
+    pub default_model: Option<String>,
     #[serde(default)]
     pub is_default: bool,
     #[serde(default)]
@@ -29,13 +37,42 @@ impl TryFrom<ProviderImportRecord> for LlmProviderRecord {
     type Error = DbError;
 
     fn try_from(value: ProviderImportRecord) -> Result<Self, Self::Error> {
+        // Determine models and default_model based on whether single model or multi-model format is used
+        let (models, default_model) = if let Some(model) = value.model {
+            // Single model format (backward compatibility)
+            (vec![model.clone()], model)
+        } else if !value.models.is_empty() {
+            // Multi-model format
+            let default = value
+                .default_model
+                .clone()
+                .unwrap_or_else(|| value.models[0].clone());
+            if !value.models.contains(&default) {
+                return Err(DbError::QueryFailed {
+                    reason: format!(
+                        "Default model '{}' must be in models list for provider '{}'",
+                        default, value.id
+                    ),
+                });
+            }
+            (value.models, default)
+        } else {
+            return Err(DbError::QueryFailed {
+                reason: format!(
+                    "Provider '{}' must have either 'model' or 'models' field",
+                    value.id
+                ),
+            });
+        };
+
         Ok(Self {
             id: LlmProviderId::new(value.id),
             kind: value.kind.parse::<LlmProviderKind>()?,
             display_name: value.display_name,
             base_url: value.base_url,
             api_key: SecretString::new(value.api_key),
-            model: value.model,
+            models,
+            default_model,
             is_default: value.is_default,
             extra_headers: value.extra_headers,
             secret_status: ProviderSecretStatus::Ready,

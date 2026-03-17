@@ -22,7 +22,8 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         display_name: display_name.to_string(),
         base_url: format!("https://{id}.example.com/v1"),
         api_key: SecretString::new(format!("sk-{id}")),
-        model: "gpt-4o-mini".to_string(),
+        models: vec!["gpt-4o-mini".to_string()],
+        default_model: "gpt-4o-mini".to_string(),
         is_default,
         extra_headers: HashMap::new(),
         secret_status: ProviderSecretStatus::Ready,
@@ -225,7 +226,7 @@ async fn llm_manager_reports_successful_provider_connection_tests() {
         .expect("provider should be stored");
 
     let result = manager
-        .test_provider_connection(&record.id)
+        .test_provider_connection(&record.id, "gpt-4o-mini")
         .await
         .expect("test should succeed");
 
@@ -250,7 +251,7 @@ async fn llm_manager_can_test_unsaved_provider_configurations() {
     record.base_url = base_url;
 
     let result = manager
-        .test_provider_record(record)
+        .test_provider_record(record, "gpt-4o-mini")
         .await
         .expect("draft provider test should succeed");
 
@@ -273,7 +274,7 @@ async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
         .expect("provider should be stored");
 
     let result = manager
-        .test_provider_connection(&record.id)
+        .test_provider_connection(&record.id, "gpt-4o-mini")
         .await
         .expect("test result should be returned");
 
@@ -287,7 +288,7 @@ async fn llm_manager_reports_missing_providers_in_connection_tests() {
     let manager = LLMManager::new(Arc::new(repository));
 
     let result = manager
-        .test_provider_connection(&LlmProviderId::new("missing"))
+        .test_provider_connection(&LlmProviderId::new("missing"), "gpt-4o-mini")
         .await
         .expect("missing provider should return a structured result");
 
@@ -311,7 +312,7 @@ async fn llm_manager_maps_model_availability_failures_for_provider_connection_te
         .expect("provider should be stored");
 
     let result = manager
-        .test_provider_connection(&record.id)
+        .test_provider_connection(&record.id, "gpt-4o-mini")
         .await
         .expect("test result should be returned");
 
@@ -337,7 +338,7 @@ async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() 
         .expect("provider should be stored");
 
     let result = manager
-        .test_provider_connection(&record.id)
+        .test_provider_connection(&record.id, "gpt-4o-mini")
         .await
         .expect("test result should be returned");
 

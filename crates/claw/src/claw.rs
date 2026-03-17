@@ -230,6 +230,15 @@ impl AppContext {
         self.llm_manager.get_provider(id).await
     }
 
+    /// 获取 LLM Provider 实例并指定模型
+    pub async fn get_provider_with_model(
+        &self,
+        id: &LlmProviderId,
+        model: &str,
+    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        self.llm_manager.get_provider_with_model(id, model).await
+    }
+
     /// 获取默认 LLM Provider
     pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
         self.llm_manager.get_default_provider().await
@@ -243,15 +252,17 @@ impl AppContext {
     pub async fn test_provider_connection(
         &self,
         id: &LlmProviderId,
+        model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.llm_manager.test_provider_connection(id).await
+        self.llm_manager.test_provider_connection(id, model).await
     }
 
     pub async fn test_provider_record(
         &self,
         record: LlmProviderRecord,
+        model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.llm_manager.test_provider_record(record).await
+        self.llm_manager.test_provider_record(record, model).await
     }
 
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {
@@ -632,7 +643,8 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
@@ -678,7 +690,8 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
@@ -723,7 +736,8 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: crate::SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
