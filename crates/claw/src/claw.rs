@@ -627,7 +627,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "openai-compatible")]
     async fn create_runtime_agent_from_template_keeps_duplicate_templates_alive() {
         use std::collections::HashMap;
 
@@ -674,7 +673,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "openai-compatible")]
     async fn get_thread_snapshot_returns_live_history_for_runtime_agent() {
         use std::collections::HashMap;
 
@@ -720,7 +718,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "openai-compatible")]
     async fn create_runtime_agent_from_template_enables_approval_for_risky_tools() {
         use std::collections::HashMap;
 

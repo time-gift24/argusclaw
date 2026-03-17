@@ -1,7 +1,6 @@
 pub mod error;
 pub mod manager;
 pub mod provider;
-#[cfg(feature = "openai-compatible")]
 pub mod providers;
 pub mod retry;
 pub mod secret;
@@ -15,7 +14,6 @@ pub use provider::{
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "openai-compatible")]
     #[test]
     fn openai_compatible_provider_factory_is_exposed_from_llm_module() {
         let config = crate::llm::providers::OpenAiCompatibleConfig::new(
