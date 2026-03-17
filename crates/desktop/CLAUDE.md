@@ -33,3 +33,14 @@ pnpm tauri build  # Tauri 生产构建
 ```
 
 ## assistant-ui 配置
+
+（略）
+
+## 功能说明
+
+### 多模型 LLM Provider 支持
+每个 Provider 可配置多个模型，用户可以在聊天页面选择具体的 Provider 和模型：
+- 按钮显示： `Provider名 / 模型名`（例如 `OpenAI / gpt-4.1`）
+- 下拉菜单：按 Provider 分组，每个 Provider 下显示其所有模型
+- 默认 Provider 旁边显示 `(默认)` 标签
+- 每个 Provider 的默认模型旁边显示 `默认` 小标签
