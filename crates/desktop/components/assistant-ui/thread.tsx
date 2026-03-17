@@ -7,11 +7,14 @@ import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
-import { ContextStatus } from "@/components/assistant-ui/context-status";
+import {
+  ContextDisplayRing,
+} from "@/components/assistant-ui/context-display";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useChatStore } from "@/lib/chat-store";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -24,6 +27,7 @@ import {
   SuggestionPrimitive,
   ThreadPrimitive,
 } from "@assistant-ui/react";
+import type { ThreadTokenUsage } from "@assistant-ui/react-ai-sdk";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -38,6 +42,47 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import type { FC } from "react";
+
+// Default context window size (most modern models support at least 128K)
+const DEFAULT_CONTEXT_WINDOW = 128000;
+
+// Wrapper component that provides token usage from Zustand store
+const ComposerContextDisplay: FC = () => {
+  const activeSessionKey = useChatStore((state) => state.activeSessionKey);
+  const sessionsByKey = useChatStore((state) => state.sessionsByKey);
+  const providers = useChatStore((state) => state.providers);
+
+  const session = activeSessionKey ? sessionsByKey[activeSessionKey] : null;
+  const tokenCount = session?.tokenCount ?? 0;
+
+  // Don't show if no tokens used
+  if (tokenCount === 0) return null;
+
+  // Get effective provider and model
+  const provider = session?.effectiveProviderId
+    ? providers.find((p) => p.id === session.effectiveProviderId)
+    : providers.find((p) => p.is_default);
+
+  const model = session?.effectiveModel ?? provider?.default_model ?? "";
+
+  // Get context window from model config, default 128000
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const contextWindow = (provider as any)?.model_config?.[model]?.context_length ?? DEFAULT_CONTEXT_WINDOW;
+
+  // Build ThreadTokenUsage from our token count
+  const usage: ThreadTokenUsage = {
+    totalTokens: tokenCount,
+    inputTokens: tokenCount, // We don't have separate input/output tracking yet
+  };
+
+  return (
+    <ContextDisplayRing
+      modelContextWindow={contextWindow}
+      usage={usage}
+      className="size-6"
+    />
+  );
+};
 
 export const Thread: FC = () => {
   return (
@@ -155,7 +200,7 @@ const ComposerAction: FC = () => {
         <ProviderSelector />
       </div>
       <div className="flex items-center gap-2">
-        <ContextStatus />
+        <ComposerContextDisplay />
         <ComposerPrimitive.Send asChild>
           <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
             <ArrowUpIcon className="aui-composer-send-icon size-4" />

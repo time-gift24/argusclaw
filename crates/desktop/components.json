@@ -22,6 +22,7 @@
   "menuColor": "default",
   "menuAccent": "subtle",
   "registries": {
+    "@assistant-ui": "https://r.assistant-ui.com/{name}.json",
     "@ss-blocks": {
       "url": "https://cli-mirror-demo.vercel.app/api/r/ss-blocks/{name}",
       "params": {
