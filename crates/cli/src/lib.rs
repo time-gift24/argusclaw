@@ -135,7 +135,8 @@ pub struct ProviderDisplayRecord {
     pub display_name: String,
     pub kind: String,
     pub base_url: String,
-    pub model: String,
+    pub models: Vec<String>,
+    pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
 }
@@ -147,7 +148,8 @@ impl From<LlmProviderSummary> for ProviderDisplayRecord {
             display_name: value.display_name,
             kind: value.kind.to_string(),
             base_url: value.base_url,
-            model: value.model,
+            models: value.models,
+            default_model: value.default_model,
             is_default: value.is_default,
             extra_headers: value.extra_headers,
         }

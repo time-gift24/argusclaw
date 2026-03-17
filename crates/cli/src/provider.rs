@@ -94,7 +94,8 @@ pub struct ProviderDisplayRecord {
     pub display_name: String,
     pub kind: String,
     pub base_url: String,
-    pub model: String,
+    pub models: Vec<String>,
+    pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
 }
@@ -106,7 +107,8 @@ impl From<LlmProviderSummary> for ProviderDisplayRecord {
             display_name: value.display_name,
             kind: value.kind.to_string(),
             base_url: value.base_url,
-            model: value.model,
+            models: value.models,
+            default_model: value.default_model,
             is_default: value.is_default,
             extra_headers: value.extra_headers,
         }
@@ -120,7 +122,8 @@ impl From<LlmProviderRecord> for ProviderDisplayRecord {
             display_name: value.display_name,
             kind: value.kind.to_string(),
             base_url: value.base_url,
-            model: value.model,
+            models: value.models,
+            default_model: value.default_model,
             is_default: value.is_default,
             extra_headers: value.extra_headers,
         }
@@ -137,7 +140,8 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
             display_name: value.display_name,
             base_url: value.base_url,
             api_key: SecretString::new(value.api_key),
-            model: value.model,
+            models: vec![value.model.clone()],
+            default_model: value.model,
             is_default: value.is_default,
             extra_headers: HashMap::new(),
             secret_status: claw::ProviderSecretStatus::Ready,
@@ -158,13 +162,16 @@ pub fn render_provider_output(record: &ProviderDisplayRecord) -> String {
         format!("\nextra_headers:\n{headers}")
     };
 
+    let models_str = record.models.join(", ");
+
     format!(
-        "id: {}\ndisplay_name: {}\nkind: {}\nbase_url: {}\nmodel: {}\nis_default: {}{}",
+        "id: {}\ndisplay_name: {}\nkind: {}\nbase_url: {}\nmodels: {}\ndefault_model: {}\nis_default: {}{}",
         record.id,
         record.display_name,
         record.kind,
         record.base_url,
-        record.model,
+        models_str,
+        record.default_model,
         record.is_default,
         headers_str
     )
@@ -259,7 +266,8 @@ mod tests {
             display_name: "OpenAI".to_string(),
             kind: "openai-compatible".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o-mini".to_string(),
+            models: vec!["gpt-4o-mini".to_string()],
+            default_model: "gpt-4o-mini".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
         });

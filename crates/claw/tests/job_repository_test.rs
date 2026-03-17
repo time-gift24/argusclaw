@@ -20,7 +20,7 @@ async fn setup() -> SqliteJobRepository {
     migrate(&pool).await.unwrap();
     // Insert dummy provider + agent for FK constraints
     sqlx::query(
-        "INSERT INTO llm_providers (id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce) VALUES ('prov-1', 'openai', 'Test', 'http://localhost', 'gpt-4', X'00', X'00')"
+        "INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce) VALUES ('prov-1', 'openai', 'Test', 'http://localhost', '[\"gpt-4\"]', 'gpt-4', X'00', X'00')"
     )
     .execute(&pool)
     .await

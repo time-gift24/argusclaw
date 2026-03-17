@@ -27,8 +27,8 @@ async fn setup_test_db() -> SqliteAgentRepository {
 /// Insert a minimal LLM provider to satisfy foreign key constraints.
 async fn insert_test_provider(pool: &sqlx::SqlitePool, provider_id: &str) {
     sqlx::query(
-        r#"INSERT INTO llm_providers (id, kind, display_name, base_url, model, encrypted_api_key, api_key_nonce, is_default)
-           VALUES (?1, 'openai_compatible', 'Test Provider', 'https://api.example.com', 'gpt-4', X'00', X'00', 0)"#,
+        r#"INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default)
+           VALUES (?1, 'openai_compatible', 'Test Provider', 'https://api.example.com', '["gpt-4"]', 'gpt-4', X'00', X'00', 0)"#,
     )
     .bind(provider_id)
     .execute(pool)

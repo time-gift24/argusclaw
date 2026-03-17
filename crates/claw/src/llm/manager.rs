@@ -39,7 +39,29 @@ impl LLMManager {
             .await?
             .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })?;
 
-        self.build_provider(record)
+        let default_model = record.default_model.clone();
+        self.build_provider_with_model(record, &default_model)
+    }
+
+    pub async fn get_provider_with_model(
+        &self,
+        id: &LlmProviderId,
+        model: &str,
+    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+        let record = self
+            .repository
+            .get_provider(id)
+            .await?
+            .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })?;
+
+        if !record.models.contains(&model.to_string()) {
+            return Err(AgentError::ModelNotAvailable {
+                provider: id.to_string(),
+                model: model.to_string(),
+            });
+        }
+
+        self.build_provider_with_model(record, model)
     }
 
     pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
@@ -49,7 +71,8 @@ impl LLMManager {
             .await?
             .ok_or(AgentError::DefaultProviderNotConfigured)?;
 
-        self.build_provider(record)
+        let default_model = record.default_model.clone();
+        self.build_provider_with_model(record, &default_model)
     }
 
     pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<(), AgentError> {
@@ -114,6 +137,7 @@ impl LLMManager {
     pub async fn test_provider_connection(
         &self,
         id: &LlmProviderId,
+        model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
         let Some(record) = self.repository.get_provider(id).await? else {
             return Ok(build_provider_test_result(
@@ -127,39 +151,48 @@ impl LLMManager {
         };
 
         let provider_id = record.id.to_string();
-        let model = record.model.clone();
         let base_url = record.base_url.clone();
-        let provider = match self.build_provider(record) {
+        let provider = match self.build_provider_with_model(record.clone(), model) {
             Ok(provider) => provider,
             Err(AgentError::UnsupportedProviderKind { kind }) => {
                 return Ok(build_provider_test_result(
                     provider_id,
-                    model,
+                    model.to_string(),
                     base_url,
                     Duration::ZERO,
                     ProviderTestStatus::UnsupportedProviderKind,
                     AgentError::UnsupportedProviderKind { kind }.to_string(),
                 ));
             }
+            Err(AgentError::ModelNotAvailable { provider, model }) => {
+                return Ok(build_provider_test_result(
+                    provider.clone(),
+                    model.clone(),
+                    base_url,
+                    Duration::ZERO,
+                    ProviderTestStatus::ModelNotAvailable,
+                    AgentError::ModelNotAvailable { provider, model }.to_string(),
+                ));
+            }
             Err(error) => return Err(error),
         };
 
-        Ok(run_provider_connection_test(provider_id, model, base_url, provider).await)
+        Ok(run_provider_connection_test(provider_id, model.to_string(), base_url, provider).await)
     }
 
     pub async fn test_provider_record(
         &self,
         record: LlmProviderRecord,
+        model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
         let provider_id = record.id.to_string();
-        let model = record.model.clone();
         let base_url = record.base_url.clone();
-        let provider = match self.build_provider(record) {
+        let provider = match self.build_provider_with_model(record, model) {
             Ok(provider) => provider,
             Err(AgentError::UnsupportedProviderKind { kind }) => {
                 return Ok(build_provider_test_result(
                     provider_id,
-                    model,
+                    model.to_string(),
                     base_url,
                     Duration::ZERO,
                     ProviderTestStatus::UnsupportedProviderKind,
@@ -169,7 +202,7 @@ impl LLMManager {
             Err(error) => return Err(error),
         };
 
-        Ok(run_provider_connection_test(provider_id, model, base_url, provider).await)
+        Ok(run_provider_connection_test(provider_id, model.to_string(), base_url, provider).await)
     }
 
     #[cfg(feature = "dev")]
@@ -206,9 +239,10 @@ impl LLMManager {
             .map_err(AgentError::from)
     }
 
-    fn build_provider(
+    fn build_provider_with_model(
         &self,
         record: LlmProviderRecord,
+        model: &str,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
         match record.kind {
             LlmProviderKind::OpenAiCompatible => {
@@ -217,7 +251,7 @@ impl LLMManager {
                     let mut config = crate::llm::providers::OpenAiCompatibleConfig::new(
                         record.base_url,
                         record.api_key.expose_secret().to_string(),
-                        record.model,
+                        model.to_string(),
                     );
 
                     for (name, value) in &record.extra_headers {

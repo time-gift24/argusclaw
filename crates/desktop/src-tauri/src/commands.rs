@@ -42,7 +42,8 @@ pub struct ProviderInput {
     pub display_name: String,
     pub base_url: String,
     pub api_key: String,
-    pub model: String,
+    pub models: Vec<String>,
+    pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
 }
@@ -55,7 +56,8 @@ impl From<ProviderInput> for LlmProviderRecord {
             display_name: input.display_name,
             base_url: input.base_url,
             api_key: SecretString::new(input.api_key),
-            model: input.model,
+            models: input.models,
+            default_model: input.default_model,
             is_default: input.is_default,
             extra_headers: input.extra_headers,
             secret_status: ProviderSecretStatus::Ready,
@@ -69,7 +71,8 @@ pub struct ProviderSummary {
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
-    pub model: String,
+    pub models: Vec<String>,
+    pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -82,7 +85,8 @@ impl From<LlmProviderSummary> for ProviderSummary {
             kind: summary.kind.into(),
             display_name: summary.display_name,
             base_url: summary.base_url,
-            model: summary.model,
+            models: summary.models,
+            default_model: summary.default_model,
             is_default: summary.is_default,
             extra_headers: summary.extra_headers,
             secret_status: summary.secret_status,
@@ -97,7 +101,8 @@ pub struct ProviderRecord {
     pub display_name: String,
     pub base_url: String,
     pub api_key: String,
-    pub model: String,
+    pub models: Vec<String>,
+    pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -111,7 +116,8 @@ impl From<LlmProviderRecord> for ProviderRecord {
             display_name: record.display_name,
             base_url: record.base_url,
             api_key: record.api_key.expose_secret().to_string(),
-            model: record.model,
+            models: record.models,
+            default_model: record.default_model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
@@ -126,7 +132,8 @@ fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord 
         display_name: summary.display_name,
         base_url: summary.base_url,
         api_key: String::new(),
-        model: summary.model,
+        models: summary.models,
+        default_model: summary.default_model,
         is_default: summary.is_default,
         extra_headers: summary.extra_headers,
         secret_status: summary.secret_status,
@@ -208,8 +215,9 @@ pub async fn set_default_provider(
 pub async fn test_provider_connection(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     id: String,
+    model: String,
 ) -> Result<ProviderTestResult, String> {
-    ctx.test_provider_connection(&LlmProviderId::new(id))
+    ctx.test_provider_connection(&LlmProviderId::new(id), &model)
         .await
         .map_err(|e| e.to_string())
 }
@@ -218,8 +226,9 @@ pub async fn test_provider_connection(
 pub async fn test_provider_input(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: ProviderInput,
+    model: String,
 ) -> Result<ProviderTestResult, String> {
-    ctx.test_provider_record(record.into())
+    ctx.test_provider_record(record.into(), &model)
         .await
         .map_err(|e| e.to_string())
 }
@@ -467,7 +476,8 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: "sk-test".to_string(),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
         }
@@ -497,7 +507,8 @@ mod tests {
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
@@ -518,7 +529,8 @@ mod tests {
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Legacy".to_string(),
             base_url: "https://legacy.example.com/v1".to_string(),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: false,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::RequiresReentry,
@@ -536,7 +548,8 @@ mod tests {
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4.1".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
