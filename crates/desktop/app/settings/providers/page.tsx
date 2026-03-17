@@ -58,7 +58,8 @@ export default function ProvidersPage() {
       display_name: record.display_name,
       base_url: record.base_url,
       api_key: record.api_key,
-      model: record.model,
+      models: record.models,
+      default_model: record.default_model,
       is_default: record.is_default,
       extra_headers: record.extra_headers,
     };
@@ -80,7 +81,8 @@ export default function ProvidersPage() {
           typeof provider.api_key === "string"
             ? provider.api_key
             : (provider.api_key as { api_key: string }).api_key || "",
-        model: provider.model,
+        models: provider.models,
+        default_model: provider.default_model,
         is_default: provider.is_default,
         extra_headers: provider.extra_headers,
         secret_status: provider.secret_status,
@@ -120,12 +122,12 @@ export default function ProvidersPage() {
       const provider = providerList.find((item) => item.id === id);
       setTestingProviderId(id);
       try {
-        const result = await providers.testConnection(id);
+        const result = await providers.testConnection(id, provider?.default_model ?? "");
         setTestResultsByProviderId((current) => ({ ...current, [id]: result }));
       } catch (error) {
         const fallbackResult: ProviderTestResult = {
           provider_id: id,
-          model: provider?.model ?? "",
+          model: provider?.default_model ?? "",
           base_url: provider?.base_url ?? "",
           checked_at: new Date().toISOString(),
           latency_ms: 0,

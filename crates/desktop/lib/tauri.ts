@@ -9,7 +9,8 @@ export interface LlmProviderSummary {
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
-  model: string;
+  models: string[];
+  default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -21,7 +22,8 @@ export interface LlmProviderRecord {
   display_name: string;
   base_url: string;
   api_key: string;
-  model: string;
+  models: string[];
+  default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -33,7 +35,8 @@ export interface ProviderInput {
   display_name: string;
   base_url: string;
   api_key: string;
-  model: string;
+  models: string[];
+  default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
 }
@@ -83,11 +86,11 @@ export const providers = {
 
   setDefault: (id: string) => invoke<void>("set_default_provider", { id }),
 
-  testConnection: (id: string) =>
-    invoke<ProviderTestResult>("test_provider_connection", { id }),
+  testConnection: (id: string, model: string) =>
+    invoke<ProviderTestResult>("test_provider_connection", { id, model }),
 
-  testInput: (record: ProviderInput) =>
-    invoke<ProviderTestResult>("test_provider_input", { record }),
+  testInput: (record: ProviderInput, model: string) =>
+    invoke<ProviderTestResult>("test_provider_input", { record, model }),
 };
 
 // Agent API
@@ -109,6 +112,7 @@ export interface ChatSessionPayload {
   runtime_agent_id: string;
   thread_id: string;
   effective_provider_id: string;
+  effective_model: string;
 }
 
 export interface ThreadSnapshotPayload {
@@ -129,10 +133,15 @@ export interface ThreadSnapshotPayload {
 export type ApprovalDecision = "approved" | "denied" | "timed_out";
 
 export const chat = {
-  createChatSession: (templateId: string, providerPreferenceId: string | null) =>
+  createChatSession: (
+    templateId: string,
+    providerPreferenceId: string | null,
+    modelOverride: string | null,
+  ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
       templateId,
       providerPreferenceId,
+      modelOverride,
     }),
 
   sendMessage: (runtimeAgentId: string, threadId: string, content: string) =>
