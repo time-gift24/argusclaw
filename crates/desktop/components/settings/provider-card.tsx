@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Cloud, Pencil, Trash2, Check, Activity } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -28,7 +29,6 @@ export interface LlmProviderSummary {
 
 interface ProviderCardProps {
   provider: LlmProviderSummary;
-  onEdit: (id: string) => void;
   onDelete: (id: string) => void;
   onSetDefault: (id: string) => void;
   onTestConnection: (id: string) => void;
@@ -49,7 +49,6 @@ const failureStatuses = new Set<ProviderTestResult["status"]>([
 
 export function ProviderCard({
   provider,
-  onEdit,
   onDelete,
   onSetDefault,
   onTestConnection,
@@ -57,6 +56,7 @@ export function ProviderCard({
   testResult,
   isTesting = false,
 }: ProviderCardProps) {
+  const router = useRouter();
   const hasResult = !!testResult;
   const isSuccess = testResult?.status === "success";
   const isFailure = !!testResult && failureStatuses.has(testResult.status);
@@ -162,7 +162,7 @@ export function ProviderCard({
           <Activity className="h-3 w-3 mr-1" />
           测试连接
         </Button>
-        <Button size="sm" variant="outline" onClick={() => onEdit(provider.id)}>
+        <Button size="sm" variant="outline" onClick={() => router.push(`/settings/providers/${provider.id}`)}>
           <Pencil className="h-3 w-3 mr-1" />
           Edit
         </Button>

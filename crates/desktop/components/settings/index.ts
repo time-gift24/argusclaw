@@ -9,3 +9,6 @@ export { AgentFormDialog } from "./agent-form-dialog";
 export { DeleteConfirmDialog } from "./delete-confirm-dialog";
 export { Breadcrumb } from "./breadcrumb";
 export { AgentEditor } from "./agent-editor";
+export { ProviderEditor } from "./provider-editor";
+export { ProviderTestPanel } from "./provider-test-panel";
+export { ProviderModelList } from "./provider-model-list";
