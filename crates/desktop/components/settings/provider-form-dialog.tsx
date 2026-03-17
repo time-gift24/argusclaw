@@ -7,6 +7,7 @@ import {
   type ProviderSecretStatus,
   type ProviderInput,
   type ProviderTestResult,
+  type ModelConfig,
 } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ProviderTestDialog } from "./provider-test-dialog";
 
 export interface LlmProviderRecord {
@@ -34,6 +42,7 @@ export interface LlmProviderRecord {
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
+  model_config: Record<string, ModelConfig>;
 }
 
 interface ProviderFormDialogProps {
@@ -56,6 +65,7 @@ function createDefaultFormData(): LlmProviderRecord {
     is_default: false,
     extra_headers: {},
     secret_status: "ready",
+    model_config: {},
   };
 }
 
@@ -137,6 +147,33 @@ export function ProviderFormDialog({
     setFormData((prev) => ({ ...prev, default_model: model }));
   }, []);
 
+  const handleUpdateModelContextLength = React.useCallback(
+    (model: string, contextLength: number | null) => {
+      setFormData((prev) => {
+        const newModelConfig = { ...prev.model_config };
+        if (contextLength === null) {
+          // If context_length is cleared, remove it from config
+          const existingConfig = newModelConfig[model];
+          if (existingConfig) {
+            const { context_length: _, ...rest } = existingConfig;
+            if (Object.keys(rest).length === 0) {
+              delete newModelConfig[model];
+            } else {
+              newModelConfig[model] = rest as ModelConfig;
+            }
+          }
+        } else {
+          newModelConfig[model] = {
+            ...newModelConfig[model],
+            context_length: contextLength,
+          };
+        }
+        return { ...prev, model_config: newModelConfig };
+      });
+    },
+    [],
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -201,12 +238,13 @@ export function ProviderFormDialog({
     is_default: formData.is_default,
     extra_headers: formData.extra_headers,
     secret_status: formData.secret_status,
+    model_config: formData.model_config,
   };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       {dialogTrigger ? <DialogTrigger render={dialogTrigger} /> : null}
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
             {isEditing ? "Edit Provider" : "Add Provider"}
@@ -223,107 +261,177 @@ export function ProviderFormDialog({
               当前保存的密钥已无法解密，请重新填写 API Key 后再保存。
             </div>
           )}
-          <div className="space-y-2">
-            <Label htmlFor="id">ID</Label>
-            <Input
-              id="id"
-              value={formData.id}
-              onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-              placeholder="unique-provider-id"
-              required
-              disabled={isEditing}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="display_name">Display Name</Label>
-            <Input
-              id="display_name"
-              value={formData.display_name}
-              onChange={(e) =>
-                setFormData({ ...formData, display_name: e.target.value })
-              }
-              placeholder="My LLM Provider"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="base_url">Base URL</Label>
-            <Input
-              id="base_url"
-              value={formData.base_url}
-              onChange={(e) =>
-                setFormData({ ...formData, base_url: e.target.value })
-              }
-              placeholder="https://api.example.com/v1"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="api_key">API Key</Label>
-            <Input
-              id="api_key"
-              type="password"
-              value={formData.api_key}
-              onChange={(e) =>
-                setFormData({ ...formData, api_key: e.target.value })
-              }
-              placeholder="sk-..."
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Models</Label>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {formData.models.map((model) => (
-                <Badge
-                  key={model}
-                  variant={model === formData.default_model ? "default" : "secondary"}
-                  className="cursor-pointer pr-1"
-                  onClick={() => handleSetDefaultModel(model)}
-                >
-                  {model}
-                  {model === formData.default_model && (
-                    <span className="ml-1 text-[10px] opacity-70">默认</span>
-                  )}
-                  <button
-                    type="button"
-                    className="ml-1 hover:text-destructive"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveModel(model);
-                    }}
-                  >
-                    ×
-                  </button>
-                </Badge>
-              ))}
-            </div>
-            <div className="flex gap-2">
-              <Input
-                value={newModel}
-                onChange={(e) => setNewModel(e.target.value)}
-                placeholder="输入模型名称"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleAddModel();
+
+          {/* Two-column grid layout */}
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            {/* Left Column: Basic Info */}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="id">ID</Label>
+                <Input
+                  id="id"
+                  value={formData.id}
+                  onChange={(e) => setFormData({ ...formData, id: e.target.value })}
+                  placeholder="unique-provider-id"
+                  required
+                  disabled={isEditing}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="kind">Provider Type</Label>
+                <Select
+                  value={formData.kind}
+                  onValueChange={(value) =>
+                    setFormData({ ...formData, kind: value as "openai-compatible" })
                   }
-                }}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleAddModel}
-                disabled={!newModel.trim()}
-              >
-                添加
-              </Button>
+                  disabled={isEditing}
+                >
+                  <SelectTrigger id="kind">
+                    <SelectValue placeholder="Select provider type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="openai-compatible">OpenAI Compatible</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="display_name">Display Name</Label>
+                <Input
+                  id="display_name"
+                  value={formData.display_name}
+                  onChange={(e) =>
+                    setFormData({ ...formData, display_name: e.target.value })
+                  }
+                  placeholder="My LLM Provider"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="base_url">Base URL</Label>
+                <Input
+                  id="base_url"
+                  value={formData.base_url}
+                  onChange={(e) =>
+                    setFormData({ ...formData, base_url: e.target.value })
+                  }
+                  placeholder="https://api.example.com/v1"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="api_key">API Key</Label>
+                <Input
+                  id="api_key"
+                  type="password"
+                  value={formData.api_key}
+                  onChange={(e) =>
+                    setFormData({ ...formData, api_key: e.target.value })
+                  }
+                  placeholder="sk-..."
+                  required
+                />
+              </div>
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              点击标签设为默认模型
-            </p>
+
+            {/* Right Column: Model Configuration */}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label>Models</Label>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {formData.models.map((model) => (
+                    <Badge
+                      key={model}
+                      variant={model === formData.default_model ? "default" : "secondary"}
+                      className="cursor-pointer pr-1"
+                      onClick={() => handleSetDefaultModel(model)}
+                    >
+                      {model}
+                      {model === formData.default_model && (
+                        <span className="ml-1 text-[10px] opacity-70">默认</span>
+                      )}
+                      <button
+                        type="button"
+                        className="ml-1 hover:text-destructive"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveModel(model);
+                        }}
+                      >
+                        ×
+                      </button>
+                    </Badge>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={newModel}
+                    onChange={(e) => setNewModel(e.target.value)}
+                    placeholder="输入模型名称"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddModel();
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={handleAddModel}
+                    disabled={!newModel.trim()}
+                  >
+                    添加
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  点击标签设为默认模型
+                </p>
+                {formData.models.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <Label className="text-xs text-muted-foreground">
+                      模型上下文长度配置（可选）
+                    </Label>
+                    <div className="space-y-1">
+                      {formData.models.map((model) => (
+                        <div
+                          key={model}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <span className="w-32 truncate text-xs" title={model}>
+                            {model}
+                          </span>
+                          <Input
+                            type="number"
+                            placeholder="默认 128000"
+                            value={
+                              formData.model_config[model]?.context_length ?? ""
+                            }
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              if (value === "") {
+                                handleUpdateModelContextLength(model, null);
+                              } else {
+                                const num = parseInt(value, 10);
+                                if (!isNaN(num) && num > 0) {
+                                  handleUpdateModelContextLength(model, num);
+                                }
+                              }
+                            }}
+                            className="h-7 w-28 text-xs"
+                          />
+                          <span className="text-[10px] text-muted-foreground">
+                            tokens
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
+
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               type="button"
