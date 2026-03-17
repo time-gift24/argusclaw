@@ -64,7 +64,7 @@ export default function AgentsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="mx-auto w-full max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb items={[
         { label: "设置", href: "/settings" },
         { label: "智能体" },
