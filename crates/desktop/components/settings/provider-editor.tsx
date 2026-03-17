@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Save } from "lucide-react";
-import { providers, type LlmProviderSummary, type ProviderSecretStatus } from "@/lib/tauri";
+import { providers, type ProviderSecretStatus } from "@/lib/tauri";
 
 import { Breadcrumb } from "@/components/settings";
 import { Button } from "@/components/ui/button";
@@ -83,9 +83,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
             kind: provider.kind,
             display_name: provider.display_name,
             base_url: provider.base_url,
-            api_key: typeof provider.api_key === "string"
-              ? provider.api_key
-              : (provider.api_key as { api_key: string }).api_key || "",
+            api_key: provider.api_key,
             models: provider.models,
             default_model: provider.default_model,
             is_default: provider.is_default,
@@ -151,7 +149,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="w-full px-6 py-6 space-y-4">
       <Breadcrumb
         items={[
           { label: "设置", href: "/settings" },
