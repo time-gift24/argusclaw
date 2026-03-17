@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use claw::{
     AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
+    LlmProviderRecord, LlmProviderSummary, ProviderModelConfig, ProviderSecretStatus,
+    ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -35,29 +36,60 @@ impl From<LlmProviderKind> for ProviderKind {
 }
 
 /// Input type for creating/updating a provider (api_key as plain string).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderModelConfigPayload {
+    pub context_length: Option<u32>,
+}
+
+impl From<ProviderModelConfigPayload> for ProviderModelConfig {
+    fn from(config: ProviderModelConfigPayload) -> Self {
+        Self {
+            context_length: config.context_length,
+        }
+    }
+}
+
+impl From<ProviderModelConfig> for ProviderModelConfigPayload {
+    fn from(config: ProviderModelConfig) -> Self {
+        Self {
+            context_length: config.context_length,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInput {
-    pub id: String,
+    pub id: Option<String>,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
     pub api_key: String,
     pub models: Vec<String>,
     pub default_model: String,
+    pub model_config: HashMap<String, ProviderModelConfigPayload>,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
 }
 
 impl From<ProviderInput> for LlmProviderRecord {
     fn from(input: ProviderInput) -> Self {
+        let provider_id = input
+            .id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         Self {
-            id: LlmProviderId::new(input.id),
+            id: LlmProviderId::new(provider_id),
             kind: input.kind.into(),
             display_name: input.display_name,
             base_url: input.base_url,
             api_key: SecretString::new(input.api_key),
             models: input.models,
             default_model: input.default_model,
+            model_config: input
+                .model_config
+                .into_iter()
+                .map(|(model, config)| (model, config.into()))
+                .collect(),
             is_default: input.is_default,
             extra_headers: input.extra_headers,
             secret_status: ProviderSecretStatus::Ready,
@@ -73,6 +105,7 @@ pub struct ProviderSummary {
     pub base_url: String,
     pub models: Vec<String>,
     pub default_model: String,
+    pub model_config: HashMap<String, ProviderModelConfigPayload>,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -87,6 +120,11 @@ impl From<LlmProviderSummary> for ProviderSummary {
             base_url: summary.base_url,
             models: summary.models,
             default_model: summary.default_model,
+            model_config: summary
+                .model_config
+                .into_iter()
+                .map(|(model, config)| (model, config.into()))
+                .collect(),
             is_default: summary.is_default,
             extra_headers: summary.extra_headers,
             secret_status: summary.secret_status,
@@ -103,6 +141,7 @@ pub struct ProviderRecord {
     pub api_key: String,
     pub models: Vec<String>,
     pub default_model: String,
+    pub model_config: HashMap<String, ProviderModelConfigPayload>,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -118,6 +157,11 @@ impl From<LlmProviderRecord> for ProviderRecord {
             api_key: record.api_key.expose_secret().to_string(),
             models: record.models,
             default_model: record.default_model,
+            model_config: record
+                .model_config
+                .into_iter()
+                .map(|(model, config)| (model, config.into()))
+                .collect(),
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
@@ -134,6 +178,11 @@ fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord 
         api_key: String::new(),
         models: summary.models,
         default_model: summary.default_model,
+        model_config: summary
+            .model_config
+            .into_iter()
+            .map(|(model, config)| (model, config.into()))
+            .collect(),
         is_default: summary.is_default,
         extra_headers: summary.extra_headers,
         secret_status: summary.secret_status,
@@ -235,6 +284,41 @@ pub async fn test_provider_input(
 
 // === Agent Commands ===
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInput {
+    pub id: Option<String>,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub provider_id: String,
+    pub model: Option<String>,
+    pub system_prompt: String,
+    pub tool_names: Vec<String>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
+
+impl From<AgentInput> for AgentRecord {
+    fn from(input: AgentInput) -> Self {
+        let id = input
+            .id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        Self {
+            id: AgentId::new(id),
+            display_name: input.display_name,
+            description: input.description,
+            version: input.version,
+            provider_id: input.provider_id,
+            model: input.model,
+            system_prompt: input.system_prompt,
+            tool_names: input.tool_names,
+            max_tokens: input.max_tokens,
+            temperature: input.temperature,
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_agent_templates(
     ctx: State<'_, std::sync::Arc<AppContext>>,
@@ -255,9 +339,11 @@ pub async fn get_agent_template(
 #[tauri::command]
 pub async fn upsert_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    record: AgentRecord,
+    record: AgentInput,
 ) -> Result<(), String> {
-    ctx.upsert_template(record).await.map_err(|e| e.to_string())
+    ctx.upsert_template(record.into())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -341,7 +427,7 @@ pub async fn logout(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<(), St
 /// Payload returned when creating a chat session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSessionPayload {
-    /// Unique session key (template_id::provider_preference_id).
+    /// Unique session key (template_id::provider_preference_id::model_override).
     pub session_key: String,
     /// The template ID this session was created from.
     pub template_id: String,
@@ -372,39 +458,20 @@ pub async fn create_chat_session(
         .create_runtime_agent_from_template(
             &AgentId::new(template_id.clone()),
             provider_override.as_ref(),
+            model_override.as_deref(),
         )
         .await
         .map_err(|e| e.to_string())?;
-
-    // Get provider record to determine effective model
-    let provider_record = ctx
-        .get_provider_record(&runtime.effective_provider_id)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Calculate effective model from override or provider's default
-    let effective_model = model_override
-        .as_ref()
-        .filter(|m| !m.is_empty())
-        .cloned()
-        .unwrap_or_else(|| provider_record.default_model.clone());
-
-    // Validate model is in provider's list
-    if !provider_record.models.contains(&effective_model) {
-        return Err(format!(
-            "Model '{}' is not available in provider '{}'",
-            effective_model, provider_record.id
-        ));
-    }
 
     let thread_id = ctx
         .create_thread(&runtime.runtime_agent_id, claw::ThreadConfig::default())
         .map_err(|e| e.to_string())?;
 
     let session_key = format!(
-        "{}::{}",
+        "{}::{}::{}",
         template_id,
-        provider_preference_id.as_deref().unwrap_or("__default__")
+        provider_preference_id.as_deref().unwrap_or("__default__"),
+        model_override.as_deref().unwrap_or("__default_model__")
     );
 
     // Start event forwarder
@@ -425,7 +492,7 @@ pub async fn create_chat_session(
         runtime_agent_id: runtime.runtime_agent_id.to_string(),
         thread_id: thread_id.to_string(),
         effective_provider_id: runtime.effective_provider_id.to_string(),
-        effective_model,
+        effective_model: runtime.effective_model,
     })
 }
 
@@ -485,24 +552,31 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_provider_reentry_record, map_provider_lookup_result, ChatSessionPayload,
-        ProviderInput, ProviderKind, ProviderRecord, ProviderSummary,
+        build_provider_reentry_record, map_provider_lookup_result, AgentInput, ChatSessionPayload,
+        ProviderInput, ProviderKind, ProviderModelConfigPayload, ProviderRecord, ProviderSummary,
     };
     use claw::{
-        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary,
-        ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
+        AgentError, AgentRecord, LlmProviderId, LlmProviderKind, LlmProviderRecord,
+        LlmProviderSummary, ProviderModelConfig, ProviderSecretStatus, ProviderTestResult,
+        ProviderTestStatus, SecretString,
     };
 
     #[test]
     fn provider_input_converts_into_domain_record() {
         let record: LlmProviderRecord = ProviderInput {
-            id: "openai".to_string(),
+            id: Some("openai".to_string()),
             kind: ProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: "sk-test".to_string(),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::from([(
+                "gpt-4.1".to_string(),
+                ProviderModelConfigPayload {
+                    context_length: Some(256_000),
+                },
+            )]),
             is_default: true,
             extra_headers: HashMap::new(),
         }
@@ -511,7 +585,68 @@ mod tests {
         assert_eq!(record.id, LlmProviderId::new("openai"));
         assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);
         assert_eq!(record.api_key.expose_secret(), "sk-test");
+        assert_eq!(record.model_config["gpt-4.1"].context_length, Some(256_000));
         assert_eq!(record.secret_status, ProviderSecretStatus::Ready);
+    }
+
+    #[test]
+    fn provider_input_generates_an_id_when_create_payload_omits_it() {
+        let record: LlmProviderRecord = ProviderInput {
+            id: None,
+            kind: ProviderKind::OpenAiCompatible,
+            display_name: "Generated".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            models: vec!["gpt-4.1".to_string()],
+            default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::new(),
+            is_default: false,
+            extra_headers: HashMap::new(),
+        }
+        .into();
+
+        assert!(!record.id.as_ref().is_empty());
+    }
+
+    #[test]
+    fn agent_input_generates_an_id_when_create_payload_omits_it() {
+        let record: AgentRecord = AgentInput {
+            id: None,
+            display_name: "Planner".to_string(),
+            description: "Generated id".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: String::new(),
+            model: None,
+            system_prompt: "You are helpful.".to_string(),
+            tool_names: vec!["shell".to_string()],
+            max_tokens: Some(2048),
+            temperature: Some(0.7),
+        }
+        .into();
+
+        assert!(!record.id.as_ref().is_empty());
+        assert_eq!(record.display_name, "Planner");
+    }
+
+    #[test]
+    fn agent_input_preserves_explicit_model_binding() {
+        let record: AgentRecord = AgentInput {
+            id: Some("planner".to_string()),
+            display_name: "Planner".to_string(),
+            description: "Bound model".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: "openai".to_string(),
+            model: Some("gpt-4o-mini".to_string()),
+            system_prompt: "You are helpful.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+        }
+        .into();
+
+        assert_eq!(record.id.as_ref(), "planner");
+        assert_eq!(record.provider_id, "openai");
+        assert_eq!(record.model.as_deref(), Some("gpt-4o-mini"));
     }
 
     #[test]
@@ -534,6 +669,12 @@ mod tests {
             api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::from([(
+                "gpt-4.1".to_string(),
+                ProviderModelConfig {
+                    context_length: Some(256_000),
+                },
+            )]),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
@@ -544,6 +685,7 @@ mod tests {
         assert_eq!(output.id, "openai");
         assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
         assert_eq!(output.api_key, "sk-test");
+        assert_eq!(output.model_config["gpt-4.1"].context_length, Some(256_000));
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 
@@ -556,6 +698,12 @@ mod tests {
             base_url: "https://legacy.example.com/v1".to_string(),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::from([(
+                "gpt-4.1".to_string(),
+                ProviderModelConfig {
+                    context_length: Some(200_000),
+                },
+            )]),
             is_default: false,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::RequiresReentry,
@@ -563,6 +711,7 @@ mod tests {
 
         assert_eq!(record.id, "legacy");
         assert_eq!(record.api_key, "");
+        assert_eq!(record.model_config["gpt-4.1"].context_length, Some(200_000));
         assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
     }
 
@@ -575,12 +724,19 @@ mod tests {
             base_url: "https://api.openai.com/v1".to_string(),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::from([(
+                "gpt-4.1".to_string(),
+                ProviderModelConfig {
+                    context_length: Some(128_000),
+                },
+            )]),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
         });
 
         assert_eq!(output.id, "openai");
+        assert_eq!(output.model_config["gpt-4.1"].context_length, Some(128_000));
         assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
     }
 
@@ -627,7 +783,7 @@ mod tests {
     #[test]
     fn chat_session_payload_serializes_effective_provider_id() {
         let payload = ChatSessionPayload {
-            session_key: "arguswing::__default__".to_string(),
+            session_key: "arguswing::__default__::__default_model__".to_string(),
             template_id: "arguswing".to_string(),
             runtime_agent_id: "arguswing--runtime".to_string(),
             thread_id: claw::ThreadId::new().to_string(),
@@ -638,6 +794,9 @@ mod tests {
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["effective_provider_id"], json!("openai"));
         assert_eq!(value["effective_model"], json!("gpt-4.1"));
-        assert_eq!(value["session_key"], json!("arguswing::__default__"));
+        assert_eq!(
+            value["session_key"],
+            json!("arguswing::__default__::__default_model__")
+        );
     }
 }

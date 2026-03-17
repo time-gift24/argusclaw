@@ -14,6 +14,7 @@ export interface AgentRecord {
   description: string
   version: string
   provider_id: string
+  model?: string | null
   system_prompt: string
   tool_names: string[]
   max_tokens?: number
@@ -63,10 +64,9 @@ function formatTemperature(temperature?: number) {
 }
 
 export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps) {
-  const providerName =
-    providers.find((provider) => provider.id === agent.provider_id)?.display_name ||
-    agent.provider_id ||
-    "未指定"
+  const provider = providers.find((provider) => provider.id === agent.provider_id) ?? null
+  const providerName = provider?.display_name || agent.provider_id || "未指定"
+  const providerBindingLabel = agent.model ? `${providerName} / ${agent.model}` : providerName
   const toolNames = agent.tool_names.filter(Boolean)
 
   return (
@@ -89,7 +89,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
           <div className="space-y-3">
             <DetailRow label="提供者">
               <div className="min-w-0">
-                <div className="truncate font-medium">{providerName}</div>
+                <div className="truncate font-medium">{providerBindingLabel}</div>
                 {agent.provider_id && providerName !== agent.provider_id ? (
                   <div className="truncate font-mono text-[11px] text-muted-foreground">
                     {agent.provider_id}

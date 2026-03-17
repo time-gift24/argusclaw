@@ -142,6 +142,7 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
             api_key: SecretString::new(value.api_key),
             models: vec![value.model.clone()],
             default_model: value.model,
+            model_config: HashMap::new(),
             is_default: value.is_default,
             extra_headers: HashMap::new(),
             secret_status: claw::ProviderSecretStatus::Ready,

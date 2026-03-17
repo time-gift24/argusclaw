@@ -4,7 +4,7 @@ import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
 import { ArrowLeft, Save } from "lucide-react"
-import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
+import { agents, providers, type AgentInput, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Breadcrumb } from "@/components/settings"
@@ -16,12 +16,40 @@ interface AgentEditorProps {
   agentId?: string
 }
 
+function toAgentInput(record: AgentRecord): AgentInput {
+  return {
+    id: record.id.trim() || undefined,
+    display_name: record.display_name,
+    description: record.description,
+    version: record.version,
+    provider_id: record.provider_id,
+    model: record.model ?? null,
+    system_prompt: record.system_prompt,
+    tool_names: record.tool_names,
+    max_tokens: record.max_tokens,
+    temperature: record.temperature,
+  }
+}
+
 function getPreferredProviderId(providersData: LlmProviderSummary[]): string {
   return (
     providersData.find((p) => p.is_default && p.secret_status !== "requires_reentry")?.id ||
     providersData.find((p) => p.secret_status !== "requires_reentry")?.id ||
     ""
   )
+}
+
+function getPreferredModel(providerId: string, providersData: LlmProviderSummary[]): string | null {
+  if (!providerId) {
+    return null
+  }
+
+  const provider = providersData.find((item) => item.id === providerId)
+  if (!provider) {
+    return null
+  }
+
+  return provider.default_model || provider.models[0] || null
 }
 
 export function AgentEditor({ agentId }: AgentEditorProps) {
@@ -38,6 +66,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     description: "",
     version: "1.0.0",
     provider_id: "",
+    model: null,
     system_prompt: "",
     tool_names: [],
     max_tokens: undefined,
@@ -65,11 +94,13 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     () => providerList.find((provider) => provider.id === formData.provider_id) ?? null,
     [formData.provider_id, providerList],
   )
+  const hasProviderModelBinding = Boolean(formData.provider_id || formData.model)
+  const isProviderModelBindingValid = !hasProviderModelBinding || Boolean(formData.provider_id && formData.model)
 
   const canSave = Boolean(
-    formData.id.trim() &&
-      formData.display_name.trim() &&
-      formData.system_prompt.trim(),
+    formData.display_name.trim() &&
+      formData.system_prompt.trim() &&
+      isProviderModelBindingValid,
   )
 
   // Load providers and agent data (if editing)
@@ -87,8 +118,15 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         } else {
           const preferredProviderId = getPreferredProviderId(providersData)
           if (preferredProviderId) {
+            const preferredModel = getPreferredModel(preferredProviderId, providersData)
             setFormData((prev) =>
-              prev.provider_id ? prev : { ...prev, provider_id: preferredProviderId },
+              prev.provider_id
+                ? prev
+                : {
+                    ...prev,
+                    provider_id: preferredProviderId,
+                    model: preferredModel,
+                  },
             )
           }
         }
@@ -101,6 +139,20 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     loadData()
   }, [agentId])
 
+  const handleProviderChange = (providerId: string) => {
+    if (!providerId) {
+      setFormData((prev) => ({ ...prev, provider_id: "", model: null }))
+      return
+    }
+
+    const preferredModel = getPreferredModel(providerId, providerList)
+    setFormData((prev) => ({
+      ...prev,
+      provider_id: providerId,
+      model: preferredModel,
+    }))
+  }
+
   const handleSave = async () => {
     if (!canSave) {
       return
@@ -108,7 +160,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
 
     setSaving(true)
     try {
-      await agents.upsert(formData)
+      await agents.upsert(toAgentInput(formData))
       router.push("/settings/agents")
     } catch (error) {
       console.error("Failed to save agent:", error)
@@ -126,7 +178,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="w-full mx-auto max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb
         items={[
           { label: "设置", href: "/settings" },
@@ -153,28 +205,15 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       <div className="grid grid-cols-2 gap-6 min-h-[calc(100vh-200px)]">
         {/* Left: Form */}
         <div className="space-y-4 overflow-y-auto pr-2">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="id">ID</Label>
-              <Input
-                id="id"
-                value={formData.id}
-                onChange={(e) => setFormData({ ...formData, id: e.target.value })}
-                placeholder="my-agent"
-                required
-                disabled={isEditing}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="display_name">名称</Label>
-              <Input
-                id="display_name"
-                value={formData.display_name}
-                onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                placeholder="我的智能体"
-                required
-              />
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="display_name">名称</Label>
+            <Input
+              id="display_name"
+              value={formData.display_name}
+              onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+              placeholder="我的智能体"
+              required
+            />
           </div>
 
           <div className="space-y-2">
@@ -203,7 +242,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               <select
                 id="provider_id"
                 value={formData.provider_id}
-                onChange={(e) => setFormData({ ...formData, provider_id: e.target.value })}
+                onChange={(e) => handleProviderChange(e.target.value)}
                 className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
               >
                 <option value="">不指定提供者</option>
@@ -223,6 +262,41 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 </p>
               )}
             </div>
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto] gap-3 items-end">
+            <div className="space-y-2">
+              <Label htmlFor="model">模型（可选）</Label>
+              <select
+                id="model"
+                value={formData.model ?? ""}
+                disabled={!formData.provider_id}
+                onChange={(e) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    model: e.target.value || null,
+                  }))
+                }
+                className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-input/30"
+              >
+                <option value="">
+                  {formData.provider_id ? "请选择模型" : "请先选择 Provider"}
+                </option>
+                {selectedProvider?.models.map((model) => (
+                  <option key={model} value={model}>
+                    {model} {model === selectedProvider.default_model ? "(默认)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setFormData((prev) => ({ ...prev, provider_id: "", model: null }))}
+            >
+              清空绑定
+            </Button>
           </div>
 
           <div className="space-y-2">
@@ -266,7 +340,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                   setFormData({
                     ...formData,
                     temperature: e.target.value ? parseFloat(e.target.value) : undefined,
-              })
+                  })
                 }
                 placeholder="0.7"
               />

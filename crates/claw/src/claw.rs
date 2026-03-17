@@ -265,7 +265,109 @@ impl AppContext {
         self.llm_manager.test_provider_record(record, model).await
     }
 
+    async fn normalize_template_record(
+        &self,
+        mut record: AgentRecord,
+    ) -> Result<AgentRecord, AgentError> {
+        let provider_id = record.provider_id.trim().to_string();
+        let model = record.model.and_then(|model| {
+            let trimmed = model.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+
+        record.provider_id = provider_id;
+        record.model = model;
+
+        if record.provider_id.is_empty() {
+            if record.model.is_some() {
+                return Err(AgentError::AgentValidationFailed {
+                    reason: "a model binding requires selecting a provider".to_string(),
+                });
+            }
+            return Ok(record);
+        }
+
+        let provider_id = LlmProviderId::new(record.provider_id.clone());
+        let provider = self.get_provider_record(&provider_id).await?;
+
+        match record.model.as_deref() {
+            Some(model) => {
+                if !provider.models.iter().any(|candidate| candidate == model) {
+                    return Err(AgentError::ModelNotAvailable {
+                        provider: provider.id.to_string(),
+                        model: model.to_string(),
+                    });
+                }
+            }
+            None => {
+                record.model = Some(provider.default_model.clone());
+            }
+        }
+
+        Ok(record)
+    }
+
+    async fn resolve_runtime_binding(
+        &self,
+        record: &AgentRecord,
+        provider_override: Option<&LlmProviderId>,
+        model_override: Option<&str>,
+    ) -> Result<(LlmProviderId, String), AgentError> {
+        let effective_provider_id = if let Some(provider_id) = provider_override {
+            provider_id.clone()
+        } else if !record.provider_id.trim().is_empty() {
+            LlmProviderId::new(record.provider_id.clone())
+        } else {
+            self.get_default_provider_record().await?.id
+        };
+
+        let provider_record = self.get_provider_record(&effective_provider_id).await?;
+        let override_model = model_override.and_then(|model| {
+            let trimmed = model.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let template_model = record.model.as_deref().and_then(|model| {
+            let trimmed = model.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let effective_model = override_model
+            .or_else(|| {
+                if provider_override.is_some() {
+                    None
+                } else {
+                    template_model
+                }
+            })
+            .unwrap_or_else(|| provider_record.default_model.clone());
+
+        if !provider_record
+            .models
+            .iter()
+            .any(|model| model == &effective_model)
+        {
+            return Err(AgentError::ModelNotAvailable {
+                provider: provider_record.id.to_string(),
+                model: effective_model,
+            });
+        }
+
+        Ok((provider_record.id, effective_model))
+    }
+
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {
+        let record = self.normalize_template_record(record).await?;
         self.agent_manager
             .upsert_template(record)
             .await
@@ -314,6 +416,7 @@ impl AppContext {
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
         record.provider_id = default_provider.id.to_string();
+        record.model = Some(default_provider.default_model.clone());
         self.agent_manager.create_agent(&record).await
     }
 
@@ -333,6 +436,7 @@ impl AppContext {
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
         record.provider_id = default_provider.id.to_string();
+        record.model = Some(default_provider.default_model.clone());
         self.agent_manager
             .create_agent_with_approval(&record, approval_tools, auto_approve)
             .await
@@ -356,6 +460,7 @@ impl AppContext {
         &self,
         template_id: &AgentId,
         provider_override: Option<&LlmProviderId>,
+        model_override: Option<&str>,
     ) -> Result<crate::RuntimeAgentHandle, AgentError> {
         let mut record =
             self.get_template(template_id)
@@ -364,12 +469,12 @@ impl AppContext {
                     id: template_id.clone(),
                 })?;
 
-        let effective_provider = match provider_override {
-            Some(provider_id) => provider_id.clone(),
-            None => self.get_default_provider_record().await?.id,
-        };
+        let (effective_provider, effective_model) = self
+            .resolve_runtime_binding(&record, provider_override, model_override)
+            .await?;
 
         record.provider_id = effective_provider.to_string();
+        record.model = Some(effective_model.clone());
         record.id = AgentId::new(format!("{template_id}--{}", Uuid::new_v4()));
 
         let approval_tools: Vec<String> = record
@@ -398,6 +503,7 @@ impl AppContext {
             runtime_agent_id,
             template_id: template_id.clone(),
             effective_provider_id: effective_provider,
+            effective_model,
         })
     }
 
@@ -645,6 +751,7 @@ mod tests {
             api_key: crate::SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::new(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
@@ -653,11 +760,19 @@ mod tests {
         .expect("provider should save");
 
         let first = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(
+                &crate::AgentId::new(crate::DEFAULT_AGENT_ID),
+                None,
+                None,
+            )
             .await
             .expect("first runtime agent should be created");
         let second = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(
+                &crate::AgentId::new(crate::DEFAULT_AGENT_ID),
+                None,
+                None,
+            )
             .await
             .expect("second runtime agent should be created");
 
@@ -692,6 +807,7 @@ mod tests {
             api_key: crate::SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::new(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
@@ -700,7 +816,11 @@ mod tests {
         .expect("provider should save");
 
         let runtime = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(
+                &crate::AgentId::new(crate::DEFAULT_AGENT_ID),
+                None,
+                None,
+            )
             .await
             .expect("runtime agent should be created");
         let thread_id = ctx
@@ -738,6 +858,7 @@ mod tests {
             api_key: crate::SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::new(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: crate::ProviderSecretStatus::Ready,
@@ -746,7 +867,11 @@ mod tests {
         .expect("provider should save");
 
         let runtime = ctx
-            .create_runtime_agent_from_template(&crate::AgentId::new(crate::DEFAULT_AGENT_ID), None)
+            .create_runtime_agent_from_template(
+                &crate::AgentId::new(crate::DEFAULT_AGENT_ID),
+                None,
+                None,
+            )
             .await
             .expect("runtime agent should be created");
 
@@ -761,5 +886,135 @@ mod tests {
             matches!(result, Err(crate::AgentError::ApprovalFailed { .. })),
             "runtime agent should have an approval manager for risky tools",
         );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn create_runtime_agent_from_template_uses_template_model_binding() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            models: vec!["gpt-4.1".to_string(), "gpt-4o-mini".to_string()],
+            default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::new(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
+        })
+        .await
+        .expect("provider should save");
+
+        ctx.upsert_template(crate::AgentRecord {
+            id: crate::AgentId::new("researcher"),
+            display_name: "Researcher".to_string(),
+            description: "Bound to a concrete model".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: "openai".to_string(),
+            model: Some("gpt-4o-mini".to_string()),
+            system_prompt: "You are a research agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+        })
+        .await
+        .expect("template should save");
+
+        let runtime = ctx
+            .create_runtime_agent_from_template(&crate::AgentId::new("researcher"), None, None)
+            .await
+            .expect("runtime agent should be created");
+        let runtime_agent = ctx
+            .get_agent(&runtime.runtime_agent_id)
+            .expect("runtime agent should be accessible");
+
+        assert_eq!(runtime.effective_provider_id.as_ref(), "openai");
+        assert_eq!(runtime.effective_model, "gpt-4o-mini");
+        assert_eq!(runtime_agent.provider().model_name(), "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openai-compatible")]
+    async fn create_runtime_agent_from_template_lets_overrides_replace_template_binding() {
+        use std::collections::HashMap;
+
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+        let ctx = AppContext::init(Some(database_path.display().to_string()))
+            .await
+            .expect("app context init should succeed");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("openai"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "OpenAI".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-test"),
+            models: vec!["gpt-4.1".to_string(), "gpt-4o-mini".to_string()],
+            default_model: "gpt-4.1".to_string(),
+            model_config: HashMap::new(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
+        })
+        .await
+        .expect("openai provider should save");
+
+        ctx.upsert_provider(crate::LlmProviderRecord {
+            id: crate::LlmProviderId::new("deepseek"),
+            kind: crate::LlmProviderKind::OpenAiCompatible,
+            display_name: "DeepSeek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            api_key: crate::SecretString::new("sk-deepseek"),
+            models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+            default_model: "deepseek-chat".to_string(),
+            model_config: HashMap::new(),
+            is_default: false,
+            extra_headers: HashMap::new(),
+            secret_status: crate::ProviderSecretStatus::Ready,
+        })
+        .await
+        .expect("deepseek provider should save");
+
+        ctx.upsert_template(crate::AgentRecord {
+            id: crate::AgentId::new("planner"),
+            display_name: "Planner".to_string(),
+            description: "Template-bound agent".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: "openai".to_string(),
+            model: Some("gpt-4o-mini".to_string()),
+            system_prompt: "You are a planning agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+        })
+        .await
+        .expect("template should save");
+
+        let runtime = ctx
+            .create_runtime_agent_from_template(
+                &crate::AgentId::new("planner"),
+                Some(&crate::LlmProviderId::new("deepseek")),
+                Some("deepseek-reasoner"),
+            )
+            .await
+            .expect("runtime agent should be created");
+        let runtime_agent = ctx
+            .get_agent(&runtime.runtime_agent_id)
+            .expect("runtime agent should be accessible");
+
+        assert_eq!(runtime.effective_provider_id.as_ref(), "deepseek");
+        assert_eq!(runtime.effective_model, "deepseek-reasoner");
+        assert_eq!(runtime_agent.provider().model_name(), "deepseek-reasoner");
     }
 }

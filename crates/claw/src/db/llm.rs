@@ -91,6 +91,12 @@ pub enum ProviderSecretStatus {
     RequiresReentry,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderModelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmProviderRecord {
     pub id: LlmProviderId,
@@ -100,6 +106,7 @@ pub struct LlmProviderRecord {
     pub api_key: SecretString,
     pub models: Vec<String>,
     pub default_model: String,
+    pub model_config: HashMap<String, ProviderModelConfig>,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -113,6 +120,7 @@ pub struct LlmProviderSummary {
     pub base_url: String,
     pub models: Vec<String>,
     pub default_model: String,
+    pub model_config: HashMap<String, ProviderModelConfig>,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
@@ -127,6 +135,7 @@ impl From<LlmProviderRecord> for LlmProviderSummary {
             base_url: record.base_url,
             models: record.models,
             default_model: record.default_model,
+            model_config: record.model_config,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
@@ -185,6 +194,14 @@ mod multi_model_tests {
 
     #[test]
     fn llm_provider_record_has_models_and_default_model() {
+        let mut model_config = HashMap::new();
+        model_config.insert(
+            "gpt-4.1".to_string(),
+            ProviderModelConfig {
+                context_length: Some(256_000),
+            },
+        );
+
         let record = LlmProviderRecord {
             id: LlmProviderId::new("test"),
             kind: LlmProviderKind::OpenAiCompatible,
@@ -193,6 +210,7 @@ mod multi_model_tests {
             api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string(), "gpt-4.1-mini".to_string()],
             default_model: "gpt-4.1".to_string(),
+            model_config,
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
@@ -200,10 +218,19 @@ mod multi_model_tests {
 
         assert_eq!(record.models.len(), 2);
         assert_eq!(record.default_model, "gpt-4.1");
+        assert_eq!(record.model_config["gpt-4.1"].context_length, Some(256_000));
     }
 
     #[test]
     fn llm_provider_summary_has_models_and_default_model() {
+        let mut model_config = HashMap::new();
+        model_config.insert(
+            "o3".to_string(),
+            ProviderModelConfig {
+                context_length: Some(200_000),
+            },
+        );
+
         let summary = LlmProviderSummary {
             id: LlmProviderId::new("test"),
             kind: LlmProviderKind::OpenAiCompatible,
@@ -211,12 +238,14 @@ mod multi_model_tests {
             base_url: "https://api.example.com/v1".to_string(),
             models: vec!["o3".to_string()],
             default_model: "o3".to_string(),
+            model_config,
             is_default: false,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
         };
 
         assert_eq!(summary.models, vec!["o3"]);
+        assert_eq!(summary.model_config["o3"].context_length, Some(200_000));
     }
 }
 
@@ -225,7 +254,22 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
-    use super::{ProviderTestResult, ProviderTestStatus};
+    use super::{ProviderModelConfig, ProviderTestResult, ProviderTestStatus};
+
+    #[test]
+    fn provider_model_config_serializes_with_optional_context_length() {
+        let serialized = serde_json::to_value(ProviderModelConfig {
+            context_length: Some(128_000),
+        })
+        .expect("config should serialize");
+
+        assert_eq!(
+            serialized,
+            json!({
+                "context_length": 128000,
+            })
+        );
+    }
 
     #[test]
     fn provider_test_result_serializes_with_stable_shape() {

@@ -239,6 +239,7 @@ impl LLMManager {
             .map_err(AgentError::from)
     }
 
+    #[allow(unused_variables)]
     fn build_provider_with_model(
         &self,
         record: LlmProviderRecord,

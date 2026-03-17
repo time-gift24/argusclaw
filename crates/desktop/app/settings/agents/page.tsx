@@ -40,7 +40,7 @@ export default function AgentsPage() {
   }, [loadData])
 
   const handleEdit = (id: string) => {
-    router.push(`/settings/agents/${id}`)
+    router.push(`/settings/agents/${encodeURIComponent(id)}`)
   }
 
   const handleDelete = async () => {
@@ -64,7 +64,7 @@ export default function AgentsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="w-full mx-auto max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb items={[
         { label: "设置", href: "/settings" },
         { label: "智能体" },
@@ -86,12 +86,12 @@ export default function AgentsPage() {
       </div>
 
       {providerList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-32 border rounded-lg border-dashed">
-          <p className="text-muted-foreground text-sm">
-            请先配置 LLM 提供者
-          </p>
+        <div className="rounded-lg border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-sm text-amber-900">
+          尚未配置 LLM 提供者。内置的 ArgusWing 智能体仍然可见并可编辑，但在补齐 Provider 前无法创建新会话。
         </div>
-      ) : agentList.length === 0 ? (
+      ) : null}
+
+      {agentList.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-64 border rounded-lg border-dashed">
           <p className="text-muted-foreground mb-4">暂无智能体配置</p>
           <Link href="/settings/agents/new">

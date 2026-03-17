@@ -77,10 +77,19 @@ impl AgentManager {
     /// Returns the `AgentId` for accessing the agent.
     pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentId, AgentError> {
         use crate::db::llm::LlmProviderId;
-        let provider = self
-            .llm_manager
-            .get_provider(&LlmProviderId::new(&record.provider_id))
-            .await?;
+        let provider_id = LlmProviderId::new(&record.provider_id);
+        let provider = match record
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            Some(model) => {
+                self.llm_manager
+                    .get_provider_with_model(&provider_id, model)
+                    .await?
+            }
+            None => self.llm_manager.get_provider(&provider_id).await?,
+        };
 
         let agent = AgentBuilder::from_record(record, provider)
             .tool_manager(self.tool_manager.clone())
@@ -103,10 +112,19 @@ impl AgentManager {
         auto_approve: bool,
     ) -> Result<AgentId, AgentError> {
         use crate::db::llm::LlmProviderId;
-        let provider = self
-            .llm_manager
-            .get_provider(&LlmProviderId::new(&record.provider_id))
-            .await?;
+        let provider_id = LlmProviderId::new(&record.provider_id);
+        let provider = match record
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            Some(model) => {
+                self.llm_manager
+                    .get_provider_with_model(&provider_id, model)
+                    .await?
+            }
+            None => self.llm_manager.get_provider(&provider_id).await?,
+        };
 
         let agent = AgentBuilder::from_record(record, provider)
             .tool_manager(self.tool_manager.clone())

@@ -28,6 +28,7 @@ pub fn load_arguswing() -> Result<AgentRecord, toml::de::Error> {
         description: def.description,
         version: def.version,
         provider_id: String::new(),
+        model: None,
         system_prompt: def.system_prompt,
         tool_names: def.tool_names,
         max_tokens: None,
@@ -46,5 +47,6 @@ mod tests {
         assert_eq!(agent.display_name, "ArgusWing");
         assert_eq!(agent.tool_names, vec!["shell", "read", "grep", "glob"]);
         assert!(agent.provider_id.is_empty());
+        assert_eq!(agent.model, None);
     }
 }

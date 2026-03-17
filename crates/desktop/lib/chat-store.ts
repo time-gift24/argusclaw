@@ -8,8 +8,12 @@ import type {
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
 
-const toSessionKey = (templateId: string, providerPreferenceId: string | null) =>
-  `${templateId}::${providerPreferenceId ?? "__default__"}`;
+const toSessionKey = (
+  templateId: string,
+  providerPreferenceId: string | null,
+  modelOverride: string | null,
+) =>
+  `${templateId}::${providerPreferenceId ?? "__default__"}::${modelOverride ?? "__default_model__"}`;
 
 const toErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -97,7 +101,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   async activateSession(templateId: string) {
     const state = get();
-    const sessionKey = toSessionKey(templateId, state.selectedProviderPreferenceId);
+    const sessionKey = toSessionKey(
+      templateId,
+      state.selectedProviderPreferenceId,
+      state.selectedModelOverride,
+    );
 
     // Reuse existing session if available
     if (state.sessionsByKey[sessionKey]) {

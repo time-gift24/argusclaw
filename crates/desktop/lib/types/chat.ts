@@ -44,6 +44,7 @@ export interface ChatSessionPayload {
   runtime_agent_id: string;
   thread_id: string;
   effective_provider_id: string;
+  effective_model: string;
 }
 
 export type ThreadEventPayload =

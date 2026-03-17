@@ -1,28 +1,28 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Plus } from "lucide-react";
 import {
   providers,
   type LlmProviderSummary,
-  type ProviderInput,
   type ProviderTestResult,
 } from "@/lib/tauri";
 import {
   ProviderCard,
-  ProviderFormDialog,
   ProviderTestDialog,
-  type LlmProviderRecord,
   DeleteConfirmDialog,
   Breadcrumb,
 } from "@/components/settings";
+import { Button } from "@/components/ui/button";
 
 export default function ProvidersPage() {
+  const router = useRouter();
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>(
     [],
   );
   const [loading, setLoading] = React.useState(true);
-  const [editingProvider, setEditingProvider] =
-    React.useState<LlmProviderRecord | null>(null);
   const [deleteId, setDeleteId] = React.useState<string | null>(null);
   const [deleteLoading, setDeleteLoading] = React.useState(false);
   const [testResultsByProviderId, setTestResultsByProviderId] = React.useState<
@@ -52,44 +52,8 @@ export default function ProvidersPage() {
     loadProviders();
   }, [loadProviders]);
 
-  const handleSubmit = async (record: LlmProviderRecord) => {
-    const input: ProviderInput = {
-      id: record.id,
-      kind: record.kind,
-      display_name: record.display_name,
-      base_url: record.base_url,
-      api_key: record.api_key,
-      models: record.models,
-      default_model: record.default_model,
-      is_default: record.is_default,
-      extra_headers: record.extra_headers,
-    };
-    await providers.upsert(input);
-    setEditingProvider(null);
-    await loadProviders();
-  };
-
-  const handleEdit = async (id: string) => {
-    const provider = await providers.get(id);
-    if (provider) {
-      // Transform from API format to form format
-      const formRecord: LlmProviderRecord = {
-        id: provider.id,
-        kind: provider.kind,
-        display_name: provider.display_name,
-        base_url: provider.base_url,
-        api_key:
-          typeof provider.api_key === "string"
-            ? provider.api_key
-            : (provider.api_key as { api_key: string }).api_key || "",
-        models: provider.models,
-        default_model: provider.default_model,
-        is_default: provider.is_default,
-        extra_headers: provider.extra_headers,
-        secret_status: provider.secret_status,
-      };
-      setEditingProvider(formRecord);
-    }
+  const handleEdit = (id: string) => {
+    router.push(`/settings/providers/${encodeURIComponent(id)}`);
   };
 
   const handleDelete = async () => {
@@ -191,7 +155,7 @@ export default function ProvidersPage() {
   }
 
   return (
-    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
+    <div className="w-full mx-auto max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb
         items={[{ label: "设置", href: "/settings" }, { label: "LLM 提供者" }]}
       />
@@ -203,13 +167,23 @@ export default function ProvidersPage() {
             配置你的 LLM 提供者连接
           </p>
         </div>
-        <ProviderFormDialog onSubmit={handleSubmit} />
+        <Link href="/settings/providers/new">
+          <Button size="sm">
+            <Plus className="h-4 w-4 mr-1" />
+            新增 Provider
+          </Button>
+        </Link>
       </div>
 
       {providerList.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-64 border rounded-lg border-dashed">
-          <p className="text-muted-foreground mb-4">No providers configured</p>
-          <ProviderFormDialog onSubmit={handleSubmit} />
+          <p className="text-muted-foreground mb-4">尚未配置 Provider</p>
+          <Link href="/settings/providers/new">
+            <Button size="sm">
+              <Plus className="h-4 w-4 mr-1" />
+              新增 Provider
+            </Button>
+          </Link>
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -227,17 +201,6 @@ export default function ProvidersPage() {
             />
           ))}
         </div>
-      )}
-
-      {/* Edit Dialog */}
-      {editingProvider && (
-        <ProviderFormDialog
-          provider={editingProvider}
-          onSubmit={handleSubmit}
-          open={!!editingProvider}
-          onOpenChange={(open) => !open && setEditingProvider(null)}
-          trigger={null}
-        />
       )}
 
       {/* Delete Confirmation */}

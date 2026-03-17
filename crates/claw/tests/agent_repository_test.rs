@@ -4,13 +4,14 @@
 
 use claw::{AgentId, AgentRecord, AgentRepository, SqliteAgentRepository, connect, migrate};
 
-fn create_test_record(id: &str, provider_id: &str) -> AgentRecord {
+fn create_test_record(id: &str, provider_id: &str, model: Option<&str>) -> AgentRecord {
     AgentRecord {
         id: AgentId::new(id),
         display_name: format!("Agent {id}"),
         description: "Integration test agent".to_string(),
         version: "1.0.0".to_string(),
         provider_id: provider_id.to_string(),
+        model: model.map(str::to_string),
         system_prompt: "You are a test agent.".to_string(),
         tool_names: vec!["tool1".to_string(), "tool2".to_string()],
         max_tokens: Some(2000),
@@ -41,7 +42,7 @@ async fn upsert_and_get_agent() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;
 
-    let record = create_test_record("test-agent-1", "provider-1");
+    let record = create_test_record("test-agent-1", "provider-1", Some("gpt-4"));
     repo.upsert(&record).await.unwrap();
 
     let retrieved = repo.get(&AgentId::new("test-agent-1")).await.unwrap();
@@ -49,6 +50,7 @@ async fn upsert_and_get_agent() {
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.id.as_ref(), "test-agent-1");
     assert_eq!(retrieved.tool_names, vec!["tool1", "tool2"]);
+    assert_eq!(retrieved.model.as_deref(), Some("gpt-4"));
 }
 
 #[tokio::test]
@@ -64,11 +66,12 @@ async fn upsert_updates_existing() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;
 
-    let mut record = create_test_record("update-test", "provider-1");
+    let mut record = create_test_record("update-test", "provider-1", Some("gpt-4"));
     repo.upsert(&record).await.unwrap();
 
     record.display_name = "Updated Name".to_string();
     record.version = "2.0.0".to_string();
+    record.model = Some("gpt-4".to_string());
     repo.upsert(&record).await.unwrap();
 
     let retrieved = repo
@@ -78,13 +81,14 @@ async fn upsert_updates_existing() {
         .unwrap();
     assert_eq!(retrieved.display_name, "Updated Name");
     assert_eq!(retrieved.version, "2.0.0");
+    assert_eq!(retrieved.model.as_deref(), Some("gpt-4"));
 }
 
 #[tokio::test]
 async fn upsert_allows_empty_provider_id() {
     let repo = setup_test_db().await;
 
-    let record = create_test_record("empty-provider", "");
+    let record = create_test_record("empty-provider", "", None);
     repo.upsert(&record).await.unwrap();
 
     let retrieved = repo
@@ -93,6 +97,7 @@ async fn upsert_allows_empty_provider_id() {
         .unwrap()
         .unwrap();
     assert_eq!(retrieved.provider_id, "");
+    assert_eq!(retrieved.model, None);
 }
 
 #[tokio::test]
@@ -100,10 +105,10 @@ async fn list_returns_summaries() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;
 
-    repo.upsert(&create_test_record("list-1", "provider-1"))
+    repo.upsert(&create_test_record("list-1", "provider-1", Some("gpt-4")))
         .await
         .unwrap();
-    repo.upsert(&create_test_record("list-2", "provider-1"))
+    repo.upsert(&create_test_record("list-2", "provider-1", Some("gpt-4")))
         .await
         .unwrap();
 
@@ -120,9 +125,13 @@ async fn delete_removes_agent() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;
 
-    repo.upsert(&create_test_record("delete-test", "provider-1"))
-        .await
-        .unwrap();
+    repo.upsert(&create_test_record(
+        "delete-test",
+        "provider-1",
+        Some("gpt-4"),
+    ))
+    .await
+    .unwrap();
 
     let deleted = repo.delete(&AgentId::new("delete-test")).await.unwrap();
     assert!(deleted);
@@ -144,7 +153,7 @@ async fn temperature_precision_preserved() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;
 
-    let mut record = create_test_record("temp-test", "provider-1");
+    let mut record = create_test_record("temp-test", "provider-1", Some("gpt-4"));
     record.temperature = Some(0.73);
     repo.upsert(&record).await.unwrap();
 
@@ -158,7 +167,7 @@ async fn summary_excludes_large_fields() {
     let repo = setup_test_db().await;
     insert_test_provider(repo.pool(), "provider-1").await;
 
-    let record = create_test_record("summary-test", "provider-1");
+    let record = create_test_record("summary-test", "provider-1", Some("gpt-4"));
     repo.upsert(&record).await.unwrap();
 
     let summaries = repo.list().await.unwrap();
@@ -170,4 +179,22 @@ async fn summary_excludes_large_fields() {
     // Summary should have display_name but not system_prompt
     // (This is enforced at compile time by the type system)
     assert_eq!(summary.display_name, "Agent summary-test");
+}
+
+#[tokio::test]
+async fn upsert_round_trips_optional_model_binding() {
+    let repo = setup_test_db().await;
+    insert_test_provider(repo.pool(), "provider-1").await;
+
+    let record = create_test_record("model-test", "provider-1", Some("gpt-4"));
+    repo.upsert(&record).await.unwrap();
+
+    let retrieved = repo
+        .get(&AgentId::new("model-test"))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(retrieved.provider_id, "provider-1");
+    assert_eq!(retrieved.model.as_deref(), Some("gpt-4"));
 }

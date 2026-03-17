@@ -12,7 +12,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import type { ProviderSecretStatus, ProviderTestResult } from "@/lib/tauri";
+import type {
+  ProviderModelConfig,
+  ProviderSecretStatus,
+  ProviderTestResult,
+} from "@/lib/tauri";
 
 export interface LlmProviderSummary {
   id: string;
@@ -21,6 +25,7 @@ export interface LlmProviderSummary {
   base_url: string;
   models: string[];
   default_model: string;
+  model_config: Record<string, ProviderModelConfig>;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use claw::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus,
-    SecretString, SqliteLlmProviderRepository, migrate,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, ProviderModelConfig,
+    ProviderSecretStatus, SecretString, SqliteLlmProviderRepository, migrate,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -18,6 +18,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         api_key: SecretString::new(format!("sk-{id}")),
         models: vec!["gpt-4o-mini".to_string()],
         default_model: "gpt-4o-mini".to_string(),
+        model_config: HashMap::new(),
         is_default,
         extra_headers: HashMap::new(),
         secret_status: ProviderSecretStatus::Ready,
@@ -38,6 +39,7 @@ fn build_record_with_headers(
         api_key: SecretString::new(format!("sk-{id}")),
         models: vec!["gpt-4o-mini".to_string()],
         default_model: "gpt-4o-mini".to_string(),
+        model_config: HashMap::new(),
         is_default,
         extra_headers: headers,
         secret_status: ProviderSecretStatus::Ready,
@@ -120,6 +122,34 @@ async fn sqlite_repository_round_trips_extra_headers() {
     assert_eq!(
         stored.extra_headers.get("x-custom-header"),
         Some(&"custom-value".to_string())
+    );
+}
+
+#[tokio::test]
+async fn sqlite_repository_round_trips_per_model_context_length() {
+    let (_temp_dir, _pool, repository) = setup_repository().await;
+    let mut record = build_record("openai", "OpenAI", true);
+    record.model_config.insert(
+        "gpt-4o-mini".to_string(),
+        ProviderModelConfig {
+            context_length: Some(256_000),
+        },
+    );
+
+    repository
+        .upsert_provider(&record)
+        .await
+        .expect("provider should be stored");
+
+    let stored = repository
+        .get_provider(&record.id)
+        .await
+        .expect("query should succeed")
+        .expect("provider should exist");
+
+    assert_eq!(
+        stored.model_config["gpt-4o-mini"].context_length,
+        Some(256_000)
     );
 }
 

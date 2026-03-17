@@ -57,6 +57,7 @@ pub struct AgentRecord {
     pub description: String,
     pub version: String,
     pub provider_id: String,
+    pub model: Option<String>,
     pub system_prompt: String,
     pub tool_names: Vec<String>,
     pub max_tokens: Option<u32>,
@@ -67,13 +68,14 @@ pub struct AgentRecord {
 impl AgentRecord {
     /// Create a minimal agent record for testing.
     #[cfg(test)]
-    pub fn for_test(id: &str, provider_id: &str) -> Self {
+    pub fn for_test(id: &str, provider_id: &str, model: Option<&str>) -> Self {
         Self {
             id: AgentId::new(id),
             display_name: format!("Test Agent {id}"),
             description: "A test agent".to_string(),
             version: "1.0.0".to_string(),
             provider_id: provider_id.to_string(),
+            model: model.map(str::to_string),
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
             max_tokens: None,

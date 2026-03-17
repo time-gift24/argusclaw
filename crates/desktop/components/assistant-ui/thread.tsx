@@ -66,8 +66,8 @@ const ComposerContextDisplay: FC = () => {
   const model = session?.effectiveModel ?? provider?.default_model ?? "";
 
   // Get context window from model config, default 128000
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const contextWindow = (provider as any)?.model_config?.[model]?.context_length ?? DEFAULT_CONTEXT_WINDOW;
+  const contextWindow =
+    provider?.model_config?.[model]?.context_length ?? DEFAULT_CONTEXT_WINDOW;
 
   // Build ThreadTokenUsage from our token count
   const usage: ThreadTokenUsage = {

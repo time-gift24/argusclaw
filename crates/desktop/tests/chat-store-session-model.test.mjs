@@ -4,11 +4,20 @@ import { readFileSync } from "node:fs";
 
 const storeSource = readFileSync(new URL("../lib/chat-store.ts", import.meta.url), "utf8");
 
-test("chat store keeps sessions keyed by template and provider preference", () => {
+test("chat store keeps sessions keyed by template, provider preference, and model override", () => {
   assert.match(storeSource, /errorMessage:\s*string \| null/);
   assert.match(storeSource, /activeSessionKey:\s*string \| null/);
   assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
   assert.match(storeSource, /selectedProviderPreferenceId:\s*string \| null/);
+  assert.match(storeSource, /selectedModelOverride:\s*string \| null/);
+  assert.match(
+    storeSource,
+    /const toSessionKey = \(\s*templateId: string,\s*providerPreferenceId: string \| null,\s*modelOverride: string \| null,\s*\)\s*=>/,
+  );
+  assert.match(
+    storeSource,
+    /`\$\{templateId\}::\$\{providerPreferenceId \?\? "__default__"\}::\$\{modelOverride \?\? "__default_model__"\}`/,
+  );
   assert.match(storeSource, /refreshSnapshot:\s*\(sessionKey: string\)/);
   assert.match(storeSource, /listen.*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
@@ -21,6 +30,10 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /await get\(\)\.activateSession\(/);
   assert.match(storeSource, /catch \(error\)/);
   assert.match(storeSource, /errorMessage:/);
+  assert.match(
+    storeSource,
+    /toSessionKey\(\s*templateId,\s*state\.selectedProviderPreferenceId,\s*state\.selectedModelOverride,\s*\)/,
+  );
 });
 
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {

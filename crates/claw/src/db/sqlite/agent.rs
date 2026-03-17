@@ -51,6 +51,7 @@ impl SqliteAgentRepository {
             description: Self::get::<String>(&row, "description")?,
             version: Self::get::<String>(&row, "version")?,
             provider_id: Self::get::<Option<String>>(&row, "provider_id")?.unwrap_or_default(),
+            model: Self::get::<Option<String>>(&row, "model")?,
             system_prompt: Self::get::<String>(&row, "system_prompt")?,
             tool_names,
             max_tokens: Self::get::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
@@ -76,13 +77,14 @@ impl AgentRepository for SqliteAgentRepository {
         };
 
         sqlx::query(
-            r#"INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            r#"INSERT INTO agents (id, display_name, description, version, provider_id, model, system_prompt, tool_names, max_tokens, temperature)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                ON CONFLICT(id) DO UPDATE SET
                    display_name = excluded.display_name,
                    description = excluded.description,
                    version = excluded.version,
                    provider_id = excluded.provider_id,
+                   model = excluded.model,
                    system_prompt = excluded.system_prompt,
                    tool_names = excluded.tool_names,
                    max_tokens = excluded.max_tokens,
@@ -94,6 +96,7 @@ impl AgentRepository for SqliteAgentRepository {
         .bind(&record.description)
         .bind(&record.version)
         .bind(provider_id)
+        .bind(record.model.as_deref())
         .bind(&record.system_prompt)
         .bind(&tool_names_json)
         .bind(record.max_tokens.map(|t| t as i64))
@@ -109,7 +112,7 @@ impl AgentRepository for SqliteAgentRepository {
 
     async fn get(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError> {
         let row = sqlx::query(
-            r#"SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            r#"SELECT id, display_name, description, version, provider_id, model, system_prompt, tool_names, max_tokens, temperature
                FROM agents
                WHERE id = ?1"#,
         )
@@ -125,7 +128,7 @@ impl AgentRepository for SqliteAgentRepository {
 
     async fn list(&self) -> Result<Vec<AgentRecord>, DbError> {
         let rows = sqlx::query(
-            r#"SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            r#"SELECT id, display_name, description, version, provider_id, model, system_prompt, tool_names, max_tokens, temperature
                FROM agents
                ORDER BY display_name ASC"#,
         )

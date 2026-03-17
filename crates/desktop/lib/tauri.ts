@@ -4,6 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type ProviderSecretStatus = "ready" | "requires_reentry";
 
+export interface ProviderModelConfig {
+  context_length?: number;
+}
+
 export interface LlmProviderSummary {
   id: string;
   kind: "openai-compatible";
@@ -11,6 +15,7 @@ export interface LlmProviderSummary {
   base_url: string;
   models: string[];
   default_model: string;
+  model_config: Record<string, ProviderModelConfig>;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
@@ -24,19 +29,21 @@ export interface LlmProviderRecord {
   api_key: string;
   models: string[];
   default_model: string;
+  model_config: Record<string, ProviderModelConfig>;
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
 }
 
 export interface ProviderInput {
-  id: string;
+  id?: string;
   kind: "openai-compatible";
   display_name: string;
   base_url: string;
   api_key: string;
   models: string[];
   default_model: string;
+  model_config: Record<string, ProviderModelConfig>;
   is_default: boolean;
   extra_headers: Record<string, string>;
 }
@@ -67,6 +74,20 @@ export interface AgentRecord {
   description: string;
   version: string;
   provider_id: string;
+  model?: string | null;
+  system_prompt: string;
+  tool_names: string[];
+  max_tokens?: number;
+  temperature?: number;
+}
+
+export interface AgentInput {
+  id?: string;
+  display_name: string;
+  description: string;
+  version: string;
+  provider_id: string;
+  model?: string | null;
   system_prompt: string;
   tool_names: string[];
   max_tokens?: number;
@@ -99,7 +120,7 @@ export const agents = {
 
   get: (id: string) => invoke<AgentRecord | null>("get_agent_template", { id }),
 
-  upsert: (record: AgentRecord) =>
+  upsert: (record: AgentInput) =>
     invoke<void>("upsert_agent_template", { record }),
 
   delete: (id: string) => invoke<boolean>("delete_agent_template", { id }),

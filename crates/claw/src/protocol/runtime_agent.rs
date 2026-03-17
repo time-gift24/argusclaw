@@ -14,4 +14,6 @@ pub struct RuntimeAgentHandle {
     pub template_id: AgentId,
     /// The effective provider ID bound to this runtime agent.
     pub effective_provider_id: LlmProviderId,
+    /// The effective model bound to this runtime agent.
+    pub effective_model: String,
 }

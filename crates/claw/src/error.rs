@@ -42,6 +42,9 @@ pub enum AgentError {
     #[error("provider validation failed: {reason}")]
     ProviderValidationFailed { reason: String },
 
+    #[error("agent validation failed: {reason}")]
+    AgentValidationFailed { reason: String },
+
     #[error("agent `{id}` was not found")]
     AgentNotFound { id: AgentId },
 

@@ -24,6 +24,7 @@ fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRe
         api_key: SecretString::new(format!("sk-{id}")),
         models: vec!["gpt-4o-mini".to_string()],
         default_model: "gpt-4o-mini".to_string(),
+        model_config: HashMap::new(),
         is_default,
         extra_headers: HashMap::new(),
         secret_status: ProviderSecretStatus::Ready,

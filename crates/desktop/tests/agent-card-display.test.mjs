@@ -19,9 +19,18 @@ test("agent list cards receive provider metadata and render stable parameter row
   assert.match(agentCardSource, /providers:\s*LlmProviderSummary\[\]/);
   assert.match(
     agentCardSource,
-    /providers\.find\(\(provider\)\s*=>\s*provider\.id === agent\.provider_id\)\?\.display_name/,
+    /const provider = providers\.find\(\(provider\)\s*=>\s*provider\.id === agent\.provider_id\) \?\? null/,
+  );
+  assert.match(
+    agentCardSource,
+    /const providerName = provider\?\.display_name \|\| agent\.provider_id \|\| "未指定"/,
+  );
+  assert.match(
+    agentCardSource,
+    /const providerBindingLabel = agent\.model \? `\$\{providerName\} \/ \$\{agent\.model\}` : providerName/,
   );
   assert.match(agentCardSource, /<DetailRow label="提供者">/);
+  assert.match(agentCardSource, /providerBindingLabel/);
   assert.match(agentCardSource, /<DetailRow label="工具">/);
   assert.match(agentCardSource, /<DetailRow[\s\S]*<span>最大 Token<\/span>/);
   assert.match(agentCardSource, /<DetailRow label="温度">/);

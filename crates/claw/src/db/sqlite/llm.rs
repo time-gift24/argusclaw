@@ -7,7 +7,7 @@ use sqlx::{Row, SqlitePool};
 use crate::db::DbError;
 use crate::db::llm::{
     LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
-    ProviderSecretStatus, SecretString,
+    ProviderModelConfig, ProviderSecretStatus, SecretString,
 };
 use crate::llm::secret::{
     ApiKeyCipher, FileKeyMaterialSource, HostMacAddressKeyMaterialSource, KeyMaterialSource,
@@ -23,14 +23,15 @@ pub struct SqliteLlmProviderRepository {
 type SharedProviderFields = (
     LlmProviderId,
     crate::db::llm::LlmProviderKind,
-    String,                  // display_name
-    String,                  // base_url
-    Vec<String>,             // models
-    String,                  // default_model
-    bool,                    // is_default
-    HashMap<String, String>, // extra_headers
-    Vec<u8>,                 // nonce
-    Vec<u8>,                 // ciphertext
+    String,                               // display_name
+    String,                               // base_url
+    Vec<String>,                          // models
+    String,                               // default_model
+    bool,                                 // is_default
+    HashMap<String, String>,              // extra_headers
+    HashMap<String, ProviderModelConfig>, // model_config
+    Vec<u8>,                              // nonce
+    Vec<u8>,                              // ciphertext
 );
 
 impl SqliteLlmProviderRepository {
@@ -114,6 +115,15 @@ impl SqliteLlmProviderRepository {
             .map_err(|e| DbError::QueryFailed {
                 reason: format!("failed to parse extra_headers: {e}"),
             })?;
+        let model_config_json: String =
+            row.try_get("model_config")
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
+        let model_config: HashMap<String, ProviderModelConfig> =
+            serde_json::from_str(&model_config_json).map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to parse model_config: {e}"),
+            })?;
 
         let models_json: String = row.try_get("models").map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
@@ -152,6 +162,7 @@ impl SqliteLlmProviderRepository {
                 })?
                 != 0,
             extra_headers,
+            model_config,
             nonce,
             ciphertext,
         ))
@@ -184,6 +195,7 @@ impl SqliteLlmProviderRepository {
             default_model,
             is_default,
             extra_headers,
+            model_config,
             nonce,
             ciphertext,
         ) = Self::parse_shared_fields(row)?;
@@ -196,6 +208,7 @@ impl SqliteLlmProviderRepository {
             api_key: self.decrypt_secret(&nonce, &ciphertext)?,
             models,
             default_model,
+            model_config,
             is_default,
             extra_headers,
             secret_status: ProviderSecretStatus::Ready,
@@ -212,6 +225,7 @@ impl SqliteLlmProviderRepository {
             default_model,
             is_default,
             extra_headers,
+            model_config,
             nonce,
             ciphertext,
         ) = Self::parse_shared_fields(row)?;
@@ -228,6 +242,7 @@ impl SqliteLlmProviderRepository {
             base_url,
             models,
             default_model,
+            model_config,
             is_default,
             extra_headers,
             secret_status,
@@ -252,11 +267,29 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                 ),
             });
         }
+        let invalid_model_configs: Vec<String> = record
+            .model_config
+            .keys()
+            .filter(|model| !record.models.iter().any(|existing| existing == *model))
+            .cloned()
+            .collect();
+        if !invalid_model_configs.is_empty() {
+            return Err(DbError::QueryFailed {
+                reason: format!(
+                    "Model config contains unknown models: {}",
+                    invalid_model_configs.join(", ")
+                ),
+            });
+        }
 
         let encrypted_secret = self.write_cipher.encrypt(record.api_key.expose_secret())?;
         let extra_headers_json =
             serde_json::to_string(&record.extra_headers).map_err(|e| DbError::QueryFailed {
                 reason: format!("failed to serialize extra_headers: {e}"),
+            })?;
+        let model_config_json =
+            serde_json::to_string(&record.model_config).map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to serialize model_config: {e}"),
             })?;
         let models_json =
             serde_json::to_string(&record.models).map_err(|e| DbError::QueryFailed {
@@ -277,8 +310,8 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         }
 
         sqlx::query(
-            "insert into llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "insert into llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, model_config)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              on conflict(id) do update set
                  kind = excluded.kind,
                  display_name = excluded.display_name,
@@ -289,6 +322,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                  api_key_nonce = excluded.api_key_nonce,
                  is_default = excluded.is_default,
                  extra_headers = excluded.extra_headers,
+                 model_config = excluded.model_config,
                  updated_at = CURRENT_TIMESTAMP",
         )
         .bind(record.id.as_ref())
@@ -301,6 +335,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         .bind(encrypted_secret.nonce)
         .bind(i64::from(record.is_default))
         .bind(&extra_headers_json)
+        .bind(&model_config_json)
         .execute(&mut *transaction)
         .await
         .map_err(|e| DbError::QueryFailed {
@@ -378,7 +413,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, model_config
              from llm_providers
              where id = ?1",
         )
@@ -397,7 +432,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         id: &LlmProviderId,
     ) -> Result<Option<LlmProviderSummary>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, model_config
              from llm_providers
              where id = ?1",
         )
@@ -413,7 +448,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, DbError> {
         let rows = sqlx::query(
-            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, model_config
              from llm_providers
              order by display_name asc",
         )
@@ -428,7 +463,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError> {
         let row = sqlx::query(
-            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
+            "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, model_config
              from llm_providers
              where is_default = 1
              limit 1",
