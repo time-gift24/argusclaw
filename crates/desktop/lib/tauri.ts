@@ -108,8 +108,8 @@ export const agents = {
     invoke<void>("upsert_agent_template", {
       record: {
         ...record,
-        id: record.id.toString(),
-        provider_id: record.provider_id?.toString() ?? null,
+        id: record.id,
+        provider_id: record.provider_id,
       },
     }),
 
