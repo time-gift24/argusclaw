@@ -149,7 +149,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   }
 
   return (
-    <div className="w-full px-6 py-6 space-y-4">
+    <div className="mx-auto max-w-7xl px-6 py-6 space-y-4">
       <Breadcrumb
         items={[
           { label: "设置", href: "/settings" },
