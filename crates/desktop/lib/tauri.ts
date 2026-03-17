@@ -77,43 +77,37 @@ export interface AgentRecord {
 export const providers = {
   list: () => invoke<LlmProviderSummary[]>("list_providers"),
 
-  get: (id: number) => invoke<LlmProviderRecord | null>("get_provider", { id: id.toString() }),
+  get: (id: number) => invoke<LlmProviderRecord | null>("get_provider", { id }),
 
   upsert: (record: ProviderInput) =>
-    invoke<string>("upsert_provider", {
-      record: {
-        ...record,
-        id: record.id.toString(),
-      },
-    }).then((id) => parseInt(id, 10)),
+    invoke<string>("upsert_provider", { record }).then((id) => parseInt(id, 10)),
 
-  delete: (id: number) => invoke<boolean>("delete_provider", { id: id.toString() }),
+  delete: (id: number) => invoke<boolean>("delete_provider", { id }),
 
-  setDefault: (id: number) => invoke<void>("set_default_provider", { id: id.toString() }),
+  setDefault: (id: number) => invoke<void>("set_default_provider", { id }),
 
   testConnection: (id: number, model: string) =>
-    invoke<ProviderTestResult>("test_provider_connection", { id: id.toString(), model }),
+    invoke<ProviderTestResult>("test_provider_connection", { id, model }),
 
   testInput: (record: ProviderInput, model: string) =>
-    invoke<ProviderTestResult>("test_provider_input", { record: { ...record, id: record.id.toString() }, model }),
+    invoke<ProviderTestResult>("test_provider_input", { record, model }),
 };
 
 // Agent API
 export const agents = {
   list: () => invoke<AgentRecord[]>("list_agent_templates"),
 
-  get: (id: number) => invoke<AgentRecord | null>("get_agent_template", { id: id.toString() }),
+  get: (id: number) => invoke<AgentRecord | null>("get_agent_template", { id }),
 
   upsert: (record: AgentRecord) =>
     invoke<void>("upsert_agent_template", {
       record: {
         ...record,
-        id: record.id,
-        provider_id: record.provider_id,
+        provider_id: record.provider_id != null ? Number(record.provider_id) : null,
       },
     }),
 
-  delete: (id: number) => invoke<boolean>("delete_agent_template", { id: id.toString() }),
+  delete: (id: number) => invoke<boolean>("delete_agent_template", { id }),
 };
 
 // Chat API

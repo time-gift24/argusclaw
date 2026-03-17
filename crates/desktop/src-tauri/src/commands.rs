@@ -34,10 +34,40 @@ impl From<LlmProviderKind> for ProviderKind {
     }
 }
 
+/// Input type for creating/updating an agent (all IDs as i64).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInput {
+    pub id: i64,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub provider_id: Option<i64>,
+    pub system_prompt: String,
+    pub tool_names: Vec<String>,
+    pub max_tokens: Option<i64>,
+    pub temperature: Option<f32>,
+}
+
+impl From<AgentInput> for AgentRecord {
+    fn from(input: AgentInput) -> Self {
+        Self {
+            id: AgentId::new(input.id),
+            display_name: input.display_name,
+            description: input.description,
+            version: input.version,
+            provider_id: input.provider_id.map(LlmProviderId::new),
+            system_prompt: input.system_prompt,
+            tool_names: input.tool_names,
+            max_tokens: input.max_tokens.map(|t| t as u32),
+            temperature: input.temperature,
+        }
+    }
+}
+
 /// Input type for creating/updating a provider (api_key as plain string).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInput {
-    pub id: String,
+    pub id: i64,
     pub kind: ProviderKind,
     pub display_name: String,
     pub base_url: String,
@@ -48,16 +78,10 @@ pub struct ProviderInput {
     pub extra_headers: HashMap<String, String>,
 }
 
-impl TryFrom<ProviderInput> for LlmProviderRecord {
-    type Error = String;
-
-    fn try_from(input: ProviderInput) -> Result<Self, Self::Error> {
-        let id: i64 = input
-            .id
-            .parse()
-            .map_err(|e| format!("Invalid provider id: {}", e))?;
-        Ok(Self {
-            id: LlmProviderId::new(id),
+impl From<ProviderInput> for LlmProviderRecord {
+    fn from(input: ProviderInput) -> Self {
+        Self {
+            id: LlmProviderId::new(input.id),
             kind: input.kind.into(),
             display_name: input.display_name,
             base_url: input.base_url,
@@ -67,7 +91,7 @@ impl TryFrom<ProviderInput> for LlmProviderRecord {
             is_default: input.is_default,
             extra_headers: input.extra_headers,
             secret_status: ProviderSecretStatus::Ready,
-        })
+        }
     }
 }
 
@@ -170,11 +194,8 @@ pub async fn list_providers(
 #[tauri::command]
 pub async fn get_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<Option<ProviderRecord>, String> {
-    let id: i64 = id
-        .parse()
-        .map_err(|e| format!("Invalid provider id: {}", e))?;
     let provider_id = LlmProviderId::new(id);
     match ctx.get_provider_record(&provider_id).await {
         Ok(record) => Ok(Some(record.into())),
@@ -195,7 +216,7 @@ pub async fn upsert_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
     record: ProviderInput,
 ) -> Result<String, String> {
-    let record = record.try_into()?;
+    let record: LlmProviderRecord = record.into();
     let id = ctx.upsert_provider(record).await.map_err(|e| e.to_string())?;
     Ok(id.to_string())
 }
@@ -203,11 +224,8 @@ pub async fn upsert_provider(
 #[tauri::command]
 pub async fn delete_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<bool, String> {
-    let id: i64 = id
-        .parse()
-        .map_err(|e| format!("Invalid provider id: {}", e))?;
     ctx.delete_provider(&LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -216,11 +234,8 @@ pub async fn delete_provider(
 #[tauri::command]
 pub async fn set_default_provider(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<(), String> {
-    let id: i64 = id
-        .parse()
-        .map_err(|e| format!("Invalid provider id: {}", e))?;
     ctx.set_default_provider(&LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -229,12 +244,9 @@ pub async fn set_default_provider(
 #[tauri::command]
 pub async fn test_provider_connection(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
     model: String,
 ) -> Result<ProviderTestResult, String> {
-    let id: i64 = id
-        .parse()
-        .map_err(|e| format!("Invalid provider id: {}", e))?;
     ctx.test_provider_connection(&LlmProviderId::new(id), &model)
         .await
         .map_err(|e| e.to_string())
@@ -246,7 +258,7 @@ pub async fn test_provider_input(
     record: ProviderInput,
     model: String,
 ) -> Result<ProviderTestResult, String> {
-    let record = record.try_into()?;
+    let record: LlmProviderRecord = record.into();
     ctx.test_provider_record(record, &model)
         .await
         .map_err(|e| e.to_string())
@@ -264,9 +276,8 @@ pub async fn list_agent_templates(
 #[tauri::command]
 pub async fn get_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<Option<AgentRecord>, String> {
-    let id: i64 = id.parse().map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.get_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -275,17 +286,17 @@ pub async fn get_agent_template(
 #[tauri::command]
 pub async fn upsert_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    record: AgentRecord,
+    record: AgentInput,
 ) -> Result<(), String> {
+    let record: AgentRecord = record.into();
     ctx.upsert_template(record).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn delete_agent_template(
     ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: String,
+    id: i64,
 ) -> Result<bool, String> {
-    let id: i64 = id.parse().map_err(|e| format!("Invalid agent id: {}", e))?;
     ctx.delete_template(&AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
