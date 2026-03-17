@@ -351,6 +351,8 @@ pub struct ChatSessionPayload {
     pub thread_id: String,
     /// The effective provider ID bound to this session.
     pub effective_provider_id: String,
+    /// The effective model being used for this session.
+    pub effective_model: String,
 }
 
 #[tauri::command]
@@ -360,6 +362,7 @@ pub async fn create_chat_session(
     app: tauri::AppHandle,
     template_id: String,
     provider_preference_id: Option<String>,
+    model_override: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
     let provider_override = provider_preference_id
         .as_ref()
@@ -372,6 +375,27 @@ pub async fn create_chat_session(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+    // Get provider record to determine effective model
+    let provider_record = ctx
+        .get_provider_record(&runtime.effective_provider_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Calculate effective model from override or provider's default
+    let effective_model = model_override
+        .as_ref()
+        .filter(|m| !m.is_empty())
+        .cloned()
+        .unwrap_or_else(|| provider_record.default_model.clone());
+
+    // Validate model is in provider's list
+    if !provider_record.models.contains(&effective_model) {
+        return Err(format!(
+            "Model '{}' is not available in provider '{}'",
+            effective_model, provider_record.id
+        ));
+    }
 
     let thread_id = ctx
         .create_thread(&runtime.runtime_agent_id, claw::ThreadConfig::default())
@@ -401,6 +425,7 @@ pub async fn create_chat_session(
         runtime_agent_id: runtime.runtime_agent_id.to_string(),
         thread_id: thread_id.to_string(),
         effective_provider_id: runtime.effective_provider_id.to_string(),
+        effective_model,
     })
 }
 
@@ -607,10 +632,12 @@ mod tests {
             runtime_agent_id: "arguswing--runtime".to_string(),
             thread_id: claw::ThreadId::new().to_string(),
             effective_provider_id: "openai".to_string(),
+            effective_model: "gpt-4.1".to_string(),
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["effective_provider_id"], json!("openai"));
+        assert_eq!(value["effective_model"], json!("gpt-4.1"));
         assert_eq!(value["session_key"], json!("arguswing::__default__"));
     }
 }
