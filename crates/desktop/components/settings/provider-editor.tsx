@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Save, Plus, X } from "lucide-react"
+import { Save, Plus, X, Check, AlertCircle, Loader2 } from "lucide-react"
 import {
   providers,
   type ProviderSecretStatus,
@@ -13,7 +13,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ProviderTestDialog } from "./provider-test-dialog"
+import { Checkbox } from "@/components/ui/checkbox"
+import { cn } from "@/lib/utils"
 
 export interface LlmProviderRecord {
   id: string
@@ -56,10 +57,9 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   const [formData, setFormData] = React.useState<LlmProviderRecord>(createDefaultFormData)
   const [newModel, setNewModel] = React.useState("")
 
-  // Test connection state
-  const [testDialogOpen, setTestDialogOpen] = React.useState(false)
-  const [testResult, setTestResult] = React.useState<ProviderTestResult | null>(null)
-  const [testingConnection, setTestingConnection] = React.useState(false)
+  // Test connection state - one result per model
+  const [testResults, setTestResults] = React.useState<Record<string, ProviderTestResult>>({})
+  const [testingModels, setTestingModels] = React.useState<Set<string>>(new Set())
 
   // Load provider data if editing
   React.useEffect(() => {
@@ -133,13 +133,62 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     setFormData({ ...formData, default_model: model })
   }
 
-  const handleAddModel = () => {
-    if (newModel.trim() && !formData.models.includes(newModel.trim())) {
-      setFormData({
-        ...formData,
-        models: [...formData.models, newModel.trim()],
+  const handleAddModel = async () => {
+    const model = newModel.trim()
+    if (!model || formData.models.includes(model)) return
+
+    const newModels = [...formData.models, model]
+    setFormData({
+      ...formData,
+      models: newModels,
+      default_model: formData.default_model || model,
+    })
+    setNewModel("")
+
+    // Auto-test the new model if we have all required fields
+    if (formData.id.trim() && formData.base_url.trim() && formData.api_key.trim()) {
+      await testModel(model, newModels)
+    }
+  }
+
+  const testModel = async (model: string, models: string[]) => {
+    setTestingModels((prev) => new Set(prev).add(model))
+
+    try {
+      // Save first to ensure provider exists
+      const input: ProviderInput = {
+        id: formData.id,
+        kind: formData.kind,
+        display_name: formData.display_name,
+        base_url: formData.base_url,
+        api_key: formData.api_key,
+        models: models,
+        default_model: formData.default_model || model,
+        is_default: formData.is_default,
+        extra_headers: formData.extra_headers,
+      }
+      await providers.upsert(input)
+
+      const result = await providers.testConnection(formData.id, model)
+      setTestResults((prev) => ({ ...prev, [model]: result }))
+    } catch (error) {
+      const fallbackResult: ProviderTestResult = {
+        provider_id: formData.id,
+        model,
+        base_url: formData.base_url,
+        checked_at: new Date().toISOString(),
+        latency_ms: 0,
+        status: "request_failed",
+        message: error instanceof Error ? error.message : String(error),
+      }
+      setTestResults((prev) => ({ ...prev, [model]: fallbackResult }))
+      console.error("Failed to test model:", error)
+    } finally {
+      setTestingModels((prev) => {
+        const next = new Set(prev)
+        next.delete(model)
+        return next
       })
-      setNewModel("")
     }
   }
 
@@ -152,45 +201,15 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         default_model: prev.default_model === model ? (newModels[0] || "") : prev.default_model,
       }
     })
+    setTestResults((prev) => {
+      const next = { ...prev }
+      delete next[model]
+      return next
+    })
   }
 
-  const handleTestConnection = async () => {
-    if (!formData.default_model) return
-
-    setTestingConnection(true)
-    try {
-      // Save first to ensure provider exists
-      const input: ProviderInput = {
-        id: formData.id,
-        kind: formData.kind,
-        display_name: formData.display_name,
-        base_url: formData.base_url,
-        api_key: formData.api_key,
-        models: formData.models,
-        default_model: formData.default_model,
-        is_default: formData.is_default,
-        extra_headers: formData.extra_headers,
-      }
-      await providers.upsert(input)
-
-      const result = await providers.testConnection(formData.id, formData.default_model)
-      setTestResult(result)
-      setTestDialogOpen(true)
-    } catch (error) {
-      setTestResult({
-        provider_id: formData.id,
-        model: formData.default_model,
-        base_url: formData.base_url,
-        checked_at: new Date().toISOString(),
-        latency_ms: 0,
-        status: "request_failed",
-        message: error instanceof Error ? error.message : String(error),
-      })
-      setTestDialogOpen(true)
-      console.error("Failed to test provider:", error)
-    } finally {
-      setTestingConnection(false)
-    }
+  const handleRetestModel = async (model: string) => {
+    await testModel(model, formData.models)
   }
 
   if (loading) {
@@ -207,25 +226,16 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         <h1 className="text-sm font-semibold">
           {isEditing ? "编辑 LLM 提供者" : "新建 LLM 提供者"}
         </h1>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleTestConnection}
-            disabled={saving || testingConnection || !canSave}
-          >
-            {testingConnection ? "测试中..." : "测试连接"}
-          </Button>
-          <Button size="sm" onClick={handleSubmit} disabled={saving || !canSave}>
-            <Save className="h-4 w-4 mr-1" />
-            {saving ? "保存中..." : "保存"}
-          </Button>
-        </div>
+        <Button size="sm" onClick={handleSubmit} disabled={saving || !canSave}>
+          <Save className="h-4 w-4 mr-1" />
+          {saving ? "保存中..." : "保存"}
+        </Button>
       </div>
 
       <div className="grid grid-cols-2 gap-6">
-        {/* Left: Basic Info */}
+        {/* Left: Basic Info + Models */}
         <div className="space-y-4">
+          {/* Basic Info */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="id">ID</Label>
@@ -274,57 +284,28 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
           </div>
 
           <div className="flex items-center gap-2">
-            <input
+            <Checkbox
               id="is_default"
-              type="checkbox"
               checked={formData.is_default}
-              onChange={(e) => setFormData({ ...formData, is_default: e.target.checked })}
-              className="h-4 w-4"
+              onCheckedChange={(checked) => setFormData({ ...formData, is_default: !!checked })}
             />
             <Label htmlFor="is_default" className="cursor-pointer">
               设为默认提供者
             </Label>
           </div>
-        </div>
 
-        {/* Right: Models */}
-        <div className="space-y-4">
-          <div className="space-y-2">
+          {/* Models Section */}
+          <div className="space-y-2 pt-4 border-t">
             <Label>模型列表</Label>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {formData.models.map((model) => (
-                <Badge
-                  key={model}
-                  variant={model === formData.default_model ? "default" : "secondary"}
-                  className="cursor-pointer pr-1"
-                  onClick={() => handleSetDefaultModel(model)}
-                >
-                  {model}
-                  {model === formData.default_model && (
-                    <span className="ml-1 text-[10px] opacity-70">默认</span>
-                  )}
-                  <button
-                    type="button"
-                    className="ml-1 hover:text-destructive"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleRemoveModel(model)
-                    }}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </Badge>
-              ))}
-            </div>
             <div className="flex gap-2">
               <Input
                 value={newModel}
                 onChange={(e) => setNewModel(e.target.value)}
-                placeholder="输入模型名称"
+                placeholder="输入模型名称后回车添加"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault()
-                    handleAddModel()
+                    void handleAddModel()
                   }
                 }}
               />
@@ -332,28 +313,103 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={handleAddModel}
+                onClick={() => void handleAddModel()}
                 disabled={!newModel.trim()}
               >
                 <Plus className="h-4 w-4" />
-                添加
               </Button>
             </div>
+            {formData.models.length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-2">
+                {formData.models.map((model) => (
+                  <Badge
+                    key={model}
+                    variant={model === formData.default_model ? "default" : "secondary"}
+                    className="cursor-pointer pr-1"
+                    onClick={() => handleSetDefaultModel(model)}
+                  >
+                    {model}
+                    {model === formData.default_model && (
+                      <span className="ml-1 text-[10px] opacity-70">默认</span>
+                    )}
+                    <button
+                      type="button"
+                      className="ml-1 hover:text-destructive"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleRemoveModel(model)
+                      }}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            )}
             <p className="text-[11px] text-muted-foreground">
-              点击标签设为默认模型
+              点击标签设为默认模型，添加模型后自动测试连接
             </p>
           </div>
         </div>
-      </div>
 
-      <ProviderTestDialog
-        open={testDialogOpen}
-        onOpenChange={setTestDialogOpen}
-        provider={formData}
-        result={testResult}
-        testing={testingConnection}
-        onRetest={() => void handleTestConnection()}
-      />
+        {/* Right: Test Results */}
+        <div className="space-y-2">
+          <Label>连接测试</Label>
+          <div className="border rounded-lg divide-y min-h-[300px]">
+            {formData.models.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-muted-foreground text-sm py-12">
+                添加模型后将自动测试连接
+              </div>
+            ) : (
+              formData.models.map((model) => {
+                const result = testResults[model]
+                const isTesting = testingModels.has(model)
+                const isSuccess = result?.status === "success"
+                const isFailed = result && result.status !== "success"
+
+                return (
+                  <div
+                    key={model}
+                    className="flex items-center justify-between px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Badge
+                        variant={model === formData.default_model ? "default" : "secondary"}
+                        className="shrink-0"
+                      >
+                        {model}
+                      </Badge>
+                      {isTesting && (
+                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                      )}
+                      {isSuccess && (
+                        <Check className="h-4 w-4 text-green-500" />
+                      )}
+                      {isFailed && (
+                        <AlertCircle className="h-4 w-4 text-destructive" />
+                      )}
+                      {result && !isTesting && (
+                        <span className="text-xs text-muted-foreground">
+                          {result.latency_ms}ms
+                        </span>
+                      )}
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="shrink-0 h-7"
+                      onClick={() => void handleRetestModel(model)}
+                      disabled={isTesting || !formData.api_key.trim()}
+                    >
+                      {isTesting ? "测试中..." : "重测"}
+                    </Button>
+                  </div>
+                )
+              })
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
