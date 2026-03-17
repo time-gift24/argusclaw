@@ -37,32 +37,26 @@ export function ProviderSelector() {
   const effectiveModel =
     selectedModelOverride ??
     selectedProvider?.default_model ??
-    providers.find((p) => p.is_default)?.default_model ??
     "默认模型";
 
   // Display text: Provider name / Model name
   const displayText = selectedProvider
     ? `${selectedProvider.display_name} / ${effectiveModel}`
-    : `系统默认 / ${effectiveModel}`;
+    : providers.find((p) => p.is_default)
+      ? `${providers.find((p) => p.is_default)!.display_name} / ${effectiveModel}`
+      : `无提供商 / ${effectiveModel}`;
 
   // Handle selecting a model from a provider
-  const handleSelectModel = (providerId: string | null, model: string) => {
+  const handleSelectModel = (providerId: string, model: string) => {
     void selectProviderPreference(providerId);
     void selectModelOverride(model);
   };
 
-  // Get default provider for "系统默认" section
-  const defaultProvider = providers.find((p) => p.is_default);
-
-  // Check if current selection is the default provider
-  const isUsingDefault = !selectedProviderPreferenceId;
-
   // Check if a specific item is selected
-  const isSelected = (providerId: string | null, model: string) => {
-    if (providerId === null) {
-      return isUsingDefault && selectedModelOverride === model;
-    }
-    return selectedProviderPreferenceId === providerId && selectedModelOverride === model;
+  const isSelected = (providerId: string, model: string) => {
+    // If no preference set, use the default provider
+    const effectiveProviderId = selectedProviderPreferenceId ?? providers.find((p) => p.is_default)?.id;
+    return effectiveProviderId === providerId && selectedModelOverride === model;
   };
 
   return (
@@ -82,41 +76,14 @@ export function ProviderSelector() {
       />
       <DropdownMenuPortal>
         <DropdownMenuContent align="start" className="max-h-80 min-w-48 overflow-y-auto">
-          {/* 系统默认 section */}
-          <DropdownMenuLabel className="text-muted-foreground">
-            系统默认 {defaultProvider && `(${defaultProvider.display_name})`}
-          </DropdownMenuLabel>
-          {defaultProvider?.models.map((model) => (
-            <DropdownMenuItem
-              key={`default-${model}`}
-              onClick={() => handleSelectModel(null, model)}
-              className="pl-6"
-            >
-              <span className="flex-1 truncate">{model}</span>
-              {model === defaultProvider.default_model && (
-                <span className="text-muted-foreground text-[10px]">默认</span>
-              )}
-              {isSelected(null, model) && (
-                <HugeiconsIcon
-                  icon={Tick02Icon}
-                  strokeWidth={2}
-                  className="size-3.5 text-primary"
-                />
-              )}
-            </DropdownMenuItem>
-          ))}
-          {!defaultProvider && (
-            <DropdownMenuItem disabled className="pl-6">
-              无可用模型
-            </DropdownMenuItem>
-          )}
-
-          {/* Provider sections */}
           {providers.map((provider, index) => (
             <div key={provider.id}>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel className="text-muted-foreground">
+              {index > 0 && <DropdownMenuSeparator />}
+              <DropdownMenuLabel className="flex items-center gap-1 text-muted-foreground">
                 {provider.display_name}
+                {provider.is_default && (
+                  <span className="text-muted-foreground text-[10px]">(默认)</span>
+                )}
               </DropdownMenuLabel>
               {provider.models.map((model) => (
                 <DropdownMenuItem
@@ -139,6 +106,11 @@ export function ProviderSelector() {
               ))}
             </div>
           ))}
+          {providers.length === 0 && (
+            <DropdownMenuItem disabled>
+              无可用提供商
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenuPortal>
     </DropdownMenu>
