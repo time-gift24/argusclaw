@@ -515,6 +515,21 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 - Modify: `crates/argus-wing/src/lib.rs` (在 Thread Management API 部分，约 line 320 之后)
 - Test: `crates/argus-wing/src/lib.rs` (添加到 `#[cfg(test)]` mod)
 
+- [ ] **Step 0: 先添加 get_default_provider() 方法（Chunk 4 需要使用）**
+
+在 `get_default_provider_record()` 方法后添加：
+
+```rust
+/// Get the default LLM provider instance.
+///
+/// Returns the actual provider instance (not just the record).
+pub async fn get_default_provider(&self) -> Result<Arc<dyn argus_protocol::LlmProvider>> {
+    let record = self.get_default_provider_record().await?;
+    let provider_id = &record.id;
+    self.provider_manager.get_provider(provider_id).await
+}
+```
+
 - [ ] **Step 1: 在 Thread Management API 部分添加方法**
 
 在 `delete_thread()` 方法后添加：
@@ -1146,7 +1161,7 @@ let output = execute_turn(input, TurnConfig::default()).await?;
 改为:
 ```rust
 let input = TurnInputBuilder::default()
-    .provider_id(argus_protocol::ProviderId::new(provider_record.id.into_inner()))
+    .provider(provider)
     .messages(vec![ChatMessage::user(message)])
     .system_prompt(system_prompt)
     .tool_manager(tool_manager)
