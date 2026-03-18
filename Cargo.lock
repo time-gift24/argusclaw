@@ -149,6 +149,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-dev"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-protocol",
+ "argus-tool",
+ "argus-turn",
+ "argus-wing",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "argus-llm"
 version = "0.1.0"
 dependencies = [
