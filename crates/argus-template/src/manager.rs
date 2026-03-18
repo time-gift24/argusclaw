@@ -87,6 +87,25 @@ impl TemplateManager {
         rows.into_iter().map(|row| self.map_agent_record(row)).collect()
     }
 
+    /// Find a template by display name.
+    pub async fn find_by_display_name(&self, display_name: &str) -> Result<Option<AgentRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            FROM agents WHERE display_name = ?
+            "#,
+        )
+        .bind(display_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        match row {
+            Some(row) => Ok(Some(self.map_agent_record(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Delete a template.
     pub async fn delete(&self, id: AgentId) -> Result<()> {
         sqlx::query("DELETE FROM agents WHERE id = ?")

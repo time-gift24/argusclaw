@@ -38,6 +38,9 @@ use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
+/// Default agent display name for the ArgusWing template.
+const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
+
 /// Wrapper that implements ProviderResolver for ProviderManager.
 ///
 /// This bridges the argus-session ProviderResolver trait with argus-llm's ProviderManager.
@@ -269,6 +272,25 @@ impl ArgusWing {
         self.template_manager.delete(id).await
     }
 
+    /// Get the default agent template.
+    ///
+    /// Returns the template record for the default "arguswing" agent if it exists.
+    /// This template contains the system prompt and default settings.
+    ///
+    /// Returns `Ok(None)` if the default template does not exist in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub async fn get_default_template(&self) -> Result<Option<AgentRecord>> {
+        self.template_manager
+            .find_by_display_name(DEFAULT_AGENT_DISPLAY_NAME)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: format!("Failed to fetch default template: {}", e),
+            })
+    }
+
     // =========================================================================
     // Session Management API
     // =========================================================================
@@ -433,5 +455,43 @@ mod tests {
             .await
             .expect("provider list should succeed");
         assert!(providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_default_template_returns_template() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        // Create the default template first
+        let default_template = AgentRecord {
+            id: AgentId::new(0), // Placeholder ID, will be auto-generated
+            display_name: DEFAULT_AGENT_DISPLAY_NAME.to_string(),
+            description: "Default assistant for ArgusWing".to_string(),
+            version: "0.1.0".to_string(),
+            provider_id: None,
+            system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
+            tool_names: vec!["shell".to_string(), "read".to_string()],
+            max_tokens: None,
+            temperature: None,
+        };
+        wing.upsert_template(default_template)
+            .await
+            .expect("should upsert default template");
+
+        // Test get_default_template
+        let template = wing
+            .get_default_template()
+            .await
+            .expect("should get default template");
+
+        assert!(template.is_some());
+        let template = template.unwrap();
+        assert_eq!(template.display_name, DEFAULT_AGENT_DISPLAY_NAME);
+        assert!(!template.system_prompt.is_empty());
+        assert_eq!(template.display_name, "ArgusWing");
     }
 }
