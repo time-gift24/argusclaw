@@ -9,7 +9,6 @@ use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
 use argus_protocol::{ApprovalDecision, ThreadEvent};
-use argus_tool::{GlobTool, GrepTool, ReadTool, ShellTool};
 use argus_wing::ArgusWing;
 use tokio::io::AsyncBufReadExt;
 
@@ -64,11 +63,8 @@ async fn run_chat(
         .collect();
 
     // Register default tools
+    wing.register_default_tools();
     let tool_manager = wing.tool_manager();
-    tool_manager.register(Arc::new(ShellTool::new()));
-    tool_manager.register(Arc::new(ReadTool::new()));
-    tool_manager.register(Arc::new(GrepTool::new()));
-    tool_manager.register(Arc::new(GlobTool::new()));
 
     // Use the default ArgusWing agent
     let (session_id, thread_id) = wing

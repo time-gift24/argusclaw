@@ -30,7 +30,7 @@ pub struct ThreadSummary {
 pub struct Session {
     pub id: SessionId,
     pub name: String,
-    pub threads: DashMap<ThreadId, Arc<Mutex<Thread>>>,
+    threads: DashMap<ThreadId, Arc<Mutex<Thread>>>,
 }
 
 impl Session {
@@ -53,6 +53,10 @@ impl Session {
 
     pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<Thread>>> {
         self.threads.get(thread_id).map(|r| r.value().clone())
+    }
+
+    pub fn thread_ids(&self) -> Vec<ThreadId> {
+        self.threads.iter().map(|e| *e.key()).collect()
     }
 
     pub async fn list_threads(&self) -> Vec<ThreadSummary> {
