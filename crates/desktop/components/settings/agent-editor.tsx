@@ -4,10 +4,11 @@ import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
 import { Save } from "lucide-react"
-import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
+import { agents, providers, tools, type AgentRecord, type LlmProviderSummary, type ToolInfo } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 
@@ -44,6 +45,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const [loading, setLoading] = React.useState(isEditing)
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
+  const [toolList, setToolList] = React.useState<ToolInfo[]>([])
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -80,6 +82,9 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       try {
         const providersData = await providers.list()
         setProviderList(providersData)
+
+        const toolsData = await tools.list()
+        setToolList(toolsData)
 
         if (agentId !== undefined) {
           const agent = await agents.get(agentId)
@@ -242,6 +247,46 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 }
                 placeholder="0.7"
               />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="tool_names">可用工具</Label>
+            <div className="space-y-2 max-h-48 overflow-y-auto border rounded-md p-3">
+              {toolList.length === 0 ? (
+                <p className="text-xs text-muted-foreground">暂无可用工具</p>
+              ) : (
+                toolList.map((tool) => (
+                  <div key={tool.name} className="flex items-start gap-2">
+                    <Checkbox
+                      id={`tool-${tool.name}`}
+                      checked={formData.tool_names.includes(tool.name)}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          setFormData({
+                            ...formData,
+                            tool_names: [...formData.tool_names, tool.name],
+                          })
+                        } else {
+                          setFormData({
+                            ...formData,
+                            tool_names: formData.tool_names.filter((n) => n !== tool.name),
+                          })
+                        }
+                      }}
+                    />
+                    <div className="flex-1">
+                      <Label
+                        htmlFor={`tool-${tool.name}`}
+                        className="text-sm font-normal cursor-pointer"
+                      >
+                        {tool.name}
+                      </Label>
+                      <p className="text-xs text-muted-foreground">{tool.description}</p>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
