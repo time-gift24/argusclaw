@@ -14,6 +14,9 @@ pub enum ArgusError {
     #[error("Thread not found: {0}")]
     ThreadNotFound(String),
 
+    #[error("Thread build failed: {reason}")]
+    ThreadBuildFailed { reason: String },
+
     #[error("Template not found: {0}")]
     TemplateNotFound(i64),
 

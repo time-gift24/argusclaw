@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::{ThreadEvent, ThreadId};
-use crate::llm::{ChatMessage, ToolDefinition};
+use argus_protocol::{ChatMessage, ToolDefinition};
 use argus_tool::ToolManager;
 
 /// Hook event types that can be intercepted.
@@ -275,7 +275,7 @@ mod tests {
         assert!(result.messages.is_some());
         let messages = result.messages.unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[1].role, crate::llm::Role::System);
+        assert_eq!(messages[1].role, argus_protocol::Role::System);
     }
 
     #[tokio::test]
@@ -399,10 +399,10 @@ mod tests {
         let result = registry.fire_before_call_llm(&ctx).await.unwrap();
         let messages = result.messages.unwrap();
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, crate::llm::Role::System);
-        assert_eq!(messages[1].role, crate::llm::Role::User);
+        assert_eq!(messages[0].role, argus_protocol::Role::System);
+        assert_eq!(messages[1].role, argus_protocol::Role::User);
         assert!(messages[1].content.contains("Original"));
-        assert_eq!(messages[2].role, crate::llm::Role::User);
+        assert_eq!(messages[2].role, argus_protocol::Role::User);
         assert!(messages[2].content.contains("Additional"));
     }
 }

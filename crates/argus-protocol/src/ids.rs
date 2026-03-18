@@ -39,11 +39,6 @@ impl ThreadId {
     pub fn inner(&self) -> &Uuid {
         &self.0
     }
-
-    /// Convert to a string representation.
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
-    }
 }
 
 impl Default for ThreadId {

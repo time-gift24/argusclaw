@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::agents::AgentId;
 use crate::db::DbError;
-use argus_protocol::LlmError;
+use argus_protocol::{ArgusError, LlmError};
 use crate::protocol::ThreadId;
 use argus_tool::ToolError;
 use crate::user::UserError;
@@ -11,6 +11,9 @@ use crate::user::UserError;
 pub enum AgentError {
     #[error(transparent)]
     Database(#[from] DbError),
+
+    #[error(transparent)]
+    Protocol(#[from] ArgusError),
 
     #[error(transparent)]
     Llm(#[from] LlmError),
@@ -26,6 +29,9 @@ pub enum AgentError {
 
     #[error("failed to create database directory `{path}`: {reason}")]
     DatabaseDirectoryCreateFailed { path: String, reason: String },
+
+    #[error("provider operation failed: {reason}")]
+    Provider { reason: String },
 
     #[error("provider `{id}` was not found")]
     ProviderNotFound { id: String },

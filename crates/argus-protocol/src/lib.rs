@@ -26,6 +26,10 @@ pub use llm::{
     ProviderCapabilities, Role, sanitize_tool_messages, ThinkingConfig, ThinkingMode,
     ToolCall, ToolCallDelta, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
     ToolResult,
+    // Provider management types
+    LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
+    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
+    LlmProviderRepository,
 };
 
 pub use tool::{NamedTool, ToolError};

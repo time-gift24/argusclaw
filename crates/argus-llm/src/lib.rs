@@ -5,8 +5,15 @@
 
 pub mod providers;
 pub mod retry;
+pub mod secret;
+pub mod manager;
 
 pub use providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
 };
 pub use retry::{RetryConfig, RetryProvider};
+pub use secret::{
+    ApiKeyCipher, EncryptedSecret, FileKeyMaterialSource, KeyMaterialSource,
+    SecretError, StaticKeyMaterialSource,
+};
+pub use manager::ProviderManager;

@@ -1,32 +1,10 @@
-pub mod approval;
-pub mod llm;
-pub mod sqlite;
-pub mod thread;
-#[cfg(feature = "dev")]
-pub mod workflow;
+//! Database error types.
 
 use thiserror::Error;
 
 use argus_protocol::llm::LlmProviderKindParseError;
 
-#[cfg(feature = "dev")]
-pub use approval::ApprovalRepository;
-#[allow(unused_imports)]
-pub use sqlite::SqliteJobRepository;
-
-pub use llm::LlmProviderId;
-
-#[cfg(feature = "dev")]
-pub use workflow::SqliteWorkflowRepository;
-
-impl From<LlmProviderKindParseError> for DbError {
-    fn from(err: LlmProviderKindParseError) -> Self {
-        DbError::InvalidProviderKind {
-            kind: err.to_string(),
-        }
-    }
-}
-
+/// Database error type.
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("database connection failed: {reason}")]
@@ -52,4 +30,15 @@ pub enum DbError {
 
     #[error("failed to decrypt secret: {reason}")]
     SecretDecryptionFailed { reason: String },
+
+    #[error("record not found: {id}")]
+    NotFound { id: String },
+}
+
+impl From<LlmProviderKindParseError> for DbError {
+    fn from(err: LlmProviderKindParseError) -> Self {
+        DbError::InvalidProviderKind {
+            kind: err.to_string(),
+        }
+    }
 }

@@ -23,4 +23,4 @@ pub use runtime_agent::RuntimeAgentHandle;
 pub use thread_snapshot::{ThreadMessageSnapshot, ThreadSnapshot, ToolCallSnapshot};
 
 // Convenience re-export
-pub use crate::llm::LlmStreamEvent;
+pub use argus_protocol::llm::{LlmEventStream, LlmStreamEvent};

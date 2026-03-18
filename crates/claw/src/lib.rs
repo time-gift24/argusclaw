@@ -7,7 +7,6 @@ pub mod agents; // Public for argus-thread
 pub(crate) mod api;
 pub(crate) mod db;
 pub(crate) mod job;
-pub mod llm; // Public for argus-turn and argus-thread (LLMManager, secret)
 pub(crate) mod scheduler;
 pub(crate) mod workflow;
 
@@ -32,7 +31,7 @@ pub use agents::{AgentRecord, AgentRuntimeInfo, ThreadInfo};
 
 // Protocol Types (稳定 DTO)
 pub use protocol::{
-    ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmStreamEvent, RiskLevel,
+    ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmEventStream, LlmStreamEvent, RiskLevel,
     RuntimeAgentHandle, ThreadEvent, ThreadId, ThreadMessageSnapshot, ThreadSnapshot, TokenUsage,
     ToolCallSnapshot,
 };
@@ -47,9 +46,9 @@ pub use db::llm::{
 // Tool Types - from argus-tool
 pub use argus_tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
 
-// LLM Types - from argus-protocol (types) and internal llm module (LLMManager)
+// LLM Types - from argus-protocol (types) and argus-llm (ProviderManager)
 pub use argus_protocol::{ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition};
-pub use llm::LLMManager;
+pub use argus_llm::ProviderManager;
 
 // User Types
 pub use user::UserInfo;
@@ -79,6 +78,6 @@ pub use job::{JobRecord, JobRepository, JobType};
 #[cfg(feature = "dev")]
 pub use argus_protocol::llm::LlmEventStream;
 #[cfg(feature = "dev")]
-pub use llm::LLMManager;
+pub use argus_llm::ProviderManager;
 #[cfg(feature = "dev")]
 pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};

@@ -14,7 +14,7 @@ use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
-use crate::llm::LLMManager;
+use argus_llm::ProviderManager;
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use argus_tool::ToolManager;
 
@@ -28,8 +28,8 @@ const RUNTIME_AGENT_ID_START: i64 = 1_000_000_000;
 pub struct AgentManager {
     /// Repository for agent templates.
     repository: Arc<dyn AgentRepository>,
-    /// LLM manager for building providers.
-    llm_manager: Arc<LLMManager>,
+    /// Provider manager for building providers.
+    provider_manager: Arc<ProviderManager>,
     /// Global CompactorManager (shared by all agents).
     compactor_manager: Arc<CompactorManager>,
     /// Global ApprovalManager (shared by all agents).
@@ -46,13 +46,13 @@ impl AgentManager {
     /// Create a new AgentManager.
     pub fn new(
         repository: Arc<dyn AgentRepository>,
-        llm_manager: Arc<LLMManager>,
+        provider_manager: Arc<ProviderManager>,
         tool_manager: Arc<ToolManager>,
         approval_manager: Option<Arc<ApprovalManager>>,
     ) -> Self {
         Self {
             repository,
-            llm_manager,
+            provider_manager,
             compactor_manager: Arc::new(CompactorManager::with_defaults()),
             approval_manager,
             tool_manager,
@@ -92,7 +92,7 @@ impl AgentManager {
             agent_id: record.id,
         })?;
 
-        let provider = self.llm_manager.get_provider(&provider_id).await?;
+        let provider = self.provider_manager.get_provider(&provider_id).await?;
 
         // Generate a unique runtime agent ID
         let runtime_id = self.next_runtime_id();
@@ -122,7 +122,7 @@ impl AgentManager {
             agent_id: record.id,
         })?;
 
-        let provider = self.llm_manager.get_provider(&provider_id).await?;
+        let provider = self.provider_manager.get_provider(&provider_id).await?;
 
         // Generate a unique runtime agent ID
         let runtime_id = self.next_runtime_id();

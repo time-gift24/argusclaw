@@ -1,98 +1,111 @@
+//! Provider manager for LLM provider lookup and instantiation.
+//!
+//! This module provides `ProviderManager` which handles:
+//! - Looking up provider records from a repository
+//! - Building LLM provider instances from records
+//! - Testing provider connections
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 
-use crate::db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmProviderSummary,
-    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
+use argus_protocol::llm::{
+    ChatMessage, CompletionRequest, LlmError, LlmProvider,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
+    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
 };
-use crate::error::AgentError;
+use argus_protocol::Result;
 
-// Use re-exports from mod.rs
-use super::{ChatMessage, CompletionRequest, LlmError, LlmProvider};
-#[cfg(feature = "dev")]
-use super::LlmEventStream;
+use crate::providers::{OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider};
 
-pub struct LLMManager {
+/// Manager for LLM provider lookup and instantiation.
+///
+/// This is the main entry point for obtaining LLM provider instances
+/// from stored configuration.
+pub struct ProviderManager {
     repository: Arc<dyn LlmProviderRepository>,
 }
 
-impl LLMManager {
+impl ProviderManager {
+    /// Create a new provider manager with the given repository.
     #[must_use]
     pub fn new(repository: Arc<dyn LlmProviderRepository>) -> Self {
         Self { repository }
     }
 
-    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
-        self.repository.list_providers().await.map_err(Into::into)
+    /// List all provider summaries.
+    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>> {
+        self.repository.list_providers().await
     }
 
+    /// Get a provider instance by ID (using the default model).
     pub async fn get_provider(
         &self,
         id: &LlmProviderId,
-    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+    ) -> Result<Arc<dyn LlmProvider>> {
         let record = self
             .repository
             .get_provider(id)
             .await?
-            .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })?;
+            .ok_or_else(|| argus_protocol::ArgusError::ProviderNotFound(id.into_inner()))?;
 
         let default_model = record.default_model.clone();
         self.build_provider_with_model(record, &default_model)
     }
 
+    /// Get a provider instance by ID with a specific model.
     pub async fn get_provider_with_model(
         &self,
         id: &LlmProviderId,
         model: &str,
-    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+    ) -> Result<Arc<dyn LlmProvider>> {
         let record = self
             .repository
             .get_provider(id)
             .await?
-            .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })?;
+            .ok_or_else(|| argus_protocol::ArgusError::ProviderNotFound(id.into_inner()))?;
 
         if !record.models.contains(&model.to_string()) {
-            return Err(AgentError::ModelNotAvailable {
-                provider: id.to_string(),
-                model: model.to_string(),
+            return Err(argus_protocol::ArgusError::LlmError {
+                reason: format!("model {} not available on provider {}", model, id),
             });
         }
 
         self.build_provider_with_model(record, model)
     }
 
-    pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
+    /// Get the default provider instance.
+    pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>> {
         let record = self
             .repository
             .get_default_provider()
             .await?
-            .ok_or(AgentError::DefaultProviderNotConfigured)?;
+            .ok_or(argus_protocol::ArgusError::ProviderNotFound(0))?;
 
         let default_model = record.default_model.clone();
         self.build_provider_with_model(record, &default_model)
     }
 
-    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId, AgentError> {
+    /// Upsert a provider record.
+    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId> {
         let record = LlmProviderRecord {
             secret_status: ProviderSecretStatus::Ready,
             ..record
         };
-        self.repository.upsert_provider(&record).await.map_err(Into::into)
+        self.repository.upsert_provider(&record).await
     }
 
-    pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, AgentError> {
-        self.repository
-            .delete_provider(id)
-            .await
-            .map_err(Into::into)
+    /// Delete a provider by ID.
+    pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool> {
+        self.repository.delete_provider(id).await
     }
 
+    /// Import multiple provider records.
     pub async fn import_providers(
         &self,
         records: Vec<LlmProviderRecord>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<()> {
         for record in records {
             self.upsert_provider(record).await?;
         }
@@ -100,43 +113,47 @@ impl LLMManager {
         Ok(())
     }
 
+    /// Get a provider record by ID.
     pub async fn get_provider_record(
         &self,
         id: &LlmProviderId,
-    ) -> Result<LlmProviderRecord, AgentError> {
+    ) -> Result<LlmProviderRecord> {
         self.repository
             .get_provider(id)
             .await?
-            .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })
+            .ok_or_else(|| argus_protocol::ArgusError::ProviderNotFound(id.into_inner()))
     }
 
+    /// Get a provider summary by ID.
     pub async fn get_provider_summary(
         &self,
         id: &LlmProviderId,
-    ) -> Result<LlmProviderSummary, AgentError> {
+    ) -> Result<LlmProviderSummary> {
         self.repository
             .get_provider_summary(id)
             .await?
-            .ok_or_else(|| AgentError::ProviderNotFound { id: id.to_string() })
+            .ok_or_else(|| argus_protocol::ArgusError::ProviderNotFound(id.into_inner()))
     }
 
-    pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
+    /// Get the default provider record.
+    pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord> {
         self.repository
             .get_default_provider()
             .await?
-            .ok_or(AgentError::DefaultProviderNotConfigured)
+            .ok_or(argus_protocol::ArgusError::ProviderNotFound(0))
     }
 
-    pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), AgentError> {
-        self.repository.set_default_provider(id).await?;
-        Ok(())
+    /// Set the default provider.
+    pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<()> {
+        self.repository.set_default_provider(id).await
     }
 
+    /// Test a provider connection.
     pub async fn test_provider_connection(
         &self,
         id: &LlmProviderId,
         model: &str,
-    ) -> Result<ProviderTestResult, AgentError> {
+    ) -> Result<ProviderTestResult> {
         let Some(record) = self.repository.get_provider(id).await? else {
             return Ok(build_provider_test_result(
                 id.to_string(),
@@ -144,7 +161,7 @@ impl LLMManager {
                 String::new(),
                 Duration::ZERO,
                 ProviderTestStatus::ProviderNotFound,
-                AgentError::ProviderNotFound { id: id.to_string() }.to_string(),
+                format!("provider {} not found", id),
             ));
         };
 
@@ -152,52 +169,43 @@ impl LLMManager {
         let base_url = record.base_url.clone();
         let provider = match self.build_provider_with_model(record.clone(), model) {
             Ok(provider) => provider,
-            Err(AgentError::UnsupportedProviderKind { kind }) => {
+            Err(argus_protocol::ArgusError::LlmError { reason }) => {
                 return Ok(build_provider_test_result(
                     provider_id,
                     model.to_string(),
                     base_url,
                     Duration::ZERO,
                     ProviderTestStatus::UnsupportedProviderKind,
-                    AgentError::UnsupportedProviderKind { kind }.to_string(),
+                    reason,
                 ));
             }
-            Err(AgentError::ModelNotAvailable { provider, model }) => {
-                return Ok(build_provider_test_result(
-                    provider.clone(),
-                    model.clone(),
-                    base_url,
-                    Duration::ZERO,
-                    ProviderTestStatus::ModelNotAvailable,
-                    AgentError::ModelNotAvailable { provider, model }.to_string(),
-                ));
-            }
-            Err(error) => return Err(error),
+            Err(e) => return Err(e),
         };
 
         Ok(run_provider_connection_test(provider_id, model.to_string(), base_url, provider).await)
     }
 
+    /// Test a provider record (without saving).
     pub async fn test_provider_record(
         &self,
         record: LlmProviderRecord,
         model: &str,
-    ) -> Result<ProviderTestResult, AgentError> {
+    ) -> Result<ProviderTestResult> {
         let provider_id = record.id.to_string();
         let base_url = record.base_url.clone();
         let provider = match self.build_provider_with_model(record, model) {
             Ok(provider) => provider,
-            Err(AgentError::UnsupportedProviderKind { kind }) => {
+            Err(argus_protocol::ArgusError::LlmError { reason }) => {
                 return Ok(build_provider_test_result(
                     provider_id,
                     model.to_string(),
                     base_url,
                     Duration::ZERO,
                     ProviderTestStatus::UnsupportedProviderKind,
-                    AgentError::UnsupportedProviderKind { kind }.to_string(),
+                    reason,
                 ));
             }
-            Err(error) => return Err(error),
+            Err(e) => return Err(e),
         };
 
         Ok(run_provider_connection_test(provider_id, model.to_string(), base_url, provider).await)
@@ -208,13 +216,17 @@ impl LLMManager {
         &self,
         provider_id: Option<&LlmProviderId>,
         prompt: impl Into<String>,
-    ) -> Result<String, AgentError> {
+    ) -> Result<String> {
         let provider = match provider_id {
             Some(id) => self.get_provider(id).await?,
             None => self.get_default_provider().await?,
         };
         let request = CompletionRequest::new(vec![ChatMessage::user(prompt.into())]);
-        let response = provider.complete(request).await?;
+        let response = provider.complete(request).await.map_err(|e| {
+            argus_protocol::ArgusError::LlmError {
+                reason: e.to_string(),
+            }
+        })?;
 
         Ok(response.content)
     }
@@ -224,7 +236,7 @@ impl LLMManager {
         &self,
         provider_id: Option<&LlmProviderId>,
         prompt: impl Into<String>,
-    ) -> Result<LlmEventStream, AgentError> {
+    ) -> Result<argus_protocol::llm::LlmEventStream> {
         let provider = match provider_id {
             Some(id) => self.get_provider(id).await?,
             None => self.get_default_provider().await?,
@@ -234,17 +246,19 @@ impl LLMManager {
         provider
             .stream_complete(request)
             .await
-            .map_err(AgentError::from)
+            .map_err(|e| argus_protocol::ArgusError::LlmError {
+                reason: e.to_string(),
+            })
     }
 
     fn build_provider_with_model(
         &self,
         record: LlmProviderRecord,
         model: &str,
-    ) -> Result<Arc<dyn LlmProvider>, AgentError> {
+    ) -> Result<Arc<dyn LlmProvider>> {
         match record.kind {
             LlmProviderKind::OpenAiCompatible => {
-                let mut config = super::OpenAiCompatibleConfig::new(
+                let mut config = OpenAiCompatibleConfig::new(
                     record.base_url,
                     record.api_key.expose_secret().to_string(),
                     model.to_string(),
@@ -254,10 +268,12 @@ impl LLMManager {
                     config = config.with_extra_header(name, value);
                 }
 
-                let factory_config = super::OpenAiCompatibleFactoryConfig::new(config);
+                let factory_config = OpenAiCompatibleFactoryConfig::new(config);
 
-                super::create_openai_compatible_provider(factory_config)
-                    .map_err(AgentError::from)
+                create_openai_compatible_provider(factory_config)
+                    .map_err(|e| argus_protocol::ArgusError::LlmError {
+                        reason: e.to_string(),
+                    })
             }
         }
     }
@@ -335,8 +351,7 @@ fn map_llm_error_to_test_status(error: &LlmError) -> ProviderTestStatus {
 mod tests {
     use std::time::Duration;
 
-    use crate::db::llm::ProviderTestStatus;
-    use crate::llm::LlmError;
+    use argus_protocol::llm::{LlmError, ProviderTestStatus};
 
     use super::{duration_to_millis, map_llm_error_to_test_status};
 

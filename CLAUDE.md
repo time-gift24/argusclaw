@@ -51,7 +51,7 @@ crates/
 
 **核心规则：cli 和 desktop 都只依赖 claw 暴露的公共 API，不可访问 claw 内部模块。**
 
-### claw — 核心库
+### claw — 核心库(迁移中，最终要废弃掉)
 
 唯一的入口点是 `AppContext`（定义在 `claw.rs`）。cli 和 desktop 只能看到 `AppContext` 一个结构体来启动和操作系统。
 
@@ -76,23 +76,3 @@ crates/
 ### cli — 命令行前端
 
 详见 `crates/cli/CLAUDE.md`。
-
-### desktop — 桌面前端
-
-Tauri + React + TypeScript + Vite + Tailwind CSS v4。Rust 后端通过 Tauri Commands 调用 claw API。
-
-## 测试
-
-- 优先使用 `#[cfg(test)]` 在实现文件中的内联测试
-- 只在需要测试多个模块组合的 E2E 场景使用 `crates/*/tests/`
-
-## 数据库
-
-- 默认 `DATABASE_URL` 为 `~/.arguswing/sqlite.db`
-- 使用 `sqlx::migrate!()` 宏，迁移在**编译时嵌入**到二进制文件中
-
-### 迁移规范
-
-- 文件位于 `crates/claw/migrations/` 目录
-- **使用 sqlx-cli 创建迁移**：`sqlx migrate add <name>`（在 `crates/claw` 目录下执行）
-- **并发开发注意**：多个 feature 分支并发开发时，rebase origin/main 后必须检查迁移文件时间戳顺序，必要时重新命名以保障时序正确
