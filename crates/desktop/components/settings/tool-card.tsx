@@ -35,13 +35,18 @@ export function ToolCard({ tool }: ToolCardProps) {
       <CardContent className="pt-0">
         <button
           type="button"
+          aria-expanded={showParams}
+          aria-controls={`tool-params-${tool.name}`}
           onClick={() => setShowParams(!showParams)}
           className="text-xs text-muted-foreground hover:text-foreground transition-colors"
         >
           {showParams ? "隐藏" : "显示"}参数 schema
         </button>
         {showParams && (
-          <pre className="mt-2 text-xs bg-muted p-2 rounded-md overflow-x-auto">
+          <pre
+            id={`tool-params-${tool.name}`}
+            className="mt-2 text-xs bg-muted p-2 rounded-md overflow-x-auto"
+          >
             {JSON.stringify(tool.parameters, null, 2)}
           </pre>
         )}
