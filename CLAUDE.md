@@ -18,7 +18,30 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 - DRY (Don't Repeat Yourself，禁止重复你自身)
 
 ## 编码前检查
-- 禁止在 main (极其重要) 分支工作，如果在 main 分支则使用 using-git-worktrees 去独立分支工作
+
+**禁令（极其重要）**
+- ❌ 禁止直接在 `main` 分支的文件夹中修改代码
+- ❌ 禁止直接在 `main` 分支创建或修改文件
+- ✅ 必须始终在 `.worktrees/` 中的某个独立分支工作
+
+使用 `using-git-worktrees` skill 创建独立工作区：
+
+```bash
+# 创建新功能分支
+/worktrees/feature-xxx  # 在这里工作
+
+# 完成后退役
+/worktrees/docs/xxx      # 文档放在这里
+```
+
+## 分支与文档规则
+
+- **docs/** 目录：始终放在 `main` 分支，不随功能分支
+- **清理分支时**：同时删除该分支关联的 docs/ 目录
+- **各 crate 特性**：一句话描述放在对应 crates/*/CLAUDE.md 顶部
+
+## 提交规则
+
 - 完成工作后无需提问直接发起 PR
 
 ## 代码风格

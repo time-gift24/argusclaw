@@ -1,8 +1,8 @@
 # Argus-LLM Crate 开发指南
 
-## 概述
+> 特性：LLM provider 抽象层，提供 OpenAI 兼容实现、Retry 装饰器和密钥加密管理。
 
-`argus-llm` 是 ArgusWing 的 LLM provider 抽象层，提供：
+
 - **OpenAI-compatible provider** 实现
 - **Retry 机制**：指数退避重试装饰器
 - **Provider 管理器**：provider 查找、实例化和测试
