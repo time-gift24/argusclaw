@@ -138,6 +138,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argus-protocol",
+ "argus-test-support",
  "async-trait",
  "chrono",
  "clap",
@@ -241,6 +242,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-test-support"
+version = "0.1.0"
+dependencies = [
+ "argus-protocol",
+ "async-trait",
+ "futures-util",
+ "rust_decimal",
+ "tokio",
+]
+
+[[package]]
 name = "argus-thread"
 version = "0.1.0"
 dependencies = [
@@ -283,6 +295,7 @@ dependencies = [
  "anyhow",
  "argus-llm",
  "argus-protocol",
+ "argus-test-support",
  "argus-tool",
  "async-trait",
  "clap",

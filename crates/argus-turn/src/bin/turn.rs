@@ -16,6 +16,7 @@ use tokio::sync::broadcast;
 use argus_llm::providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
 };
+use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role, ToolDefinition};
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_turn::{TurnBuilder, TurnConfig, TurnStreamEvent};
@@ -67,6 +68,8 @@ enum Commands {
     Execute(ExecuteArgs),
     /// Test tool execution.
     ToolTest(ToolTestArgs),
+    /// Test retry behavior with mock providers.
+    MockTest(MockTestArgs),
 }
 
 #[derive(Args)]
@@ -102,6 +105,19 @@ struct ToolTestArgs {
     /// The prompt to execute
     #[arg(long)]
     prompt: String,
+}
+
+#[derive(Args)]
+struct MockTestArgs {
+    /// Test type: "intermittent" or "always-fail"
+    #[arg(long)]
+    test_type: String,
+    /// Maximum number of retries
+    #[arg(long, default_value_t = 3)]
+    max_retries: u32,
+    /// Enable streaming
+    #[arg(long, default_value_t = false)]
+    stream: bool,
 }
 
 /// Echo tool for testing
@@ -344,6 +360,62 @@ Example flow:
     Ok(())
 }
 
+async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
+    use argus_test_support::{IntermittentFailureProvider, AlwaysFailProvider};
+
+    let provider: Arc<dyn LlmProvider> = match args.test_type.as_str() {
+        "intermittent" => Arc::new(IntermittentFailureProvider::new()),
+        "always-fail" => Arc::new(AlwaysFailProvider::new()),
+        _ => return Err(anyhow!("Unknown test type: {}", args.test_type)),
+    };
+
+    let retry_provider = Arc::new(RetryProvider::new(provider, RetryConfig { max_retries: args.max_retries }));
+
+    println!("Testing {} with max_retries={}, stream={}", args.test_type, args.max_retries, args.stream);
+    println!("Provider: {}", retry_provider.active_model_name());
+    println!();
+
+    let messages = vec![ChatMessage::user("Test message".to_string())];
+
+    if args.stream {
+        // Test streaming turn execution
+        todo!("Implement streaming test");
+    } else {
+        // Test simple turn execution
+        let (stream_tx, _stream_rx) = broadcast::channel::<TurnStreamEvent>(256);
+        let (thread_event_tx, _thread_event_rx) = broadcast::channel(256);
+
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("test-thread".to_string())
+            .messages(messages)
+            .provider(retry_provider)
+            .tools(vec![])
+            .hooks(vec![])
+            .config(TurnConfig::default())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .build()
+            .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
+
+        match turn.execute().await {
+            Ok(output) => {
+                println!("✓ Turn completed successfully!");
+                println!("📊 Tokens: {} input, {} output, {} total",
+                    output.token_usage.input_tokens,
+                    output.token_usage.output_tokens,
+                    output.token_usage.total_tokens
+                );
+                Ok(())
+            }
+            Err(e) => {
+                println!("✗ Turn failed: {}", e);
+                Err(anyhow!("Mock test failed: {}", e))
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -364,6 +436,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Execute(args) => execute_turn(args, &config).await?,
         Commands::ToolTest(args) => tool_test(args, &config).await?,
+        Commands::MockTest(args) => mock_test_turn(args).await?,
     }
 
     Ok(())

@@ -9,6 +9,7 @@ path = "src/bin/turn.rs"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
+argus-test-support = { path = "../argus-test-support" }
 argus-tool = { path = "../argus-tool" }
 argus-llm = { path = "../argus-llm" }
 tokio = { version = "1", features = ["sync", "rt", "time", "test-util", "macros"] }

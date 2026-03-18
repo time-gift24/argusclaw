@@ -9,6 +9,7 @@ path = "src/bin/cli.rs"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
+argus-test-support = { path = "../argus-test-support" }
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }

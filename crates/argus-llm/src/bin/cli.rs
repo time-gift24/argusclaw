@@ -75,6 +75,8 @@ enum Commands {
     Complete(CompleteArgs),
     /// Test retry capability.
     RetryTest(RetryTestArgs),
+    /// Test retry behavior with mock providers.
+    MockTest(MockTestArgs),
 }
 
 #[derive(Args)]
@@ -159,6 +161,16 @@ impl CommandArgs for RetryTestArgs {
     fn model(&self) -> &Option<String> {
         &self.model
     }
+}
+
+#[derive(Args)]
+struct MockTestArgs {
+    /// Test type: "intermittent" or "always-fail"
+    #[arg(long)]
+    test_type: String,
+    /// Maximum number of retries
+    #[arg(long, default_value_t = 3)]
+    max_retries: u32,
 }
 
 fn create_provider(config: &ResolvedConfig) -> Result<Arc<dyn LlmProvider>> {
@@ -332,6 +344,38 @@ async fn test_retry(config: &ResolvedConfig, max_retries: u32) -> Result<()> {
     }
 }
 
+async fn mock_test(test_type: &str, max_retries: u32) -> Result<()> {
+    use argus_test_support::{IntermittentFailureProvider, AlwaysFailProvider};
+
+    let provider: Arc<dyn LlmProvider> = match test_type {
+        "intermittent" => Arc::new(IntermittentFailureProvider::new()),
+        "always-fail" => Arc::new(AlwaysFailProvider::new()),
+        _ => return Err(anyhow!("Unknown test type: {}", test_type)),
+    };
+
+    let retry_provider = create_retry_provider(provider, max_retries);
+
+    println!("Testing {} with max_retries={}", test_type, max_retries);
+    println!("Provider: {}", retry_provider.active_model_name());
+    println!();
+
+    // Test streaming call
+    let request = CompletionRequest::new(vec![
+        ChatMessage::user("Test message".to_string())
+    ]);
+
+    match retry_provider.stream_complete(request).await {
+        Ok(_) => {
+            println!("✓ Success!");
+            Ok(())
+        }
+        Err(e) => {
+            println!("✗ Failed: {}", e);
+            Err(anyhow!("Mock test failed: {}", e))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -358,6 +402,9 @@ async fn main() -> Result<()> {
         Commands::RetryTest(args) => {
             let resolved = resolve_config(&config, args);
             test_retry(&resolved, args.max_retries).await
+        }
+        Commands::MockTest(args) => {
+            mock_test(&args.test_type, args.max_retries).await
         }
     }
 }
