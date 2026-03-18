@@ -7,6 +7,10 @@ edition = "2024"
 name = "argus-llm"
 path = "src/bin/cli.rs"
 
+[[example]]
+name = "test_real_retry"
+path = "../../examples/test_real_retry.rs"
+
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
 argus-test-support = { path = "../argus-test-support" }

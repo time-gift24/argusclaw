@@ -7,6 +7,7 @@ pub mod manager;
 pub mod providers;
 pub mod retry;
 pub mod secret;
+pub mod test_utils;
 
 pub use manager::ProviderManager;
 pub use providers::{
@@ -17,3 +18,4 @@ pub use secret::{
     ApiKeyCipher, EncryptedSecret, FileKeyMaterialSource, KeyMaterialSource, SecretError,
     StaticKeyMaterialSource,
 };
+pub use test_utils::{TestRetryProvider, create_test_retry_provider};

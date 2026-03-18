@@ -121,6 +121,12 @@ struct CompleteArgs {
     /// Stream the response
     #[arg(long, default_value_t = false)]
     stream: bool,
+    /// Test retry behavior by injecting intermittent failures
+    #[arg(long, default_value_t = false)]
+    test_retry: bool,
+    /// Maximum retries for test mode
+    #[arg(long, default_value_t = 3)]
+    max_retries: u32,
 }
 
 impl CommandArgs for CompleteArgs {
@@ -237,8 +243,18 @@ async fn test_connection(config: &ResolvedConfig) -> Result<()> {
     }
 }
 
-async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool) -> Result<()> {
-    let provider = create_provider(config)?;
+async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool, test_retry: bool, max_retries: u32) -> Result<()> {
+    let base_provider = create_provider(config)?;
+
+    // Wrap provider with test retry behavior if requested
+    let provider = if test_retry {
+        println!("🧪 Test mode: Injecting intermittent failures");
+        println!("📊 Max retries: {}", max_retries);
+        println!();
+        argus_llm::create_test_retry_provider(base_provider, max_retries)
+    } else {
+        base_provider
+    };
 
     println!("Completing prompt: \"{}\"", prompt);
     println!("Model: {}", config.model);
@@ -256,12 +272,17 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool) ->
         use futures_util::StreamExt;
         use std::io::Write;
 
-        // Track state for printing section headers
+        // Track state for printing section headers and retry events
         let mut reasoning_started = false;
         let mut summary_started = false;
+        let mut retry_count = 0;
 
         while let Some(event) = stream.next().await {
             match event {
+                Ok(LlmStreamEvent::RetryAttempt { attempt, max_retries, error }) => {
+                    retry_count += 1;
+                    println!("🔄 Retry attempt {}/{}: {}", attempt, max_retries, error);
+                }
                 Ok(LlmStreamEvent::ReasoningDelta { delta }) if !delta.is_empty() => {
                     if !reasoning_started {
                         print!("[Reasoning] ");
@@ -292,6 +313,15 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool) ->
                     return Err(anyhow!("Stream error: {}", e));
                 }
                 _ => {}
+            }
+        }
+
+        if test_retry {
+            println!();
+            if retry_count > 0 {
+                println!("📊 Total retries: {}", retry_count);
+            } else {
+                println!("📊 No retries occurred");
             }
         }
     } else {
@@ -424,7 +454,7 @@ async fn main() -> Result<()> {
         }
         Commands::Complete(args) => {
             let resolved = resolve_config(&config, args);
-            complete_prompt(&resolved, &args.prompt, args.stream).await
+            complete_prompt(&resolved, &args.prompt, args.stream, args.test_retry, args.max_retries).await
         }
         Commands::RetryTest(args) => {
             let resolved = resolve_config(&config, args);
