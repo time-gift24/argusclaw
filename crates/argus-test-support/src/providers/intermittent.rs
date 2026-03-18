@@ -10,9 +10,8 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use argus_protocol::llm::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmError,
-    LlmEventStream, LlmProvider, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream, LlmProvider,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Provider that succeeds on first call, fails on next 3 calls, then succeeds.
@@ -42,7 +41,7 @@ impl IntermittentFailureProvider {
     fn should_fail(&self) -> bool {
         let count = self.call_count.fetch_add(1, Ordering::Relaxed);
         // Fail on calls 2, 3, 4 (1-indexed: 2, 3, 4)
-        matches!(count, 1 | 2 | 3)
+        matches!(count, 1..=3)
     }
 }
 
@@ -62,10 +61,7 @@ impl LlmProvider for IntermittentFailureProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: "intermittent-failure".to_string(),
@@ -160,7 +156,9 @@ impl LlmProvider for IntermittentFailureProvider {
     }
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
-        requested_model.unwrap_or("intermittent-failure").to_string()
+        requested_model
+            .unwrap_or("intermittent-failure")
+            .to_string()
     }
 
     fn active_model_name(&self) -> String {

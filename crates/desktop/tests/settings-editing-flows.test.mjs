@@ -18,6 +18,10 @@ const providerDialogPath = new URL(
   "../components/settings/provider-form-dialog.tsx",
   import.meta.url,
 );
+const deleteDialogPath = new URL(
+  "../components/settings/delete-confirm-dialog.tsx",
+  import.meta.url,
+);
 
 test("settings exposes a dedicated new-agent route that renders create mode", () => {
   assert.equal(existsSync(newAgentPagePath), true);
@@ -36,30 +40,29 @@ test("agent editor treats provider as optional when deciding whether the form ca
     )?.[0] ?? "";
 
   assert.match(agentEditorSource, /function getPreferredProviderId/);
+  assert.match(agentEditorSource, /const isEditing = agentId !== undefined/);
   assert.match(
     agentEditorSource,
-    /providersData\.find\(\(p\)\s*=>\s*p\.is_default && p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*providersData\.find\(\(p\)\s*=>\s*p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*""/,
+    /providersData\.find\(\(p\)\s*=>\s*p\.is_default && p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*providersData\.find\(\(p\)\s*=>\s*p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*null/,
   );
   assert.match(
     agentEditorSource,
-    /const canSave = Boolean\(\s*formData\.id\.trim\(\)\s*&&\s*formData\.display_name\.trim\(\)\s*&&\s*formData\.system_prompt\.trim\(\),\s*\)/,
+    /const canSave = Boolean\([\s\S]*formData\.display_name\.trim\(\)[\s\S]*formData\.system_prompt\.trim\(\)[\s\S]*\)/,
   );
   assert.match(
     agentEditorSource,
     /<Button size="sm" onClick=\{handleSave\} disabled=\{saving \|\| !canSave\}>/,
   );
+  assert.match(agentEditorSource, /const savedId = await agents\.upsert\(formData\)/);
+  assert.match(agentEditorSource, /router\.push\(`\/settings\/agents\/\$\{savedId\}`\)/);
   assert.doesNotMatch(providerSelectBlock, /required/);
 });
 
-test("provider editing flow controls the dialog from the page state", () => {
+test("provider editing flow uses dedicated routes while keeping dialog open state controllable", () => {
   const providersPageSource = readFileSync(providersPagePath, "utf8");
   const providerDialogSource = readFileSync(providerDialogPath, "utf8");
 
-  assert.match(providersPageSource, /open=\{!!editingProvider\}/);
-  assert.match(
-    providersPageSource,
-    /onOpenChange=\{\(open\)\s*=>\s*!open\s*&&\s*setEditingProvider\(null\)\}/,
-  );
+  assert.match(providersPageSource, /router\.push\("\/settings\/providers\/new"\)/);
   assert.match(providerDialogSource, /open\?: boolean/);
   assert.match(
     providerDialogSource,
@@ -96,7 +99,7 @@ test("provider form dialog can test the current draft configuration before savin
     providerDialogSource,
     /const \[testResult, setTestResult\] = React\.useState<ProviderTestResult \| null>\(\s*null,\s*\)/,
   );
-  assert.match(providerDialogSource, /providers\.testInput\(record\)/);
+  assert.match(providerDialogSource, /providers\.testInput\(record, record\.default_model\)/);
   assert.match(providerDialogSource, /测试连接/);
   assert.match(providerDialogSource, /<ProviderTestDialog/);
 });
@@ -111,4 +114,14 @@ test("provider cards and agent editor surface providers that require api key ree
   assert.match(providerDialogSource, /secret_status === "requires_reentry"/);
   assert.match(agentEditorSource, /secret_status === "requires_reentry"/);
   assert.match(agentEditorSource, /disabled=\{.*secret_status === "requires_reentry"/);
+});
+
+
+test("delete confirmation dialog keeps the modal open and surfaces backend errors", () => {
+  const deleteDialogSource = readFileSync(deleteDialogPath, "utf8");
+
+  assert.match(deleteDialogSource, /const \[errorMessage, setErrorMessage\] = React\.useState\(""\)/);
+  assert.match(deleteDialogSource, /await onConfirm\(\)/);
+  assert.match(deleteDialogSource, /setErrorMessage\(message\)/);
+  assert.match(deleteDialogSource, /<p className="text-sm text-destructive">\{errorMessage\}<\/p>/);
 });

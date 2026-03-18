@@ -24,22 +24,22 @@ test("desktop tauri bindings expose provider test connection types and invoke wr
   assert.match(tauriSource, /export interface ProviderTestResult/);
   assert.match(
     tauriSource,
-    /testConnection:\s*\(id: string\)\s*=>\s*invoke<ProviderTestResult>\("test_provider_connection",\s*\{ id \}\)/,
+    /testConnection:\s*\(id: number, model: string\)\s*=>\s*invoke<ProviderTestResult>\("test_provider_connection",\s*\{ id, model \}\)/,
   );
   assert.match(
     tauriSource,
-    /testInput:\s*\(record: ProviderInput\)\s*=>\s*invoke<ProviderTestResult>\("test_provider_input",\s*\{ record \}\)/,
+    /testInput:\s*\(record: ProviderInput, model: string\)\s*=>\s*invoke<ProviderTestResult>\("test_provider_input",\s*\{ record, model \}\)/,
   );
 });
 
 test("providers page keeps transient provider test status state and wires the card actions", () => {
   assert.match(
     providersPageSource,
-    /const \[testResultsByProviderId, setTestResultsByProviderId\] = React\.useState<\s*Record<string, ProviderTestResult>\s*>\(\{\}\)/,
+    /const \[testResultsByProviderId, setTestResultsByProviderId\] = React\.useState<[\s\S]*Record<number, ProviderTestResult>[\s\S]*>\(\{\}\)/,
   );
   assert.match(
     providersPageSource,
-    /const \[activeProviderId, setActiveProviderId\] = React\.useState<string \| null>\(\s*null,\s*\)/,
+    /const \[activeProviderId, setActiveProviderId\] = React\.useState<number \| null>\([\s\S]*null,[\s\S]*\)/,
   );
   assert.match(
     providersPageSource,
@@ -47,9 +47,9 @@ test("providers page keeps transient provider test status state and wires the ca
   );
   assert.match(
     providersPageSource,
-    /const \[testingProviderId, setTestingProviderId\] = React\.useState<\s*string \| null\s*>\(null\)/,
+    /const \[testingProviderId, setTestingProviderId\] = React\.useState<[\s\S]*number \| null[\s\S]*>\(null\)/,
   );
-  assert.match(providersPageSource, /providers\.testConnection\(id\)/);
+  assert.match(providersPageSource, /providers\.testConnection\(id, model\)/);
   assert.match(
     providersPageSource,
     /onTestConnection=\{handleTestConnection\}/,
@@ -59,10 +59,11 @@ test("providers page keeps transient provider test status state and wires the ca
 });
 
 test("provider card exposes test connection and clickable status affordances", () => {
-  assert.match(providerCardSource, /onTestConnection: \(id: string\) => void/);
-  assert.match(providerCardSource, /onViewStatus: \(id: string\) => void/);
+  assert.match(providerCardSource, /onTestConnection: \(id: number\) => void/);
+  assert.match(providerCardSource, /onViewStatus: \(id: number\) => void/);
   assert.match(providerCardSource, /测试连接/);
   assert.match(providerCardSource, /查看状态/);
+  assert.match(providerCardSource, /requires_reentry/);
 });
 
 test("provider test dialog exists and exposes loading, result details, and retest controls", () => {

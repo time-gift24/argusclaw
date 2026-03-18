@@ -5,18 +5,17 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 
+use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::events::ThreadEvent;
 use argus_protocol::llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, LlmStreamEvent,
-    LlmEventStream,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
+    LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_turn::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
-use futures_util::Stream;
 use rust_decimal::Decimal;
-use argus_llm::retry::{RetryProvider, RetryConfig};
 
 /// Mock provider that can simulate tool calls with stateful responses
 struct MockProvider {
@@ -183,6 +182,7 @@ impl FlakyProvider {
         }
     }
 
+    #[allow(dead_code)]
     fn calls(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -211,10 +211,7 @@ impl LlmProvider for FlakyProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Err(LlmError::RequestFailed {
             provider: "flaky".to_string(),
             reason: "streaming not supported".to_string(),
@@ -225,7 +222,8 @@ impl LlmProvider for FlakyProvider {
         &self,
         _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         if self
             .stream_failures
@@ -266,7 +264,8 @@ impl LlmProvider for FlakyProvider {
         &self,
         _request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         if self.should_fail() {
             return Err(LlmError::RateLimited {
@@ -425,9 +424,7 @@ async fn test_turn_streams_retry_events() {
         .unwrap();
 
     // Execute turn in background
-    let turn_handle = tokio::spawn(async move {
-        turn.execute().await
-    });
+    let turn_handle = tokio::spawn(async move { turn.execute().await });
 
     // Collect retry events from ThreadEvent::Processing
     let mut retry_count = 0;
@@ -439,13 +436,22 @@ async fn test_turn_streams_retry_events() {
 
     while start.elapsed() < timeout {
         match thread_event_rx.recv().await {
-            Ok(ThreadEvent::Processing { event, .. }) => {
-                if let LlmStreamEvent::RetryAttempt { attempt, max_retries, error } = event {
-                    retry_count += 1;
-                    max_retries_seen = max_retries;
-                    assert_eq!(attempt, retry_count, "attempt numbers should be sequential");
-                    assert!(error.contains("rate limited"), "error should mention rate limiting");
-                }
+            Ok(ThreadEvent::Processing {
+                event:
+                    LlmStreamEvent::RetryAttempt {
+                        attempt,
+                        max_retries,
+                        error,
+                    },
+                ..
+            }) => {
+                retry_count += 1;
+                max_retries_seen = max_retries;
+                assert_eq!(attempt, retry_count, "attempt numbers should be sequential");
+                assert!(
+                    error.contains("rate limited"),
+                    "error should mention rate limiting"
+                );
             }
             Ok(ThreadEvent::TurnCompleted { .. }) => {
                 // Don't break, continue listening for more events
@@ -465,5 +471,8 @@ async fn test_turn_streams_retry_events() {
 
     // Should have retried 3 times
     assert_eq!(retry_count, 3, "should have 3 retry events");
-    assert_eq!(max_retries_seen, 3, "should report max_retries=3 from RetryConfig::default()");
+    assert_eq!(
+        max_retries_seen, 3,
+        "should report max_retries=3 from RetryConfig::default()"
+    );
 }

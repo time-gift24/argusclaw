@@ -5,4 +5,4 @@
 
 pub mod providers;
 
-pub use providers::{IntermittentFailureProvider, AlwaysFailProvider};
+pub use providers::{AlwaysFailProvider, IntermittentFailureProvider};

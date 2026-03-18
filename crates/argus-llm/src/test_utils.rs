@@ -1,7 +1,7 @@
 //! Test utilities for injecting failures into providers.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -49,10 +49,10 @@ impl TestRetryProvider {
         if self.fail_first {
             // Pattern: Call 1 fails, calls 2-4 fail, call 5+ succeeds
             // This ensures first call triggers retries
-            matches!(count, 0 | 1 | 2 | 3)
+            matches!(count, 0..=3)
         } else {
             // Original pattern: Call 1 succeeds, calls 2-4 fail, call 5+ succeeds
-            matches!(count, 1 | 2 | 3)
+            matches!(count, 1..=3)
         }
     }
 }
@@ -67,10 +67,7 @@ impl LlmProvider for TestRetryProvider {
         self.inner.cost_per_token()
     }
 
-    async fn complete(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: self.model_name().to_string(),
@@ -158,5 +155,8 @@ pub fn create_test_retry_provider(
     max_retries: u32,
 ) -> Arc<dyn LlmProvider> {
     let test_provider = Arc::new(TestRetryProvider::new(base_provider));
-    Arc::new(RetryProvider::new(test_provider, RetryConfig { max_retries }))
+    Arc::new(RetryProvider::new(
+        test_provider,
+        RetryConfig { max_retries },
+    ))
 }

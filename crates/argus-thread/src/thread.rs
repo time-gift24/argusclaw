@@ -118,7 +118,9 @@ impl ThreadBuilder {
 
         // Initialize messages with system prompt if not empty and no existing system message
         let mut messages = self.messages.unwrap_or_default();
-        let has_system_message = messages.first().map_or(false, |m| m.role == argus_protocol::llm::Role::System);
+        let has_system_message = messages
+            .first()
+            .is_some_and(|m| m.role == argus_protocol::llm::Role::System);
         if !has_system_message && !agent_record.system_prompt.is_empty() {
             messages.insert(0, ChatMessage::system(&agent_record.system_prompt));
         }

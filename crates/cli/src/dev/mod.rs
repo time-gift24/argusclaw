@@ -5,12 +5,13 @@
 //! - turn: Agent/LLM turn execution testing
 //! - thread: Thread management testing
 
+pub mod config;
 pub mod llm;
 pub mod turn;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use argus_wing::ArgusWing;
+use clap::{Parser, Subcommand};
 use std::sync::Arc;
 
 use crate::dev::llm::LlmCommand;
@@ -111,10 +112,7 @@ pub async fn try_run(wing: Arc<ArgusWing>) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
-    if !matches!(
-        first_arg.as_str(),
-        "provider" | "llm" | "turn" | "thread"
-    ) {
+    if !matches!(first_arg.as_str(), "provider" | "llm" | "turn" | "thread") {
         return Ok(false);
     }
 

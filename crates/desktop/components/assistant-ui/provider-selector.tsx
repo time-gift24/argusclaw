@@ -18,9 +18,6 @@ export function ProviderSelector() {
   const selectedProviderPreferenceId = useChatStore(
     (state) => state.selectedProviderPreferenceId,
   );
-  const selectedModelOverride = useChatStore(
-    (state) => state.selectedModelOverride,
-  );
   const selectProviderPreference = useChatStore(
     (state) => state.selectProviderPreference,
   );
@@ -35,8 +32,8 @@ export function ProviderSelector() {
 
   // Get the effective model name for display
   const effectiveModel =
-    selectedModelOverride ??
     selectedProvider?.default_model ??
+    providers.find((p) => p.is_default)?.default_model ??
     "默认模型";
 
   // Display text: Provider name / Model name
@@ -48,15 +45,22 @@ export function ProviderSelector() {
 
   // Handle selecting a model from a provider
   const handleSelectModel = (providerId: number, model: string) => {
+    const provider = providers.find((item) => item.id === providerId);
+    if (!provider || model !== provider.default_model) {
+      return;
+    }
+
     void selectProviderPreference(providerId);
-    void selectModelOverride(model);
+    void selectModelOverride(null);
   };
 
   // Check if a specific item is selected
   const isSelected = (providerId: number, model: string) => {
     // If no preference set, use the default provider
     const effectiveProviderId = selectedProviderPreferenceId ?? providers.find((p) => p.is_default)?.id;
-    return effectiveProviderId === providerId && selectedModelOverride === model;
+    const effectiveProvider = providers.find((provider) => provider.id === effectiveProviderId);
+
+    return effectiveProviderId === providerId && effectiveProvider?.default_model === model;
   };
 
   return (
@@ -90,10 +94,14 @@ export function ProviderSelector() {
                   key={`${provider.id}-${model}`}
                   onClick={() => handleSelectModel(provider.id, model)}
                   className="pl-6"
+                  disabled={model !== provider.default_model}
                 >
                   <span className="flex-1 truncate">{model}</span>
                   {model === provider.default_model && (
                     <span className="text-muted-foreground text-[10px]">默认</span>
+                  )}
+                  {model !== provider.default_model && (
+                    <span className="text-muted-foreground text-[10px]">暂未支持</span>
                   )}
                   {isSelected(provider.id, model) && (
                     <HugeiconsIcon

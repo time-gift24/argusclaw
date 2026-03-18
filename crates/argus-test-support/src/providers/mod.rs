@@ -1,7 +1,7 @@
 //! Test providers for simulating various failure scenarios.
 
-mod intermittent;
 mod always_fail;
+mod intermittent;
 
-pub use intermittent::IntermittentFailureProvider;
 pub use always_fail::AlwaysFailProvider;
+pub use intermittent::IntermittentFailureProvider;

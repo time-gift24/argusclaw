@@ -108,9 +108,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     try {
-      const session = await chat.createChatSession(templateId, state.selectedProviderPreferenceId, state.selectedModelOverride);
-      // TODO: Implement get_thread_snapshot command in backend
-      // const snapshot = await chat.getThreadSnapshot(session.session_id, session.thread_id);
+      const session = await chat.createChatSession(
+        templateId,
+        state.selectedProviderPreferenceId,
+      );
+      const snapshot = await chat.getThreadSnapshot(
+        session.session_id,
+        session.thread_id,
+      );
 
       const newSessionState: ChatSessionState = {
         sessionKey: session.session_key,
@@ -119,7 +124,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         threadId: session.thread_id,
         effectiveProviderId: session.effective_provider_id,
         status: "idle",
-        messages: [], // snapshot.messages,
+        messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
         error: null,

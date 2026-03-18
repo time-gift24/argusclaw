@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentRecord, ApprovalDecision, LlmProviderId,
-    LlmProviderRecord, LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult,
+    AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
+    LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
     SecretString, SessionId, ThreadId,
 };
 use argus_wing::ArgusWing;
@@ -78,25 +78,22 @@ pub async fn upsert_provider(
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
     };
-    let id = wing.upsert_provider(record).await.map_err(|e| e.to_string())?;
+    let id = wing
+        .upsert_provider(record)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(id.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_provider(
-    wing: State<'_, Arc<ArgusWing>>,
-    id: i64,
-) -> Result<bool, String> {
+pub async fn delete_provider(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
     wing.delete_provider(LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_default_provider(
-    wing: State<'_, Arc<ArgusWing>>,
-    id: i64,
-) -> Result<(), String> {
+pub async fn set_default_provider(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<(), String> {
     wing.set_default_provider(LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -162,15 +159,15 @@ pub async fn upsert_agent_template(
     wing: State<'_, Arc<ArgusWing>>,
     record: AgentRecord,
 ) -> Result<String, String> {
-    let id = wing.upsert_template(record).await.map_err(|e| e.to_string())?;
+    let id = wing
+        .upsert_template(record)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(id.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_agent_template(
-    wing: State<'_, Arc<ArgusWing>>,
-    id: i64,
-) -> Result<(), String> {
+pub async fn delete_agent_template(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<(), String> {
     wing.delete_template(AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
@@ -194,6 +191,40 @@ pub struct ChatSessionPayload {
     /// The effective provider ID bound to this session.
     /// `None` if no provider is configured (session will fail on first LLM call).
     pub effective_provider_id: Option<i64>,
+}
+
+/// Serialized message snapshot for frontend consumption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessagePayload {
+    pub role: Role,
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub name: Option<String>,
+    pub tool_calls: Option<Vec<argus_protocol::ToolCall>>,
+}
+
+impl From<&ChatMessage> for ChatMessagePayload {
+    fn from(message: &ChatMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
+            reasoning_content: message.reasoning_content.clone(),
+            tool_call_id: message.tool_call_id.clone(),
+            name: message.name.clone(),
+            tool_calls: message.tool_calls.clone(),
+        }
+    }
+}
+
+/// Current snapshot of a chat thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadSnapshotPayload {
+    pub session_id: i64,
+    pub thread_id: String,
+    pub messages: Vec<ChatMessagePayload>,
+    pub turn_count: u32,
+    pub token_count: u32,
 }
 
 #[tauri::command]
@@ -240,9 +271,7 @@ pub async fn create_chat_session(
     // 1. Use the explicitly provided provider preference
     // 2. Fall back to the template's configured provider
     // 3. Return None if no provider is configured (frontend should handle this case)
-    let effective_provider_id = provider_id
-        .or(template.provider_id)
-        .map(|p| p.inner());
+    let effective_provider_id = provider_id.or(template.provider_id).map(|p| p.inner());
 
     let session_key = format!(
         "{}::{}",
@@ -252,7 +281,13 @@ pub async fn create_chat_session(
 
     // Start event forwarder
     subscriptions
-        .start_forwarder(session_key.clone(), session_id, thread_id, app, wing.inner().clone())
+        .start_forwarder(
+            session_key.clone(),
+            session_id,
+            thread_id,
+            app,
+            wing.inner().clone(),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -276,6 +311,38 @@ pub async fn send_message(
     wing.send_message(SessionId::new(session_id), thread_id, content)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_thread_snapshot(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: i64,
+    thread_id: String,
+) -> Result<ThreadSnapshotPayload, String> {
+    let session_id = SessionId::new(session_id);
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+
+    let session = wing
+        .load_session(session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let thread = session
+        .get_thread(&thread_id)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+
+    let thread = thread.lock().await;
+
+    Ok(ThreadSnapshotPayload {
+        session_id: session_id.inner(),
+        thread_id: thread_id.to_string(),
+        messages: thread
+            .history()
+            .iter()
+            .map(ChatMessagePayload::from)
+            .collect(),
+        turn_count: thread.turn_count(),
+        token_count: thread.token_count(),
+    })
 }
 
 #[tauri::command]
@@ -378,6 +445,7 @@ mod tests {
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["effective_provider_id"], json!(1));
         assert_eq!(value["session_key"], json!("arguswing::__default__"));
+        assert_eq!(value["session_id"], json!(1));
     }
 
     #[test]

@@ -83,7 +83,12 @@ impl HookHandler for ApprovalHook {
         }
 
         // First check runtime allow list (user has already approved this tool)
-        if self.runtime_allow.read().unwrap_or_else(|e| e.into_inner()).is_allowed(&ctx.tool_name) {
+        if self
+            .runtime_allow
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_allowed(&ctx.tool_name)
+        {
             return HookAction::Continue;
         }
 
@@ -127,7 +132,10 @@ impl HookHandler for ApprovalHook {
 
         // If approved for session, enable allow_all for all future tool calls
         if matches!(decision, ApprovalDecision::ApprovedSession) {
-            self.runtime_allow.write().unwrap_or_else(|e| e.into_inner()).allow_all();
+            self.runtime_allow
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .allow_all();
         }
 
         // Send ApprovalResolved event to thread subscribers

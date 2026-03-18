@@ -1,8 +1,6 @@
 use crate::error::{DevError, Result};
-use argus_protocol::{
-    llm::{ChatMessage, LlmProvider},
-};
-use argus_turn::{TurnConfig, TurnInputBuilder, execute_turn};
+use argus_protocol::llm::{ChatMessage, LlmProvider};
+use argus_turn::{execute_turn, TurnConfig, TurnInputBuilder};
 use std::sync::Arc;
 
 /// Execute a single turn with given parameters.
@@ -44,10 +42,14 @@ pub async fn execute_turn_with_config(
         builder = builder.tool_ids(ids);
     }
 
-    let input = builder.build()
+    let input = builder
+        .build()
         .map_err(|e| DevError::InvalidConfiguration(e.to_string()))?;
-    let output = execute_turn(input, config).await
-        .map_err(|e| DevError::TurnFailed { reason: e.to_string() })?;
+    let output = execute_turn(input, config)
+        .await
+        .map_err(|e| DevError::TurnFailed {
+            reason: e.to_string(),
+        })?;
     Ok(output)
 }
 

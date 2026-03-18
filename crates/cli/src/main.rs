@@ -3,8 +3,8 @@
 //! This binary is minimal - it only includes provider and agent commands.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use argus_wing::ArgusWing;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use cli::agent::{AgentCommand, run_agent_command};

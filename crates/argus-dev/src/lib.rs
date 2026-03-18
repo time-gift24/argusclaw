@@ -27,14 +27,14 @@ pub mod workflow;
 
 pub use error::{DevError, Result};
 
-use crate::Result as DevResult;
 use crate::turn::execute_turn_with_config;
-use argus_wing::ArgusWing;
+use crate::Result as DevResult;
 use argus_protocol::{
-    llm::{LlmProvider, ChatMessage},
     events::ThreadEvent,
+    llm::{ChatMessage, LlmProvider},
 };
 use argus_turn::TurnConfig;
+use argus_wing::ArgusWing;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -105,7 +105,8 @@ impl DevTools {
             tool_manager.clone(),
             tool_ids,
             TurnConfig::default(),
-        ).await?;
+        )
+        .await?;
 
         Ok(output.messages)
     }
@@ -121,4 +122,3 @@ mod tests {
         let _: &'static str = std::any::type_name::<DevTools>();
     }
 }
-

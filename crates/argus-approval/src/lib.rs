@@ -51,6 +51,4 @@ pub use policy::{MAX_ACTION_LEN, MAX_TIMEOUT_SECS, MAX_TOOL_NAME_LEN, MIN_TIMEOU
 pub use runtime_allow::RuntimeAllowList;
 
 // Re-export approval types from argus-protocol for convenience
-pub use argus_protocol::{
-    ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse,
-};
+pub use argus_protocol::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};

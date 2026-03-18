@@ -4,9 +4,11 @@
 //! to both the production and development CLI binaries.
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Args, Subcommand};
+use argus_protocol::{
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus, SecretString,
+};
 use argus_wing::ArgusWing;
-use argus_protocol::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString, ProviderSecretStatus};
+use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -241,7 +243,7 @@ pub async fn run_provider_command(wing: Arc<ArgusWing>, command: ProviderCommand
                 .with_context(|| format!("failed to read provider import file `{file}`"))?;
             let config: config::ProviderImportFile =
                 toml::from_str(&contents).context("failed to parse provider import toml")?;
-            let records = config.into_records().map_err(|e| anyhow!(e.to_string()))?;
+            let records = config.into_records();
             wing.import_providers(records).await?;
         }
     }

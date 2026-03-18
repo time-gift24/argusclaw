@@ -137,11 +137,7 @@ impl SessionManager {
             };
 
             // Get agent record (template)
-            let agent_record = match self
-                .template_manager
-                .get(AgentId::new(template_id))
-                .await
-            {
+            let agent_record = match self.template_manager.get(AgentId::new(template_id)).await {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     tracing::warn!(

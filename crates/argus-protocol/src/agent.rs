@@ -8,8 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::ProviderId;
 use crate::AgentId;
+use crate::ids::ProviderId;
 
 /// Full agent record/template configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

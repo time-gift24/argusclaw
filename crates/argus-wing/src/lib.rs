@@ -27,8 +27,8 @@ use std::sync::Arc;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord,
-    ProviderId, ProviderTestResult, Result, SessionId, ThreadEvent, ThreadId,
+    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
+    ProviderTestResult, Result, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{ProviderResolver, SessionManager, SessionSummary, ThreadSummary};
@@ -114,6 +114,7 @@ impl ArgusWing {
 
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
+        template_manager.repair_placeholder_ids().await?;
 
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
@@ -240,7 +241,9 @@ impl ArgusWing {
         record: LlmProviderRecord,
         model: &str,
     ) -> Result<ProviderTestResult> {
-        self.provider_manager.test_provider_record(record, model).await
+        self.provider_manager
+            .test_provider_record(record, model)
+            .await
     }
 
     /// Get the default provider record.
@@ -250,9 +253,13 @@ impl ArgusWing {
 
     /// Import multiple provider records.
     #[cfg(feature = "dev")]
-    pub async fn import_providers(&self, records: Vec<LlmProviderRecord>) -> Result<usize, ArgusError> {
-        self.provider_manager.import_providers(records).await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+    pub async fn import_providers(&self, records: Vec<LlmProviderRecord>) -> Result<()> {
+        self.provider_manager
+            .import_providers(records)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     // =========================================================================
@@ -337,16 +344,20 @@ impl ArgusWing {
         let session_id = self.create_session(name).await?;
 
         // Get default template
-        let template = self.get_default_template().await?
-            .ok_or_else(|| ArgusError::ApprovalError {
-                reason: "Default template 'ArgusWing' not found".to_string(),
-            })?;
+        let template =
+            self.get_default_template()
+                .await?
+                .ok_or_else(|| ArgusError::ApprovalError {
+                    reason: "Default template 'ArgusWing' not found".to_string(),
+                })?;
 
         // Configure approval policy if needed
         if !approval_tools.is_empty() {
-            let mut policy = ApprovalPolicy::default();
-            policy.require_approval = approval_tools.clone();
-            policy.auto_approve = auto_approve;
+            let policy = ApprovalPolicy {
+                require_approval: approval_tools.clone(),
+                auto_approve,
+                ..Default::default()
+            };
             self.approval_manager.update_policy(policy);
         }
 
@@ -389,7 +400,9 @@ impl ArgusWing {
 
     /// Delete a thread from a session.
     pub async fn delete_thread(&self, session_id: SessionId, thread_id: ThreadId) -> Result<()> {
-        self.session_manager.delete_thread(session_id, &thread_id).await
+        self.session_manager
+            .delete_thread(session_id, &thread_id)
+            .await
     }
 
     // =========================================================================
@@ -477,9 +490,13 @@ impl ArgusWing {
 
     #[cfg(feature = "dev")]
     /// Get an LLM provider by ID (dev only).
-    pub async fn get_provider(&self, id: &LlmProviderId) -> Result<Arc<dyn LlmProvider>, ArgusError> {
-        self.provider_manager.get_provider(id).await
-            .map_err(|e| ArgusError::LlmError { reason: e.to_string() })
+    pub async fn get_provider(&self, id: &LlmProviderId) -> Result<Arc<dyn LlmProvider>> {
+        self.provider_manager
+            .get_provider(id)
+            .await
+            .map_err(|e| ArgusError::LlmError {
+                reason: e.to_string(),
+            })
     }
 }
 
@@ -588,6 +605,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_template_with_placeholder_id_returns_real_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let new_template = AgentRecord {
+            id: AgentId::new(0),
+            display_name: "Real ID Agent".to_string(),
+            description: "Should receive a database-generated id".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: None,
+            system_prompt: "You are a test agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+        };
+
+        let template_id = wing
+            .upsert_template(new_template)
+            .await
+            .expect("template should upsert");
+
+        assert_ne!(
+            template_id.inner(),
+            0,
+            "new templates should not keep placeholder id 0"
+        );
+
+        let stored = wing
+            .get_template(template_id)
+            .await
+            .expect("template lookup should succeed")
+            .expect("template should exist");
+
+        assert_eq!(stored.id, template_id);
+        assert_eq!(stored.display_name, "Real ID Agent");
+    }
+
+    #[tokio::test]
+    async fn init_repairs_legacy_placeholder_agent_ids() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
+            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', NULL, NULL, datetime('now'), datetime('now'))
+            "#,
+        )
+        .execute(&wing.pool)
+        .await
+        .expect("legacy zero-id agent should insert");
+
+        drop(wing);
+
+        let repaired = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should re-initialize and repair legacy data");
+
+        let templates = repaired
+            .list_templates()
+            .await
+            .expect("template listing should succeed");
+
+        assert!(templates.iter().all(|template| template.id.inner() != 0));
+        assert!(templates
+            .iter()
+            .any(|template| template.display_name == "Legacy Zero Agent"));
+    }
+
+    #[tokio::test]
+    async fn delete_template_reports_references_before_hitting_foreign_key_constraint() {
+        use argus_protocol::LlmProviderRecord;
+        use std::collections::HashMap;
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let provider_record = LlmProviderRecord {
+            id: argus_protocol::LlmProviderId::new(1),
+            display_name: "test-provider".to_string(),
+            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key: argus_protocol::SecretString::new("test-key"),
+            models: vec!["gpt-4".to_string()],
+            default_model: "gpt-4".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: argus_protocol::ProviderSecretStatus::Ready,
+        };
+
+        let provider_id = wing
+            .upsert_provider(provider_record)
+            .await
+            .expect("provider should upsert");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Delete Guard Agent".to_string(),
+                description: "Used by an existing thread".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+                system_prompt: "You are a test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("delete-guard-session")
+            .await
+            .expect("session should create");
+
+        wing.create_thread(
+            session_id,
+            template_id,
+            Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+        )
+        .await
+        .expect("thread should create");
+
+        let error = wing
+            .delete_template(template_id)
+            .await
+            .expect_err("template in use should not delete");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("无法删除智能体"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("1 个会话线程"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[tokio::test]
     async fn create_session_with_approval_configures_policy() {
         use argus_protocol::LlmProviderRecord;
         use std::collections::HashMap;
@@ -612,10 +780,13 @@ mod tests {
             secret_status: argus_protocol::ProviderSecretStatus::Ready,
         };
 
-        let provider_id = wing.upsert_provider(provider_record.clone()).await
+        let provider_id = wing
+            .upsert_provider(provider_record.clone())
+            .await
             .expect("provider should upsert");
 
-        wing.set_default_provider(provider_id).await
+        wing.set_default_provider(provider_id)
+            .await
             .expect("should set default provider");
 
         // Create the default template
@@ -634,18 +805,20 @@ mod tests {
             .await
             .expect("should upsert default template");
 
-        let (session_id, _thread_id) = wing.create_session_with_approval(
-            "test-session",
-            vec!["shell".to_string()],
-            false,
-        ).await.expect("session with approval should create");
+        let (session_id, _thread_id) = wing
+            .create_session_with_approval("test-session", vec!["shell".to_string()], false)
+            .await
+            .expect("session with approval should create");
 
         // Verify session was created
         let sessions = wing.list_sessions().await.expect("should list sessions");
         assert!(!sessions.is_empty());
 
         // Verify thread was created
-        let threads = wing.list_threads(session_id).await.expect("should list threads");
+        let threads = wing
+            .list_threads(session_id)
+            .await
+            .expect("should list threads");
         assert_eq!(threads.len(), 1);
     }
 }

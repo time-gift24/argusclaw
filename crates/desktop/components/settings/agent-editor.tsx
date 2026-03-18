@@ -39,7 +39,7 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
 
 export function AgentEditor({ agentId }: AgentEditorProps) {
   const router = useRouter()
-  const isEditing = !!agentId
+  const isEditing = agentId !== undefined
 
   const [loading, setLoading] = React.useState(isEditing)
   const [saving, setSaving] = React.useState(false)
@@ -81,7 +81,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         const providersData = await providers.list()
         setProviderList(providersData)
 
-        if (agentId) {
+        if (agentId !== undefined) {
           const agent = await agents.get(agentId)
           if (agent) {
             setFormData(agent)
@@ -106,8 +106,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
 
     setSaving(true)
     try {
-      await agents.upsert(formData)
-      router.push("/settings/agents")
+      const savedId = await agents.upsert(formData)
+      router.push(`/settings/agents/${savedId}`)
     } catch (error) {
       console.error("Failed to save agent:", error)
     } finally {

@@ -72,11 +72,7 @@ async fn run_chat(
 
     // Use the default ArgusWing agent
     let (session_id, thread_id) = wing
-        .create_session_with_approval(
-            "default",
-            effective_approval_tools.clone(),
-            auto_approve,
-        )
+        .create_session_with_approval("default", effective_approval_tools.clone(), auto_approve)
         .await
         .map_err(|e| anyhow!("Failed to create session: {}", e))?;
 

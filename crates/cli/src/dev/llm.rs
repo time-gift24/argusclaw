@@ -4,9 +4,9 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::Subcommand;
-use argus_wing::ArgusWing;
 use argus_protocol::LlmProviderId;
+use argus_wing::ArgusWing;
+use clap::Subcommand;
 use futures_util::StreamExt;
 
 use crate::{StreamRenderState, finish_stream_output, render_stream_event};

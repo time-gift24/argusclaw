@@ -101,12 +101,12 @@ export const agents = {
   get: (id: number) => invoke<AgentRecord | null>("get_agent_template", { id }),
 
   upsert: (record: AgentRecord) =>
-    invoke<void>("upsert_agent_template", {
+    invoke<string>("upsert_agent_template", {
       record: {
         ...record,
         provider_id: record.provider_id != null ? Number(record.provider_id) : null,
       },
-    }),
+    }).then((id) => parseInt(id, 10)),
 
   delete: (id: number) => invoke<boolean>("delete_agent_template", { id }),
 };
@@ -121,6 +121,7 @@ export interface ChatSessionPayload {
 }
 
 export interface ThreadSnapshotPayload {
+  session_id: number;
   thread_id: string;
   messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -140,12 +141,10 @@ export const chat = {
   createChatSession: (
     templateId: number,
     providerPreferenceId: number | null,
-    modelOverride: string | null,
   ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
       templateId: templateId.toString(),
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
-      modelOverride,
     }),
 
   sendMessage: (sessionId: number, threadId: string, content: string) =>

@@ -216,13 +216,15 @@ impl ThreadEventPayload {
                 input_tokens,
                 output_tokens,
             }),
-            LlmStreamEvent::RetryAttempt { attempt, max_retries, error } => {
-                Some(Self::RetryAttempt {
-                    attempt,
-                    max_retries,
-                    error,
-                })
-            }
+            LlmStreamEvent::RetryAttempt {
+                attempt,
+                max_retries,
+                error,
+            } => Some(Self::RetryAttempt {
+                attempt,
+                max_retries,
+                error,
+            }),
             LlmStreamEvent::Finished { .. } => None,
         }
     }

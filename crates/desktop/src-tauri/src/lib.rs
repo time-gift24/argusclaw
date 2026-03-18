@@ -42,6 +42,7 @@ pub fn run() {
             commands::delete_agent_template,
             commands::create_chat_session,
             commands::send_message,
+            commands::get_thread_snapshot,
             commands::resolve_approval,
         ])
         .run(tauri::generate_context!())

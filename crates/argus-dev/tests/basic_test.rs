@@ -1,8 +1,6 @@
 //! Integration tests for argus-dev crate.
 
 use argus_dev::DevTools;
-use argus_wing::ArgusWing;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_dev_tools_init() {

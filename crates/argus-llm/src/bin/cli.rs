@@ -243,7 +243,13 @@ async fn test_connection(config: &ResolvedConfig) -> Result<()> {
     }
 }
 
-async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool, test_retry: bool, max_retries: u32) -> Result<()> {
+async fn complete_prompt(
+    config: &ResolvedConfig,
+    prompt: &str,
+    stream: bool,
+    test_retry: bool,
+    max_retries: u32,
+) -> Result<()> {
     let base_provider = create_provider(config)?;
 
     // Wrap provider with test retry behavior if requested
@@ -279,7 +285,11 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool, te
 
         while let Some(event) = stream.next().await {
             match event {
-                Ok(LlmStreamEvent::RetryAttempt { attempt, max_retries, error }) => {
+                Ok(LlmStreamEvent::RetryAttempt {
+                    attempt,
+                    max_retries,
+                    error,
+                }) => {
                     retry_count += 1;
                     println!("🔄 Retry attempt {}/{}: {}", attempt, max_retries, error);
                 }
@@ -343,7 +353,10 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool, te
         if test_retry {
             println!();
             println!("💡 Tip: Use --stream to see retry events in real-time");
-            println!("   Example: cargo run --bin argus-llm -- complete --prompt '{}' --stream --test-retry", prompt);
+            println!(
+                "   Example: cargo run --bin argus-llm -- complete --prompt '{}' --stream --test-retry",
+                prompt
+            );
         }
     }
 
@@ -381,7 +394,7 @@ async fn test_retry(config: &ResolvedConfig, max_retries: u32) -> Result<()> {
 }
 
 async fn mock_test(test_type: &str, max_retries: u32) -> Result<()> {
-    use argus_test_support::{IntermittentFailureProvider, AlwaysFailProvider};
+    use argus_test_support::{AlwaysFailProvider, IntermittentFailureProvider};
 
     let provider: Arc<dyn LlmProvider> = match test_type {
         "intermittent" => Arc::new(IntermittentFailureProvider::new()),
@@ -396,9 +409,7 @@ async fn mock_test(test_type: &str, max_retries: u32) -> Result<()> {
     println!();
 
     // Test streaming call to capture retry events
-    let request = CompletionRequest::new(vec![
-        ChatMessage::user("Test message".to_string())
-    ]);
+    let request = CompletionRequest::new(vec![ChatMessage::user("Test message".to_string())]);
 
     let event_stream = retry_provider.stream_complete(request).await?;
 
@@ -410,7 +421,11 @@ async fn mock_test(test_type: &str, max_retries: u32) -> Result<()> {
 
     while let Some(event) = stream.next().await {
         match event {
-            Ok(LlmStreamEvent::RetryAttempt { attempt, max_retries, error }) => {
+            Ok(LlmStreamEvent::RetryAttempt {
+                attempt,
+                max_retries,
+                error,
+            }) => {
                 retry_count += 1;
                 println!("🔄 Retry attempt {}/{}: {}", attempt, max_retries, error);
             }
@@ -460,14 +475,19 @@ async fn main() -> Result<()> {
         }
         Commands::Complete(args) => {
             let resolved = resolve_config(&config, args);
-            complete_prompt(&resolved, &args.prompt, args.stream, args.test_retry, args.max_retries).await
+            complete_prompt(
+                &resolved,
+                &args.prompt,
+                args.stream,
+                args.test_retry,
+                args.max_retries,
+            )
+            .await
         }
         Commands::RetryTest(args) => {
             let resolved = resolve_config(&config, args);
             test_retry(&resolved, args.max_retries).await
         }
-        Commands::MockTest(args) => {
-            mock_test(&args.test_type, args.max_retries).await
-        }
+        Commands::MockTest(args) => mock_test(&args.test_type, args.max_retries).await,
     }
 }

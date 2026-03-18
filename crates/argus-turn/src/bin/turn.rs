@@ -361,7 +361,7 @@ Example flow:
 }
 
 async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
-    use argus_test_support::{IntermittentFailureProvider, AlwaysFailProvider};
+    use argus_test_support::{AlwaysFailProvider, IntermittentFailureProvider};
 
     let provider: Arc<dyn LlmProvider> = match args.test_type.as_str() {
         "intermittent" => Arc::new(IntermittentFailureProvider::new()),
@@ -369,9 +369,17 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
         _ => return Err(anyhow!("Unknown test type: {}", args.test_type)),
     };
 
-    let retry_provider = Arc::new(RetryProvider::new(provider, RetryConfig { max_retries: args.max_retries }));
+    let retry_provider = Arc::new(RetryProvider::new(
+        provider,
+        RetryConfig {
+            max_retries: args.max_retries,
+        },
+    ));
 
-    println!("Testing {} with max_retries={}, stream={}", args.test_type, args.max_retries, args.stream);
+    println!(
+        "Testing {} with max_retries={}, stream={}",
+        args.test_type, args.max_retries, args.stream
+    );
     println!("Provider: {}", retry_provider.active_model_name());
     println!();
 
@@ -401,7 +409,8 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
         match turn.execute().await {
             Ok(output) => {
                 println!("✓ Turn completed successfully!");
-                println!("📊 Tokens: {} input, {} output, {} total",
+                println!(
+                    "📊 Tokens: {} input, {} output, {} total",
                     output.token_usage.input_tokens,
                     output.token_usage.output_tokens,
                     output.token_usage.total_tokens

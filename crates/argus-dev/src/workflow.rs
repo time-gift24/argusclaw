@@ -16,6 +16,12 @@ impl WorkflowManager {
     }
 }
 
+impl Default for WorkflowManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
