@@ -512,8 +512,8 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 ### Task 4: 添加 create_session_with_approval() 方法
 
 **Files:**
-- Modify: `crates/argus-wing/src/lib.rs:320-346`
-- Test: `crates/argus-wing/tests/session_with_approval_test.rs`
+- Modify: `crates/argus-wing/src/lib.rs` (在 Thread Management API 部分，约 line 320 之后)
+- Test: `crates/argus-wing/src/lib.rs` (添加到 `#[cfg(test)]` mod)
 
 - [ ] **Step 1: 在 Thread Management API 部分添加方法**
 
@@ -532,22 +532,22 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 pub async fn create_session_with_approval(
     &self,
     name: &str,
-    approval_tools: Vec<String>,
+    mut approval_tools: Vec<String>,
     auto_approve: bool,
 ) -> Result<(SessionId, ThreadId)> {
     let session_id = self.create_session(name).await?;
 
     // Get default template
     let template = self.get_default_template().await?
-        .ok_or_else(|| ArgusError::TemplateError {
+        .ok_or_else(|| ArgusError::ApprovalError {
             reason: "Default template 'ArgusWing' not found".to_string(),
         })?;
 
     // Configure approval policy if needed
     if !approval_tools.is_empty() {
-        let policy = ApprovalPolicy::new()
-            .require_approval_for(approval_tools)
-            .auto_approve(auto_approve);
+        let mut policy = argus_approval::ApprovalPolicy::default();
+        policy.require_approval = approval_tools;
+        policy.auto_approve = auto_approve;
         self.approval_manager.update_policy(policy);
     }
 
@@ -558,14 +558,18 @@ pub async fn create_session_with_approval(
 }
 ```
 
-- [ ] **Step 2: 创建测试**
+**注意:** `ApprovalError` 是 `ArgusError` 的有效变体
+
+- [ ] **Step 2: 在 lib.rs 的测试模块添加测试**
+
+找到 `#[cfg(test)]` mod（约 line 418），在现有测试后添加：
 
 ```rust
-use argus_wing::ArgusWing;
-use argus_protocol::ProviderId;
-
 #[tokio::test]
 async fn create_session_with_approval_configures_policy() {
+    use argus_protocol::LlmProviderRecord;
+    use std::collections::HashMap;
+
     let temp_dir = tempfile::tempdir().expect("temp dir should exist");
     let database_path = temp_dir.path().join("test.sqlite");
 
@@ -574,11 +578,20 @@ async fn create_session_with_approval_configures_policy() {
         .expect("ArgusWing should initialize");
 
     // Create a test provider first
-    let provider_id = wing.create_default_provider_record(
-        "test-provider".to_string(),
-        "http://localhost".parse().unwrap(),
-        "gpt-4".to_string(),
-    ).await.expect("provider should create");
+    let provider_record = LlmProviderRecord {
+        id: argus_protocol::LlmProviderId::new(1),
+        display_name: "test-provider".to_string(),
+        kind: argus_protocol::LlmProviderKind::OpenAICompatible,
+        api_base: "http://localhost:11434/v1".parse().unwrap(),
+        models: vec!["gpt-4".to_string()],
+        default_model: "gpt-4".to_string(),
+        is_default: true,
+        extra_headers: HashMap::new(),
+        secret_status: argus_protocol::ProviderSecretStatus::Ready,
+    };
+
+    wing.upsert_provider(provider_record.clone()).await
+        .expect("provider should upsert");
 
     let (session_id, thread_id) = wing.create_session_with_approval(
         "test-session",
@@ -602,7 +615,12 @@ async fn create_session_with_approval_configures_policy() {
 cargo test --p argus-wing create_session_with_approval
 ```
 
-Expected: PASS
+Expected output:
+```
+running 1 test
+test create_session_with_approval_configures_policy ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
 
 - [ ] **Step 4: 提交**
 
@@ -611,9 +629,9 @@ git add crates/argus-wing/
 git commit -m "feat(argus-wing): add create_session_with_approval() method
 
 - Add convenience method for creating session with approval config
-- Configures ApprovalPolicy based on approval_tools and auto_approve
+- Configure ApprovalPolicy using direct field assignment
 - Returns (session_id, thread_id) tuple
-- Add comprehensive test
+- Add comprehensive test in lib.rs
 
 Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 ```
