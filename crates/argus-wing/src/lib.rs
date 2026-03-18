@@ -248,6 +248,13 @@ impl ArgusWing {
         self.provider_manager.get_default_provider_record().await
     }
 
+    /// Import multiple provider records.
+    #[cfg(feature = "dev")]
+    pub async fn import_providers(&self, records: Vec<LlmProviderRecord>) -> Result<usize, ArgusError> {
+        self.provider_manager.import_providers(records).await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+    }
+
     // =========================================================================
     // Template CRUD API
     // =========================================================================

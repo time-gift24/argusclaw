@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
-use claw::{LlmProviderRecord, LlmStreamEvent};
+use argus_protocol::{LlmProviderRecord, LlmStreamEvent};
 
 pub mod agent;
 pub mod provider;

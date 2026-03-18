@@ -16,6 +16,9 @@ required-features = ["dev"]
 [dependencies]
 anyhow = "1"
 argus-dev = { path = "../argus-dev", optional = true }
+argus-protocol = { path = "../argus-protocol" }
+argus-thread = { path = "../argus-thread" }
+argus-tool = { path = "../argus-tool" }
 argus-wing = { path = "../argus-wing" }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }

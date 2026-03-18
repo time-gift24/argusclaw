@@ -5,9 +5,10 @@
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
-use claw::AppContext;
-use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
+use argus_wing::ArgusWing;
+use argus_protocol::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString, ProviderSecretStatus};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(feature = "dev")]
 use std::path::Path;
@@ -113,7 +114,7 @@ impl From<LlmProviderRecord> for ProviderDisplayRecord {
 }
 
 impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
-    type Error = claw::DbError;
+    type Error = argus_protocol::LlmProviderKindParseError;
 
     fn try_from(value: ProviderUpsertArgs) -> Result<Self, Self::Error> {
         // Note: With INTEGER auto-increment IDs, the ID field should be removed
@@ -129,7 +130,7 @@ impl TryFrom<ProviderUpsertArgs> for LlmProviderRecord {
             default_model: value.model,
             is_default: value.is_default,
             extra_headers: HashMap::new(),
-            secret_status: claw::ProviderSecretStatus::Ready,
+            secret_status: ProviderSecretStatus::Ready,
         })
     }
 }
@@ -185,17 +186,17 @@ fn validate_header_name(name: &str) -> Result<()> {
 }
 
 /// Run provider command.
-pub async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> Result<()> {
+pub async fn run_provider_command(wing: Arc<ArgusWing>, command: ProviderCommand) -> Result<()> {
     match command {
         ProviderCommand::List => {
-            for provider in ctx.list_providers().await? {
+            for provider in wing.list_providers().await? {
                 println!("{}", render_provider_output(&provider.into()));
                 println!();
             }
         }
         ProviderCommand::Get { id } => {
             let id: i64 = id.parse().context("provider id must be an integer")?;
-            let provider = ctx.get_provider_record(&LlmProviderId::new(id)).await?;
+            let provider = wing.get_provider_record(LlmProviderId::new(id)).await?;
             println!("{}", render_provider_output(&provider.into()));
         }
         ProviderCommand::Upsert(args) => {
@@ -204,31 +205,31 @@ pub async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> 
             let id: i64 = args.id.parse().context("provider id must be an integer")?;
             let mut record = LlmProviderRecord::try_from(args)?;
             record.id = LlmProviderId::new(id);
-            ctx.upsert_provider(record).await?;
+            wing.upsert_provider(record).await?;
         }
         ProviderCommand::SetDefault { id } => {
             let id: i64 = id.parse().context("provider id must be an integer")?;
-            ctx.set_default_provider(&LlmProviderId::new(id)).await?;
+            wing.set_default_provider(LlmProviderId::new(id)).await?;
         }
         ProviderCommand::GetDefault => {
-            let provider = ctx.get_default_provider_record().await?;
+            let provider = wing.get_default_provider_record().await?;
             println!("{}", render_provider_output(&provider.into()));
         }
         ProviderCommand::SetHeader { id, name, value } => {
             validate_header_name(&name)?;
             let provider_id: i64 = id.parse().context("provider id must be an integer")?;
             let provider_id = LlmProviderId::new(provider_id);
-            let mut record = ctx.get_provider_record(&provider_id).await?;
+            let mut record = wing.get_provider_record(provider_id).await?;
             record.extra_headers.insert(name.clone(), value);
-            ctx.upsert_provider(record).await?;
+            wing.upsert_provider(record).await?;
             println!("Set header `{name}` on provider `{provider_id}`");
         }
         ProviderCommand::RemoveHeader { id, name } => {
             let provider_id: i64 = id.parse().context("provider id must be an integer")?;
             let provider_id = LlmProviderId::new(provider_id);
-            let mut record = ctx.get_provider_record(&provider_id).await?;
+            let mut record = wing.get_provider_record(provider_id).await?;
             if record.extra_headers.remove(&name).is_some() {
-                ctx.upsert_provider(record).await?;
+                wing.upsert_provider(record).await?;
                 println!("Removed header `{name}` from provider `{provider_id}`");
             } else {
                 println!("Header `{name}` not found on provider `{provider_id}`");
@@ -241,7 +242,7 @@ pub async fn run_provider_command(ctx: AppContext, command: ProviderCommand) -> 
             let config: config::ProviderImportFile =
                 toml::from_str(&contents).context("failed to parse provider import toml")?;
             let records = config.into_records().map_err(|e| anyhow!(e.to_string()))?;
-            ctx.import_providers(records).await?;
+            wing.import_providers(records).await?;
         }
     }
 
@@ -285,6 +286,6 @@ mod tests {
 
         let error =
             LlmProviderRecord::try_from(args).expect_err("invalid provider kind should fail");
-        assert!(error.to_string().contains("invalid llm provider kind"));
+        assert!(error.to_string().contains("invalid provider kind"));
     }
 }
