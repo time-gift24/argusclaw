@@ -1,7 +1,7 @@
 //! ProviderResolver - trait for resolving LLM providers.
 //!
 //! This trait abstracts provider resolution to avoid circular dependencies
-//! between argus-session and claw.
+//! between argus-session and argus-wing.
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 /// Trait for resolving LLM providers by ID.
 ///
-/// This trait is implemented by the application layer (claw::LLMManager)
+/// This trait is implemented by the application layer (argus-wing::LLMManager)
 /// to provide provider instances to the session layer.
 #[async_trait]
 pub trait ProviderResolver: Send + Sync {

@@ -3,30 +3,19 @@
 //! This module aggregates all development-only commands:
 //! - llm: LLM completion testing
 //! - turn: Agent/LLM turn execution testing
-//! - approval: Approval flow testing
-//! - workflow: Workflow management testing
 //! - thread: Thread management testing
 
-pub mod approval;
-pub mod config;
 pub mod llm;
 pub mod turn;
-pub mod workflow;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use argus_wing::ArgusWing;
-use sqlx::migrate::Migrator;
 use std::sync::Arc;
 
-use crate::dev::approval::ApprovalCommand;
 use crate::dev::llm::LlmCommand;
 use crate::dev::turn::TurnCommand;
-use crate::dev::workflow::WorkflowCommand;
 use crate::provider::ProviderCommand;
-
-/// Approval dev migrator for CLI testing.
-pub static APPROVAL_DEV_MIGRATOR: Migrator = sqlx::migrate!("./src/dev/migrations");
 
 /// Dev CLI for arguswing-dev.
 #[derive(Debug, Parser)]
@@ -35,7 +24,7 @@ pub struct DevCli {
     pub command: DevCommand,
 }
 
-/// 开发与测试命令，用于 LLM 提供商、Agent 和工作流。
+/// 开发与测试命令，用于 LLM 提供商、Agent 和对话线程。
 #[derive(Debug, Subcommand)]
 pub enum DevCommand {
     /// 管理 LLM 提供商配置。
@@ -47,12 +36,6 @@ pub enum DevCommand {
     /// 测试 Agent/LLM Turn 执行流程。
     #[command(subcommand)]
     Turn(TurnCommand),
-    /// 管理审批请求和响应。
-    #[command(subcommand)]
-    Approval(ApprovalCommand),
-    /// 管理工作流、阶段和任务。
-    #[command(subcommand)]
-    Workflow(WorkflowCommand),
     /// 管理对话线程 (开发测试)。
     #[command(subcommand)]
     Thread(ThreadCommand),
@@ -92,8 +75,6 @@ pub async fn run(wing: Arc<ArgusWing>, command: DevCommand) -> Result<()> {
         DevCommand::Provider(cmd) => crate::provider::run_provider_command(wing, cmd).await,
         DevCommand::Llm(cmd) => crate::dev::llm::run_llm_command(wing, cmd).await,
         DevCommand::Turn(cmd) => crate::dev::turn::run_turn_command(wing, cmd).await,
-        DevCommand::Approval(cmd) => crate::dev::approval::run_approval_command(cmd).await,
-        DevCommand::Workflow(cmd) => crate::dev::workflow::run_workflow_command(wing, cmd).await,
         DevCommand::Thread(cmd) => run_thread_command(wing, cmd).await,
     }
 }
@@ -132,7 +113,7 @@ pub async fn try_run(wing: Arc<ArgusWing>) -> Result<bool> {
     };
     if !matches!(
         first_arg.as_str(),
-        "provider" | "llm" | "turn" | "approval" | "workflow" | "thread"
+        "provider" | "llm" | "turn" | "thread"
     ) {
         return Ok(false);
     }

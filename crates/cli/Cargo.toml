@@ -8,11 +8,6 @@ license = "MIT OR Apache-2.0"
 name = "arguswing"
 path = "src/main.rs"
 
-[[bin]]
-name = "arguswing-dev"
-path = "src/main-dev.rs"
-required-features = ["dev"]
-
 [dependencies]
 anyhow = "1"
 argus-dev = { path = "../argus-dev", optional = true }
