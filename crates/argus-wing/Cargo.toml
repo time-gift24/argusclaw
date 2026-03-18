@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Unified entry point for ArgusWing application"
 
+[features]
+default = []
+dev = []
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

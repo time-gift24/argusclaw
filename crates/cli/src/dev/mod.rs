@@ -15,8 +15,9 @@ pub mod workflow;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use claw::AppContext;
+use argus_wing::ArgusWing;
 use sqlx::migrate::Migrator;
+use std::sync::Arc;
 
 use crate::dev::approval::ApprovalCommand;
 use crate::dev::llm::LlmCommand;
@@ -86,19 +87,19 @@ pub enum ThreadCommand {
 }
 
 /// Run dev CLI.
-pub async fn run(ctx: AppContext, command: DevCommand) -> Result<()> {
+pub async fn run(wing: Arc<ArgusWing>, command: DevCommand) -> Result<()> {
     match command {
-        DevCommand::Provider(cmd) => crate::provider::run_provider_command(ctx, cmd).await,
-        DevCommand::Llm(cmd) => crate::dev::llm::run_llm_command(ctx, cmd).await,
-        DevCommand::Turn(cmd) => crate::dev::turn::run_turn_command(ctx, cmd).await,
+        DevCommand::Provider(cmd) => crate::provider::run_provider_command(wing, cmd).await,
+        DevCommand::Llm(cmd) => crate::dev::llm::run_llm_command(wing, cmd).await,
+        DevCommand::Turn(cmd) => crate::dev::turn::run_turn_command(wing, cmd).await,
         DevCommand::Approval(cmd) => crate::dev::approval::run_approval_command(cmd).await,
-        DevCommand::Workflow(cmd) => crate::dev::workflow::run_workflow_command(ctx, cmd).await,
-        DevCommand::Thread(cmd) => run_thread_command(ctx, cmd).await,
+        DevCommand::Workflow(cmd) => crate::dev::workflow::run_workflow_command(wing, cmd).await,
+        DevCommand::Thread(cmd) => run_thread_command(wing, cmd).await,
     }
 }
 
 /// Run thread command (placeholder).
-async fn run_thread_command(_ctx: AppContext, command: ThreadCommand) -> Result<()> {
+async fn run_thread_command(_wing: Arc<ArgusWing>, command: ThreadCommand) -> Result<()> {
     match command {
         ThreadCommand::Start {
             provider,
@@ -125,7 +126,7 @@ async fn run_thread_command(_ctx: AppContext, command: ThreadCommand) -> Result<
 }
 
 /// Try to run dev CLI if a dev command is detected.
-pub async fn try_run(ctx: AppContext) -> Result<bool> {
+pub async fn try_run(wing: Arc<ArgusWing>) -> Result<bool> {
     let Some(first_arg) = std::env::args().nth(1) else {
         return Ok(false);
     };
@@ -137,7 +138,7 @@ pub async fn try_run(ctx: AppContext) -> Result<bool> {
     }
 
     let cli = DevCli::parse();
-    run(ctx, cli.command).await?;
+    run(wing, cli.command).await?;
     Ok(true)
 }
 

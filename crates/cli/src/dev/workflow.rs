@@ -1,13 +1,16 @@
 //! Workflow command - development only.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
-use claw::AppContext;
+use argus_wing::ArgusWing;
+use owo_colors::OwoColorize;
+
+// TODO: Remove claw dependencies once workflow is fully migrated to ArgusWing
 use claw::{AgentId, JobRecord, JobRepository, JobType, SqliteWorkflowRepository};
 use claw::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
-use owo_colors::OwoColorize;
 
 /// 工作流执行测试命令。
 #[derive(Debug, Subcommand)]
@@ -128,7 +131,9 @@ fn format_workflow_status(status: WorkflowStatus) -> String {
 }
 
 /// Run a workflow command.
-pub async fn run_workflow_command(_ctx: AppContext, command: WorkflowCommand) -> Result<()> {
+pub async fn run_workflow_command(_wing: Arc<ArgusWing>, command: WorkflowCommand) -> Result<()> {
+    // TODO: Implement workflow management with ArgusWing
+    // For now, this is a placeholder that creates independent repositories
     let (workflow_repo, job_repo, database_url) = create_dev_workflow_repositories().await?;
 
     match command {
