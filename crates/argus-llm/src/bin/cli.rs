@@ -359,20 +359,47 @@ async fn mock_test(test_type: &str, max_retries: u32) -> Result<()> {
     println!("Provider: {}", retry_provider.active_model_name());
     println!();
 
-    // Test streaming call
+    // Test streaming call to capture retry events
     let request = CompletionRequest::new(vec![
         ChatMessage::user("Test message".to_string())
     ]);
 
-    match retry_provider.stream_complete(request).await {
-        Ok(_) => {
-            println!("✓ Success!");
-            Ok(())
+    let event_stream = retry_provider.stream_complete(request).await?;
+
+    // Process events
+    use futures_util::StreamExt;
+    let mut stream = event_stream;
+    let mut retry_count = 0;
+    let mut had_error = false;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(LlmStreamEvent::RetryAttempt { attempt, max_retries, error }) => {
+                retry_count += 1;
+                println!("🔄 Retry attempt {}/{}: {}", attempt, max_retries, error);
+            }
+            Ok(LlmStreamEvent::Finished { finish_reason }) => {
+                println!("✓ Stream finished: {:?}", finish_reason);
+            }
+            Err(e) => {
+                println!("✗ Stream error: {}", e);
+                had_error = true;
+            }
+            _ => {}
         }
-        Err(e) => {
-            println!("✗ Failed: {}", e);
-            Err(anyhow!("Mock test failed: {}", e))
-        }
+    }
+
+    println!();
+    if retry_count > 0 {
+        println!("📊 Total retries: {}", retry_count);
+    } else {
+        println!("📊 No retries occurred (request succeeded on first attempt)");
+    }
+
+    if had_error {
+        Err(anyhow!("Mock test failed after {} retries", retry_count))
+    } else {
+        Ok(())
     }
 }
 

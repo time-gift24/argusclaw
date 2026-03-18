@@ -25,11 +25,29 @@ run_test() {
     local test_name="$1"
     local command="$2"
     local should_fail="$3"
+    local expected_output="$4"
 
     test_count=$((test_count + 1))
     echo -e "${BLUE}[$test_count] Testing: $test_name${NC}"
 
-    if eval "$command" > /dev/null 2>&1; then
+    local output
+    output=$(eval "$command" 2>&1)
+    local exit_code=$?
+
+    # Check for expected output if provided
+    if [ -n "$expected_output" ]; then
+        if echo "$output" | grep -q "$expected_output"; then
+            echo -e "  ${GREEN}✓ Found expected output: $expected_output${NC}"
+        else
+            echo -e "  ${RED}✗ Missing expected output: $expected_output${NC}"
+            echo -e "  ${YELLOW}Output:${NC}\n$output"
+            fail_count=$((fail_count + 1))
+            return
+        fi
+    fi
+
+    # Check exit code
+    if [ $exit_code -eq 0 ]; then
         if [ "$should_fail" = "true" ]; then
             echo -e "  ${RED}✗ FAIL: Expected failure but succeeded${NC}"
             fail_count=$((fail_count + 1))
@@ -64,22 +82,26 @@ echo ""
 run_test \
     "argus-llm: Intermittent failure with max_retries=3" \
     "cargo run --bin argus-llm -- mock-test --test-type intermittent --max-retries 3" \
-    "false"
+    "false" \
+    "Stream finished"
 
 run_test \
     "argus-llm: Intermittent failure with max_retries=5" \
     "cargo run --bin argus-llm -- mock-test --test-type intermittent --max-retries 5" \
-    "false"
+    "false" \
+    "Stream finished"
 
 run_test \
-    "argus-llm: Always fail with max_retries=1" \
+    "argus-llm: Always fail with max_retries=1 (check retry events)" \
     "cargo run --bin argus-llm -- mock-test --test-type always-fail --max-retries 1" \
-    "true"
+    "true" \
+    "🔄 Retry attempt 1/1"
 
 run_test \
-    "argus-llm: Always fail with max_retries=3" \
+    "argus-llm: Always fail with max_retries=3 (check retry events)" \
     "cargo run --bin argus-llm -- mock-test --test-type always-fail --max-retries 3" \
-    "true"
+    "true" \
+    "📊 Total retries: 3"
 
 # ═════════════════════════════════════════════════════════════
 # argus-turn CLI Tests
@@ -90,22 +112,26 @@ echo ""
 run_test \
     "argus-turn: Intermittent failure with max_retries=3" \
     "cargo run --bin argus-turn -- mock-test --test-type intermittent --max-retries 3" \
-    "false"
+    "false" \
+    "Turn completed successfully"
 
 run_test \
     "argus-turn: Intermittent failure with max_retries=5" \
     "cargo run --bin argus-turn -- mock-test --test-type intermittent --max-retries 5" \
-    "false"
+    "false" \
+    "Turn completed successfully"
 
 run_test \
     "argus-turn: Always fail with max_retries=1" \
     "cargo run --bin argus-turn -- mock-test --test-type always-fail --max-retries 1" \
-    "true"
+    "true" \
+    "Turn failed"
 
 run_test \
     "argus-turn: Always fail with max_retries=3" \
     "cargo run --bin argus-turn -- mock-test --test-type always-fail --max-retries 3" \
-    "true"
+    "true" \
+    "Turn failed"
 
 # ═════════════════════════════════════════════════════════════
 # Unit Tests
@@ -116,7 +142,8 @@ echo ""
 run_test \
     "argus-test-support: Unit tests" \
     "cargo test -p argus-test-support -q" \
-    "false"
+    "false" \
+    ""
 
 # ═════════════════════════════════════════════════════════════
 # Summary

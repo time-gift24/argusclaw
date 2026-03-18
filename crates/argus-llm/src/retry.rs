@@ -92,7 +92,7 @@ impl RetryProvider {
         &self,
         mut op: F,
         label: &str,
-    ) -> Result<(T, Vec<LlmStreamEvent>), LlmError>
+    ) -> Result<(T, Vec<LlmStreamEvent>), (LlmError, Vec<LlmStreamEvent>)>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, LlmError>>,
@@ -105,7 +105,7 @@ impl RetryProvider {
                 Ok(response) => return Ok((response, retry_events)),
                 Err(err) => {
                     if !is_retryable(&err) || attempt == self.config.max_retries {
-                        return Err(err);
+                        return Err((err, retry_events));
                     }
 
                     // Collect retry event
@@ -138,10 +138,10 @@ impl RetryProvider {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+        Err((last_error.unwrap_or_else(|| LlmError::RequestFailed {
             provider: self.inner.active_model_name(),
             reason: "retry loop exited unexpectedly".to_string(),
-        }))
+        }), retry_events))
     }
 }
 
@@ -164,7 +164,8 @@ impl LlmProvider for RetryProvider {
             },
             "",
         )
-        .await?;
+        .await
+        .map_err(|(err, _events)| err)?;
         Ok(response)
     }
 
@@ -180,7 +181,8 @@ impl LlmProvider for RetryProvider {
             },
             " (tools)",
         )
-        .await?;
+        .await
+        .map_err(|(err, _events)| err)?;
         Ok(response)
     }
 
@@ -189,19 +191,32 @@ impl LlmProvider for RetryProvider {
         request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let inner = &self.inner;
-        let (response, retry_events) = self.retry_loop(
+        let result = self.retry_loop(
             || {
                 let req = request.clone();
                 async move { inner.stream_complete(req).await }
             },
             " (stream)",
         )
-        .await?;
+        .await;
 
-        Ok(Box::pin(RetryEventStream {
-            retry_events,
-            inner_stream: response,
-        }))
+        match result {
+            Ok((stream, retry_events)) => Ok(Box::pin(RetryEventStream {
+                retry_events,
+                inner_stream: stream,
+            })),
+            Err((err, retry_events)) => {
+                // Even on failure, return retry events in the stream before the error
+                use futures_util::{stream, StreamExt};
+
+                let retry_event_stream = stream::iter(
+                    retry_events.into_iter().map(Ok)
+                );
+                let error_stream = stream::once(async move { Err(err) });
+                let combined_stream = retry_event_stream.chain(error_stream);
+                Ok(Box::pin(combined_stream))
+            }
+        }
     }
 
     async fn stream_complete_with_tools(
@@ -209,19 +224,32 @@ impl LlmProvider for RetryProvider {
         request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let inner = &self.inner;
-        let (response, retry_events) = self.retry_loop(
+        let result = self.retry_loop(
             || {
                 let req = request.clone();
                 async move { inner.stream_complete_with_tools(req).await }
             },
             " (stream tools)",
         )
-        .await?;
+        .await;
 
-        Ok(Box::pin(RetryEventStream {
-            retry_events,
-            inner_stream: response,
-        }))
+        match result {
+            Ok((stream, retry_events)) => Ok(Box::pin(RetryEventStream {
+                retry_events,
+                inner_stream: stream,
+            })),
+            Err((err, retry_events)) => {
+                // Even on failure, return retry events in the stream before the error
+                use futures_util::{stream, StreamExt};
+
+                let retry_event_stream = stream::iter(
+                    retry_events.into_iter().map(Ok)
+                );
+                let error_stream = stream::once(async move { Err(err) });
+                let combined_stream = retry_event_stream.chain(error_stream);
+                Ok(Box::pin(combined_stream))
+            }
+        }
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
