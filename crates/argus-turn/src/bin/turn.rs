@@ -13,7 +13,9 @@ use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use argus_llm::providers::{OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider};
+use argus_llm::providers::{
+    OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
+};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role, ToolDefinition};
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_turn::{TurnBuilder, TurnConfig, TurnStreamEvent};
@@ -45,7 +47,11 @@ struct ResolvedConfig {
 }
 
 #[derive(Parser)]
-#[command(name = "argus-turn", version, about = "Test Turn execution with tools and hooks")]
+#[command(
+    name = "argus-turn",
+    version,
+    about = "Test Turn execution with tools and hooks"
+)]
 struct Cli {
     /// Configuration file path (default: ./turn.toml)
     #[arg(short, long, global = true)]
@@ -125,7 +131,8 @@ impl NamedTool for EchoTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        let message = args.get("message")
+        let message = args
+            .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed {
                 tool_name: "echo".to_string(),
@@ -150,7 +157,12 @@ fn create_provider(config: &ResolvedConfig) -> Result<Arc<dyn LlmProvider>> {
         .map_err(|e| anyhow!("Failed to create provider: {}", e))
 }
 
-fn resolve_config(config: &Config, base_url: Option<&str>, api_key: Option<&str>, model: Option<&str>) -> Result<ResolvedConfig> {
+fn resolve_config(
+    config: &Config,
+    base_url: Option<&str>,
+    api_key: Option<&str>,
+    model: Option<&str>,
+) -> Result<ResolvedConfig> {
     Ok(ResolvedConfig {
         base_url: base_url
             .map(|s| s.to_string())
@@ -161,7 +173,9 @@ fn resolve_config(config: &Config, base_url: Option<&str>, api_key: Option<&str>
             .map(|s| s.to_string())
             .or_else(|| std::env::var("ARGUS_LLM_API_KEY").ok())
             .or_else(|| config.api_key.clone())
-            .ok_or_else(|| anyhow!("API key is required (set --api-key, ARGUS_LLM_API_KEY, or config file)"))?,
+            .ok_or_else(|| {
+                anyhow!("API key is required (set --api-key, ARGUS_LLM_API_KEY, or config file)")
+            })?,
         model: model
             .map(|s| s.to_string())
             .or_else(|| std::env::var("ARGUS_LLM_MODEL").ok())
@@ -222,7 +236,8 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
         };
         println!("  [{}] {}: {}", i, role_str, content);
     }
-    println!("📊 Tokens: {} input, {} output, {} total",
+    println!(
+        "📊 Tokens: {} input, {} output, {} total",
         output.token_usage.input_tokens,
         output.token_usage.output_tokens,
         output.token_usage.total_tokens
@@ -285,8 +300,11 @@ Example flow:
     let output = turn.execute().await?;
 
     println!("✅ Turn completed!");
-    println!("📊 Total tool calls in conversation: {}",
-        output.messages.iter()
+    println!(
+        "📊 Total tool calls in conversation: {}",
+        output
+            .messages
+            .iter()
             .filter(|m| m.tool_calls.is_some())
             .count()
     );
@@ -308,12 +326,16 @@ Example flow:
 
         if let Some(tool_calls) = &msg.tool_calls {
             for tc in tool_calls {
-                println!("    🔧 Tool call: {} ({}) - args: {}", tc.name, tc.id, tc.arguments);
+                println!(
+                    "    🔧 Tool call: {} ({}) - args: {}",
+                    tc.name, tc.id, tc.arguments
+                );
             }
         }
     }
 
-    println!("📊 Tokens: {} input, {} output, {} total",
+    println!(
+        "📊 Tokens: {} input, {} output, {} total",
         output.token_usage.input_tokens,
         output.token_usage.output_tokens,
         output.token_usage.total_tokens

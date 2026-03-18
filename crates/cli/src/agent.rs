@@ -203,13 +203,13 @@ async fn run_chat(
                                 eprintln!("   ⚡ Auto-approving...");
                                 let request_id = request.id;
                                 let ctx_clone = ctx.clone();
-                                let agent_id_clone = agent_id.clone();
+                                let agent_id_val = agent_id;
                                 tokio::spawn(async move {
                                     let _ =
                                         tokio::time::sleep(std::time::Duration::from_millis(100))
                                             .await;
                                     let _ = ctx_clone.resolve_approval(
-                                        &agent_id_clone,
+                                        &agent_id_val,
                                         request_id,
                                         ApprovalDecision::Approved,
                                         Some("auto-approve".to_string()),

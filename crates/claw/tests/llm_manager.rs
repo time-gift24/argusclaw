@@ -9,13 +9,13 @@ use std::{
 };
 
 use claw::{
-    LLMManager, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
+    ProviderManager, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
     ProviderSecretStatus, ProviderTestStatus, SecretString, SqliteLlmProviderRepository, migrate,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 
-fn build_record(id: &str, display_name: &str, is_default: bool) -> LlmProviderRecord {
+fn build_record(id: i64, display_name: &str, is_default: bool) -> LlmProviderRecord {
     LlmProviderRecord {
         id: LlmProviderId::new(id),
         kind: LlmProviderKind::OpenAiCompatible,
@@ -83,15 +83,15 @@ fn spawn_single_response_server(
 async fn llm_manager_lists_provider_summaries_for_user_selection() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
     repository
-        .upsert_provider(&build_record("openai", "OpenAI", true))
+        .upsert_provider(&build_record(1, "OpenAI", true))
         .await
         .expect("openai provider should be stored");
     repository
-        .upsert_provider(&build_record("deepseek", "DeepSeek", false))
+        .upsert_provider(&build_record(2, "DeepSeek", false))
         .await
         .expect("deepseek provider should be stored");
 
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = ProviderManager::new(Arc::new(repository));
     let providers = manager
         .list_providers()
         .await
@@ -107,11 +107,11 @@ async fn llm_manager_lists_provider_summaries_for_user_selection() {
 async fn llm_manager_builds_a_provider_from_the_stored_default_configuration() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
     repository
-        .upsert_provider(&build_record("openai", "OpenAI", true))
+        .upsert_provider(&build_record(1, "OpenAI", true))
         .await
         .expect("openai provider should be stored");
 
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = ProviderManager::new(Arc::new(repository));
     let provider = manager
         .get_default_provider()
         .await
@@ -124,9 +124,9 @@ async fn llm_manager_builds_a_provider_from_the_stored_default_configuration() {
 #[tokio::test]
 async fn llm_manager_exposes_dev_passthrough_for_provider_records() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let openai = build_record("openai", "OpenAI", true);
-    let deepseek = build_record("deepseek", "DeepSeek", false);
-    let manager = LLMManager::new(Arc::new(repository));
+    let openai = build_record(1, "OpenAI", true);
+    let deepseek = build_record(2, "DeepSeek", false);
+    let manager = ProviderManager::new(Arc::new(repository));
 
     manager
         .upsert_provider(openai.clone())
@@ -159,9 +159,9 @@ async fn llm_manager_exposes_dev_passthrough_for_provider_records() {
 #[tokio::test]
 async fn llm_manager_can_import_multiple_providers() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let manager = LLMManager::new(Arc::new(repository));
-    let openai = build_record("openai", "OpenAI", false);
-    let deepseek = build_record("deepseek", "DeepSeek", true);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let openai = build_record(1, "OpenAI", false);
+    let deepseek = build_record(2, "DeepSeek", true);
 
     manager
         .import_providers(vec![openai.clone(), deepseek.clone()])
@@ -185,8 +185,8 @@ async fn llm_manager_can_import_multiple_providers() {
 #[tokio::test]
 async fn llm_manager_deletes_provider_records() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let manager = LLMManager::new(Arc::new(repository));
-    let record = build_record("openai", "OpenAI", false);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let record = build_record(1, "OpenAI", false);
 
     manager
         .upsert_provider(record.clone())
@@ -200,9 +200,10 @@ async fn llm_manager_deletes_provider_records() {
     let missing = manager.get_provider_record(&record.id).await;
 
     assert!(deleted);
+    let missing_id = record.id;
     assert!(matches!(
         missing,
-        Err(claw::AgentError::ProviderNotFound { id }) if id == "openai"
+        Err(claw::AgentError::ProviderNotFound { id }) if id == missing_id
     ));
 }
 
@@ -214,8 +215,8 @@ async fn llm_manager_reports_successful_provider_connection_tests() {
         r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
         &[],
     );
-    let manager = LLMManager::new(Arc::new(repository));
-    let mut record = build_record("openai", "OpenAI", true);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let mut record = build_record(1, "OpenAI", true);
     record.base_url = base_url.clone();
 
     manager
@@ -243,8 +244,8 @@ async fn llm_manager_can_test_unsaved_provider_configurations() {
         r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
         &[],
     );
-    let manager = LLMManager::new(Arc::new(repository));
-    let mut record = build_record("", "Draft Provider", false);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let mut record = build_record(0, "Draft Provider", false);
     record.base_url = base_url;
 
     let result = manager
@@ -260,8 +261,8 @@ async fn llm_manager_can_test_unsaved_provider_configurations() {
 async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
     let base_url = spawn_single_response_server("401 Unauthorized", r#"{"error":"bad key"}"#, &[]);
-    let manager = LLMManager::new(Arc::new(repository));
-    let mut record = build_record("openai", "OpenAI", true);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let mut record = build_record(1, "OpenAI", true);
     record.base_url = base_url;
 
     manager
@@ -280,14 +281,15 @@ async fn llm_manager_maps_auth_failures_for_provider_connection_tests() {
 #[tokio::test]
 async fn llm_manager_reports_missing_providers_in_connection_tests() {
     let (_temp_dir, _pool, repository) = setup_repository().await;
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = ProviderManager::new(Arc::new(repository));
 
+    let missing_id = LlmProviderId::new(999);
     let result = manager
-        .test_provider_connection(&LlmProviderId::new("missing"), "gpt-4o-mini")
+        .test_provider_connection(&missing_id, "gpt-4o-mini")
         .await
         .expect("missing provider should return a structured result");
 
-    assert_eq!(result.provider_id, "missing");
+    assert_eq!(result.provider_id, "999");
     assert_eq!(result.status, ProviderTestStatus::ProviderNotFound);
 }
 
@@ -296,8 +298,8 @@ async fn llm_manager_maps_model_availability_failures_for_provider_connection_te
     let (_temp_dir, _pool, repository) = setup_repository().await;
     let base_url =
         spawn_single_response_server("404 Not Found", r#"{"error":"model not available"}"#, &[]);
-    let manager = LLMManager::new(Arc::new(repository));
-    let mut record = build_record("openai", "OpenAI", true);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let mut record = build_record(1, "OpenAI", true);
     record.base_url = base_url;
 
     manager
@@ -321,8 +323,8 @@ async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() 
         r#"{"error":"upstream exploded"}"#,
         &[],
     );
-    let manager = LLMManager::new(Arc::new(repository));
-    let mut record = build_record("openai", "OpenAI", true);
+    let manager = ProviderManager::new(Arc::new(repository));
+    let mut record = build_record(1, "OpenAI", true);
     record.base_url = base_url;
 
     manager
@@ -343,7 +345,7 @@ async fn llm_manager_maps_generic_http_failures_for_provider_connection_tests() 
 async fn llm_manager_lists_provider_summaries_when_some_secrets_require_reentry() {
     let (_temp_dir, pool, repository) = setup_repository().await;
     repository
-        .upsert_provider(&build_record("openai", "OpenAI", true))
+        .upsert_provider(&build_record(1, "OpenAI", true))
         .await
         .expect("openai provider should be stored");
 
@@ -352,11 +354,11 @@ async fn llm_manager_lists_provider_summaries_when_some_secrets_require_reentry(
         b"legacy-test-key".to_vec(),
     );
     legacy_repository
-        .upsert_provider(&build_record("legacy", "Legacy", false))
+        .upsert_provider(&build_record(3, "Legacy", false))
         .await
         .expect("legacy provider should be stored");
 
-    let manager = LLMManager::new(Arc::new(repository));
+    let manager = ProviderManager::new(Arc::new(repository));
     let providers = manager
         .list_providers()
         .await

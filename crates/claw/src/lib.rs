@@ -39,8 +39,8 @@ pub use protocol::{
 // LLM Provider Types (DTO)
 pub use db::DbError;
 pub use db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus,
-    ProviderTestResult, ProviderTestStatus, SecretString,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus, ProviderTestResult,
+    ProviderTestStatus, SecretString,
 };
 
 // Tool Types - from argus-tool

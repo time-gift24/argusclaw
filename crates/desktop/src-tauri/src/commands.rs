@@ -443,7 +443,7 @@ pub async fn create_chat_session(
     subscriptions
         .start_forwarder(
             session_key.clone(),
-            runtime.runtime_agent_id.clone(),
+            runtime.runtime_agent_id,
             thread_id,
             app,
             ctx.inner().clone(),
@@ -526,12 +526,12 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_provider_reentry_record, ChatSessionPayload,
-        ProviderInput, ProviderKind, ProviderRecord, ProviderSummary,
+        build_provider_reentry_record, ChatSessionPayload, ProviderInput, ProviderKind,
+        ProviderRecord, ProviderSummary,
     };
     use claw::{
-        LlmProviderId, LlmProviderKind, LlmProviderRecord,
-        ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
+        LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus,
+        ProviderTestResult, ProviderTestStatus, SecretString,
     };
 
     #[test]
@@ -547,8 +547,7 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
         }
-        .try_into()
-        .expect("conversion should succeed");
+        .into();
 
         assert_eq!(record.id, LlmProviderId::new(1));
         assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);

@@ -40,7 +40,7 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 
 所有 I/O 使用 tokio 异步。使用 Arc<T> 共享状态，RwLock 并发访问。
 
-## Crate 关系（极其重要）
+## Crate 关系（极其重要，迁移中，正在改成多 crates）
 
 ```text
 crates/

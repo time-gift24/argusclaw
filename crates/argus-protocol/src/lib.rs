@@ -13,8 +13,8 @@ pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalRes
 pub use error::{ArgusError, Result};
 pub use events::ThreadEvent;
 pub use hooks::{
-    BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookEvent, HookHandler, HookRegistry,
-    ToolHookContext,
+    BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,
+    HookRegistry, ToolHookContext,
 };
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
 pub use risk_level::RiskLevel;

@@ -111,6 +111,18 @@ pub struct BeforeCallLLMResult {
     pub tools: Option<Vec<ToolDefinition>>,
 }
 
+/// Union type for hook contexts.
+///
+/// This enum replaces `&dyn Any` to ensure `Send + Sync` bounds are satisfied
+/// when hooks are fired across async boundaries.
+#[derive(Clone)]
+pub enum HookContext {
+    /// Context for BeforeCallLLM events.
+    BeforeCallLLM(BeforeCallLLMContext),
+    /// Context for tool-related events (BeforeToolCall, AfterToolCall, TurnEnd).
+    ToolEvent(ToolHookContext),
+}
+
 /// Registry for hook handlers.
 #[derive(Default)]
 pub struct HookRegistry {

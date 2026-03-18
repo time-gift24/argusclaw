@@ -278,7 +278,10 @@ impl ArgusSqlite {
         // and RequiresReentry status so the user knows to re-enter the key
         let (api_key, secret_status) = match self.decrypt_secret(&nonce, &ciphertext) {
             Ok(key) => (key, ProviderSecretStatus::Ready),
-            Err(_) => (SecretString::new(String::new()), ProviderSecretStatus::RequiresReentry),
+            Err(_) => (
+                SecretString::new(String::new()),
+                ProviderSecretStatus::RequiresReentry,
+            ),
         };
 
         Ok(LlmProviderRecord {

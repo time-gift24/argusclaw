@@ -6,9 +6,9 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider};
+use argus_protocol::tool::NamedTool;
 use argus_protocol::{HookHandler, HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
-use argus_protocol::tool::NamedTool;
 use argus_turn::{TurnBuilder, TurnOutput};
 
 use super::compact::{CompactContext, Compactor};

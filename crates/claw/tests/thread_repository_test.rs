@@ -3,8 +3,8 @@
 //! Integration tests for SqliteThreadRepository.
 
 use claw::{
-    MessageRecord, SqliteThreadRepository, ThreadId, ThreadRecord, ThreadRepository, connect,
-    migrate,
+    LlmProviderId, MessageRecord, SqliteThreadRepository, ThreadId, ThreadRecord, ThreadRepository,
+    connect, migrate,
 };
 
 async fn setup_test_db() -> SqliteThreadRepository {
@@ -13,10 +13,10 @@ async fn setup_test_db() -> SqliteThreadRepository {
     SqliteThreadRepository::new(pool)
 }
 
-fn create_test_thread(id: &ThreadId, provider_id: &str) -> ThreadRecord {
+fn create_test_thread(id: &ThreadId, provider_id: i64) -> ThreadRecord {
     ThreadRecord {
         id: *id,
-        provider_id: provider_id.to_string(),
+        provider_id: LlmProviderId::new(provider_id),
         title: Some("Test Thread".to_string()),
         token_count: 0,
         turn_count: 0,
@@ -43,7 +43,7 @@ fn create_test_message(thread_id: &ThreadId, seq: u32, role: &str, content: &str
 async fn upsert_and_get_thread() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let record = create_test_thread(&thread_id, "provider-1");
+    let record = create_test_thread(&thread_id, 1);
 
     repo.upsert_thread(&record).await.unwrap();
 
@@ -51,7 +51,7 @@ async fn upsert_and_get_thread() {
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.id, thread_id);
-    assert_eq!(retrieved.provider_id, "provider-1");
+    assert_eq!(retrieved.provider_id, LlmProviderId::new(1));
     assert_eq!(retrieved.title, Some("Test Thread".to_string()));
 }
 
@@ -68,7 +68,7 @@ async fn get_thread_returns_none_for_missing() {
 async fn upsert_updates_existing_thread() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let mut record = create_test_thread(&thread_id, "provider-1");
+    let mut record = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&record).await.unwrap();
 
     // Update the thread
@@ -133,7 +133,7 @@ async fn list_threads_respects_limit() {
 async fn delete_thread_removes_thread_and_messages() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let thread = create_test_thread(&thread_id, "provider-1");
+    let thread = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&thread).await.unwrap();
 
     // Add a message
@@ -166,7 +166,7 @@ async fn delete_thread_returns_false_for_missing() {
 async fn add_and_get_messages() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let thread = create_test_thread(&thread_id, "provider-1");
+    let thread = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&thread).await.unwrap();
 
     // Add messages
@@ -200,7 +200,7 @@ async fn get_messages_returns_empty_for_missing_thread() {
 async fn get_recent_messages() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let thread = create_test_thread(&thread_id, "provider-1");
+    let thread = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&thread).await.unwrap();
 
     // Add 5 messages
@@ -223,7 +223,7 @@ async fn get_recent_messages() {
 async fn delete_messages_before() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let thread = create_test_thread(&thread_id, "provider-1");
+    let thread = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&thread).await.unwrap();
 
     // Add 5 messages
@@ -246,7 +246,7 @@ async fn delete_messages_before() {
 async fn update_thread_stats() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let thread = create_test_thread(&thread_id, "provider-1");
+    let thread = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&thread).await.unwrap();
 
     repo.update_thread_stats(&thread_id, 500, 3).await.unwrap();
@@ -260,7 +260,7 @@ async fn update_thread_stats() {
 async fn message_with_tool_info() {
     let repo = setup_test_db().await;
     let thread_id = ThreadId::new();
-    let thread = create_test_thread(&thread_id, "provider-1");
+    let thread = create_test_thread(&thread_id, 1);
     repo.upsert_thread(&thread).await.unwrap();
 
     // Add assistant message with tool calls

@@ -13,7 +13,9 @@ use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
 
-use argus_llm::providers::{OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider};
+use argus_llm::providers::{
+    OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
+};
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{ChatMessage, CompletionRequest, LlmProvider, LlmStreamEvent};
 
@@ -51,7 +53,11 @@ trait CommandArgs {
 }
 
 #[derive(Parser)]
-#[command(name = "argus-llm", version, about = "Test LLM connections and retry capabilities")]
+#[command(
+    name = "argus-llm",
+    version,
+    about = "Test LLM connections and retry capabilities"
+)]
 struct Cli {
     /// Configuration file path (default: ./llm.toml)
     #[arg(short, long, global = true)]
@@ -208,10 +214,7 @@ async fn test_connection(config: &ResolvedConfig) -> Result<()> {
     match provider.complete(request).await {
         Ok(response) => {
             let latency = started.elapsed();
-            println!(
-                "✓ Connection successful ({}ms)",
-                latency.as_millis()
-            );
+            println!("✓ Connection successful ({}ms)", latency.as_millis());
             println!("Response: {}", response.content.trim());
             Ok(())
         }
@@ -232,7 +235,9 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool) ->
     let request = CompletionRequest::new(vec![ChatMessage::user(prompt.to_string())]);
 
     if stream {
-        let event_stream = provider.stream_complete(request).await
+        let event_stream = provider
+            .stream_complete(request)
+            .await
             .map_err(|e| anyhow!("Failed to start stream: {}", e))?;
 
         let mut stream = event_stream;
@@ -279,7 +284,9 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool) ->
         }
     } else {
         let started = Instant::now();
-        let response = provider.complete(request).await
+        let response = provider
+            .complete(request)
+            .await
             .map_err(|e| anyhow!("Completion failed: {}", e))?;
 
         println!("{}", response.content);
@@ -330,7 +337,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Determine config file path
-    let config_path = cli.config.clone().unwrap_or_else(|| PathBuf::from("llm.toml"));
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("llm.toml"));
 
     // Load config file
     let config = Config::load(&config_path);

@@ -9,8 +9,8 @@ use crate::db::DbError;
 
 // Re-export all LLM types from argus-protocol for backward compatibility.
 pub use argus_protocol::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus,
-    ProviderTestResult, ProviderTestStatus, SecretString,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus, ProviderTestResult,
+    ProviderTestStatus, SecretString,
 };
 
 /// SQLite-specific repository trait that returns `DbError`.
@@ -47,7 +47,7 @@ mod multi_model_tests {
 
     #[test]
     fn llm_provider_record_has_models_and_default_model() {
-        let record = LlmProviderRecord{
+        let record = LlmProviderRecord {
             id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Test".to_string(),

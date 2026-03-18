@@ -78,13 +78,8 @@ fn turn_input_to_turn(input: TurnInput, config: TurnConfig) -> Result<Turn, Turn
         .collect();
 
     // Extract hooks from HookRegistry (if present)
-    let hooks: Vec<Arc<dyn argus_protocol::HookHandler>> = if let Some(_registry) = input.hooks {
-        // We need to extract all handlers from the registry
-        // Since HookRegistry doesn't expose all_handlers(), we need to work around this
-        // For now, we'll return an empty vec and let the caller handle hook registration differently
-        // TODO: Add HookRegistry::all_handlers() method to argus-protocol
-        tracing::warn!("HookRegistry is not yet supported in Turn API, hooks will be ignored");
-        Vec::new()
+    let hooks: Vec<Arc<dyn argus_protocol::HookHandler>> = if let Some(registry) = input.hooks {
+        registry.all_handlers()
     } else {
         Vec::new()
     };
@@ -155,7 +150,8 @@ mod tests {
         async fn complete_with_tools(
             &self,
             _request: argus_protocol::llm::ToolCompletionRequest,
-        ) -> Result<argus_protocol::llm::ToolCompletionResponse, argus_protocol::llm::LlmError> {
+        ) -> Result<argus_protocol::llm::ToolCompletionResponse, argus_protocol::llm::LlmError>
+        {
             let mut count = self.call_count.lock().unwrap();
             let responses = self.responses.lock().unwrap();
             if *count < responses.len() {
@@ -187,6 +183,7 @@ mod tests {
     }
 
     /// Echo tool for testing.
+    #[allow(dead_code)]
     struct EchoTool;
 
     #[async_trait]
@@ -232,7 +229,7 @@ mod tests {
                 finish_reason: argus_protocol::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
-            }
+            },
         ]));
 
         let input = create_test_input(provider);
@@ -280,7 +277,7 @@ mod tests {
                 finish_reason: argus_protocol::llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
-            }
+            },
         ]));
 
         let hooks = Arc::new(HookRegistry::new());

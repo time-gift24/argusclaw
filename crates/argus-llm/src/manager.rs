@@ -13,8 +13,8 @@ use chrono::Utc;
 use argus_protocol::Result;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus,
-    ProviderTestResult, ProviderTestStatus,
+    LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus, ProviderTestResult,
+    ProviderTestStatus,
 };
 
 use crate::providers::{

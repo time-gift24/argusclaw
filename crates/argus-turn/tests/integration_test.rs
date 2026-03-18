@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 use argus_protocol::llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_turn::{TurnBuilder, TurnConfig};
@@ -42,7 +42,10 @@ impl MockProvider {
             responses: Mutex::new(
                 responses
                     .into_iter()
-                    .map(|(content, tool_calls)| MockResponse { content, tool_calls })
+                    .map(|(content, tool_calls)| MockResponse {
+                        content,
+                        tool_calls,
+                    })
                     .collect(),
             ),
         }
@@ -83,10 +86,7 @@ impl LlmProvider for MockProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let response = self.next_response();
         Ok(CompletionResponse {
             content: response.content,
@@ -242,9 +242,11 @@ async fn test_turn_integration_with_tool_call() {
         .collect();
     assert!(!assistant_msgs.is_empty());
     // At least one assistant message should have tool calls
-    assert!(assistant_msgs
-        .iter()
-        .any(|m| m.tool_calls.is_some() && !m.tool_calls.as_ref().unwrap().is_empty()));
+    assert!(
+        assistant_msgs
+            .iter()
+            .any(|m| m.tool_calls.is_some() && !m.tool_calls.as_ref().unwrap().is_empty())
+    );
 }
 
 #[tokio::test]
