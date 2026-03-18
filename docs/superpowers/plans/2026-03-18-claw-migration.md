@@ -561,7 +561,7 @@ pub async fn create_session_with_approval(
     // Configure approval policy if needed
     if !approval_tools.is_empty() {
         let mut policy = argus_approval::ApprovalPolicy::default();
-        policy.require_approval = approval_tools;
+        policy.require_approval = approval_tools.clone();
         policy.auto_approve = auto_approve;
         self.approval_manager.update_policy(policy);
     }
@@ -1132,13 +1132,13 @@ let provider = if let Some(id) = provider {
 
 改为:
 ```rust
-let provider_record = if let Some(id) = provider {
+let provider = if let Some(id) = provider {
     let id: i64 = id
         .parse()
         .with_context(|| format!("Invalid provider id: {}", id))?;
-    dev_tools.wing().get_provider_record(&LlmProviderId::new(id)).await?
+    dev_tools.wing().get_provider(&LlmProviderId::new(id)).await?
 } else {
-    dev_tools.wing().get_default_provider_record().await?
+    dev_tools.wing().get_default_provider().await?
 };
 ```
 
