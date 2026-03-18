@@ -174,6 +174,32 @@ pub async fn delete_agent_template(wing: State<'_, Arc<ArgusWing>>, id: i64) -> 
 }
 
 // ============================================================================
+// Tool Commands
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolInfoPayload {
+    pub name: String,
+    pub description: String,
+    pub risk_level: String,
+    pub parameters: serde_json::Value,
+}
+
+#[tauri::command]
+pub async fn list_tools(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<ToolInfoPayload>, String> {
+    let tools = wing.list_tools().await;
+    Ok(tools
+        .into_iter()
+        .map(|t| ToolInfoPayload {
+            name: t.name,
+            description: t.description,
+            risk_level: format!("{:?}", t.risk_level).to_lowercase(),
+            parameters: t.parameters,
+        })
+        .collect())
+}
+
+// ============================================================================
 // Chat Session Commands
 // ============================================================================
 
