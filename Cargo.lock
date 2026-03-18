@@ -963,6 +963,7 @@ dependencies = [
  "argus-llm",
  "argus-log",
  "argus-protocol",
+ "argus-repository",
  "argus-session",
  "argus-template",
  "argus-thread",

@@ -66,17 +66,11 @@ pub use agents::turn;
 #[cfg(feature = "dev")]
 pub use approval::{ApprovalManager, ApprovalPolicy};
 #[cfg(feature = "dev")]
-pub use db::llm::LlmProviderRepository;
-#[cfg(feature = "dev")]
-pub use db::sqlite::{
-    self, SqliteAgentRepository, SqliteLlmProviderRepository, SqliteThreadRepository, connect,
-    migrate,
+pub use argus_repository::{
+    JobRecord, JobRepository, JobType, MessageRecord, ThreadRecord,
+    ThreadRepository, WorkflowRecord, WorkflowRepository, WorkflowStatus,
 };
 #[cfg(feature = "dev")]
-pub use db::thread::{MessageRecord, ThreadRecord, ThreadRepository};
+pub use db::llm::LlmProviderRepository;
 #[cfg(feature = "dev")]
-pub use db::{ApprovalRepository, SqliteJobRepository, SqliteWorkflowRepository};
-#[cfg(feature = "dev")]
-pub use job::{JobRecord, JobRepository, JobType};
-#[cfg(feature = "dev")]
-pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
+pub use workflow::{JobId, WorkflowId};

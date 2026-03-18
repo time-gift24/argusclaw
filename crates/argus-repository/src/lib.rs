@@ -17,4 +17,4 @@ pub use traits::*;
 pub use types::*;
 
 // Re-export ArgusSqlite for convenience
-pub use sqlite::ArgusSqlite;
+pub use sqlite::{ArgusSqlite, connect, connect_path, migrate};

@@ -43,6 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 
 # Session layer
 argus-protocol = { path = "../argus-protocol" }
+argus-repository = { path = "../argus-repository" }
 argus-session = { path = "../argus-session" }
 argus-template = { path = "../argus-template" }
 argus-log = { path = "../argus-log" }
@@ -53,7 +54,7 @@ argus-thread = { path = "../argus-thread" }
 
 [features]
 default = []
-dev = []
+dev = ["argus-llm/dev"]
 
 [dev-dependencies]
 mockall = "0.14"

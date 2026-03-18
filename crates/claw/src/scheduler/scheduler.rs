@@ -12,8 +12,7 @@ use uuid::Uuid;
 
 use crate::agents::AgentManager;
 use crate::agents::thread::ThreadConfig;
-use crate::job::repository::JobRepository;
-use crate::job::types::{JobRecord, JobType};
+use crate::job::{JobRecord, JobRepository, JobType};
 use crate::workflow::{JobId, WorkflowStatus};
 
 use super::config::SchedulerConfig;

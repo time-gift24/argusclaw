@@ -42,3 +42,11 @@ impl From<LlmProviderKindParseError> for DbError {
         }
     }
 }
+
+impl From<DbError> for argus_protocol::ArgusError {
+    fn from(err: DbError) -> Self {
+        argus_protocol::ArgusError::DatabaseError {
+            reason: err.to_string(),
+        }
+    }
+}

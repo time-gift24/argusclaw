@@ -3,21 +3,26 @@
 use async_trait::async_trait;
 
 use crate::error::DbError;
-use crate::traits::LlmProviderRepository;
+use argus_protocol::ArgusError;
 use argus_protocol::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    ProviderSecretStatus, SecretString,
+    LlmProviderRepository, ProviderSecretStatus, SecretString,
 };
 
-use super::{ArgusSqlite, DbResult};
+use super::ArgusSqlite;
+
+/// Map DbError to ArgusError for protocol trait compatibility.
+fn map_err(e: DbError) -> ArgusError {
+    e.into()
+}
 
 #[async_trait]
 impl LlmProviderRepository for ArgusSqlite {
-    async fn upsert_provider(&self, record: &LlmProviderRecord) -> DbResult<LlmProviderId> {
+    async fn upsert_provider(&self, record: &LlmProviderRecord) -> Result<LlmProviderId, ArgusError> {
         if record.models.is_empty() {
             return Err(DbError::QueryFailed {
                 reason: "At least one model is required".to_string(),
-            });
+            }.into());
         }
         if !record.models.contains(&record.default_model) {
             return Err(DbError::QueryFailed {
@@ -25,7 +30,7 @@ impl LlmProviderRepository for ArgusSqlite {
                     "Default model '{}' must be in models list",
                     record.default_model
                 ),
-            });
+            }.into());
         }
 
         let encrypted = self
@@ -120,7 +125,7 @@ impl LlmProviderRepository for ArgusSqlite {
         Ok(provider_id)
     }
 
-    async fn delete_provider(&self, id: &LlmProviderId) -> DbResult<bool> {
+    async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, ArgusError> {
         let result = sqlx::query("DELETE FROM llm_providers WHERE id = ?1")
             .bind(id.into_inner())
             .execute(&self.pool)
@@ -132,7 +137,7 @@ impl LlmProviderRepository for ArgusSqlite {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn set_default_provider(&self, id: &LlmProviderId) -> DbResult<()> {
+    async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), ArgusError> {
         let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
@@ -148,7 +153,7 @@ impl LlmProviderRepository for ArgusSqlite {
         if exists == 0 {
             return Err(DbError::NotFound {
                 id: id.into_inner().to_string(),
-            });
+            }.into());
         }
 
         sqlx::query("UPDATE llm_providers SET is_default = 0, updated_at = CURRENT_TIMESTAMP WHERE is_default = 1")
@@ -172,7 +177,7 @@ impl LlmProviderRepository for ArgusSqlite {
         Ok(())
     }
 
-    async fn get_provider(&self, id: &LlmProviderId) -> DbResult<Option<LlmProviderRecord>> {
+    async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, ArgusError> {
         let row = sqlx::query(
             "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              FROM llm_providers WHERE id = ?1",
@@ -185,7 +190,7 @@ impl LlmProviderRepository for ArgusSqlite {
         row.map(|r| self.map_llm_record(r)).transpose()
     }
 
-    async fn list_providers(&self) -> DbResult<Vec<LlmProviderRecord>> {
+    async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, ArgusError> {
         let rows = sqlx::query(
             "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              FROM llm_providers ORDER BY display_name ASC",
@@ -197,7 +202,7 @@ impl LlmProviderRepository for ArgusSqlite {
         rows.into_iter().map(|r| self.map_llm_record(r)).collect()
     }
 
-    async fn get_default_provider(&self) -> DbResult<Option<LlmProviderRecord>> {
+    async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, ArgusError> {
         let row = sqlx::query(
             "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              FROM llm_providers WHERE is_default = 1 LIMIT 1",
@@ -214,7 +219,7 @@ impl ArgusSqlite {
     #[allow(clippy::type_complexity)]
     pub(super) fn parse_llm_shared_fields(
         row: sqlx::sqlite::SqliteRow,
-    ) -> DbResult<(
+    ) -> Result<(
         LlmProviderId,
         LlmProviderKind,
         String,
@@ -225,42 +230,42 @@ impl ArgusSqlite {
         std::collections::HashMap<String, String>,
         Vec<u8>,
         Vec<u8>,
-    )> {
-        let nonce: Vec<u8> = Self::get_column(&row, "api_key_nonce")?;
-        let ciphertext: Vec<u8> = Self::get_column(&row, "encrypted_api_key")?;
+    ), ArgusError> {
+        let nonce: Vec<u8> = Self::get_column(&row, "api_key_nonce").map_err(map_err)?;
+        let ciphertext: Vec<u8> = Self::get_column(&row, "encrypted_api_key").map_err(map_err)?;
         let extra_headers: std::collections::HashMap<String, String> = serde_json::from_str(
-            &Self::get_column::<String>(&row, "extra_headers")?,
+            &Self::get_column::<String>(&row, "extra_headers").map_err(map_err)?,
         )
-        .map_err(|e| DbError::QueryFailed {
+        .map_err(|e| ArgusError::from(DbError::QueryFailed {
             reason: format!("failed to parse extra_headers: {e}"),
-        })?;
+        }))?;
         let models: Vec<String> =
-            serde_json::from_str(&Self::get_column::<String>(&row, "models")?).map_err(|e| {
-                DbError::QueryFailed {
+            serde_json::from_str(&Self::get_column::<String>(&row, "models").map_err(map_err)?).map_err(|e| {
+                ArgusError::from(DbError::QueryFailed {
                     reason: format!("failed to parse models: {e}"),
-                }
+                })
             })?;
-        let kind: LlmProviderKind = Self::get_column::<String>(&row, "kind")?.parse().map_err(
-            |e: LlmProviderKindParseError| DbError::InvalidProviderKind {
+        let kind: LlmProviderKind = Self::get_column::<String>(&row, "kind").map_err(map_err)?.parse().map_err(
+            |e: LlmProviderKindParseError| ArgusError::from(DbError::InvalidProviderKind {
                 kind: e.to_string(),
-            },
+            }),
         )?;
 
         Ok((
-            LlmProviderId::new(Self::get_column(&row, "id")?),
+            LlmProviderId::new(Self::get_column(&row, "id").map_err(map_err)?),
             kind,
-            Self::get_column(&row, "display_name")?,
-            Self::get_column(&row, "base_url")?,
+            Self::get_column(&row, "display_name").map_err(map_err)?,
+            Self::get_column(&row, "base_url").map_err(map_err)?,
             models,
-            Self::get_column(&row, "default_model")?,
-            Self::get_column::<i64>(&row, "is_default")? != 0,
+            Self::get_column(&row, "default_model").map_err(map_err)?,
+            Self::get_column::<i64>(&row, "is_default").map_err(map_err)? != 0,
             extra_headers,
             nonce,
             ciphertext,
         ))
     }
 
-    fn map_llm_record(&self, row: sqlx::sqlite::SqliteRow) -> DbResult<LlmProviderRecord> {
+    fn map_llm_record(&self, row: sqlx::sqlite::SqliteRow) -> Result<LlmProviderRecord, ArgusError> {
         let (
             id,
             kind,

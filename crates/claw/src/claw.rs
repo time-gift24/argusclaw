@@ -13,10 +13,7 @@ use crate::agents::builtins::{DEFAULT_AGENT_DISPLAY_NAME, load_arguswing};
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
 use crate::db::llm::{LlmProviderId, LlmProviderRecord, ProviderTestResult};
-use crate::db::sqlite::{
-    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
-    migrate,
-};
+use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use crate::error::AgentError;
 use crate::job::JobRepository;
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
@@ -105,10 +102,10 @@ impl AppContext {
         }?;
         migrate(&pool).await?;
 
-        let llm_repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
-        let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let agent_repository = Arc::new(ArgusSqlite::new(pool.clone()));
         let job_repository: Arc<dyn JobRepository> =
-            Arc::new(SqliteJobRepository::new(pool.clone()));
+            Arc::new(ArgusSqlite::new(pool.clone()));
 
         let user = UserService::new(pool.clone());
 
@@ -189,7 +186,7 @@ impl AppContext {
             provider_manager,
             agent_manager,
             tool_manager,
-            job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
+            job_repository: Arc::new(ArgusSqlite::new(pool.clone())),
             shutdown: CancellationToken::new(),
             user: UserService::new(pool.clone()),
             session_manager,
@@ -219,7 +216,7 @@ impl AppContext {
             provider_manager,
             agent_manager,
             tool_manager,
-            job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
+            job_repository: Arc::new(ArgusSqlite::new(pool.clone())),
             shutdown: CancellationToken::new(),
             user: UserService::new(pool.clone()),
             session_manager,
