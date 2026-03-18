@@ -4,7 +4,6 @@
 
 // === 内部模块 (不对外暴露) ===
 pub mod agents; // Public for argus-thread
-pub(crate) mod api;
 pub(crate) mod db;
 pub(crate) mod job;
 pub(crate) mod scheduler;
