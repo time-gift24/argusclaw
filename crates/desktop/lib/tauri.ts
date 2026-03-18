@@ -114,15 +114,13 @@ export const agents = {
 // Chat API
 export interface ChatSessionPayload {
   session_key: string;
+  session_id: number;
   template_id: number;
-  runtime_agent_id: number;
   thread_id: string;
-  effective_provider_id: number;
-  effective_model: string;
+  effective_provider_id: number | null;
 }
 
 export interface ThreadSnapshotPayload {
-  runtime_agent_id: string;
   thread_id: string;
   messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -150,23 +148,21 @@ export const chat = {
       modelOverride,
     }),
 
-  sendMessage: (runtimeAgentId: string, threadId: string, content: string) =>
-    invoke<void>("send_message", { runtimeAgentId, threadId, content }),
+  sendMessage: (sessionId: number, threadId: string, content: string) =>
+    invoke<void>("send_message", { sessionId, threadId, content }),
 
-  getThreadSnapshot: (runtimeAgentId: string, threadId: string) =>
+  getThreadSnapshot: (sessionId: number, threadId: string) =>
     invoke<ThreadSnapshotPayload>("get_thread_snapshot", {
-      runtimeAgentId,
+      sessionId,
       threadId,
     }),
 
   resolveApproval: (
-    runtimeAgentId: string,
     requestId: string,
     decision: ApprovalDecision,
     resolvedBy?: string | null,
   ) =>
     invoke<void>("resolve_approval", {
-      runtimeAgentId,
       requestId,
       decision,
       resolvedBy,

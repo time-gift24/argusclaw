@@ -19,7 +19,6 @@ export function ApprovalPrompt() {
 
   const handleApprove = () => {
     void chat.resolveApproval(
-      session!.runtimeAgentId,
       pendingRequest.id,
       "approved",
       "desktop-user",
@@ -28,7 +27,6 @@ export function ApprovalPrompt() {
 
   const handleDeny = () => {
     void chat.resolveApproval(
-      session!.runtimeAgentId,
       pendingRequest.id,
       "denied",
       "desktop-user",

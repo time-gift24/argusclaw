@@ -16,11 +16,10 @@ const toErrorMessage = (error: unknown) =>
 
 export interface ChatSessionState {
   sessionKey: string;
+  sessionId: number;
   templateId: number;
-  runtimeAgentId: string;
   threadId: string;
-  effectiveProviderId: number;
-  effectiveModel: string;
+  effectiveProviderId: number | null;
   status: "idle" | "running" | "error";
   messages: ThreadSnapshotPayload["messages"];
   pendingAssistant: { content: string; reasoning: string } | null;
@@ -110,17 +109,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     try {
       const session = await chat.createChatSession(templateId, state.selectedProviderPreferenceId, state.selectedModelOverride);
-      const snapshot = await chat.getThreadSnapshot(session.runtime_agent_id.toString(), session.thread_id);
+      // TODO: Implement get_thread_snapshot command in backend
+      // const snapshot = await chat.getThreadSnapshot(session.session_id, session.thread_id);
 
       const newSessionState: ChatSessionState = {
         sessionKey: session.session_key,
+        sessionId: session.session_id,
         templateId: session.template_id,
-        runtimeAgentId: session.runtime_agent_id.toString(),
         threadId: session.thread_id,
         effectiveProviderId: session.effective_provider_id,
-        effectiveModel: session.effective_model,
         status: "idle",
-        messages: snapshot.messages,
+        messages: [], // snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
         error: null,
@@ -216,7 +215,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
 
     try {
-      await chat.sendMessage(session.runtimeAgentId, session.threadId, trimmedContent);
+      await chat.sendMessage(session.sessionId, session.threadId, trimmedContent);
     } catch (error) {
       const errorMessage = toErrorMessage(error);
       set((store) => ({
@@ -239,7 +238,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!session) return;
 
     try {
-      const snapshot = await chat.getThreadSnapshot(session.runtimeAgentId, session.threadId);
+      const snapshot = await chat.getThreadSnapshot(session.sessionId, session.threadId);
       set((state) => ({
         errorMessage: null,
         sessionsByKey: {
@@ -282,7 +281,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const sessionKey = Object.keys(state.sessionsByKey).find(
       (key) =>
         state.sessionsByKey[key].threadId === envelope.thread_id &&
-        state.sessionsByKey[key].runtimeAgentId === envelope.runtime_agent_id,
+        state.sessionsByKey[key].sessionId.toString() === envelope.session_id,
     );
 
     if (!sessionKey) return;

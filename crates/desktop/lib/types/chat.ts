@@ -73,7 +73,7 @@ export type ThreadEventPayload =
   | { type: "approval_resolved"; response: ApprovalResponsePayload };
 
 export interface ThreadEventEnvelope {
-  runtime_agent_id: string;
+  session_id: string;
   thread_id: string;
   turn_number?: number | null;
   payload: ThreadEventPayload;
