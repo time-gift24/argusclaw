@@ -11,16 +11,19 @@
 //! - Extends retry setup to `stream_complete` and `stream_complete_with_tools`.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::Stream;
 use rand::RngExt;
 use rust_decimal::Decimal;
 
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider, ModelMetadata,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, LlmStreamEvent,
 };
 
 fn is_retryable(err: &LlmError) -> bool {
@@ -62,25 +65,55 @@ pub struct RetryProvider {
     config: RetryConfig,
 }
 
+struct RetryEventStream {
+    retry_events: Vec<LlmStreamEvent>,
+    inner_stream: LlmEventStream,
+}
+
+impl Stream for RetryEventStream {
+    type Item = Result<LlmStreamEvent, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Yield retry events first
+        if !self.retry_events.is_empty() {
+            return Poll::Ready(Some(Ok(self.retry_events.remove(0))));
+        }
+        // Then forward inner stream
+        Pin::new(&mut self.inner_stream).poll_next(cx)
+    }
+}
+
 impl RetryProvider {
     pub fn new(inner: Arc<dyn LlmProvider>, config: RetryConfig) -> Self {
         Self { inner, config }
     }
 
-    async fn retry_loop<T, F, Fut>(&self, mut op: F, label: &str) -> Result<T, LlmError>
+    async fn retry_loop<T, F, Fut>(
+        &self,
+        mut op: F,
+        label: &str,
+    ) -> Result<(T, Vec<LlmStreamEvent>), LlmError>
     where
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, LlmError>>,
     {
         let mut last_error: Option<LlmError> = None;
+        let mut retry_events = Vec::new();
 
         for attempt in 0..=self.config.max_retries {
             match op().await {
-                Ok(response) => return Ok(response),
+                Ok(response) => return Ok((response, retry_events)),
                 Err(err) => {
                     if !is_retryable(&err) || attempt == self.config.max_retries {
                         return Err(err);
                     }
+
+                    // Collect retry event
+                    retry_events.push(LlmStreamEvent::RetryAttempt {
+                        attempt: attempt + 1,
+                        max_retries: self.config.max_retries,
+                        error: err.to_string(),
+                    });
 
                     let delay = match &err {
                         LlmError::RateLimited {
@@ -124,14 +157,15 @@ impl LlmProvider for RetryProvider {
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let inner = &self.inner;
-        self.retry_loop(
+        let (response, _retry_events) = self.retry_loop(
             || {
                 let req = request.clone();
                 async move { inner.complete(req).await }
             },
             "",
         )
-        .await
+        .await?;
+        Ok(response)
     }
 
     async fn complete_with_tools(
@@ -139,14 +173,15 @@ impl LlmProvider for RetryProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let inner = &self.inner;
-        self.retry_loop(
+        let (response, _retry_events) = self.retry_loop(
             || {
                 let req = request.clone();
                 async move { inner.complete_with_tools(req).await }
             },
             " (tools)",
         )
-        .await
+        .await?;
+        Ok(response)
     }
 
     async fn stream_complete(
@@ -154,14 +189,19 @@ impl LlmProvider for RetryProvider {
         request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let inner = &self.inner;
-        self.retry_loop(
+        let (response, retry_events) = self.retry_loop(
             || {
                 let req = request.clone();
                 async move { inner.stream_complete(req).await }
             },
             " (stream)",
         )
-        .await
+        .await?;
+
+        Ok(Box::pin(RetryEventStream {
+            retry_events,
+            inner_stream: response,
+        }))
     }
 
     async fn stream_complete_with_tools(
@@ -169,14 +209,19 @@ impl LlmProvider for RetryProvider {
         request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let inner = &self.inner;
-        self.retry_loop(
+        let (response, retry_events) = self.retry_loop(
             || {
                 let req = request.clone();
                 async move { inner.stream_complete_with_tools(req).await }
             },
             " (stream tools)",
         )
-        .await
+        .await?;
+
+        Ok(Box::pin(RetryEventStream {
+            retry_events,
+            inner_stream: response,
+        }))
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -398,6 +443,52 @@ mod tests {
             .expect("transient stream setup errors should be retried");
 
         assert_eq!(inner.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_provider_emits_retry_events() {
+        use futures_util::StreamExt;
+
+        let inner = Arc::new(FlakyProvider::new(2, 2)); // Fails twice for both complete and stream
+        let provider = RetryProvider::new(inner.clone(), RetryConfig { max_retries: 3 });
+
+        let stream = provider
+            .stream_complete(CompletionRequest::new(vec![]))
+            .await
+            .expect("should succeed after retries");
+
+        // Collect all events
+        let events: Vec<_> = futures_util::StreamExt::collect(stream).await;
+
+        // Should have 2 retry events + finish event
+        let retry_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| e.as_ref().ok())
+            .filter_map(|e| match e {
+                LlmStreamEvent::RetryAttempt { .. } => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(retry_events.len(), 2, "expected 2 retry events, got {}", retry_events.len());
+
+        // Verify first retry event structure
+        if let LlmStreamEvent::RetryAttempt { attempt, max_retries, error } = retry_events[0] {
+            assert_eq!(*attempt, 1, "first attempt should be 1");
+            assert_eq!(*max_retries, 3, "max_retries should be 3");
+            assert!(error.contains("rate limited"), "error should mention rate limiting, got: {}", error);
+        } else {
+            panic!("expected RetryAttempt event");
+        }
+
+        // Verify second retry event structure
+        if let LlmStreamEvent::RetryAttempt { attempt, max_retries, error } = retry_events[1] {
+            assert_eq!(*attempt, 2, "second attempt should be 2");
+            assert_eq!(*max_retries, 3, "max_retries should be 3");
+            assert!(error.contains("rate limited"), "error should mention rate limiting, got: {}", error);
+        } else {
+            panic!("expected RetryAttempt event");
+        }
     }
 
     #[test]

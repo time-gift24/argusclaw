@@ -161,6 +161,11 @@ pub enum ThreadEventPayload {
         input_tokens: u32,
         output_tokens: u32,
     },
+    RetryAttempt {
+        attempt: u32,
+        max_retries: u32,
+        error: String,
+    },
     ToolStarted {
         tool_call_id: String,
         tool_name: String,
@@ -211,6 +216,13 @@ impl ThreadEventPayload {
                 input_tokens,
                 output_tokens,
             }),
+            LlmStreamEvent::RetryAttempt { attempt, max_retries, error } => {
+                Some(Self::RetryAttempt {
+                    attempt,
+                    max_retries,
+                    error,
+                })
+            }
             LlmStreamEvent::Finished { .. } => None,
         }
     }

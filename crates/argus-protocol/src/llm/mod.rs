@@ -387,6 +387,15 @@ pub enum LlmStreamEvent {
     },
     /// The model finished generating output.
     Finished { finish_reason: FinishReason },
+    /// Retry attempt due to transient error.
+    RetryAttempt {
+        /// Current attempt number (1-indexed)
+        attempt: u32,
+        /// Maximum retry attempts allowed
+        max_retries: u32,
+        /// Error message that triggered the retry
+        error: String,
+    },
 }
 
 /// A delta for a tool call emitted during streaming.

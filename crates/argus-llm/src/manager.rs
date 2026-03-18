@@ -20,6 +20,7 @@ use argus_protocol::llm::{
 use crate::providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
 };
+use crate::retry::{RetryConfig, RetryProvider};
 
 /// Manager for LLM provider lookup and instantiation.
 ///
@@ -240,7 +241,7 @@ impl ProviderManager {
         record: LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        match record.kind {
+        let provider = match record.kind {
             LlmProviderKind::OpenAiCompatible => {
                 let mut config = OpenAiCompatibleConfig::new(
                     record.base_url,
@@ -258,9 +259,15 @@ impl ProviderManager {
                     argus_protocol::ArgusError::LlmError {
                         reason: e.to_string(),
                     }
-                })
+                })?
             }
-        }
+        };
+
+        // Wrap with retry by default
+        Ok(Arc::new(RetryProvider::new(
+            provider,
+            RetryConfig::default(),
+        )))
     }
 }
 

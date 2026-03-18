@@ -105,6 +105,10 @@ impl StreamingAccumulator {
             LlmStreamEvent::Finished { finish_reason } => {
                 self.finish_reason = finish_reason;
             }
+            LlmStreamEvent::RetryAttempt { .. } => {
+                // Retry events are informational and forwarded to subscribers,
+                // but don't affect the accumulated response state
+            }
         }
     }
 

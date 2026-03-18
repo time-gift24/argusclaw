@@ -1,17 +1,22 @@
 //! Integration tests for argus-turn
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::broadcast;
 
+use argus_protocol::events::ThreadEvent;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, LlmStreamEvent,
+    LlmEventStream,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_turn::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
+use futures_util::Stream;
 use rust_decimal::Decimal;
+use argus_llm::retry::{RetryProvider, RetryConfig};
 
 /// Mock provider that can simulate tool calls with stateful responses
 struct MockProvider {
@@ -164,6 +169,123 @@ impl NamedTool for EchoTool {
     }
 }
 
+/// Mock provider that simulates transient failures for testing retry behavior
+struct FlakyProvider {
+    stream_failures: Mutex<usize>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FlakyProvider {
+    fn new(stream_failures: usize) -> Self {
+        Self {
+            stream_failures: Mutex::new(stream_failures),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn should_fail(&self) -> bool {
+        // Try to decrement the failure counter
+        // Returns true if we should fail (counter was > 0)
+        // Returns false if we should succeed (counter was 0)
+        let mut failures = self.stream_failures.lock().unwrap();
+        if *failures > 0 {
+            *failures -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for FlakyProvider {
+    fn model_name(&self) -> &str {
+        "flaky"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "flaky".to_string(),
+            reason: "streaming not supported".to_string(),
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        if self
+            .stream_failures
+            .lock()
+            .unwrap()
+            .checked_sub(1)
+            .is_some()
+        {
+            return Err(LlmError::RateLimited {
+                provider: "flaky".to_string(),
+                retry_after: Some(Duration::ZERO),
+            });
+        }
+
+        Ok(ToolCompletionResponse {
+            content: Some("Success after retries!".to_string()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "flaky".to_string(),
+            reason: "use complete_with_tools".to_string(),
+        })
+    }
+
+    async fn stream_complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        if self.should_fail() {
+            return Err(LlmError::RateLimited {
+                provider: "flaky".to_string(),
+                retry_after: Some(Duration::ZERO),
+            });
+        }
+
+        // Create a simple stream that just emits a finish event
+        let stream = futures_util::stream::once(async move {
+            Ok(argus_protocol::llm::LlmStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+            })
+        });
+
+        Ok(Box::pin(stream))
+    }
+}
+
 #[tokio::test]
 async fn test_turn_integration_simple() {
     let provider = Arc::new(MockProvider::new("Hello, world!".to_string()));
@@ -277,4 +399,71 @@ async fn test_turn_builder_validation() {
         .build();
 
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_turn_streams_retry_events() {
+    // Create a provider that fails 3 times before succeeding
+    // (initial attempt + 3 retries = 4 total attempts with RetryConfig::default())
+    let flaky_provider = Arc::new(FlakyProvider::new(3));
+    let provider = Arc::new(RetryProvider::new(flaky_provider, RetryConfig::default()));
+
+    let (stream_tx, _stream_rx) = broadcast::channel(256);
+    let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    // Execute turn in background
+    let turn_handle = tokio::spawn(async move {
+        turn.execute().await
+    });
+
+    // Collect retry events from ThreadEvent::Processing
+    let mut retry_count = 0;
+    let mut max_retries_seen = 0;
+
+    // Listen for events with a timeout
+    let timeout = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+
+    while start.elapsed() < timeout {
+        match thread_event_rx.recv().await {
+            Ok(ThreadEvent::Processing { event, .. }) => {
+                if let LlmStreamEvent::RetryAttempt { attempt, max_retries, error } = event {
+                    retry_count += 1;
+                    max_retries_seen = max_retries;
+                    assert_eq!(attempt, retry_count, "attempt numbers should be sequential");
+                    assert!(error.contains("rate limited"), "error should mention rate limiting");
+                }
+            }
+            Ok(ThreadEvent::TurnCompleted { .. }) => {
+                // Don't break, continue listening for more events
+            }
+            Ok(ThreadEvent::TurnFailed { .. }) => {
+                panic!("turn should not fail with retryable errors");
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => break,
+            _ => {}
+        }
+    }
+
+    // Wait for turn to complete
+    let turn_result = turn_handle.await.expect("turn task should complete");
+    assert!(turn_result.is_ok(), "turn should succeed");
+
+    // Should have retried 3 times
+    assert_eq!(retry_count, 3, "should have 3 retry events");
+    assert_eq!(max_retries_seen, 3, "should report max_retries=3 from RetryConfig::default()");
 }
