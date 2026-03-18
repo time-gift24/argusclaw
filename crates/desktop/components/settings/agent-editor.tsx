@@ -102,7 +102,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId])
+  }, [agentId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
     if (!canSave) {
@@ -260,29 +260,24 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                   <div key={tool.name} className="flex items-start gap-2">
                     <Checkbox
                       id={`tool-${tool.name}`}
+                      aria-describedby={`tool-desc-${tool.name}`}
                       checked={formData.tool_names.includes(tool.name)}
                       onCheckedChange={(checked) => {
-                        if (checked) {
-                          setFormData({
-                            ...formData,
-                            tool_names: [...formData.tool_names, tool.name],
-                          })
-                        } else {
-                          setFormData({
-                            ...formData,
-                            tool_names: formData.tool_names.filter((n) => n !== tool.name),
-                          })
-                        }
+                        setFormData((prev) => ({
+                          ...prev,
+                          tool_names: checked
+                            ? [...prev.tool_names, tool.name]
+                            : prev.tool_names.filter((n) => n !== tool.name),
+                        }))
                       }}
                     />
                     <div className="flex-1">
-                      <Label
-                        htmlFor={`tool-${tool.name}`}
-                        className="text-sm font-normal cursor-pointer"
-                      >
+                      <Label htmlFor={`tool-${tool.name}`} className="text-sm font-normal cursor-pointer">
                         {tool.name}
                       </Label>
-                      <p className="text-xs text-muted-foreground">{tool.description}</p>
+                      <p id={`tool-desc-${tool.name}`} className="text-xs text-muted-foreground">
+                        {tool.description}
+                      </p>
                     </div>
                   </div>
                 ))
