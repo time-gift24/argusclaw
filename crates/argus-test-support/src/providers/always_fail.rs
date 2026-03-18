@@ -46,7 +46,7 @@ impl LlmProvider for AlwaysFailProvider {
     ) -> Result<CompletionResponse, LlmError> {
         Err(LlmError::RateLimited {
             provider: "always-fail".to_string(),
-            retry_after: Some(Duration::from_secs(1)),
+            retry_after: Some(Duration::from_millis(300)),
         })
     }
 
@@ -56,7 +56,7 @@ impl LlmProvider for AlwaysFailProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         Err(LlmError::RateLimited {
             provider: "always-fail".to_string(),
-            retry_after: Some(Duration::from_secs(1)),
+            retry_after: Some(Duration::from_millis(300)),
         })
     }
 
@@ -66,7 +66,7 @@ impl LlmProvider for AlwaysFailProvider {
     ) -> Result<LlmEventStream, LlmError> {
         Err(LlmError::RateLimited {
             provider: "always-fail".to_string(),
-            retry_after: Some(Duration::from_secs(1)),
+            retry_after: Some(Duration::from_millis(300)),
         })
     }
 
@@ -76,7 +76,7 @@ impl LlmProvider for AlwaysFailProvider {
     ) -> Result<LlmEventStream, LlmError> {
         Err(LlmError::RateLimited {
             provider: "always-fail".to_string(),
-            retry_after: Some(Duration::from_secs(1)),
+            retry_after: Some(Duration::from_millis(300)),
         })
     }
 

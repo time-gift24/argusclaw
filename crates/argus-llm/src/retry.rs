@@ -37,7 +37,10 @@ fn is_retryable(err: &LlmError) -> bool {
 }
 
 fn retry_backoff_delay(attempt: u32) -> Duration {
-    let base_ms: u64 = 1000u64.saturating_mul(2u64.saturating_pow(attempt));
+    // Exponential backoff from 300ms to 5000ms
+    let base_ms: u64 = 300u64.saturating_mul(2u64.saturating_pow(attempt));
+    let base_ms = base_ms.min(5000); // Cap at 5000ms
+
     let jitter_range = base_ms / 4;
     let jitter = if jitter_range > 0 {
         let offset = rand::rng().random_range(0..=jitter_range * 2);
@@ -45,7 +48,7 @@ fn retry_backoff_delay(attempt: u32) -> Duration {
     } else {
         0
     };
-    let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
+    let delay_ms = (base_ms as i64 + jitter).max(300) as u64;
     Duration::from_millis(delay_ms)
 }
 

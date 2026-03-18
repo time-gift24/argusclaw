@@ -69,7 +69,7 @@ impl LlmProvider for IntermittentFailureProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: "intermittent-failure".to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
 
@@ -91,7 +91,7 @@ impl LlmProvider for IntermittentFailureProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: "intermittent-failure".to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
 
@@ -114,7 +114,7 @@ impl LlmProvider for IntermittentFailureProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: "intermittent-failure".to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
 
@@ -135,7 +135,7 @@ impl LlmProvider for IntermittentFailureProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: "intermittent-failure".to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
 

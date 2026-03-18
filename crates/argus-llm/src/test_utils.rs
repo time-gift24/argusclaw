@@ -74,7 +74,7 @@ impl LlmProvider for TestRetryProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: self.model_name().to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
         self.inner.complete(request).await
@@ -87,7 +87,7 @@ impl LlmProvider for TestRetryProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: self.model_name().to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
         self.inner.complete_with_tools(request).await
@@ -100,7 +100,7 @@ impl LlmProvider for TestRetryProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: self.model_name().to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
         self.inner.stream_complete(request).await
@@ -113,7 +113,7 @@ impl LlmProvider for TestRetryProvider {
         if self.should_fail() {
             return Err(LlmError::RateLimited {
                 provider: self.model_name().to_string(),
-                retry_after: Some(Duration::from_millis(100)),
+                retry_after: Some(Duration::from_millis(300)),
             });
         }
         self.inner.stream_complete_with_tools(request).await
