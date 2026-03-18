@@ -305,6 +305,50 @@ impl ArgusWing {
         self.session_manager.create(name.to_string()).await
     }
 
+    /// Create a session with custom approval policy.
+    ///
+    /// Creates a new session (thread) with the specified approval policy.
+    /// The approval policy controls which tools require explicit approval.
+    ///
+    /// # Arguments
+    /// * `template_id` - The agent template to use
+    /// * `approval_policy` - Custom approval policy configuration
+    ///
+    /// # Returns
+    /// The session ID if successful
+    ///
+    /// # Note
+    /// Currently, the approval policy is not persisted to the database.
+    /// This will be addressed in a future update.
+    pub async fn create_session_with_approval(
+        &self,
+        template_id: &AgentId,
+        _approval_policy: ApprovalPolicy,
+    ) -> Result<SessionId> {
+        // Get template
+        let template = self
+            .get_template(*template_id)
+            .await?
+            .ok_or_else(|| ArgusError::DatabaseError {
+                reason: format!("Template {} not found", template_id.inner()),
+            })?;
+
+        // Create session with template name as session name
+        let session_id = self
+            .session_manager
+            .create(template.display_name.clone())
+            .await?;
+
+        // TODO: Store approval policy with session
+        // For now, create thread without approval policy storage
+        let _thread = self
+            .session_manager
+            .create_thread(session_id, template.id, None)
+            .await?;
+
+        Ok(session_id)
+    }
+
     /// Load a session into memory.
     pub async fn load_session(&self, session_id: SessionId) -> Result<Arc<argus_session::Session>> {
         self.session_manager.load(session_id).await
@@ -493,5 +537,78 @@ mod tests {
         assert_eq!(template.display_name, DEFAULT_AGENT_DISPLAY_NAME);
         assert!(!template.system_prompt.is_empty());
         assert_eq!(template.display_name, "ArgusWing");
+    }
+
+    #[tokio::test]
+    async fn create_session_with_custom_approval() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        // Create a mock provider for testing
+        use std::collections::HashMap;
+        let provider_record = LlmProviderRecord {
+            id: LlmProviderId::new(1),
+            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+            display_name: "Test Provider".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: argus_protocol::SecretString::new("test-key"),
+            models: vec!["gpt-4".to_string()],
+            default_model: "gpt-4".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: argus_protocol::ProviderSecretStatus::Ready,
+        };
+        wing.upsert_provider(provider_record.clone())
+            .await
+            .expect("should upsert provider");
+        wing.set_default_provider(provider_record.id)
+            .await
+            .expect("should set default provider");
+
+        // Create the default template
+        let default_template = AgentRecord {
+            id: AgentId::new(0), // Placeholder ID, will be auto-generated
+            display_name: DEFAULT_AGENT_DISPLAY_NAME.to_string(),
+            description: "Default assistant for ArgusWing".to_string(),
+            version: "0.1.0".to_string(),
+            provider_id: Some(argus_protocol::ProviderId::new(1)),
+            system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
+            tool_names: vec!["shell".to_string(), "read".to_string()],
+            max_tokens: None,
+            temperature: None,
+        };
+        wing.upsert_template(default_template)
+            .await
+            .expect("should upsert default template");
+
+        let template = wing
+            .get_default_template()
+            .await
+            .expect("should get default template")
+            .expect("default template should exist");
+
+        let approval_policy = ApprovalPolicy {
+            require_approval: vec!["shell".to_string()],
+            timeout_secs: 300,
+            auto_approve_autonomous: false,
+            auto_approve: false,
+        };
+
+        let session_id = wing
+            .create_session_with_approval(&template.id, approval_policy)
+            .await
+            .expect("should create session with approval");
+
+        // Verify session exists
+        let sessions = wing
+            .list_sessions()
+            .await
+            .expect("should list sessions");
+        assert!(sessions.len() >= 1);
+        assert!(sessions.iter().any(|s| s.id == session_id));
     }
 }
