@@ -192,7 +192,8 @@ pub struct ChatSessionPayload {
     /// The thread ID for this session.
     pub thread_id: String,
     /// The effective provider ID bound to this session.
-    pub effective_provider_id: i64,
+    /// `None` if no provider is configured (session will fail on first LLM call).
+    pub effective_provider_id: Option<i64>,
 }
 
 #[tauri::command]
@@ -228,17 +229,20 @@ pub async fn create_chat_session(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Get effective provider from the template or default
+    // Get effective provider from the template or use the provided one
     let template = wing
         .get_template(AgentId::new(template_id_i64))
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Template not found".to_string())?;
 
+    // Determine the effective provider ID:
+    // 1. Use the explicitly provided provider preference
+    // 2. Fall back to the template's configured provider
+    // 3. Return None if no provider is configured (frontend should handle this case)
     let effective_provider_id = provider_id
         .or(template.provider_id)
-        .map(|p| p.inner())
-        .unwrap_or(0);
+        .map(|p| p.inner());
 
     let session_key = format!(
         "{}::{}",
@@ -368,11 +372,27 @@ mod tests {
             session_id: 1,
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
-            effective_provider_id: 1,
+            effective_provider_id: Some(1),
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["effective_provider_id"], json!(1));
         assert_eq!(value["session_key"], json!("arguswing::__default__"));
+    }
+
+    #[test]
+    fn chat_session_payload_serializes_none_effective_provider_id() {
+        use super::ChatSessionPayload;
+
+        let payload = ChatSessionPayload {
+            session_key: "arguswing::__default__".to_string(),
+            session_id: 1,
+            template_id: 1,
+            thread_id: ThreadId::new().to_string(),
+            effective_provider_id: None,
+        };
+
+        let value = serde_json::to_value(payload).expect("payload should serialize");
+        assert_eq!(value["effective_provider_id"], json!(null));
     }
 }

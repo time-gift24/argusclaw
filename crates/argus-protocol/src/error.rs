@@ -35,6 +35,9 @@ pub enum ArgusError {
     #[error("LLM error: {reason}")]
     LlmError { reason: String },
 
+    #[error("Approval error: {reason}")]
+    ApprovalError { reason: String },
+
     #[error("IO error: {reason}")]
     IoError { reason: String },
 

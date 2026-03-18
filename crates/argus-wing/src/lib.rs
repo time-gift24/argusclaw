@@ -38,10 +38,6 @@ use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
-pub mod error;
-
-pub use error::WingError;
-
 /// Wrapper that implements ProviderResolver for ProviderManager.
 ///
 /// This bridges the argus-session ProviderResolver trait with argus-llm's ProviderManager.
@@ -367,7 +363,7 @@ impl ArgusWing {
     ) -> Result<argus_protocol::ApprovalResponse> {
         self.approval_manager
             .resolve(request_id, decision, resolved_by)
-            .map_err(|e| ArgusError::IoError {
+            .map_err(|e| ArgusError::ApprovalError {
                 reason: e.to_string(),
             })
     }
