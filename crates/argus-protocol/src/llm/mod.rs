@@ -9,7 +9,7 @@ pub mod repository;
 // Re-export provider types for convenience
 pub use provider_types::{
     LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
+    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
 };
 
 pub use repository::LlmProviderRepository;

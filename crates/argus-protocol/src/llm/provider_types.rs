@@ -160,36 +160,6 @@ pub struct LlmProviderRecord {
     pub secret_status: ProviderSecretStatus,
 }
 
-/// Provider summary without sensitive data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LlmProviderSummary {
-    pub id: LlmProviderId,
-    pub kind: LlmProviderKind,
-    pub display_name: String,
-    pub base_url: String,
-    pub models: Vec<String>,
-    pub default_model: String,
-    pub is_default: bool,
-    pub extra_headers: HashMap<String, String>,
-    pub secret_status: ProviderSecretStatus,
-}
-
-impl From<LlmProviderRecord> for LlmProviderSummary {
-    fn from(record: LlmProviderRecord) -> Self {
-        Self {
-            id: record.id,
-            kind: record.kind,
-            display_name: record.display_name,
-            base_url: record.base_url,
-            models: record.models,
-            default_model: record.default_model,
-            is_default: record.is_default,
-            extra_headers: record.extra_headers,
-            secret_status: record.secret_status,
-        }
-    }
-}
-
 // ============================================================================
 // Provider Test Types
 // ============================================================================
@@ -248,23 +218,6 @@ mod tests {
 
         assert_eq!(record.models.len(), 2);
         assert_eq!(record.default_model, "gpt-4.1");
-    }
-
-    #[test]
-    fn llm_provider_summary_has_models_and_default_model() {
-        let summary = LlmProviderSummary {
-            id: LlmProviderId::new(1),
-            kind: LlmProviderKind::OpenAiCompatible,
-            display_name: "Test".to_string(),
-            base_url: "https://api.example.com/v1".to_string(),
-            models: vec!["o3".to_string()],
-            default_model: "o3".to_string(),
-            is_default: false,
-            extra_headers: HashMap::new(),
-            secret_status: ProviderSecretStatus::Ready,
-        };
-
-        assert_eq!(summary.models, vec!["o3"]);
     }
 
     #[test]

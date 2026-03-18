@@ -13,7 +13,7 @@ use chrono::Utc;
 use argus_protocol::Result;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderRepository, LlmProviderSummary, ProviderSecretStatus,
+    LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus,
     ProviderTestResult, ProviderTestStatus,
 };
 
@@ -36,8 +36,8 @@ impl ProviderManager {
         Self { repository }
     }
 
-    /// List all provider summaries.
-    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>> {
+    /// List all provider records.
+    pub async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>> {
         self.repository.list_providers().await
     }
 
@@ -113,14 +113,6 @@ impl ProviderManager {
     pub async fn get_provider_record(&self, id: &LlmProviderId) -> Result<LlmProviderRecord> {
         self.repository
             .get_provider(id)
-            .await?
-            .ok_or_else(|| argus_protocol::ArgusError::ProviderNotFound(id.into_inner()))
-    }
-
-    /// Get a provider summary by ID.
-    pub async fn get_provider_summary(&self, id: &LlmProviderId) -> Result<LlmProviderSummary> {
-        self.repository
-            .get_provider_summary(id)
             .await?
             .ok_or_else(|| argus_protocol::ArgusError::ProviderNotFound(id.into_inner()))
     }

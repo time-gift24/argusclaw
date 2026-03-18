@@ -136,9 +136,11 @@ dependencies = [
 name = "argus-llm"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argus-protocol",
  "async-trait",
  "chrono",
+ "clap",
  "dirs 6.0.0",
  "eventsource-stream",
  "futures-util",
@@ -152,6 +154,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
  "tracing",
 ]
 

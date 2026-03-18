@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
-use claw::{LlmProviderSummary, LlmStreamEvent};
+use claw::{LlmProviderRecord, LlmStreamEvent};
 
 pub mod agent;
 pub mod provider;
@@ -141,8 +141,8 @@ pub struct ProviderDisplayRecord {
     pub extra_headers: HashMap<String, String>,
 }
 
-impl From<LlmProviderSummary> for ProviderDisplayRecord {
-    fn from(value: LlmProviderSummary) -> Self {
+impl From<LlmProviderRecord> for ProviderDisplayRecord {
+    fn from(value: LlmProviderRecord) -> Self {
         Self {
             id: value.id.to_string(),
             display_name: value.display_name,

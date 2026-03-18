@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use claw::{
-    AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
+    AgentError, AgentId, AgentRecord, AppContext, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, ProviderSecretStatus, ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -108,18 +108,18 @@ pub struct ProviderSummary {
     pub secret_status: ProviderSecretStatus,
 }
 
-impl From<LlmProviderSummary> for ProviderSummary {
-    fn from(summary: LlmProviderSummary) -> Self {
+impl From<LlmProviderRecord> for ProviderSummary {
+    fn from(record: LlmProviderRecord) -> Self {
         Self {
-            id: summary.id.into_inner(),
-            kind: summary.kind.into(),
-            display_name: summary.display_name,
-            base_url: summary.base_url,
-            models: summary.models,
-            default_model: summary.default_model,
-            is_default: summary.is_default,
-            extra_headers: summary.extra_headers,
-            secret_status: summary.secret_status,
+            id: record.id.into_inner(),
+            kind: record.kind.into(),
+            display_name: record.display_name,
+            base_url: record.base_url,
+            models: record.models,
+            default_model: record.default_model,
+            is_default: record.is_default,
+            extra_headers: record.extra_headers,
+            secret_status: record.secret_status,
         }
     }
 }
@@ -155,29 +155,18 @@ impl From<LlmProviderRecord> for ProviderRecord {
     }
 }
 
-fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord {
+fn build_provider_reentry_record(record: LlmProviderRecord) -> ProviderRecord {
     ProviderRecord {
-        id: summary.id.into_inner(),
-        kind: summary.kind.into(),
-        display_name: summary.display_name,
-        base_url: summary.base_url,
+        id: record.id.into_inner(),
+        kind: record.kind.into(),
+        display_name: record.display_name,
+        base_url: record.base_url,
         api_key: String::new(),
-        models: summary.models,
-        default_model: summary.default_model,
-        is_default: summary.is_default,
-        extra_headers: summary.extra_headers,
-        secret_status: summary.secret_status,
-    }
-}
-
-#[cfg(test)]
-fn map_provider_lookup_result(
-    result: Result<LlmProviderRecord, AgentError>,
-) -> Result<Option<ProviderRecord>, String> {
-    match result {
-        Ok(record) => Ok(Some(record.into())),
-        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
-        Err(error) => Err(error.to_string()),
+        models: record.models,
+        default_model: record.default_model,
+        is_default: record.is_default,
+        extra_headers: record.extra_headers,
+        secret_status: record.secret_status,
     }
 }
 
@@ -198,15 +187,15 @@ pub async fn get_provider(
 ) -> Result<Option<ProviderRecord>, String> {
     let provider_id = LlmProviderId::new(id);
     match ctx.get_provider_record(&provider_id).await {
-        Ok(record) => Ok(Some(record.into())),
-        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
-        Err(AgentError::Database(DbError::SecretDecryptionFailed { .. })) => {
-            let summary = ctx
-                .get_provider_summary(&provider_id)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Some(build_provider_reentry_record(summary)))
+        Ok(record) => {
+            // If secret_status is RequiresReentry, build a re-entry record with blank api_key
+            if record.secret_status == ProviderSecretStatus::RequiresReentry {
+                Ok(Some(build_provider_reentry_record(record)))
+            } else {
+                Ok(Some(record.into()))
+            }
         }
+        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -537,11 +526,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_provider_reentry_record, map_provider_lookup_result, ChatSessionPayload,
+        build_provider_reentry_record, ChatSessionPayload,
         ProviderInput, ProviderKind, ProviderRecord, ProviderSummary,
     };
     use claw::{
-        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary,
+        LlmProviderId, LlmProviderKind, LlmProviderRecord,
         ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
     };
 
@@ -568,16 +557,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_lookup_returns_none_for_missing_provider() {
-        let result = map_provider_lookup_result(Err(AgentError::ProviderNotFound {
-            id: "999".to_string(),
-        }))
-        .expect("missing providers should map to None");
-
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn provider_record_conversion_exposes_plain_api_key() {
         let record = LlmProviderRecord {
             id: LlmProviderId::new(1),
@@ -601,12 +580,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_summary_can_build_a_reentry_record_with_a_blank_api_key() {
-        let record = build_provider_reentry_record(LlmProviderSummary {
+    fn provider_record_can_build_a_reentry_record_with_a_blank_api_key() {
+        let record = build_provider_reentry_record(LlmProviderRecord {
             id: LlmProviderId::new(2),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Legacy".to_string(),
             base_url: "https://legacy.example.com/v1".to_string(),
+            api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
             is_default: false,
@@ -620,12 +600,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_summary_conversion_exposes_secret_status_for_frontend() {
-        let output = ProviderSummary::from(LlmProviderSummary {
+    fn provider_record_conversion_exposes_secret_status_for_frontend() {
+        let output = ProviderSummary::from(LlmProviderRecord {
             id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
+            api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
             is_default: true,

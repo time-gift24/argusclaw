@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::error::DbError;
-use argus_protocol::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
+use argus_protocol::llm::{LlmProviderId, LlmProviderRecord};
 
 /// Repository for LLM provider persistence.
 #[async_trait]
@@ -20,14 +20,8 @@ pub trait LlmProviderRepository: Send + Sync {
     /// Gets a provider by ID.
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>, DbError>;
 
-    /// Gets a provider summary by ID.
-    async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<Option<LlmProviderSummary>, DbError>;
-
     /// Lists all providers.
-    async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, DbError>;
+    async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, DbError>;
 
     /// Gets the default provider.
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, DbError>;

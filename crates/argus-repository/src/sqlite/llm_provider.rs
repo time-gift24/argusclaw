@@ -6,7 +6,7 @@ use crate::error::DbError;
 use crate::traits::LlmProviderRepository;
 use argus_protocol::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    LlmProviderSummary, ProviderSecretStatus,
+    ProviderSecretStatus, SecretString,
 };
 
 use super::{ArgusSqlite, DbResult};
@@ -185,23 +185,7 @@ impl LlmProviderRepository for ArgusSqlite {
         row.map(|r| self.map_llm_record(r)).transpose()
     }
 
-    async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> DbResult<Option<LlmProviderSummary>> {
-        let row = sqlx::query(
-            "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
-             FROM llm_providers WHERE id = ?1",
-        )
-        .bind(id.into_inner())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
-
-        row.map(|r| self.map_llm_summary(r)).transpose()
-    }
-
-    async fn list_providers(&self) -> DbResult<Vec<LlmProviderSummary>> {
+    async fn list_providers(&self) -> DbResult<Vec<LlmProviderRecord>> {
         let rows = sqlx::query(
             "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              FROM llm_providers ORDER BY display_name ASC",
@@ -210,7 +194,7 @@ impl LlmProviderRepository for ArgusSqlite {
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
 
-        rows.into_iter().map(|r| self.map_llm_summary(r)).collect()
+        rows.into_iter().map(|r| self.map_llm_record(r)).collect()
     }
 
     async fn get_default_provider(&self) -> DbResult<Option<LlmProviderRecord>> {
@@ -290,45 +274,19 @@ impl ArgusSqlite {
             ciphertext,
         ) = Self::parse_llm_shared_fields(row)?;
 
+        // Attempt decryption; if it fails, return record with empty api_key
+        // and RequiresReentry status so the user knows to re-enter the key
+        let (api_key, secret_status) = match self.decrypt_secret(&nonce, &ciphertext) {
+            Ok(key) => (key, ProviderSecretStatus::Ready),
+            Err(_) => (SecretString::new(String::new()), ProviderSecretStatus::RequiresReentry),
+        };
+
         Ok(LlmProviderRecord {
             id,
             kind,
             display_name,
             base_url,
-            api_key: self.decrypt_secret(&nonce, &ciphertext)?,
-            models,
-            default_model,
-            is_default,
-            extra_headers,
-            secret_status: ProviderSecretStatus::Ready,
-        })
-    }
-
-    fn map_llm_summary(&self, row: sqlx::sqlite::SqliteRow) -> DbResult<LlmProviderSummary> {
-        let (
-            id,
-            kind,
-            display_name,
-            base_url,
-            models,
-            default_model,
-            is_default,
-            extra_headers,
-            nonce,
-            ciphertext,
-        ) = Self::parse_llm_shared_fields(row)?;
-
-        let secret_status = if self.decrypt_secret(&nonce, &ciphertext).is_ok() {
-            ProviderSecretStatus::Ready
-        } else {
-            ProviderSecretStatus::RequiresReentry
-        };
-
-        Ok(LlmProviderSummary {
-            id,
-            kind,
-            display_name,
-            base_url,
+            api_key,
             models,
             default_model,
             is_default,

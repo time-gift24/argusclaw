@@ -12,7 +12,7 @@ use crate::agents::Agent;
 use crate::agents::builtins::{DEFAULT_AGENT_DISPLAY_NAME, load_arguswing};
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
-use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
+use crate::db::llm::{LlmProviderId, LlmProviderRecord, ProviderTestResult};
 use crate::db::sqlite::{
     SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
     migrate,
@@ -439,18 +439,6 @@ impl AppContext {
             })
     }
 
-    pub async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<LlmProviderSummary, AgentError> {
-        self.provider_manager
-            .get_provider_summary(id)
-            .await
-            .map_err(|e| AgentError::Provider {
-                reason: e.to_string(),
-            })
-    }
-
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
         self.provider_manager
             .get_default_provider_record()
@@ -506,8 +494,8 @@ impl AppContext {
             })
     }
 
-    /// 列出所有 provider 摘要
-    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
+    /// 列出所有 provider 记录
+    pub async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, AgentError> {
         self.provider_manager
             .list_providers()
             .await

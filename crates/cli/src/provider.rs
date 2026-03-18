@@ -6,7 +6,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Subcommand};
 use claw::AppContext;
-use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, SecretString};
+use claw::{LlmProviderId, LlmProviderKind, LlmProviderRecord, SecretString};
 use std::collections::HashMap;
 
 #[cfg(feature = "dev")]
@@ -95,21 +95,6 @@ pub struct ProviderDisplayRecord {
     pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
-}
-
-impl From<LlmProviderSummary> for ProviderDisplayRecord {
-    fn from(value: LlmProviderSummary) -> Self {
-        Self {
-            id: value.id.to_string(),
-            display_name: value.display_name,
-            kind: value.kind.to_string(),
-            base_url: value.base_url,
-            models: value.models,
-            default_model: value.default_model,
-            is_default: value.is_default,
-            extra_headers: value.extra_headers,
-        }
-    }
 }
 
 impl From<LlmProviderRecord> for ProviderDisplayRecord {

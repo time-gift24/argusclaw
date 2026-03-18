@@ -9,7 +9,7 @@ use crate::db::DbError;
 
 // Re-export all LLM types from argus-protocol for backward compatibility.
 pub use argus_protocol::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus,
     ProviderTestResult, ProviderTestStatus, SecretString,
 };
 
@@ -34,12 +34,7 @@ pub trait LlmProviderRepository: Send + Sync {
         id: &LlmProviderId,
     ) -> std::result::Result<Option<LlmProviderRecord>, DbError>;
 
-    async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> std::result::Result<Option<LlmProviderSummary>, DbError>;
-
-    async fn list_providers(&self) -> std::result::Result<Vec<LlmProviderSummary>, DbError>;
+    async fn list_providers(&self) -> std::result::Result<Vec<LlmProviderRecord>, DbError>;
 
     async fn get_default_provider(&self)
     -> std::result::Result<Option<LlmProviderRecord>, DbError>;
@@ -52,7 +47,7 @@ mod multi_model_tests {
 
     #[test]
     fn llm_provider_record_has_models_and_default_model() {
-        let record = LlmProviderRecord {
+        let record = LlmProviderRecord{
             id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Test".to_string(),
@@ -67,23 +62,6 @@ mod multi_model_tests {
 
         assert_eq!(record.models.len(), 2);
         assert_eq!(record.default_model, "gpt-4.1");
-    }
-
-    #[test]
-    fn llm_provider_summary_has_models_and_default_model() {
-        let summary = LlmProviderSummary {
-            id: LlmProviderId::new(1),
-            kind: LlmProviderKind::OpenAiCompatible,
-            display_name: "Test".to_string(),
-            base_url: "https://api.example.com/v1".to_string(),
-            models: vec!["o3".to_string()],
-            default_model: "o3".to_string(),
-            is_default: false,
-            extra_headers: HashMap::new(),
-            secret_status: ProviderSecretStatus::Ready,
-        };
-
-        assert_eq!(summary.models, vec!["o3"]);
     }
 }
 
