@@ -6,10 +6,8 @@
 
 use async_trait::async_trait;
 
+use super::provider_types::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
 use crate::Result;
-use super::provider_types::{
-    LlmProviderId, LlmProviderRecord, LlmProviderSummary,
-};
 
 /// Repository trait for LLM provider CRUD operations.
 ///
@@ -38,10 +36,7 @@ pub trait LlmProviderRepository: Send + Sync {
     async fn get_provider(&self, id: &LlmProviderId) -> Result<Option<LlmProviderRecord>>;
 
     /// Get a provider summary by ID (without sensitive data).
-    async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<Option<LlmProviderSummary>>;
+    async fn get_provider_summary(&self, id: &LlmProviderId) -> Result<Option<LlmProviderSummary>>;
 
     /// List all provider summaries.
     async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>>;

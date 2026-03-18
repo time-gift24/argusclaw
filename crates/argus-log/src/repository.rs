@@ -1,6 +1,6 @@
+use argus_protocol::{ArgusError, Result, ThreadId};
 use async_trait::async_trait;
-use sqlx::{SqlitePool, Row};
-use argus_protocol::{ThreadId, Result, ArgusError};
+use sqlx::{Row, SqlitePool};
 
 use crate::models::TurnLog;
 
@@ -78,7 +78,8 @@ impl TurnLogRepository for SqliteTurnLogRepository {
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 TurnLog {
-                    thread_id: ThreadId::parse(&row.get::<String, _>("thread_id")).unwrap_or_default(),
+                    thread_id: ThreadId::parse(&row.get::<String, _>("thread_id"))
+                        .unwrap_or_default(),
                     turn_seq: row.get("turn_seq"),
                     input_tokens: row.get("input_tokens"),
                     output_tokens: row.get("output_tokens"),
@@ -105,7 +106,9 @@ impl TurnLogRepository for SqliteTurnLogRepository {
         .bind(limit)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
 
         let thread_ids = rows
             .into_iter()
@@ -124,7 +127,9 @@ impl TurnLogRepository for SqliteTurnLogRepository {
             let result = sqlx::query("DELETE FROM turn_logs")
                 .execute(&self.pool)
                 .await
-                .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
 
             return Ok(result.rows_affected() as i64);
         }
@@ -146,7 +151,9 @@ impl TurnLogRepository for SqliteTurnLogRepository {
         let result = query
             .execute(&self.pool)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected() as i64)
     }

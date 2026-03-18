@@ -476,6 +476,7 @@ struct ToolExecutionResult {
 /// 3. AfterToolCall hook (observe-only)
 ///
 /// Tool execution failures are captured as error messages, not propagated.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
     tool_manager: Arc<ToolManager>,
@@ -506,6 +507,7 @@ async fn execute_tools_parallel(
 }
 
 /// Executes a single tool call with hooks and timeout.
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool(
     tool_call: ToolCall,
     tool_manager: Arc<ToolManager>,
@@ -720,7 +722,8 @@ mod tests {
         async fn complete(
             &self,
             _request: argus_protocol::llm::CompletionRequest,
-        ) -> Result<argus_protocol::llm::CompletionResponse, argus_protocol::llm::LlmError> {
+        ) -> Result<argus_protocol::llm::CompletionResponse, argus_protocol::llm::LlmError>
+        {
             unreachable!("complete not used in turn execution")
         }
     }

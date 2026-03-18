@@ -7,14 +7,14 @@
 //! - Database connection and migration utilities
 
 pub mod error;
-pub mod types;
-pub mod traits;
 pub mod sqlite;
+pub mod traits;
+pub mod types;
 
 // Re-export main types
 pub use error::DbError;
-pub use types::*;
 pub use traits::*;
+pub use types::*;
 
 // Re-export ArgusSqlite for convenience
 pub use sqlite::ArgusSqlite;

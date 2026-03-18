@@ -56,7 +56,9 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
 
     // Get provider from context via LLM manager
     let provider = if let Some(id) = provider {
-        let id: i64 = id.parse().with_context(|| format!("Invalid provider id: {}", id))?;
+        let id: i64 = id
+            .parse()
+            .with_context(|| format!("Invalid provider id: {}", id))?;
         ctx.get_provider(&LlmProviderId::new(id)).await?
     } else {
         ctx.get_default_provider().await?

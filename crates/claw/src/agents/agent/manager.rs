@@ -14,8 +14,8 @@ use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
 use crate::approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
-use argus_llm::ProviderManager;
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
+use argus_llm::ProviderManager;
 use argus_tool::ToolManager;
 
 /// Starting ID for runtime agents (to distinguish from template IDs which start from 1).
@@ -88,9 +88,11 @@ impl AgentManager {
     ///
     /// Returns the `AgentId` for accessing the agent.
     pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentId, AgentError> {
-        let provider_id = record.provider_id.ok_or(AgentError::ProviderNotConfigured {
-            agent_id: record.id,
-        })?;
+        let provider_id = record
+            .provider_id
+            .ok_or(AgentError::ProviderNotConfigured {
+                agent_id: record.id,
+            })?;
 
         let provider = self.provider_manager.get_provider(&provider_id).await?;
 
@@ -118,9 +120,11 @@ impl AgentManager {
         approval_tools: Vec<String>,
         auto_approve: bool,
     ) -> Result<AgentId, AgentError> {
-        let provider_id = record.provider_id.ok_or(AgentError::ProviderNotConfigured {
-            agent_id: record.id,
-        })?;
+        let provider_id = record
+            .provider_id
+            .ok_or(AgentError::ProviderNotConfigured {
+                agent_id: record.id,
+            })?;
 
         let provider = self.provider_manager.get_provider(&provider_id).await?;
 
@@ -177,9 +181,7 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .ok_or_else(|| AgentError::AgentNotFound {
-                id: agent_id.clone(),
-            })?;
+            .ok_or(AgentError::AgentNotFound { id: *agent_id })?;
         agent.value().create_thread(config)
     }
 
@@ -208,9 +210,7 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .ok_or_else(|| AgentError::AgentNotFound {
-                id: agent_id.clone(),
-            })?;
+            .ok_or(AgentError::AgentNotFound { id: *agent_id })?;
         agent.value().send_message(thread_id, message).await
     }
 
@@ -235,9 +235,7 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .ok_or_else(|| AgentError::AgentNotFound {
-                id: agent_id.clone(),
-            })?;
+            .ok_or(AgentError::AgentNotFound { id: *agent_id })?;
         agent
             .value()
             .resolve_approval(request_id, decision, resolved_by)

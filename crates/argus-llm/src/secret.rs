@@ -174,10 +174,11 @@ impl ApiKeyCipher {
             .map_err(|_| SecretError::SecretDecryptionFailed {
                 reason: "aes-256-gcm open failed; key material may have changed".to_string(),
             })?;
-        let value =
-            String::from_utf8(decrypted.to_vec()).map_err(|e| SecretError::SecretDecryptionFailed {
+        let value = String::from_utf8(decrypted.to_vec()).map_err(|e| {
+            SecretError::SecretDecryptionFailed {
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(SecretString::new(value))
     }
@@ -222,9 +223,10 @@ fn resolve_master_key_path(configured: Option<String>) -> Result<PathBuf, Secret
         .unwrap_or_else(|| ARGUSCLAW_MASTER_KEY_PATH.to_string());
 
     if let Some(relative_path) = configured.strip_prefix("~/") {
-        let home_dir = dirs::home_dir().ok_or_else(|| SecretError::SecretKeyMaterialUnavailable {
-            reason: "failed to resolve home directory for master key".to_string(),
-        })?;
+        let home_dir =
+            dirs::home_dir().ok_or_else(|| SecretError::SecretKeyMaterialUnavailable {
+                reason: "failed to resolve home directory for master key".to_string(),
+            })?;
         return Ok(home_dir.join(relative_path));
     }
 

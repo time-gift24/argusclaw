@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
+use argus_protocol::LlmProvider;
 use argus_protocol::{AgentId, ChatMessage, ProviderId, SessionId, ThreadEvent, ThreadId};
 use argus_thread::{Compactor, ThreadBuilder, ThreadConfig, ThreadError};
 use argus_tool::ToolManager;
-use argus_protocol::LlmProvider;
 use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, Mutex};
 
@@ -69,7 +69,9 @@ impl RuntimeThread {
 
         // Add system prompt as first message
         if !system_prompt.is_empty() {
-            thread.messages_mut().push(ChatMessage::system(&system_prompt));
+            thread
+                .messages_mut()
+                .push(ChatMessage::system(&system_prompt));
         }
 
         Ok(Self {
@@ -93,7 +95,7 @@ impl RuntimeThread {
     ///
     /// Returns `ThreadError` if the thread fails to process the message.
     pub async fn send_message(&self, message: String) -> Result<(), ThreadError> {
-        let thread_id = self.id.clone();
+        let thread_id = self.id;
         let thread_arc = self.execution_thread.lock().await;
 
         // We need to spawn a task that owns the mutex guard

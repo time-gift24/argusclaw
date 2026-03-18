@@ -8,9 +8,9 @@ use tokio::sync::broadcast;
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::{HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
-use argus_turn::{execute_turn_streaming, TurnInputBuilder, TurnOutput, TurnStreamEvent};
+use argus_turn::{TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming};
 
-use super::compact::{Compactor, CompactContext};
+use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
 use super::error::ThreadError;
 use super::types::{ThreadInfo, ThreadState};
@@ -215,11 +215,8 @@ impl Thread {
 
         // Create CompactContext for compaction
         {
-            let mut context = CompactContext::new(
-                &self.provider,
-                &mut self.token_count,
-                &mut self.messages,
-            );
+            let mut context =
+                CompactContext::new(&self.provider, &mut self.token_count, &mut self.messages);
             if let Err(e) = compactor.compact(&mut context).await {
                 tracing::warn!("Compact failed: {}", e);
             }

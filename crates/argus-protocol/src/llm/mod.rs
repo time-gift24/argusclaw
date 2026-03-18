@@ -6,6 +6,14 @@
 pub mod provider_types;
 pub mod repository;
 
+// Re-export provider types for convenience
+pub use provider_types::{
+    LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
+    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
+};
+
+pub use repository::LlmProviderRepository;
+
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -836,11 +844,3 @@ mod tests {
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
     }
 }
-
-// Re-export provider types for convenience
-pub use provider_types::{
-    LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
-};
-
-pub use repository::LlmProviderRepository;

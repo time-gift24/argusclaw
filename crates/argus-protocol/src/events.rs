@@ -2,9 +2,9 @@
 //!
 //! These events are emitted during thread processing and consumed by subscribers (CLI, Tauri).
 
-use crate::llm::LlmStreamEvent;
-use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::TokenUsage;
+use crate::approval::{ApprovalRequest, ApprovalResponse};
+use crate::llm::LlmStreamEvent;
 
 /// Thread event broadcast to subscribers (CLI, Tauri).
 #[derive(Debug, Clone)]

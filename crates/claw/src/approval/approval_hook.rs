@@ -91,9 +91,11 @@ impl HookHandler for ApprovalHook {
         );
 
         // Send WaitingForApproval event to thread subscribers
-        if let (Some(sender), Some(thread_id), Some(turn_number)) =
-            (&ctx.thread_event_sender, ctx.thread_id.clone(), ctx.turn_number)
-        {
+        if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+            &ctx.thread_event_sender,
+            ctx.thread_id.clone(),
+            ctx.turn_number,
+        ) {
             let _ = sender.send(ThreadEvent::WaitingForApproval {
                 thread_id,
                 turn_number,
@@ -105,9 +107,11 @@ impl HookHandler for ApprovalHook {
         let decision = self.approval_manager.request_approval(req.clone()).await;
 
         // Send ApprovalResolved event to thread subscribers
-        if let (Some(sender), Some(thread_id), Some(turn_number)) =
-            (&ctx.thread_event_sender, ctx.thread_id.clone(), ctx.turn_number)
-        {
+        if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+            &ctx.thread_event_sender,
+            ctx.thread_id.clone(),
+            ctx.turn_number,
+        ) {
             let response = ApprovalResponse {
                 request_id: req.id,
                 decision,

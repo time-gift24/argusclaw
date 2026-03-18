@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use argus_protocol::{LlmProvider, ProviderId};
 use argus_protocol::Result;
+use argus_protocol::{LlmProvider, ProviderId};
+use async_trait::async_trait;
 
 /// Trait for resolving LLM providers by ID.
 ///

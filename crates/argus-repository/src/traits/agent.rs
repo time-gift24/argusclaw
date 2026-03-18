@@ -15,7 +15,10 @@ pub trait AgentRepository: Send + Sync {
     async fn get(&self, id: &AgentId) -> Result<Option<AgentRecord>, DbError>;
 
     /// Find an agent by display name.
-    async fn find_by_display_name(&self, display_name: &str) -> Result<Option<AgentRecord>, DbError>;
+    async fn find_by_display_name(
+        &self,
+        display_name: &str,
+    ) -> Result<Option<AgentRecord>, DbError>;
 
     /// List all agents.
     async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;

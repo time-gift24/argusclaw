@@ -4,8 +4,8 @@
 
 use async_trait::async_trait;
 
-use crate::llm::ToolDefinition;
 use crate::RiskLevel;
+use crate::llm::ToolDefinition;
 
 /// Error type for tool operations.
 #[derive(Debug, thiserror::Error)]

@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
+use async_trait::async_trait;
 
 use super::error::CompactError;
 

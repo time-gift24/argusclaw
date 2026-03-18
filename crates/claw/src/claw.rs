@@ -19,21 +19,21 @@ use crate::db::sqlite::{
 };
 use crate::error::AgentError;
 use crate::job::JobRepository;
-#[cfg(feature = "dev")]
-use argus_protocol::llm::LlmEventStream;
-use argus_llm::ProviderManager;
-use argus_protocol::{ArgusError, LlmProvider, ProviderId};
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
-use argus_tool::ToolManager;
 use crate::user::UserService;
+use argus_llm::ProviderManager;
+#[cfg(feature = "dev")]
+use argus_protocol::llm::LlmEventStream;
+use argus_protocol::{ArgusError, LlmProvider, ProviderId};
+use argus_tool::ToolManager;
 
 // Session layer - use existing protocol types
+use argus_log::SqliteTurnLogRepository;
+use argus_protocol::SessionId;
 use argus_session::ProviderResolver as ProviderResolverTrait;
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
-use argus_log::SqliteTurnLogRepository;
-use argus_protocol::SessionId;
 use argus_thread::CompactorManager;
 
 /// Ensures the default ArgusWing agent exists in the database.
@@ -69,12 +69,13 @@ impl ProviderManagerResolver {
 
 #[async_trait]
 impl ProviderResolverTrait for ProviderManagerResolver {
-    async fn resolve(&self, id: ProviderId) -> std::result::Result<Arc<dyn LlmProvider>, ArgusError> {
+    async fn resolve(
+        &self,
+        id: ProviderId,
+    ) -> std::result::Result<Arc<dyn LlmProvider>, ArgusError> {
         // Convert argus-protocol ProviderId to argus-protocol LlmProviderId
         let provider_id = LlmProviderId::new(id.inner());
-        self.provider_manager
-            .get_provider(&provider_id)
-            .await
+        self.provider_manager.get_provider(&provider_id).await
     }
 }
 
@@ -272,7 +273,9 @@ impl AppContext {
         self.session_manager
             .list_sessions()
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
     }
 
     /// Create a new session.
@@ -280,7 +283,9 @@ impl AppContext {
         self.session_manager
             .create(name)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
     }
 
     /// Load a session into memory.
@@ -288,7 +293,9 @@ impl AppContext {
         self.session_manager
             .load(session_id)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })?;
         Ok(())
     }
 
@@ -297,7 +304,9 @@ impl AppContext {
         self.session_manager
             .unload(session_id)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
     }
 
     /// Delete a session.
@@ -305,7 +314,9 @@ impl AppContext {
         self.session_manager
             .delete(session_id)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
     }
 
     /// Create a new thread in a session.
@@ -319,13 +330,18 @@ impl AppContext {
         let template_id_proto = argus_protocol::AgentId::new(template_id.into_inner());
         let provider_id_proto = argus_protocol::ProviderId::new(provider_id.into_inner());
 
-        let thread_id = self.session_manager
+        let thread_id = self
+            .session_manager
             .create_thread(session_id, template_id_proto, provider_id_proto)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })?;
 
         // Convert back to claw's ThreadId
-        Ok(ThreadId::parse(&thread_id.inner().to_string()).map_err(|e| AgentError::Session { reason: e.to_string() })?)
+        ThreadId::parse(&thread_id.inner().to_string()).map_err(|e| AgentError::Session {
+            reason: e.to_string(),
+        })
     }
 
     /// Delete a thread from a session.
@@ -335,13 +351,19 @@ impl AppContext {
         thread_id: &ThreadId,
     ) -> Result<(), AgentError> {
         // Convert to argus-protocol ThreadId
-        let thread_id_proto = argus_protocol::ThreadId::parse(&thread_id.to_string())
-            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+        let thread_id_proto =
+            argus_protocol::ThreadId::parse(&thread_id.to_string()).map_err(|e| {
+                AgentError::Session {
+                    reason: e.to_string(),
+                }
+            })?;
 
         self.session_manager
             .delete_thread(session_id, &thread_id_proto)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
     }
 
     /// List threads in a session.
@@ -352,7 +374,9 @@ impl AppContext {
         self.session_manager
             .list_threads(session_id)
             .await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
     }
 
     /// Run log cleanup (LRU-based).
@@ -364,46 +388,85 @@ impl AppContext {
         let pool = self.db_pool.clone();
         let repo = Arc::new(SqliteTurnLogRepository::new(pool));
         let cleaner = LogCleaner::new(repo, 20);
-        let report = cleaner.cleanup().await
-            .map_err(|e| AgentError::Session { reason: e.to_string() })?;
+        let report = cleaner.cleanup().await.map_err(|e| AgentError::Session {
+            reason: e.to_string(),
+        })?;
         Ok(report.deleted_count)
     }
 
-    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId, AgentError> {
-        self.provider_manager.upsert_provider(record).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+    pub async fn upsert_provider(
+        &self,
+        record: LlmProviderRecord,
+    ) -> Result<LlmProviderId, AgentError> {
+        self.provider_manager
+            .upsert_provider(record)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, AgentError> {
-        self.provider_manager.delete_provider(id).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .delete_provider(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn import_providers(
         &self,
         records: Vec<LlmProviderRecord>,
     ) -> Result<(), AgentError> {
-        self.provider_manager.import_providers(records).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .import_providers(records)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn get_provider_record(
         &self,
         id: &LlmProviderId,
     ) -> Result<LlmProviderRecord, AgentError> {
-        self.provider_manager.get_provider_record(id).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .get_provider_record(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn get_provider_summary(
         &self,
         id: &LlmProviderId,
     ) -> Result<LlmProviderSummary, AgentError> {
-        self.provider_manager.get_provider_summary(id).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .get_provider_summary(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
-        self.provider_manager.get_default_provider_record().await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .get_default_provider_record()
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), AgentError> {
-        self.provider_manager.set_default_provider(id).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .set_default_provider(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 获取 LLM Provider 实例
@@ -411,7 +474,12 @@ impl AppContext {
         &self,
         id: &LlmProviderId,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        self.provider_manager.get_provider(id).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .get_provider(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 获取 LLM Provider 实例并指定模型
@@ -420,17 +488,32 @@ impl AppContext {
         id: &LlmProviderId,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        self.provider_manager.get_provider_with_model(id, model).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .get_provider_with_model(id, model)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 获取默认 LLM Provider
     pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        self.provider_manager.get_default_provider().await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .get_default_provider()
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 列出所有 provider 摘要
     pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
-        self.provider_manager.list_providers().await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .list_providers()
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn test_provider_connection(
@@ -438,7 +521,12 @@ impl AppContext {
         id: &LlmProviderId,
         model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.provider_manager.test_provider_connection(id, model).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .test_provider_connection(id, model)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn test_provider_record(
@@ -446,7 +534,12 @@ impl AppContext {
         record: LlmProviderRecord,
         model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.provider_manager.test_provider_record(record, model).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .test_provider_record(record, model)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {
@@ -698,7 +791,12 @@ impl AppContext {
         provider_id: Option<&LlmProviderId>,
         prompt: impl Into<String>,
     ) -> Result<String, AgentError> {
-        self.provider_manager.complete_text(provider_id, prompt).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .complete_text(provider_id, prompt)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     #[cfg(feature = "dev")]
@@ -707,7 +805,12 @@ impl AppContext {
         provider_id: Option<&LlmProviderId>,
         prompt: impl Into<String>,
     ) -> Result<LlmEventStream, AgentError> {
-        self.provider_manager.stream_text(provider_id, prompt).await.map_err(|e| AgentError::Provider { reason: e.to_string() })
+        self.provider_manager
+            .stream_text(provider_id, prompt)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 }
 

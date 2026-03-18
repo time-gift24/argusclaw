@@ -4,8 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::{AgentId, WorkflowId, WorkflowStatus};
 use argus_protocol::ThreadId;
-use super::{AgentId, WorkflowStatus, WorkflowId};
 
 /// The kind of job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

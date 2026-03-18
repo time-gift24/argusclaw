@@ -1,6 +1,6 @@
-use argus_protocol::{AgentId, ProviderId, Result, ArgusError};
+use argus_protocol::{AgentId, ArgusError, ProviderId, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::{SqlitePool, Row};
+use sqlx::{Row, SqlitePool};
 
 /// Agent template - a saved agent configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,8 +37,10 @@ impl TemplateManager {
 
     /// Upsert (create or update) an agent template.
     pub async fn upsert(&self, template: AgentTemplate) -> Result<AgentId> {
-        let tool_names_json = serde_json::to_string(&template.tool_names)
-            .map_err(|e| ArgusError::SerdeError { reason: e.to_string() })?;
+        let tool_names_json =
+            serde_json::to_string(&template.tool_names).map_err(|e| ArgusError::SerdeError {
+                reason: e.to_string(),
+            })?;
 
         sqlx::query(
             r#"
@@ -88,15 +90,17 @@ impl TemplateManager {
         match row {
             Some(row) => {
                 let tool_names_str: String = row.get("tool_names");
-                let tool_names: Vec<String> = serde_json::from_str(&tool_names_str)
-                    .unwrap_or_default();
+                let tool_names: Vec<String> =
+                    serde_json::from_str(&tool_names_str).unwrap_or_default();
 
                 Ok(Some(AgentTemplate {
                     id: AgentId::new(row.get("id")),
                     display_name: row.get("display_name"),
                     description: row.get("description"),
                     version: row.get("version"),
-                    provider_id: row.get::<Option<i64>, _>("provider_id").map(ProviderId::new),
+                    provider_id: row
+                        .get::<Option<i64>, _>("provider_id")
+                        .map(ProviderId::new),
                     system_prompt: row.get("system_prompt"),
                     tool_names,
                     max_tokens: row.get("max_tokens"),
@@ -123,15 +127,17 @@ impl TemplateManager {
             .into_iter()
             .map(|row| {
                 let tool_names_str: String = row.get("tool_names");
-                let tool_names: Vec<String> = serde_json::from_str(&tool_names_str)
-                    .unwrap_or_default();
+                let tool_names: Vec<String> =
+                    serde_json::from_str(&tool_names_str).unwrap_or_default();
 
                 AgentTemplate {
                     id: AgentId::new(row.get("id")),
                     display_name: row.get("display_name"),
                     description: row.get("description"),
                     version: row.get("version"),
-                    provider_id: row.get::<Option<i64>, _>("provider_id").map(ProviderId::new),
+                    provider_id: row
+                        .get::<Option<i64>, _>("provider_id")
+                        .map(ProviderId::new),
                     system_prompt: row.get("system_prompt"),
                     tool_names,
                     max_tokens: row.get("max_tokens"),
@@ -149,7 +155,9 @@ impl TemplateManager {
             .bind(id.inner())
             .execute(&self.pool)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }

@@ -217,7 +217,10 @@ pub async fn upsert_provider(
     record: ProviderInput,
 ) -> Result<String, String> {
     let record: LlmProviderRecord = record.into();
-    let id = ctx.upsert_provider(record).await.map_err(|e| e.to_string())?;
+    let id = ctx
+        .upsert_provider(record)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(id.to_string())
 }
 

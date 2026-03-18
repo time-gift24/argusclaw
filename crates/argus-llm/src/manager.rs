@@ -10,14 +10,16 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use argus_protocol::llm::{
-    ChatMessage, CompletionRequest, LlmError, LlmProvider,
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
-    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
-};
 use argus_protocol::Result;
+use argus_protocol::llm::{
+    ChatMessage, CompletionRequest, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, LlmProviderRepository, LlmProviderSummary, ProviderSecretStatus,
+    ProviderTestResult, ProviderTestStatus,
+};
 
-use crate::providers::{OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider};
+use crate::providers::{
+    OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
+};
 
 /// Manager for LLM provider lookup and instantiation.
 ///
@@ -40,10 +42,7 @@ impl ProviderManager {
     }
 
     /// Get a provider instance by ID (using the default model).
-    pub async fn get_provider(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<Arc<dyn LlmProvider>> {
+    pub async fn get_provider(&self, id: &LlmProviderId) -> Result<Arc<dyn LlmProvider>> {
         let record = self
             .repository
             .get_provider(id)
@@ -102,10 +101,7 @@ impl ProviderManager {
     }
 
     /// Import multiple provider records.
-    pub async fn import_providers(
-        &self,
-        records: Vec<LlmProviderRecord>,
-    ) -> Result<()> {
+    pub async fn import_providers(&self, records: Vec<LlmProviderRecord>) -> Result<()> {
         for record in records {
             self.upsert_provider(record).await?;
         }
@@ -114,10 +110,7 @@ impl ProviderManager {
     }
 
     /// Get a provider record by ID.
-    pub async fn get_provider_record(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<LlmProviderRecord> {
+    pub async fn get_provider_record(&self, id: &LlmProviderId) -> Result<LlmProviderRecord> {
         self.repository
             .get_provider(id)
             .await?
@@ -125,10 +118,7 @@ impl ProviderManager {
     }
 
     /// Get a provider summary by ID.
-    pub async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<LlmProviderSummary> {
+    pub async fn get_provider_summary(&self, id: &LlmProviderId) -> Result<LlmProviderSummary> {
         self.repository
             .get_provider_summary(id)
             .await?
@@ -222,11 +212,13 @@ impl ProviderManager {
             None => self.get_default_provider().await?,
         };
         let request = CompletionRequest::new(vec![ChatMessage::user(prompt.into())]);
-        let response = provider.complete(request).await.map_err(|e| {
-            argus_protocol::ArgusError::LlmError {
-                reason: e.to_string(),
-            }
-        })?;
+        let response =
+            provider
+                .complete(request)
+                .await
+                .map_err(|e| argus_protocol::ArgusError::LlmError {
+                    reason: e.to_string(),
+                })?;
 
         Ok(response.content)
     }
@@ -270,10 +262,11 @@ impl ProviderManager {
 
                 let factory_config = OpenAiCompatibleFactoryConfig::new(config);
 
-                create_openai_compatible_provider(factory_config)
-                    .map_err(|e| argus_protocol::ArgusError::LlmError {
+                create_openai_compatible_provider(factory_config).map_err(|e| {
+                    argus_protocol::ArgusError::LlmError {
                         reason: e.to_string(),
-                    })
+                    }
+                })
             }
         }
     }

@@ -9,9 +9,8 @@ use crate::db::DbError;
 
 // Re-export all LLM types from argus-protocol for backward compatibility.
 pub use argus_protocol::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord,
-    LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
-    SecretString,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus,
+    ProviderTestResult, ProviderTestStatus, SecretString,
 };
 
 /// SQLite-specific repository trait that returns `DbError`.
@@ -21,13 +20,19 @@ pub use argus_protocol::llm::{
 pub trait LlmProviderRepository: Send + Sync {
     /// Upserts a provider record. Returns the provider ID (newly generated for inserts, or the
     /// existing ID for updates).
-    async fn upsert_provider(&self, record: &LlmProviderRecord) -> std::result::Result<LlmProviderId, DbError>;
+    async fn upsert_provider(
+        &self,
+        record: &LlmProviderRecord,
+    ) -> std::result::Result<LlmProviderId, DbError>;
 
     async fn delete_provider(&self, id: &LlmProviderId) -> std::result::Result<bool, DbError>;
 
     async fn set_default_provider(&self, id: &LlmProviderId) -> std::result::Result<(), DbError>;
 
-    async fn get_provider(&self, id: &LlmProviderId) -> std::result::Result<Option<LlmProviderRecord>, DbError>;
+    async fn get_provider(
+        &self,
+        id: &LlmProviderId,
+    ) -> std::result::Result<Option<LlmProviderRecord>, DbError>;
 
     async fn get_provider_summary(
         &self,
@@ -36,7 +41,8 @@ pub trait LlmProviderRepository: Send + Sync {
 
     async fn list_providers(&self) -> std::result::Result<Vec<LlmProviderSummary>, DbError>;
 
-    async fn get_default_provider(&self) -> std::result::Result<Option<LlmProviderRecord>, DbError>;
+    async fn get_default_provider(&self)
+    -> std::result::Result<Option<LlmProviderRecord>, DbError>;
 }
 
 #[cfg(test)]

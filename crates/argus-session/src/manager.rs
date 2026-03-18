@@ -54,7 +54,9 @@ impl SessionManager {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
 
         let sessions = rows
             .into_iter()
@@ -88,7 +90,9 @@ impl SessionManager {
             .bind(session_id.inner())
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         let session = match row {
             Some(row) => {
@@ -108,7 +112,9 @@ impl SessionManager {
         .bind(session_id.inner())
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
 
         for thread_row in thread_rows {
             let thread_id_str: String = thread_row.get("id");
@@ -149,9 +155,7 @@ impl SessionManager {
                 .ok()
                 .flatten();
 
-            let system_prompt = template
-                .map(|t| t.system_prompt)
-                .unwrap_or_default();
+            let system_prompt = template.map(|t| t.system_prompt).unwrap_or_default();
 
             // Get compactor
             let compactor = self.compactor_manager.default_compactor().clone();
@@ -217,7 +221,9 @@ impl SessionManager {
             .bind(session_id.inner())
             .execute(&self.pool)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
@@ -264,7 +270,9 @@ impl SessionManager {
             template.system_prompt.clone(),
             ThreadConfig::default(),
         )
-        .map_err(|e| ArgusError::ThreadBuildFailed { reason: e.to_string() })?;
+        .map_err(|e| ArgusError::ThreadBuildFailed {
+            reason: e.to_string(),
+        })?;
 
         // Insert into DB
         sqlx::query(
@@ -288,18 +296,16 @@ impl SessionManager {
     }
 
     /// Delete a thread from a session.
-    pub async fn delete_thread(
-        &self,
-        session_id: SessionId,
-        thread_id: &ThreadId,
-    ) -> Result<()> {
+    pub async fn delete_thread(&self, session_id: SessionId, thread_id: &ThreadId) -> Result<()> {
         // Delete from DB
         sqlx::query("DELETE FROM threads WHERE id = ? AND session_id = ?")
             .bind(thread_id.inner().to_string())
             .bind(session_id.inner())
             .execute(&self.pool)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -327,7 +333,9 @@ impl SessionManager {
         .bind(session_id.inner())
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
 
         let threads = rows
             .into_iter()
@@ -362,8 +370,12 @@ impl SessionManager {
             .get_thread(thread_id)
             .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
-        thread.send_message(message).await
-            .map_err(|e| ArgusError::LlmError { reason: e.to_string() })
+        thread
+            .send_message(message)
+            .await
+            .map_err(|e| ArgusError::LlmError {
+                reason: e.to_string(),
+            })
     }
 
     /// Subscribe to thread events.

@@ -132,7 +132,7 @@ impl Scheduler {
                 job_type: JobType::Standalone,
                 name: template.name.clone(),
                 status: WorkflowStatus::Pending,
-                agent_id: template.agent_id.clone(),
+                agent_id: template.agent_id,
                 context: template.context.clone(),
                 prompt: template.prompt.clone(),
                 thread_id: None,

@@ -2,10 +2,8 @@
 
 use async_trait::async_trait;
 
-use argus_protocol::llm::{
-    LlmProviderId, LlmProviderRecord, LlmProviderSummary,
-};
 use crate::error::DbError;
+use argus_protocol::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary};
 
 /// Repository for LLM provider persistence.
 #[async_trait]

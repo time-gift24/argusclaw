@@ -13,8 +13,8 @@ use argus_protocol::llm::{
 use argus_protocol::{ArgusError, Result};
 // Import secret types from argus-llm
 use argus_llm::secret::{
-    ApiKeyCipher, FileKeyMaterialSource, HostMacAddressKeyMaterialSource,
-    KeyMaterialSource, StaticKeyMaterialSource,
+    ApiKeyCipher, FileKeyMaterialSource, HostMacAddressKeyMaterialSource, KeyMaterialSource,
+    StaticKeyMaterialSource,
 };
 
 pub struct SqliteLlmProviderRepository {
@@ -287,10 +287,11 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })?;
-        let extra_headers_json =
-            serde_json::to_string(&record.extra_headers).map_err(|e| ArgusError::DatabaseError {
+        let extra_headers_json = serde_json::to_string(&record.extra_headers).map_err(|e| {
+            ArgusError::DatabaseError {
                 reason: format!("failed to serialize extra_headers: {e}"),
-            })?;
+            }
+        })?;
         let models_json =
             serde_json::to_string(&record.models).map_err(|e| ArgusError::DatabaseError {
                 reason: format!("failed to serialize models: {e}"),
@@ -380,12 +381,11 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             record.id
         };
 
-        transaction
-            .commit()
-            .await
-            .map_err(|e| db_to_argus(DbError::QueryFailed {
+        transaction.commit().await.map_err(|e| {
+            db_to_argus(DbError::QueryFailed {
                 reason: e.to_string(),
-            }))?;
+            })
+        })?;
 
         Ok(provider_id)
     }
@@ -404,9 +404,11 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
                 .bind(id.into_inner())
                 .fetch_one(&mut *transaction)
                 .await
-                .map_err(|e| db_to_argus(DbError::QueryFailed {
-                    reason: e.to_string(),
-                }))?;
+                .map_err(|e| {
+                    db_to_argus(DbError::QueryFailed {
+                        reason: e.to_string(),
+                    })
+                })?;
 
         if exists == 0 {
             return Err(ArgusError::ProviderNotFound(id.into_inner()));
@@ -427,16 +429,17 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
         .bind(id.into_inner())
         .execute(&mut *transaction)
         .await
-        .map_err(|e| db_to_argus(DbError::QueryFailed {
-            reason: e.to_string(),
-        }))?;
-
-        transaction
-            .commit()
-            .await
-            .map_err(|e| db_to_argus(DbError::QueryFailed {
+        .map_err(|e| {
+            db_to_argus(DbError::QueryFailed {
                 reason: e.to_string(),
-            }))?;
+            })
+        })?;
+
+        transaction.commit().await.map_err(|e| {
+            db_to_argus(DbError::QueryFailed {
+                reason: e.to_string(),
+            })
+        })?;
 
         Ok(())
     }
@@ -446,9 +449,11 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             .bind(id.into_inner())
             .execute(&self.pool)
             .await
-            .map_err(|e| db_to_argus(DbError::QueryFailed {
-                reason: e.to_string(),
-            }))?;
+            .map_err(|e| {
+                db_to_argus(DbError::QueryFailed {
+                    reason: e.to_string(),
+                })
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -470,10 +475,7 @@ impl LlmProviderRepository for SqliteLlmProviderRepository {
             .transpose()
     }
 
-    async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<Option<LlmProviderSummary>> {
+    async fn get_provider_summary(&self, id: &LlmProviderId) -> Result<Option<LlmProviderSummary>> {
         let row = sqlx::query(
             "select id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers
              from llm_providers
@@ -553,10 +555,7 @@ impl crate::db::llm::LlmProviderRepository for SqliteLlmProviderRepository {
             })
     }
 
-    async fn delete_provider(
-        &self,
-        id: &LlmProviderId,
-    ) -> std::result::Result<bool, DbError> {
+    async fn delete_provider(&self, id: &LlmProviderId) -> std::result::Result<bool, DbError> {
         <Self as LlmProviderRepository>::delete_provider(self, id)
             .await
             .map_err(|e| DbError::QueryFailed {
@@ -564,10 +563,7 @@ impl crate::db::llm::LlmProviderRepository for SqliteLlmProviderRepository {
             })
     }
 
-    async fn set_default_provider(
-        &self,
-        id: &LlmProviderId,
-    ) -> std::result::Result<(), DbError> {
+    async fn set_default_provider(&self, id: &LlmProviderId) -> std::result::Result<(), DbError> {
         <Self as LlmProviderRepository>::set_default_provider(self, id)
             .await
             .map_err(|e| DbError::QueryFailed {

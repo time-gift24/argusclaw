@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 
-use argus_protocol::ThreadId;
 use crate::error::DbError;
-use crate::types::{MessageRecord, MessageId, ThreadRecord};
+use crate::types::{MessageId, MessageRecord, ThreadRecord};
+use argus_protocol::ThreadId;
 
 /// Repository trait for thread persistence.
 #[async_trait]

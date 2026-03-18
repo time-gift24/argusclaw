@@ -47,8 +47,11 @@ pub use db::llm::{
 pub use argus_tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
 
 // LLM Types - from argus-protocol (types) and argus-llm (ProviderManager)
-pub use argus_protocol::{ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition};
 pub use argus_llm::ProviderManager;
+pub use argus_protocol::{
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+};
 
 // User Types
 pub use user::UserInfo;
@@ -75,9 +78,5 @@ pub use db::thread::{MessageRecord, ThreadRecord, ThreadRepository};
 pub use db::{ApprovalRepository, SqliteJobRepository, SqliteWorkflowRepository};
 #[cfg(feature = "dev")]
 pub use job::{JobRecord, JobRepository, JobType};
-#[cfg(feature = "dev")]
-pub use argus_protocol::llm::LlmEventStream;
-#[cfg(feature = "dev")]
-pub use argus_llm::ProviderManager;
 #[cfg(feature = "dev")]
 pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};

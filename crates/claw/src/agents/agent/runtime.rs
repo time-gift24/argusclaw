@@ -7,13 +7,13 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use argus_thread::compact::{Compactor, CompactorManager};
-use argus_thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord};
 use crate::approval::{ApprovalHook, ApprovalManager, ApprovalPolicy};
 use crate::error::AgentError;
-use argus_protocol::{ChatMessage, LlmProvider};
 use crate::protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadId};
+use argus_protocol::{ChatMessage, LlmProvider};
+use argus_thread::compact::{Compactor, CompactorManager};
+use argus_thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
 use argus_tool::ToolManager;
 
 /// Runtime information about an agent.
@@ -83,7 +83,7 @@ impl AgentBuilder {
     #[must_use]
     pub fn from_record(record: &AgentRecord, provider: Arc<dyn LlmProvider>) -> Self {
         Self::default()
-            .id(record.id.clone())
+            .id(record.id)
             .system_prompt(record.system_prompt.clone())
             .provider(provider)
     }
@@ -293,7 +293,7 @@ impl Agent {
     #[must_use]
     pub fn runtime_info(&self) -> AgentRuntimeInfo {
         AgentRuntimeInfo::new(
-            self.id.clone(),
+            self.id,
             self.threads.len(),
             self.provider.model_name().to_string(),
         )
@@ -321,7 +321,7 @@ impl Agent {
         let thread_arc = self.threads.get(thread_id)?.value().clone();
         let thread = thread_arc.lock().await;
         Some(crate::protocol::ThreadSnapshot {
-            runtime_agent_id: self.id.clone(),
+            runtime_agent_id: self.id,
             thread_id: ThreadId::parse(thread.id()).unwrap_or_default(),
             messages: thread
                 .history()
@@ -358,7 +358,7 @@ impl Agent {
 impl Clone for Agent {
     fn clone(&self) -> Self {
         Self {
-            id: self.id.clone(),
+            id: self.id,
             system_prompt: self.system_prompt.clone(),
             provider: self.provider.clone(),
             tool_manager: self.tool_manager.clone(),
@@ -389,11 +389,11 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
+    use crate::protocol::ThreadEvent;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse};
     use argus_protocol::{
         FinishReason, LlmError, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
     };
-    use crate::protocol::ThreadEvent;
 
     #[test]
     fn test_agent_runtime_info() {

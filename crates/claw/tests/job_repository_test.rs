@@ -275,7 +275,10 @@ async fn test_delete_job() {
     assert!(fetched.is_none(), "Job should be deleted");
 
     // Delete non-existent job should return false
-    let deleted = repo.delete(&JobId::new("non-existent".to_string())).await.unwrap();
+    let deleted = repo
+        .delete(&JobId::new("non-existent".to_string()))
+        .await
+        .unwrap();
     assert!(!deleted, "Delete should return false for non-existent job");
 }
 

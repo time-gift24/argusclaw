@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use argus_protocol::{SessionId, ThreadId};
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
 
 use crate::RuntimeThread;
 
@@ -43,7 +43,7 @@ impl Session {
     }
 
     pub fn add_thread(&self, thread: Arc<RuntimeThread>) {
-        self.threads.insert(thread.id.clone(), thread);
+        self.threads.insert(thread.id, thread);
     }
 
     pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RuntimeThread>> {
@@ -61,7 +61,7 @@ impl Session {
             let turn_count = thread.turn_count().await as i64;
             let token_count = thread.token_count().await as i64;
             summaries.push(ThreadSummary {
-                id: thread.id.clone(),
+                id: thread.id,
                 title: thread.title.clone(),
                 turn_count,
                 token_count,

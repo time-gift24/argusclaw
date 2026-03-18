@@ -3,9 +3,7 @@
 //! Re-exports shared types from argus_protocol and provides claw-specific types.
 
 // Re-export shared types from argus_protocol
-pub use argus_protocol::{
-    ApprovalRequest, ApprovalResponse,
-};
+pub use argus_protocol::{ApprovalRequest, ApprovalResponse};
 
 // Claw-specific constants
 /// Maximum length of tool names (chars).

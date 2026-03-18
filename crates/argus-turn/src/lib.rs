@@ -22,9 +22,12 @@ pub mod config;
 pub mod error;
 pub mod execution;
 
-pub use config::{TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput, TurnOutputBuilder, TurnStreamEvent};
+pub use config::{
+    TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput, TurnOutputBuilder,
+    TurnStreamEvent,
+};
 pub use error::TurnError;
-pub use execution::{execute_turn, execute_turn_streaming, ExecutionMode};
+pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
 
 // Re-export hook types from argus-protocol for convenience
 pub use argus_protocol::{

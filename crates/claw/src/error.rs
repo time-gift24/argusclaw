@@ -2,10 +2,10 @@ use thiserror::Error;
 
 use crate::agents::AgentId;
 use crate::db::DbError;
-use argus_protocol::{ArgusError, LlmError};
 use crate::protocol::ThreadId;
-use argus_tool::ToolError;
 use crate::user::UserError;
+use argus_protocol::{ArgusError, LlmError};
+use argus_tool::ToolError;
 
 #[derive(Debug, Error)]
 pub enum AgentError {

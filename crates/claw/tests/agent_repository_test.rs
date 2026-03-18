@@ -156,10 +156,7 @@ async fn summary_excludes_large_fields() {
     repo.upsert(&record).await.unwrap();
 
     let summaries = repo.list().await.unwrap();
-    let summary = summaries
-        .iter()
-        .find(|s| s.id.into_inner() == 1)
-        .unwrap();
+    let summary = summaries.iter().find(|s| s.id.into_inner() == 1).unwrap();
 
     // Summary should have display_name but not system_prompt
     // (This is enforced at compile time by the type system)
