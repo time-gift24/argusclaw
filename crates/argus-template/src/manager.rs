@@ -127,7 +127,10 @@ impl TemplateManager {
                 reason: e.to_string(),
             })?;
 
-        for statement in ["UPDATE threads SET template_id = ? WHERE template_id = 0"] {
+        for statement in [
+            "UPDATE threads SET template_id = ? WHERE template_id = 0",
+            "UPDATE jobs SET agent_id = ? WHERE agent_id = 0",
+        ] {
             sqlx::query(statement)
                 .bind(repaired_id)
                 .execute(&mut *tx)
