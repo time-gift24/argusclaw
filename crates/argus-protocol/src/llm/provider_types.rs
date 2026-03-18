@@ -59,8 +59,8 @@ impl fmt::Display for LlmProviderId {
 
 /// Supported LLM provider kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum LlmProviderKind {
+    #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
 }
 
@@ -258,6 +258,22 @@ mod tests {
 
         assert_eq!(record.models.len(), 2);
         assert_eq!(record.default_model, "gpt-4.1");
+    }
+
+    #[test]
+    fn llm_provider_kind_deserializes_from_frontend_format() {
+        // Test that the kind field deserializes correctly from frontend format
+        let json = r#""openai-compatible""#;
+        let kind: LlmProviderKind = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(kind, LlmProviderKind::OpenAiCompatible);
+    }
+
+    #[test]
+    fn llm_provider_kind_serializes_to_frontend_format() {
+        // Test that the kind field serializes correctly to frontend format
+        let kind = LlmProviderKind::OpenAiCompatible;
+        let serialized = serde_json::to_string(&kind).expect("should serialize");
+        assert_eq!(serialized, r#""openai-compatible""#);
     }
 
     #[test]
