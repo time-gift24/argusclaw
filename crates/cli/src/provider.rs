@@ -12,12 +12,6 @@ use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(feature = "dev")]
-use std::path::Path;
-
-#[cfg(feature = "dev")]
-use crate::dev::config;
-
 /// LLM 提供商管理命令。
 #[derive(Debug, Subcommand)]
 pub enum ProviderCommand {
@@ -59,13 +53,6 @@ pub enum ProviderCommand {
         /// 要移除的请求头名称。
         #[arg(long)]
         name: String,
-    },
-    /// 从 TOML 配置文件导入提供商。
-    #[cfg(feature = "dev")]
-    Import {
-        /// TOML 配置文件路径。
-        #[arg(long)]
-        file: String,
     },
 }
 
@@ -236,15 +223,6 @@ pub async fn run_provider_command(wing: Arc<ArgusWing>, command: ProviderCommand
             } else {
                 println!("Header `{name}` not found on provider `{provider_id}`");
             }
-        }
-        #[cfg(feature = "dev")]
-        ProviderCommand::Import { file } => {
-            let contents = std::fs::read_to_string(Path::new(&file))
-                .with_context(|| format!("failed to read provider import file `{file}`"))?;
-            let config: config::ProviderImportFile =
-                toml::from_str(&contents).context("failed to parse provider import toml")?;
-            let records = config.into_records();
-            wing.import_providers(records).await?;
         }
     }
 

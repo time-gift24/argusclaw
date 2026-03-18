@@ -54,8 +54,8 @@ async fn main() -> Result<()> {
 fn init_tracing() {
     // Only initialize tracing if RUST_LOG is set
     if std::env::var("RUST_LOG").is_ok() {
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("arguswing=info,claw=info"));
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("arguswing=info"));
 
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)

@@ -9,9 +9,6 @@ use argus_protocol::{LlmProviderRecord, LlmStreamEvent};
 pub mod agent;
 pub mod provider;
 
-#[cfg(feature = "dev")]
-pub mod dev;
-
 // ---------------------------------------------------------------------------
 // Database path resolution
 // ---------------------------------------------------------------------------

@@ -32,4 +32,3 @@ uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["dep:argus-dev", "dep:argus-turn", "dep:futures-util", "dep:owo-colors", "dep:serde_json", "dep:sqlx", "dep:toml"]
