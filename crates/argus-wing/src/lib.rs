@@ -455,7 +455,7 @@ impl ArgusWing {
         self.provider_manager
             .complete_text(provider_id, prompt)
             .await
-            .map_err(|e| ArgusError::Provider {
+            .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
             })
     }
@@ -470,9 +470,16 @@ impl ArgusWing {
         self.provider_manager
             .stream_text(provider_id, prompt)
             .await
-            .map_err(|e| ArgusError::Provider {
+            .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
             })
+    }
+
+    #[cfg(feature = "dev")]
+    /// Get an LLM provider by ID (dev only).
+    pub async fn get_provider(&self, id: &LlmProviderId) -> Result<Arc<dyn LlmProvider>, ArgusError> {
+        self.provider_manager.get_provider(id).await
+            .map_err(|e| ArgusError::LlmError { reason: e.to_string() })
     }
 }
 
