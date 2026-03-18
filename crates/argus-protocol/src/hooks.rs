@@ -218,6 +218,20 @@ impl HookRegistry {
             .map(|v| !v.is_empty())
             .unwrap_or(false)
     }
+
+    /// Get all registered handlers across all events.
+    ///
+    /// This is useful when migrating from HookRegistry to direct handler ownership
+    /// (e.g., when building a Turn with tools and hooks).
+    pub fn all_handlers(&self) -> Vec<Arc<dyn HookHandler>> {
+        let mut all = Vec::new();
+        for entry in self.handlers.iter() {
+            for handler in entry.value().iter() {
+                all.push(handler.clone());
+            }
+        }
+        all
+    }
 }
 
 #[cfg(test)]

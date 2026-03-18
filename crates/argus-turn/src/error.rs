@@ -42,6 +42,17 @@ pub enum TurnError {
     /// LLM provider not configured.
     #[error("LLM provider not configured for TurnInput")]
     ProviderNotConfigured,
+
+    /// Turn builder failed (missing required field).
+    #[error("Turn build failed: {0}")]
+    BuildFailed(String),
+}
+
+// Implement From<UninitializedFieldError> for derive_builder compatibility
+impl From<derive_builder::UninitializedFieldError> for TurnError {
+    fn from(err: derive_builder::UninitializedFieldError) -> Self {
+        TurnError::BuildFailed(err.to_string())
+    }
 }
 
 #[cfg(test)]

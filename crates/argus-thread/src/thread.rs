@@ -6,9 +6,10 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider};
-use argus_protocol::{HookRegistry, ThreadEvent};
+use argus_protocol::{HookHandler, HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
-use argus_turn::{TurnInputBuilder, TurnOutput, TurnStreamEvent, execute_turn_streaming};
+use argus_protocol::tool::NamedTool;
+use argus_turn::{TurnBuilder, TurnOutput};
 
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
@@ -232,102 +233,47 @@ impl Thread {
         let turn_number = self.turn_count;
         let thread_id = self.id.clone();
 
-        // Create channel for streaming events
-        let (stream_tx, mut stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        // Thread is responsible for building: collect tools and hooks
+        let tools: Vec<Arc<dyn NamedTool>> = self
+            .tool_manager
+            .list_ids()
+            .iter()
+            .filter_map(|id| self.tool_manager.get(id))
+            .collect();
 
-        // Build TurnInput with stream_sender
-        let tool_ids = self.tool_manager.list_ids();
-        let mut turn_input_builder = TurnInputBuilder::new()
-            .provider(self.provider.clone())
-            .messages(self.messages.clone())
-            .tool_manager(self.tool_manager.clone())
-            .tool_ids(tool_ids)
-            .thread_event_sender(self.event_sender.clone())
+        let hooks: Vec<Arc<dyn HookHandler>> = self
+            .hooks
+            .as_ref()
+            .map(|registry| registry.all_handlers())
+            .unwrap_or_default();
+
+        // Create internal stream channel
+        let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+
+        // Build Turn using TurnBuilder
+        let turn = TurnBuilder::default()
+            .turn_number(turn_number)
             .thread_id(thread_id.clone())
-            .stream_sender(stream_tx);
-
-        // Set hooks if present
-        if let Some(hooks) = self.hooks.clone() {
-            turn_input_builder = turn_input_builder.hooks(hooks);
-        }
-
-        // SAFETY: provider is always set since Thread requires it at construction.
-        let turn_input = turn_input_builder
+            .messages(self.messages.clone())
+            .provider(self.provider.clone())
+            .tools(tools)
+            .hooks(hooks)
+            .config(self.config.turn_config.clone())
+            .stream_tx(stream_tx)
+            .thread_event_tx(self.event_sender.clone())
             .build()
-            .expect("TurnInput build cannot fail: provider is guaranteed by Thread");
+            .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))?;
 
-        let event_sender = self.event_sender.clone();
-        let config = self.config.turn_config.clone();
+        // Turn is responsible for execution
+        let result = turn.execute().await;
 
-        // Start event forwarding task (runs concurrently with turn execution)
-        let forwarder_event_sender = event_sender.clone();
-        let forwarder_thread_id = thread_id.clone();
-        let forwarder = tokio::spawn(async move {
-            while let Ok(event) = stream_rx.recv().await {
-                match event {
-                    TurnStreamEvent::LlmEvent(llm_event) => {
-                        let _ = forwarder_event_sender.send(ThreadEvent::Processing {
-                            thread_id: forwarder_thread_id.clone(),
-                            turn_number,
-                            event: llm_event,
-                        });
-                    }
-                    TurnStreamEvent::ToolStarted {
-                        tool_call_id,
-                        tool_name,
-                        arguments,
-                    } => {
-                        let _ = forwarder_event_sender.send(ThreadEvent::ToolStarted {
-                            thread_id: forwarder_thread_id.clone(),
-                            turn_number,
-                            tool_call_id,
-                            tool_name,
-                            arguments,
-                        });
-                    }
-                    TurnStreamEvent::ToolCompleted {
-                        tool_call_id,
-                        tool_name,
-                        result: tool_result,
-                    } => {
-                        let _ = forwarder_event_sender.send(ThreadEvent::ToolCompleted {
-                            thread_id: forwarder_thread_id.clone(),
-                            turn_number,
-                            tool_call_id,
-                            tool_name,
-                            result: tool_result,
-                        });
-                    }
-                }
-            }
-        });
-
-        let result = execute_turn_streaming(turn_input, config).await;
-        let _ = forwarder.await;
-
-        let final_result = match result {
+        match result {
             Ok(output) => {
-                let token_usage = output.token_usage.clone();
                 self.apply_turn_output(output);
-                let _ = event_sender.send(ThreadEvent::TurnCompleted {
-                    thread_id: thread_id.clone(),
-                    turn_number,
-                    token_usage,
-                });
                 Ok(())
             }
-            Err(error) => {
-                let _ = event_sender.send(ThreadEvent::TurnFailed {
-                    thread_id: thread_id.clone(),
-                    turn_number,
-                    error: error.to_string(),
-                });
-                Err(ThreadError::TurnFailed(error))
-            }
-        };
-
-        let _ = event_sender.send(ThreadEvent::Idle { thread_id });
-        final_result
+            Err(error) => Err(ThreadError::TurnFailed(error)),
+        }
     }
 
     /// Estimate token count for a string.

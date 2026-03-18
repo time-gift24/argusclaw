@@ -26,6 +26,10 @@ pub enum ThreadError {
     #[error("Turn execution failed: {0}")]
     TurnFailed(#[from] TurnError),
 
+    /// Turn build failed.
+    #[error("Turn build failed: {0}")]
+    TurnBuildFailed(String),
+
     /// Compact operation failed.
     #[error("Compact failed: {0}")]
     CompactFailed(#[from] CompactError),

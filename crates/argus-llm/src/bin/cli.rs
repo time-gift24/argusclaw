@@ -237,18 +237,35 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool) ->
 
         let mut stream = event_stream;
         use futures_util::StreamExt;
+        use std::io::Write;
+
+        // Track state for printing section headers
+        let mut reasoning_started = false;
+        let mut summary_started = false;
 
         while let Some(event) = stream.next().await {
             match event {
-                Ok(LlmStreamEvent::ContentDelta { delta }) => {
+                Ok(LlmStreamEvent::ReasoningDelta { delta }) if !delta.is_empty() => {
+                    if !reasoning_started {
+                        print!("[Reasoning] ");
+                        reasoning_started = true;
+                    }
                     print!("{}", delta);
-                    use std::io::Write;
                     std::io::stdout().flush().ok();
                 }
-                Ok(LlmStreamEvent::ReasoningDelta { delta }) => {
-                    eprint!("[Reasoning] {}", delta);
-                    use std::io::Write;
-                    std::io::stderr().flush().ok();
+                Ok(LlmStreamEvent::ContentDelta { delta }) if !delta.is_empty() => {
+                    // Transition from reasoning to summary: add newline before summary
+                    if reasoning_started && !summary_started {
+                        println!();
+                        print!("[Summary] ");
+                        summary_started = true;
+                    }
+                    if !summary_started {
+                        print!("[Summary] ");
+                        summary_started = true;
+                    }
+                    print!("{}", delta);
+                    std::io::stdout().flush().ok();
                 }
                 Ok(LlmStreamEvent::Finished { .. }) => {
                     println!();
