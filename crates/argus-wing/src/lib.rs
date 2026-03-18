@@ -591,7 +591,6 @@ mod tests {
     async fn create_session_with_approval_configures_policy() {
         use argus_protocol::LlmProviderRecord;
         use std::collections::HashMap;
-
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
 
