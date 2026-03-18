@@ -28,10 +28,7 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 
 ```bash
 # 创建新功能分支
-/worktrees/feature-xxx  # 在这里工作
-
-# 完成后退役
-/worktrees/docs/xxx      # 文档放在这里
+.worktrees/feature-xxx  # 在这里工作
 ```
 
 ## 分支与文档规则
