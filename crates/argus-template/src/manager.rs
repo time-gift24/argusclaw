@@ -6,29 +6,16 @@ pub struct TemplateManager {
     pool: SqlitePool,
 }
 
-fn format_delete_blocked_reason(
-    id: AgentId,
-    thread_count: i64,
-    approval_request_count: i64,
-    job_count: i64,
-) -> String {
-    let mut blockers = Vec::new();
-
+fn format_delete_blocked_reason(id: AgentId, thread_count: i64) -> String {
     if thread_count > 0 {
-        blockers.push(format!("{} 个会话线程", thread_count));
+        format!(
+            "无法删除智能体 {}：当前仍被 {} 个会话线程引用，请先删除相关会话。",
+            id.inner(),
+            thread_count
+        )
+    } else {
+        format!("无法删除智能体 {}：存在引用", id.inner())
     }
-    if approval_request_count > 0 {
-        blockers.push(format!("{} 个审批请求", approval_request_count));
-    }
-    if job_count > 0 {
-        blockers.push(format!("{} 个任务", job_count));
-    }
-
-    format!(
-        "无法删除智能体 {}：当前仍被 {} 引用，请先删除相关会话、审批或任务。",
-        id.inner(),
-        blockers.join("、")
-    )
 }
 
 impl TemplateManager {
@@ -140,11 +127,7 @@ impl TemplateManager {
                 reason: e.to_string(),
             })?;
 
-        for statement in [
-            "UPDATE threads SET template_id = ? WHERE template_id = 0",
-            "UPDATE approval_requests SET agent_id = ? WHERE agent_id = 0",
-            "UPDATE jobs SET agent_id = ? WHERE agent_id = 0",
-        ] {
+        for statement in ["UPDATE threads SET template_id = ? WHERE template_id = 0"] {
             sqlx::query(statement)
                 .bind(repaired_id)
                 .execute(&mut *tx)
@@ -223,7 +206,7 @@ impl TemplateManager {
         }
     }
 
-    async fn count_references(&self, id: AgentId) -> Result<(i64, i64, i64)> {
+    async fn count_references(&self, id: AgentId) -> Result<i64> {
         let thread_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE template_id = ?")
                 .bind(id.inner())
@@ -233,38 +216,16 @@ impl TemplateManager {
                     reason: e.to_string(),
                 })?;
 
-        let approval_request_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM approval_requests WHERE agent_id = ?")
-                .bind(id.inner())
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| ArgusError::DatabaseError {
-                    reason: e.to_string(),
-                })?;
-
-        let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE agent_id = ?")
-            .bind(id.inner())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
-
-        Ok((thread_count, approval_request_count, job_count))
+        Ok(thread_count)
     }
 
     /// Delete a template.
     pub async fn delete(&self, id: AgentId) -> Result<()> {
-        let (thread_count, approval_request_count, job_count) = self.count_references(id).await?;
+        let thread_count = self.count_references(id).await?;
 
-        if thread_count > 0 || approval_request_count > 0 || job_count > 0 {
+        if thread_count > 0 {
             return Err(ArgusError::DatabaseError {
-                reason: format_delete_blocked_reason(
-                    id,
-                    thread_count,
-                    approval_request_count,
-                    job_count,
-                ),
+                reason: format_delete_blocked_reason(id, thread_count),
             });
         }
 
