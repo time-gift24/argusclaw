@@ -249,11 +249,29 @@ async fn tool_test(args: ToolTestArgs, config: &Config) -> Result<()> {
     let (stream_tx, _) = broadcast::channel::<TurnStreamEvent>(256);
     let (thread_event_tx, _) = broadcast::channel(256);
 
-    // Build turn with echo tool
+    // System prompt that forces the assistant to use echo tool
+    let system_prompt = r#"You are a helpful assistant that MUST use the echo tool to respond.
+
+IMPORTANT RULES:
+1. You MUST use the echo tool to echo back messages
+2. After calling the echo tool and receiving the result, briefly mention what was echoed
+3. Do NOT just respond with text - always use the echo tool first
+4. The echo tool takes a "message" parameter with the string to echo
+
+Example flow:
+- User: "Echo hello"
+- You: Call echo tool with {"message": "hello"}
+- Tool returns: {"echoed": "hello"}
+- You: "I echoed 'hello' for you""#;
+
+    // Build turn with echo tool and system prompt
     let turn = TurnBuilder::default()
         .turn_number(1)
         .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user(&args.prompt)])
+        .messages(vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(&args.prompt),
+        ])
         .provider(provider)
         .tools(vec![Arc::new(EchoTool) as Arc<dyn NamedTool>])
         .hooks(vec![])
@@ -290,7 +308,7 @@ async fn tool_test(args: ToolTestArgs, config: &Config) -> Result<()> {
 
         if let Some(tool_calls) = &msg.tool_calls {
             for tc in tool_calls {
-                println!("    🔧 Tool call: {} ({})", tc.name, tc.id);
+                println!("    🔧 Tool call: {} ({}) - args: {}", tc.name, tc.id, tc.arguments);
             }
         }
     }
