@@ -1,0 +1,11 @@
+# argus-llm Configuration Example
+# Copy this file to llm.toml and fill in your API key
+
+# API base URL (default: https://api.openai.com/v1)
+# base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+# API Key (required)
+# api_key = "your-api-key-here"
+
+# Default model (default: gpt-4o-mini)
+# model = "glm-4-plus"

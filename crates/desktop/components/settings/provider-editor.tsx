@@ -117,6 +117,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         default_model: formData.default_model,
         is_default: formData.is_default,
         extra_headers: formData.extra_headers,
+        secret_status: formData.secret_status,
       }
       await providers.upsert(input)
       router.push("/settings/providers")
@@ -163,6 +164,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         default_model: formData.default_model || model,
         is_default: formData.is_default,
         extra_headers: formData.extra_headers,
+        secret_status: formData.secret_status,
       }
 
       // For existing providers, test the saved record

@@ -1,17 +1,17 @@
 //! Thread subscription management for event forwarding.
 //!
 //! This module manages active thread subscriptions and forwards events
-//! from claw to the frontend via Tauri events.
+//! from ArgusWing to the frontend via Tauri events.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use argus_protocol::{SessionId, ThreadEvent, ThreadId};
+use argus_wing::ArgusWing;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
-
-use claw::{AgentId, AppContext, ThreadEvent, ThreadId};
 
 use crate::events::ThreadEventEnvelope;
 
@@ -39,10 +39,10 @@ impl ThreadSubscriptions {
     pub async fn start_forwarder(
         &self,
         session_key: String,
-        runtime_agent_id: AgentId,
+        session_id: SessionId,
         thread_id: ThreadId,
         app: AppHandle,
-        ctx: Arc<AppContext>,
+        wing: Arc<ArgusWing>,
     ) -> Result<(), String> {
         let mut inner = self.inner.lock().await;
 
@@ -52,8 +52,8 @@ impl ThreadSubscriptions {
         }
 
         // Subscribe to thread events
-        let receiver = ctx
-            .subscribe(&runtime_agent_id, &thread_id)
+        let receiver = wing
+            .subscribe(session_id, thread_id)
             .await
             .ok_or_else(|| "Thread not found".to_string())?;
 
@@ -61,13 +61,13 @@ impl ThreadSubscriptions {
         let cancellation_token = token.clone();
         inner.subscriptions.insert(session_key.clone(), token);
 
-        let runtime_agent_id_str = runtime_agent_id.to_string();
+        let session_id_str = session_id.inner().to_string();
 
         // Spawn the forwarder task
         tokio::spawn(async move {
             Self::forward_events(
                 receiver,
-                runtime_agent_id_str,
+                session_id_str,
                 app,
                 cancellation_token,
                 session_key,
@@ -99,7 +99,7 @@ impl ThreadSubscriptions {
 
     async fn forward_events(
         mut receiver: broadcast::Receiver<ThreadEvent>,
-        runtime_agent_id: String,
+        session_id: String,
         app: AppHandle,
         cancellation_token: CancellationToken,
         session_key: String,
@@ -114,7 +114,7 @@ impl ThreadSubscriptions {
                     match result {
                         Ok(event) => {
                             if let Some(envelope) = ThreadEventEnvelope::from_thread_event(
-                                runtime_agent_id.clone(),
+                                session_id.clone(),
                                 event,
                             ) {
                                 if let Err(e) = app.emit("thread:event", &envelope) {

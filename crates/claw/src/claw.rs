@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::{env, path::Path, path::PathBuf};
 
+use async_trait::async_trait;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -11,20 +12,26 @@ use crate::agents::Agent;
 use crate::agents::builtins::{DEFAULT_AGENT_DISPLAY_NAME, load_arguswing};
 use crate::agents::thread::ThreadInfo;
 use crate::agents::{AgentId, AgentManager, AgentRecord, ThreadConfig};
-use crate::db::llm::{LlmProviderId, LlmProviderRecord, LlmProviderSummary, ProviderTestResult};
-use crate::db::sqlite::{
-    SqliteAgentRepository, SqliteJobRepository, SqliteLlmProviderRepository, connect, connect_path,
-    migrate,
-};
+use crate::db::llm::{LlmProviderId, LlmProviderRecord, ProviderTestResult};
+use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use crate::error::AgentError;
 use crate::job::JobRepository;
-#[cfg(feature = "dev")]
-use crate::llm::provider::LlmEventStream;
-use crate::llm::{LLMManager, LlmProvider};
 use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use crate::scheduler::{Scheduler, SchedulerConfig};
-use crate::tool::ToolManager;
 use crate::user::UserService;
+use argus_llm::ProviderManager;
+#[cfg(feature = "dev")]
+use argus_protocol::llm::LlmEventStream;
+use argus_protocol::{ArgusError, LlmProvider, ProviderId};
+use argus_tool::ToolManager;
+
+// Session layer - use existing protocol types
+use argus_log::SqliteTurnLogRepository;
+use argus_protocol::SessionId;
+use argus_session::ProviderResolver as ProviderResolverTrait;
+use argus_session::{SessionManager, SessionSummary, ThreadSummary};
+use argus_template::TemplateManager;
+use argus_thread::CompactorManager;
 
 /// Ensures the default ArgusWing agent exists in the database.
 async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentError> {
@@ -43,15 +50,48 @@ async fn ensure_default_agent(agent_manager: &AgentManager) -> Result<(), AgentE
     Ok(())
 }
 
+/// Wrapper that implements ProviderResolver for ProviderManager.
+///
+/// This bridges the argus-session ProviderResolver trait with argus-llm's ProviderManager.
+pub struct ProviderManagerResolver {
+    provider_manager: Arc<ProviderManager>,
+}
+
+impl ProviderManagerResolver {
+    /// Create a new resolver wrapper.
+    pub fn new(provider_manager: Arc<ProviderManager>) -> Self {
+        Self { provider_manager }
+    }
+}
+
+#[async_trait]
+impl ProviderResolverTrait for ProviderManagerResolver {
+    async fn resolve(
+        &self,
+        id: ProviderId,
+    ) -> std::result::Result<Arc<dyn LlmProvider>, ArgusError> {
+        // Convert argus-protocol ProviderId to argus-protocol LlmProviderId
+        let provider_id = LlmProviderId::new(id.inner());
+        self.provider_manager.get_provider(&provider_id).await
+    }
+
+    async fn default_provider(&self) -> std::result::Result<Arc<dyn LlmProvider>, ArgusError> {
+        self.provider_manager.get_default_provider().await
+    }
+}
+
 #[derive(Clone)]
 pub struct AppContext {
     db_pool: SqlitePool,
-    llm_manager: Arc<LLMManager>,
+    provider_manager: Arc<ProviderManager>,
     agent_manager: Arc<AgentManager>,
     tool_manager: Arc<ToolManager>,
     job_repository: Arc<dyn JobRepository>,
     shutdown: CancellationToken,
     user: UserService,
+    // Session layer
+    session_manager: Arc<SessionManager>,
+    turn_log_repository: Arc<SqliteTurnLogRepository>,
 }
 
 impl AppContext {
@@ -66,18 +106,18 @@ impl AppContext {
         }?;
         migrate(&pool).await?;
 
-        let llm_repository = Arc::new(SqliteLlmProviderRepository::new(pool.clone()));
-        let agent_repository = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let agent_repository = Arc::new(ArgusSqlite::new(pool.clone()));
         let job_repository: Arc<dyn JobRepository> =
-            Arc::new(SqliteJobRepository::new(pool.clone()));
+            Arc::new(ArgusSqlite::new(pool.clone()));
 
         let user = UserService::new(pool.clone());
 
-        let llm_manager = Arc::new(LLMManager::new(llm_repository));
+        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
         let tool_manager = Arc::new(ToolManager::new());
         let agent_manager = Arc::new(AgentManager::new(
             agent_repository,
-            llm_manager.clone(),
+            provider_manager.clone(),
             tool_manager.clone(),
             None,
         ));
@@ -101,34 +141,60 @@ impl AppContext {
             }
         });
 
+        // Initialize session layer
+        let template_manager = Arc::new(TemplateManager::new(pool.clone()));
+        let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+        let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let session_manager = Arc::new(SessionManager::new(
+            pool.clone(),
+            template_manager,
+            provider_resolver,
+            tool_manager.clone(),
+            compactor_manager,
+        ));
+        let turn_log_repository = Arc::new(SqliteTurnLogRepository::new(pool.clone()));
+
         Ok(Self {
             db_pool: pool,
-            llm_manager,
+            provider_manager,
             agent_manager,
             tool_manager,
             job_repository,
             shutdown,
             user,
+            session_manager,
+            turn_log_repository,
         })
     }
 
     #[must_use]
     pub fn new(
-        llm_manager: Arc<LLMManager>,
+        provider_manager: Arc<ProviderManager>,
         agent_manager: Arc<AgentManager>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
         let pool = SqlitePool::connect_lazy_with(
             sqlx::sqlite::SqliteConnectOptions::new().filename(std::path::Path::new(":memory:")),
         );
+        let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+        let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let session_manager = Arc::new(SessionManager::new(
+            pool.clone(),
+            Arc::new(TemplateManager::new(pool.clone())),
+            provider_resolver,
+            tool_manager.clone(),
+            compactor_manager,
+        ));
         Self {
             db_pool: pool.clone(),
-            llm_manager,
+            provider_manager,
             agent_manager,
             tool_manager,
-            job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
+            job_repository: Arc::new(ArgusSqlite::new(pool.clone())),
             shutdown: CancellationToken::new(),
-            user: UserService::new(pool),
+            user: UserService::new(pool.clone()),
+            session_manager,
+            turn_log_repository: Arc::new(SqliteTurnLogRepository::new(pool.clone())),
         }
     }
 
@@ -136,18 +202,29 @@ impl AppContext {
     #[must_use]
     pub fn with_pool(
         pool: SqlitePool,
-        llm_manager: Arc<LLMManager>,
+        provider_manager: Arc<ProviderManager>,
         agent_manager: Arc<AgentManager>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
+        let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+        let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let session_manager = Arc::new(SessionManager::new(
+            pool.clone(),
+            Arc::new(TemplateManager::new(pool.clone())),
+            provider_resolver,
+            tool_manager.clone(),
+            compactor_manager,
+        ));
         Self {
             db_pool: pool.clone(),
-            llm_manager,
+            provider_manager,
             agent_manager,
             tool_manager,
-            job_repository: Arc::new(SqliteJobRepository::new(pool.clone())),
+            job_repository: Arc::new(ArgusSqlite::new(pool.clone())),
             shutdown: CancellationToken::new(),
-            user: UserService::new(pool),
+            user: UserService::new(pool.clone()),
+            session_manager,
+            turn_log_repository: Arc::new(SqliteTurnLogRepository::new(pool.clone())),
         }
     }
 
@@ -159,8 +236,8 @@ impl AppContext {
 
     #[cfg(feature = "dev")]
     #[must_use]
-    pub fn llm_manager(&self) -> Arc<LLMManager> {
-        Arc::clone(&self.llm_manager)
+    pub fn provider_manager(&self) -> Arc<ProviderManager> {
+        Arc::clone(&self.provider_manager)
     }
 
     #[cfg(feature = "dev")]
@@ -190,41 +267,195 @@ impl AppContext {
         self.shutdown.cancel();
     }
 
-    pub async fn upsert_provider(&self, record: LlmProviderRecord) -> Result<LlmProviderId, AgentError> {
-        self.llm_manager.upsert_provider(record).await
+    // === Session Management API ===
+
+    /// List all sessions.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, AgentError> {
+        self.session_manager
+            .list_sessions()
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Create a new session.
+    pub async fn create_session(&self, name: String) -> Result<SessionId, AgentError> {
+        self.session_manager
+            .create(name)
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Load a session into memory.
+    pub async fn load_session(&self, session_id: SessionId) -> Result<(), AgentError> {
+        self.session_manager
+            .load(session_id)
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    /// Unload a session from memory.
+    pub async fn unload_session(&self, session_id: SessionId) -> Result<(), AgentError> {
+        self.session_manager
+            .unload(session_id)
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Delete a session.
+    pub async fn delete_session(&self, session_id: SessionId) -> Result<(), AgentError> {
+        self.session_manager
+            .delete(session_id)
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Create a new thread in a session.
+    pub async fn create_thread_in_session(
+        &self,
+        session_id: SessionId,
+        template_id: AgentId,
+        provider_id: LlmProviderId,
+    ) -> Result<ThreadId, AgentError> {
+        // Convert to argus-protocol types for session manager
+        let template_id_proto = argus_protocol::AgentId::new(template_id.into_inner());
+        let provider_id_proto = argus_protocol::ProviderId::new(provider_id.into_inner());
+
+        let thread_id = self
+            .session_manager
+            .create_thread(session_id, template_id_proto, Some(provider_id_proto))
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })?;
+
+        // Convert back to claw's ThreadId
+        ThreadId::parse(&thread_id.to_string()).map_err(|e| AgentError::Session {
+            reason: e.to_string(),
+        })
+    }
+
+    /// Delete a thread from a session.
+    pub async fn delete_thread_from_session(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<(), AgentError> {
+        // Convert to argus-protocol ThreadId
+        let thread_id_proto =
+            argus_protocol::ThreadId::parse(&thread_id.to_string()).map_err(|e| {
+                AgentError::Session {
+                    reason: e.to_string(),
+                }
+            })?;
+
+        self.session_manager
+            .delete_thread(session_id, &thread_id_proto)
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
+    }
+
+    /// List threads in a session.
+    pub async fn list_threads_in_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<ThreadSummary>, AgentError> {
+        self.session_manager
+            .list_threads(session_id)
+            .await
+            .map_err(|e| AgentError::Session {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Run log cleanup (LRU-based).
+    pub async fn cleanup_turn_logs(&self) -> Result<i64, AgentError> {
+        use argus_log::LogCleaner;
+        use std::sync::Arc;
+
+        // Create a new cleaner with the right type
+        let pool = self.db_pool.clone();
+        let repo = Arc::new(SqliteTurnLogRepository::new(pool));
+        let cleaner = LogCleaner::new(repo, 20);
+        let report = cleaner.cleanup().await.map_err(|e| AgentError::Session {
+            reason: e.to_string(),
+        })?;
+        Ok(report.deleted_count)
+    }
+
+    pub async fn upsert_provider(
+        &self,
+        record: LlmProviderRecord,
+    ) -> Result<LlmProviderId, AgentError> {
+        self.provider_manager
+            .upsert_provider(record)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn delete_provider(&self, id: &LlmProviderId) -> Result<bool, AgentError> {
-        self.llm_manager.delete_provider(id).await
+        self.provider_manager
+            .delete_provider(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn import_providers(
         &self,
         records: Vec<LlmProviderRecord>,
     ) -> Result<(), AgentError> {
-        self.llm_manager.import_providers(records).await
+        self.provider_manager
+            .import_providers(records)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn get_provider_record(
         &self,
         id: &LlmProviderId,
     ) -> Result<LlmProviderRecord, AgentError> {
-        self.llm_manager.get_provider_record(id).await
-    }
-
-    pub async fn get_provider_summary(
-        &self,
-        id: &LlmProviderId,
-    ) -> Result<LlmProviderSummary, AgentError> {
-        self.llm_manager.get_provider_summary(id).await
+        self.provider_manager
+            .get_provider_record(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord, AgentError> {
-        self.llm_manager.get_default_provider_record().await
+        self.provider_manager
+            .get_default_provider_record()
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn set_default_provider(&self, id: &LlmProviderId) -> Result<(), AgentError> {
-        self.llm_manager.set_default_provider(id).await
+        self.provider_manager
+            .set_default_provider(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 获取 LLM Provider 实例
@@ -232,7 +463,12 @@ impl AppContext {
         &self,
         id: &LlmProviderId,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        self.llm_manager.get_provider(id).await
+        self.provider_manager
+            .get_provider(id)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 获取 LLM Provider 实例并指定模型
@@ -241,17 +477,32 @@ impl AppContext {
         id: &LlmProviderId,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        self.llm_manager.get_provider_with_model(id, model).await
+        self.provider_manager
+            .get_provider_with_model(id, model)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     /// 获取默认 LLM Provider
     pub async fn get_default_provider(&self) -> Result<Arc<dyn LlmProvider>, AgentError> {
-        self.llm_manager.get_default_provider().await
+        self.provider_manager
+            .get_default_provider()
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
-    /// 列出所有 provider 摘要
-    pub async fn list_providers(&self) -> Result<Vec<LlmProviderSummary>, AgentError> {
-        self.llm_manager.list_providers().await
+    /// 列出所有 provider 记录
+    pub async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, AgentError> {
+        self.provider_manager
+            .list_providers()
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn test_provider_connection(
@@ -259,7 +510,12 @@ impl AppContext {
         id: &LlmProviderId,
         model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.llm_manager.test_provider_connection(id, model).await
+        self.provider_manager
+            .test_provider_connection(id, model)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn test_provider_record(
@@ -267,7 +523,12 @@ impl AppContext {
         record: LlmProviderRecord,
         model: &str,
     ) -> Result<ProviderTestResult, AgentError> {
-        self.llm_manager.test_provider_record(record, model).await
+        self.provider_manager
+            .test_provider_record(record, model)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn upsert_template(&self, record: AgentRecord) -> Result<(), AgentError> {
@@ -319,7 +580,7 @@ impl AppContext {
         let template = self.get_default_agent_template().await?;
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
-        record.provider_id = Some(default_provider.id);
+        record.provider_id = Some(ProviderId::new(default_provider.id.into_inner()));
         self.agent_manager.create_agent(&record).await
     }
 
@@ -338,7 +599,7 @@ impl AppContext {
         let template = self.get_default_agent_template().await?;
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
-        record.provider_id = Some(default_provider.id);
+        record.provider_id = Some(ProviderId::new(default_provider.id.into_inner()));
         self.agent_manager
             .create_agent_with_approval(&record, approval_tools, auto_approve)
             .await
@@ -374,7 +635,7 @@ impl AppContext {
         };
 
         let mut runtime_record = record;
-        runtime_record.provider_id = Some(effective_provider);
+        runtime_record.provider_id = Some(ProviderId::new(effective_provider.into_inner()));
 
         // Collect high/critical risk tools for approval
         let approval_tools: Vec<String> = runtime_record
@@ -519,7 +780,12 @@ impl AppContext {
         provider_id: Option<&LlmProviderId>,
         prompt: impl Into<String>,
     ) -> Result<String, AgentError> {
-        self.llm_manager.complete_text(provider_id, prompt).await
+        self.provider_manager
+            .complete_text(provider_id, prompt)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 
     #[cfg(feature = "dev")]
@@ -528,7 +794,12 @@ impl AppContext {
         provider_id: Option<&LlmProviderId>,
         prompt: impl Into<String>,
     ) -> Result<LlmEventStream, AgentError> {
-        self.llm_manager.stream_text(provider_id, prompt).await
+        self.provider_manager
+            .stream_text(provider_id, prompt)
+            .await
+            .map_err(|e| AgentError::Provider {
+                reason: e.to_string(),
+            })
     }
 }
 

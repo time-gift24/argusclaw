@@ -39,6 +39,7 @@ export interface ProviderInput {
   default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 export type ProviderTestStatus =
@@ -100,12 +101,12 @@ export const agents = {
   get: (id: number) => invoke<AgentRecord | null>("get_agent_template", { id }),
 
   upsert: (record: AgentRecord) =>
-    invoke<void>("upsert_agent_template", {
+    invoke<string>("upsert_agent_template", {
       record: {
         ...record,
         provider_id: record.provider_id != null ? Number(record.provider_id) : null,
       },
-    }),
+    }).then((id) => parseInt(id, 10)),
 
   delete: (id: number) => invoke<boolean>("delete_agent_template", { id }),
 };
@@ -113,15 +114,14 @@ export const agents = {
 // Chat API
 export interface ChatSessionPayload {
   session_key: string;
+  session_id: number;
   template_id: number;
-  runtime_agent_id: number;
   thread_id: string;
-  effective_provider_id: number;
-  effective_model: string;
+  effective_provider_id: number | null;
 }
 
 export interface ThreadSnapshotPayload {
-  runtime_agent_id: string;
+  session_id: number;
   thread_id: string;
   messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -141,31 +141,27 @@ export const chat = {
   createChatSession: (
     templateId: number,
     providerPreferenceId: number | null,
-    modelOverride: string | null,
   ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
       templateId: templateId.toString(),
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
-      modelOverride,
     }),
 
-  sendMessage: (runtimeAgentId: string, threadId: string, content: string) =>
-    invoke<void>("send_message", { runtimeAgentId, threadId, content }),
+  sendMessage: (sessionId: number, threadId: string, content: string) =>
+    invoke<void>("send_message", { sessionId, threadId, content }),
 
-  getThreadSnapshot: (runtimeAgentId: string, threadId: string) =>
+  getThreadSnapshot: (sessionId: number, threadId: string) =>
     invoke<ThreadSnapshotPayload>("get_thread_snapshot", {
-      runtimeAgentId,
+      sessionId,
       threadId,
     }),
 
   resolveApproval: (
-    runtimeAgentId: string,
     requestId: string,
     decision: ApprovalDecision,
     resolvedBy?: string | null,
   ) =>
     invoke<void>("resolve_approval", {
-      runtimeAgentId,
       requestId,
       decision,
       resolvedBy,

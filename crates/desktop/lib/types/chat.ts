@@ -31,7 +31,7 @@ export interface ChatMessagePayload {
 }
 
 export interface ThreadSnapshotPayload {
-  runtime_agent_id: string;
+  session_id: number;
   thread_id: string;
   messages: ChatMessagePayload[];
   turn_count: number;
@@ -40,10 +40,10 @@ export interface ThreadSnapshotPayload {
 
 export interface ChatSessionPayload {
   session_key: string;
-  template_id: string;
-  runtime_agent_id: string;
+  template_id: number;
+  session_id: number;
   thread_id: string;
-  effective_provider_id: string;
+  effective_provider_id: number | null;
 }
 
 export type ThreadEventPayload =
@@ -73,7 +73,7 @@ export type ThreadEventPayload =
   | { type: "approval_resolved"; response: ApprovalResponsePayload };
 
 export interface ThreadEventEnvelope {
-  runtime_agent_id: string;
+  session_id: string;
   thread_id: string;
   turn_number?: number | null;
   payload: ThreadEventPayload;

@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use argus_protocol::{LlmProviderId, llm::ChatMessage};
+use argus_turn::{TurnConfig, TurnInputBuilder, execute_turn};
+use argus_wing::ArgusWing;
 use clap::Subcommand;
-use claw::turn::{TurnConfig, TurnInputBuilder, execute_turn};
-use claw::{AppContext, ChatMessage, LlmProviderId};
 use owo_colors::OwoColorize;
 
 /// Turn 执行测试命令。
@@ -36,7 +37,7 @@ pub enum TurnCommand {
 }
 
 /// Run turn command.
-pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<()> {
+pub async fn run_turn_command(wing: Arc<ArgusWing>, command: TurnCommand) -> Result<()> {
     let TurnCommand::Test {
         provider,
         tools,
@@ -54,16 +55,19 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
         message
     };
 
-    // Get provider from context via LLM manager
+    // Get provider from wing
     let provider = if let Some(id) = provider {
-        let id: i64 = id.parse().with_context(|| format!("Invalid provider id: {}", id))?;
-        ctx.get_provider(&LlmProviderId::new(id)).await?
+        let id: i64 = id
+            .parse()
+            .with_context(|| format!("Invalid provider id: {}", id))?;
+        wing.get_provider(&LlmProviderId::new(id)).await?
     } else {
-        ctx.get_default_provider().await?
+        let record = wing.get_default_provider_record().await?;
+        wing.get_provider(&record.id).await?
     };
 
-    // Build tool manager with requested tools
-    let tool_manager = Arc::new(claw::ToolManager::new());
+    // Get tool manager from wing
+    let tool_manager = wing.tool_manager();
     // TODO: Register tools based on IDs when tools are implemented
 
     // Build turn input
@@ -71,7 +75,7 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
         .provider(provider)
         .messages(vec![ChatMessage::user(message)])
         .system_prompt(system_prompt)
-        .tool_manager(tool_manager)
+        .tool_manager(tool_manager.clone())
         .tool_ids(tools)
         .build()
         .context("Failed to build TurnInput")?;
@@ -92,16 +96,16 @@ pub async fn run_turn_command(ctx: AppContext, command: TurnCommand) -> Result<(
     println!("{}", "Messages:".bold());
     for msg in &output.messages {
         let role_str = match msg.role {
-            claw::Role::User => "USER",
-            claw::Role::Assistant => "ASSISTANT",
-            claw::Role::System => "SYSTEM",
-            claw::Role::Tool => "TOOL",
+            argus_protocol::llm::Role::User => "USER",
+            argus_protocol::llm::Role::Assistant => "ASSISTANT",
+            argus_protocol::llm::Role::System => "SYSTEM",
+            argus_protocol::llm::Role::Tool => "TOOL",
         };
         let role_colored = match msg.role {
-            claw::Role::User => role_str.blue().to_string(),
-            claw::Role::Assistant => role_str.green().to_string(),
-            claw::Role::System => role_str.yellow().to_string(),
-            claw::Role::Tool => role_str.magenta().to_string(),
+            argus_protocol::llm::Role::User => role_str.blue().to_string(),
+            argus_protocol::llm::Role::Assistant => role_str.green().to_string(),
+            argus_protocol::llm::Role::System => role_str.yellow().to_string(),
+            argus_protocol::llm::Role::Tool => role_str.magenta().to_string(),
         };
         let content = if verbose {
             msg.content.clone()

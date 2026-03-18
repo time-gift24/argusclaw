@@ -1,0 +1,856 @@
+//! LLM types for provider abstraction.
+//!
+//! This module contains shared types used by both LLM providers and tools.
+//! It is consumed by argus-llm and argus-tool crates.
+
+pub mod provider_types;
+pub mod repository;
+
+// Re-export provider types for convenience
+pub use provider_types::{
+    LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
+    LlmProviderRecordJson, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
+    SecretString,
+};
+
+pub use repository::LlmProviderRepository;
+
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures_core::Stream;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+/// Unified error type for provider-agnostic LLM operations.
+#[derive(Debug, thiserror::Error)]
+pub enum LlmError {
+    /// Provider returned an error for a request.
+    #[error("Provider {provider} request failed: {reason}")]
+    RequestFailed { provider: String, reason: String },
+
+    /// Provider is rate limited and may indicate a retry window.
+    #[error("Provider {provider} rate limited, retry after {retry_after:?}")]
+    RateLimited {
+        provider: String,
+        retry_after: Option<Duration>,
+    },
+
+    /// Provider response was malformed or unexpected.
+    #[error("Invalid response from {provider}: {reason}")]
+    InvalidResponse { provider: String, reason: String },
+
+    /// Request exceeded the model context window.
+    #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
+    ContextLengthExceeded { used: usize, limit: usize },
+
+    /// Requested model is not available on the provider.
+    #[error("Model {model} not available on provider {provider}")]
+    ModelNotAvailable { provider: String, model: String },
+
+    /// Authentication failed for the provider.
+    #[error("Authentication failed for provider {provider}")]
+    AuthFailed { provider: String },
+
+    /// Provider session expired and requires renewal.
+    #[error("Session expired for provider {provider}")]
+    SessionExpired { provider: String },
+
+    /// Session renewal failed.
+    #[error("Session renewal failed for provider {provider}: {reason}")]
+    SessionRenewalFailed { provider: String, reason: String },
+
+    /// Provider does not support a requested capability.
+    #[error("Provider {provider} does not support capability {capability}")]
+    UnsupportedCapability {
+        provider: String,
+        capability: String,
+    },
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+/// Role in a conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// Controls whether the provider should generate reasoning content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingMode {
+    Enabled,
+    Disabled,
+}
+
+/// Why the completion finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    ToolUse,
+    ContentFilter,
+    Unknown,
+}
+
+// ============================================================================
+// Structs
+// ============================================================================
+
+/// Provider-specific thinking configuration for a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    #[serde(rename = "type")]
+    pub mode: ThinkingMode,
+    pub clear_thinking: bool,
+}
+
+impl ThinkingConfig {
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            mode: ThinkingMode::Enabled,
+            clear_thinking: false,
+        }
+    }
+
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            mode: ThinkingMode::Disabled,
+            clear_thinking: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_clear_thinking(mut self, clear_thinking: bool) -> Self {
+        self.clear_thinking = clear_thinking;
+        self
+    }
+}
+
+/// Explicit provider feature flags exposed to upper layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProviderCapabilities {
+    pub thinking: bool,
+}
+
+/// A part of multimodal message content (OpenAI Chat Completions format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content part.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image URL content part (supports data: URLs for inline base64 images).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL reference for multimodal content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// URL or data: URI (e.g., "data:image/jpeg;base64,...").
+    pub url: String,
+    /// Detail level hint: "auto", "low", or "high".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// A message in a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub content: String,
+    /// Hidden or auxiliary reasoning content associated with the message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    /// Multimodal content parts (images, etc.).
+    /// When non-empty, providers serialize content as an array of parts
+    /// (with `content` included as a text part) instead of a plain string.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<ContentPart>,
+    /// Tool call ID if this is a tool result message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Name of the tool for tool results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Tool calls made by the assistant (OpenAI protocol requires these
+    /// to appear on the assistant message preceding tool result messages).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+impl ChatMessage {
+    /// Create a system message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
+            content: content.into(),
+            reasoning_content: None,
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create a user message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            reasoning_content: None,
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create a user message with multimodal content parts (e.g., images).
+    ///
+    /// The text `content` is included as the primary text alongside the parts.
+    pub fn user_with_parts(content: impl Into<String>, parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            reasoning_content: None,
+            content_parts: parts,
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create an assistant message.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::assistant_with_reasoning(content, None)
+    }
+
+    /// Create an assistant message with optional reasoning content.
+    pub fn assistant_with_reasoning(
+        content: impl Into<String>,
+        reasoning_content: Option<String>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            reasoning_content,
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create an assistant message that includes tool calls.
+    ///
+    /// Per the OpenAI protocol, an assistant message with tool_calls must
+    /// precede the corresponding tool result messages in the conversation.
+    pub fn assistant_with_tool_calls(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self::assistant_with_tool_calls_and_reasoning(content, tool_calls, None)
+    }
+
+    /// Create an assistant message with tool calls and optional reasoning content.
+    pub fn assistant_with_tool_calls_and_reasoning(
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+        reasoning_content: Option<String>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.unwrap_or_default(),
+            reasoning_content,
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+        }
+    }
+
+    /// Create a tool result message.
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            reasoning_content: None,
+            content_parts: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+            name: Some(name.into()),
+            tool_calls: None,
+        }
+    }
+}
+
+/// Request for a chat completion.
+#[derive(Debug, Clone)]
+pub struct CompletionRequest {
+    pub messages: Vec<ChatMessage>,
+    /// Optional per-request model override.
+    pub model: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    pub stop_sequences: Option<Vec<String>>,
+    pub thinking: Option<ThinkingConfig>,
+    /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+impl CompletionRequest {
+    /// Create a new completion request.
+    pub fn new(messages: Vec<ChatMessage>) -> Self {
+        Self {
+            messages,
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            thinking: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Set model override.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Set max tokens.
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set temperature.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set thinking configuration.
+    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+}
+
+/// Response from a chat completion.
+#[derive(Debug, Clone)]
+pub struct CompletionResponse {
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub finish_reason: FinishReason,
+    /// Tokens read from the provider's server-side prompt cache (Anthropic).
+    /// Zero when caching is not supported or on a cache miss.
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache (Anthropic).
+    /// Zero when caching is not supported or no new prefix was cached.
+    pub cache_creation_input_tokens: u32,
+}
+
+/// A delta emitted while streaming a completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmStreamEvent {
+    /// Incremental reasoning output from the model.
+    ReasoningDelta { delta: String },
+    /// Incremental text output from the model.
+    ContentDelta { delta: String },
+    /// Incremental tool call output from the model.
+    ToolCallDelta(ToolCallDelta),
+    /// Usage information emitted by the provider during streaming.
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    /// The model finished generating output.
+    Finished { finish_reason: FinishReason },
+    /// Retry attempt due to transient error.
+    RetryAttempt {
+        /// Current attempt number (1-indexed)
+        attempt: u32,
+        /// Maximum retry attempts allowed
+        max_retries: u32,
+        /// Error message that triggered the retry
+        error: String,
+    },
+}
+
+/// A delta for a tool call emitted during streaming.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments_delta: Option<String>,
+}
+
+/// A boxed stream of completion events.
+pub type LlmEventStream =
+    std::pin::Pin<Box<dyn Stream<Item = Result<LlmStreamEvent, LlmError>> + Send + 'static>>;
+
+/// Definition of a tool for the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call requested by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Result of a tool execution to send back to the LLM.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub name: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// Request for a completion with tool use.
+#[derive(Debug, Clone)]
+pub struct ToolCompletionRequest {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolDefinition>,
+    /// Optional per-request model override.
+    pub model: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    /// How to handle tool use: "auto", "required", or "none".
+    pub tool_choice: Option<String>,
+    pub thinking: Option<ThinkingConfig>,
+    /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
+    pub metadata: std::collections::HashMap<String, String>,
+}
+
+impl ToolCompletionRequest {
+    /// Create a new tool completion request.
+    pub fn new(messages: Vec<ChatMessage>, tools: Vec<ToolDefinition>) -> Self {
+        Self {
+            messages,
+            tools,
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            tool_choice: None,
+            thinking: None,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Set model override.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Set max tokens.
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set temperature.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set tool choice mode.
+    pub fn with_tool_choice(mut self, choice: impl Into<String>) -> Self {
+        self.tool_choice = Some(choice.into());
+        self
+    }
+
+    /// Set thinking configuration.
+    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+}
+
+/// Response from a completion with potential tool calls.
+#[derive(Debug, Clone)]
+pub struct ToolCompletionResponse {
+    /// Text content (may be empty if tool calls are present).
+    pub content: Option<String>,
+    /// Reasoning content emitted separately from visible content.
+    pub reasoning_content: Option<String>,
+    /// Tool calls requested by the model.
+    pub tool_calls: Vec<ToolCall>,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub finish_reason: FinishReason,
+    /// Tokens read from the provider's server-side prompt cache (Anthropic).
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache (Anthropic).
+    pub cache_creation_input_tokens: u32,
+}
+
+/// Metadata about a model returned by the provider's API.
+#[derive(Debug, Clone)]
+pub struct ModelMetadata {
+    pub id: String,
+    /// Total context window size in tokens.
+    pub context_length: Option<u32>,
+}
+
+// ============================================================================
+// LlmProvider Trait
+// ============================================================================
+
+/// Trait for LLM providers.
+#[async_trait]
+pub trait LlmProvider: Send + Sync {
+    /// Get the model name.
+    fn model_name(&self) -> &str;
+
+    /// Get cost per token (input, output).
+    fn cost_per_token(&self) -> (Decimal, Decimal);
+
+    /// Report explicit provider capabilities to upper layers.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+
+    /// Complete a chat conversation.
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
+
+    /// Complete with tool use support.
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError>;
+
+    /// Stream a chat completion incrementally.
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: self.active_model_name(),
+            capability: "stream_complete".to_string(),
+        })
+    }
+
+    /// Stream a tool-capable completion incrementally.
+    async fn stream_complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: self.active_model_name(),
+            capability: "stream_complete_with_tools".to_string(),
+        })
+    }
+
+    /// List available models from the provider.
+    /// Default implementation returns empty list.
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        Ok(Vec::new())
+    }
+
+    /// Fetch metadata for the current model (context length, etc.).
+    /// Default returns the model name with no size info.
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        Ok(ModelMetadata {
+            id: self.model_name().to_string(),
+            context_length: None,
+        })
+    }
+
+    /// Resolve which model should be reported for a given request.
+    ///
+    /// Providers that ignore per-request model overrides should override this
+    /// and return `active_model_name()`.
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        requested_model
+            .map(std::borrow::ToOwned::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
+    }
+
+    /// Get the currently active model name.
+    ///
+    /// May differ from `model_name()` if the model was switched at runtime
+    /// via `set_model()`. Default returns `model_name()`.
+    fn active_model_name(&self) -> String {
+        self.model_name().to_string()
+    }
+
+    /// Get the context window size (maximum context length) for this provider.
+    ///
+    /// Returns the maximum number of tokens that can be used in the context.
+    /// Default is 128,000 tokens (common for modern models).
+    /// Providers should override this if they have model-specific context limits.
+    fn context_window(&self) -> u32 {
+        128_000
+    }
+
+    /// Switch the active model at runtime. Not all providers support this.
+    fn set_model(&self, _model: &str) -> Result<(), LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "unknown".to_string(),
+            reason: "Runtime model switching not supported by this provider".to_string(),
+        })
+    }
+
+    /// Calculate cost for a completion.
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        let (input_cost, output_cost) = self.cost_per_token();
+        input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
+    }
+
+    /// Cost multiplier for cache-creation tokens (Anthropic prompt caching).
+    ///
+    /// Returns `1.0` by default (no surcharge). Anthropic providers return
+    /// `1.25` for 5-minute TTL or `2.0` for 1-hour TTL.
+    fn cache_write_multiplier(&self) -> Decimal {
+        Decimal::ONE
+    }
+
+    /// Discount divisor for cache-read tokens.
+    ///
+    /// Cached-read cost = `input_rate / cache_read_discount()`.
+    /// Returns `1` by default (no discount). Anthropic returns `10` (90% off),
+    /// OpenAI would return `2` (50% off).
+    fn cache_read_discount(&self) -> Decimal {
+        Decimal::ONE
+    }
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Sanitize a message list to ensure tool_use / tool_result integrity.
+///
+/// LLM APIs (especially Anthropic) require every tool_result to reference a
+/// tool_call_id that exists in an immediately preceding assistant message's
+/// tool_calls. Orphaned tool_results cause HTTP 400 errors.
+///
+/// This function:
+/// 1. Tracks all tool_call_ids emitted by assistant messages.
+/// 2. Rewrites orphaned tool_result messages (whose tool_call_id has no
+///    matching assistant tool_call) as user messages so the content is
+///    preserved without violating the protocol.
+///
+/// Call this before sending messages to any LLM provider.
+pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
+    use std::collections::HashSet;
+
+    // Collect all tool_call_ids from assistant messages with tool_calls.
+    let mut known_ids: HashSet<String> = HashSet::new();
+    for msg in messages.iter() {
+        if msg.role == Role::Assistant
+            && let Some(ref calls) = msg.tool_calls
+        {
+            for tc in calls {
+                known_ids.insert(tc.id.clone());
+            }
+        }
+    }
+
+    // Rewrite orphaned tool_result messages as user messages.
+    for msg in messages.iter_mut() {
+        if msg.role != Role::Tool {
+            continue;
+        }
+        let is_orphaned = match &msg.tool_call_id {
+            Some(id) => !known_ids.contains(id),
+            None => true,
+        };
+        if is_orphaned {
+            let tool_name = msg.name.as_deref().unwrap_or("unknown");
+            tracing::debug!(
+                tool_call_id = ?msg.tool_call_id,
+                tool_name,
+                "Rewriting orphaned tool_result as user message",
+            );
+            msg.role = Role::User;
+            msg.content = format!("[Tool `{}` returned: {}]", tool_name, msg.content);
+            msg.tool_call_id = None;
+            msg.name = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_preserves_valid_pairs() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let mut messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "result"),
+        ];
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[2].tool_call_id, Some("call_1".to_string()));
+    }
+
+    #[test]
+    fn test_sanitize_rewrites_orphaned_tool_result() {
+        let mut messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("I'll use a tool"),
+            ChatMessage::tool_result("call_missing", "search", "some result"),
+        ];
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages[2].role, Role::User);
+        assert!(messages[2].content.contains("[Tool `search` returned:"));
+        assert!(messages[2].tool_call_id.is_none());
+        assert!(messages[2].name.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_handles_no_tool_messages() {
+        let mut messages = vec![
+            ChatMessage::system("prompt"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+        ];
+        let original_len = messages.len();
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages.len(), original_len);
+    }
+
+    #[test]
+    fn test_completion_request_with_thinking_sets_config() {
+        let request = CompletionRequest::new(vec![ChatMessage::user("hi")])
+            .with_thinking(ThinkingConfig::enabled().with_clear_thinking(false));
+
+        assert_eq!(
+            request.thinking,
+            Some(ThinkingConfig::enabled().with_clear_thinking(false))
+        );
+    }
+
+    #[test]
+    fn test_tool_completion_request_with_thinking_sets_config() {
+        let request = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], vec![])
+            .with_thinking(ThinkingConfig::disabled());
+
+        assert_eq!(request.thinking, Some(ThinkingConfig::disabled()));
+    }
+
+    #[test]
+    fn test_provider_capabilities_default_to_thinking_disabled() {
+        struct StubProvider;
+
+        #[async_trait]
+        impl LlmProvider for StubProvider {
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: String::new(),
+                    reasoning_content: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+
+            async fn stream_complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<LlmEventStream, LlmError> {
+                Ok(Box::pin(futures_util::stream::iter(vec![])))
+            }
+        }
+
+        let provider = StubProvider;
+        assert!(!provider.capabilities().thinking);
+    }
+
+    #[test]
+    fn test_thinking_config_defaults_to_preserved_history() {
+        assert!(!ThinkingConfig::enabled().clear_thinking);
+        assert!(!ThinkingConfig::disabled().clear_thinking);
+    }
+
+    #[test]
+    fn test_sanitize_multiple_orphaned() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let mut messages = vec![
+            ChatMessage::user("test"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "ok"),
+            // These are orphaned (call_2 and call_3 have no matching assistant message)
+            ChatMessage::tool_result("call_2", "search", "orphan 1"),
+            ChatMessage::tool_result("call_3", "http", "orphan 2"),
+        ];
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages[2].role, Role::Tool); // call_1 is valid
+        assert_eq!(messages[3].role, Role::User); // call_2 orphaned
+        assert_eq!(messages[4].role, Role::User); // call_3 orphaned
+    }
+}

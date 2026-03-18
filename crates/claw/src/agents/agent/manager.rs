@@ -8,15 +8,16 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
-use crate::agents::compact::CompactorManager;
+use crate::agents::CompactorManager;
 use crate::agents::thread::{ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
-use crate::approval::ApprovalManager;
+use argus_approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
-use crate::llm::LLMManager;
-use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
-use crate::tool::ToolManager;
+use argus_protocol::llm::LlmProviderId;
+use argus_protocol::{ApprovalDecision, ThreadEvent, ThreadId};
+use argus_llm::ProviderManager;
+use argus_tool::ToolManager;
 
 /// Starting ID for runtime agents (to distinguish from template IDs which start from 1).
 const RUNTIME_AGENT_ID_START: i64 = 1_000_000_000;
@@ -28,8 +29,8 @@ const RUNTIME_AGENT_ID_START: i64 = 1_000_000_000;
 pub struct AgentManager {
     /// Repository for agent templates.
     repository: Arc<dyn AgentRepository>,
-    /// LLM manager for building providers.
-    llm_manager: Arc<LLMManager>,
+    /// Provider manager for building providers.
+    provider_manager: Arc<ProviderManager>,
     /// Global CompactorManager (shared by all agents).
     compactor_manager: Arc<CompactorManager>,
     /// Global ApprovalManager (shared by all agents).
@@ -46,13 +47,13 @@ impl AgentManager {
     /// Create a new AgentManager.
     pub fn new(
         repository: Arc<dyn AgentRepository>,
-        llm_manager: Arc<LLMManager>,
+        provider_manager: Arc<ProviderManager>,
         tool_manager: Arc<ToolManager>,
         approval_manager: Option<Arc<ApprovalManager>>,
     ) -> Self {
         Self {
             repository,
-            llm_manager,
+            provider_manager,
             compactor_manager: Arc::new(CompactorManager::with_defaults()),
             approval_manager,
             tool_manager,
@@ -88,11 +89,15 @@ impl AgentManager {
     ///
     /// Returns the `AgentId` for accessing the agent.
     pub async fn create_agent(&self, record: &AgentRecord) -> Result<AgentId, AgentError> {
-        let provider_id = record.provider_id.ok_or(AgentError::ProviderNotConfigured {
-            agent_id: record.id,
-        })?;
+        let provider_id = record
+            .provider_id
+            .ok_or(AgentError::ProviderNotConfigured {
+                agent_id: record.id,
+            })?;
 
-        let provider = self.llm_manager.get_provider(&provider_id).await?;
+        // Convert ProviderId to LlmProviderId
+        let llm_provider_id = LlmProviderId::new(provider_id.inner());
+        let provider = self.provider_manager.get_provider(&llm_provider_id).await?;
 
         // Generate a unique runtime agent ID
         let runtime_id = self.next_runtime_id();
@@ -118,11 +123,15 @@ impl AgentManager {
         approval_tools: Vec<String>,
         auto_approve: bool,
     ) -> Result<AgentId, AgentError> {
-        let provider_id = record.provider_id.ok_or(AgentError::ProviderNotConfigured {
-            agent_id: record.id,
-        })?;
+        let provider_id = record
+            .provider_id
+            .ok_or(AgentError::ProviderNotConfigured {
+                agent_id: record.id,
+            })?;
 
-        let provider = self.llm_manager.get_provider(&provider_id).await?;
+        // Convert ProviderId to LlmProviderId
+        let llm_provider_id = LlmProviderId::new(provider_id.inner());
+        let provider = self.provider_manager.get_provider(&llm_provider_id).await?;
 
         // Generate a unique runtime agent ID
         let runtime_id = self.next_runtime_id();
@@ -177,9 +186,7 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .ok_or_else(|| AgentError::AgentNotFound {
-                id: agent_id.clone(),
-            })?;
+            .ok_or(AgentError::AgentNotFound { id: *agent_id })?;
         agent.value().create_thread(config)
     }
 
@@ -208,9 +215,7 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .ok_or_else(|| AgentError::AgentNotFound {
-                id: agent_id.clone(),
-            })?;
+            .ok_or(AgentError::AgentNotFound { id: *agent_id })?;
         agent.value().send_message(thread_id, message).await
     }
 
@@ -235,9 +240,7 @@ impl AgentManager {
         let agent = self
             .agents
             .get(agent_id)
-            .ok_or_else(|| AgentError::AgentNotFound {
-                id: agent_id.clone(),
-            })?;
+            .ok_or(AgentError::AgentNotFound { id: *agent_id })?;
         agent
             .value()
             .resolve_approval(request_id, decision, resolved_by)

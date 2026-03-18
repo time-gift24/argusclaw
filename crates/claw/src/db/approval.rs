@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use super::DbError;
-use crate::approval::{ApprovalRequest, ApprovalResponse};
+use argus_repository::DbError;
+use crate::protocol::{ApprovalRequest, ApprovalResponse};
 
 /// Repository for persisting approval requests and responses.
 #[async_trait]

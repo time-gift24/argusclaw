@@ -1,0 +1,29 @@
+[package]
+name = "argus-turn"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "argus-turn"
+path = "src/bin/turn.rs"
+
+[dependencies]
+argus-protocol = { path = "../argus-protocol" }
+argus-test-support = { path = "../argus-test-support" }
+argus-tool = { path = "../argus-tool" }
+argus-llm = { path = "../argus-llm" }
+tokio = { version = "1", features = ["sync", "rt", "time", "test-util", "macros"] }
+derive_builder = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+futures-util = "0.3"
+tracing = "0.1"
+async-trait = "0.1"
+rust_decimal = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

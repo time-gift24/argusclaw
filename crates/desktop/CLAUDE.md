@@ -1,6 +1,6 @@
 # ArgusWing Desktop
 
-> **Tauri 2.0 桌面应用** - React 19 + TypeScript + Tailwind CSS v4
+> 特性：Tauri 2.0 桌面应用，React 19 + TypeScript + Tailwind CSS v4。
 
 ## 技术栈
 

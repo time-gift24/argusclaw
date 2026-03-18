@@ -3,8 +3,8 @@
 //! This binary is minimal - it only includes provider and agent commands.
 
 use anyhow::Result;
+use argus_wing::ArgusWing;
 use clap::{Parser, Subcommand};
-use claw::AppContext;
 use tracing_subscriber::EnvFilter;
 
 use cli::agent::{AgentCommand, run_agent_command};
@@ -38,14 +38,14 @@ async fn main() -> Result<()> {
     let db_url = db_path_to_url(&db_path);
 
     // Initialize app context
-    let ctx = AppContext::init(Some(db_url)).await?;
+    let wing = ArgusWing::init(Some(&db_url)).await?;
 
     // Parse CLI
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Provider(cmd) => run_provider_command(ctx, cmd).await?,
-        Command::Agent(cmd) => run_agent_command(ctx, cmd).await?,
+        Command::Provider(cmd) => run_provider_command(wing, cmd).await?,
+        Command::Agent(cmd) => run_agent_command(wing, cmd).await?,
     }
 
     Ok(())

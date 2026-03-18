@@ -8,8 +8,9 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use clap::Subcommand;
 
-use claw::{AppContext, ApprovalDecision, ThreadConfig, ThreadEvent};
-use claw::{GlobTool, GrepTool, ReadTool, ShellTool};
+use argus_protocol::{ApprovalDecision, ThreadEvent};
+use argus_tool::{GlobTool, GrepTool, ReadTool, ShellTool};
+use argus_wing::ArgusWing;
 use tokio::io::AsyncBufReadExt;
 
 use super::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -38,19 +39,19 @@ pub enum AgentCommand {
 }
 
 /// Run an agent command.
-pub async fn run_agent_command(ctx: AppContext, command: AgentCommand) -> Result<()> {
+pub async fn run_agent_command(wing: Arc<ArgusWing>, command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::Chat {
             verbose,
             approval_tools,
             muted_tools,
             auto_approve,
-        } => run_chat(ctx, verbose, approval_tools, muted_tools, auto_approve).await,
+        } => run_chat(wing, verbose, approval_tools, muted_tools, auto_approve).await,
     }
 }
 
 async fn run_chat(
-    ctx: AppContext,
+    wing: Arc<ArgusWing>,
     verbose: bool,
     approval_tools: Vec<String>,
     muted_tools: Vec<String>,
@@ -63,26 +64,21 @@ async fn run_chat(
         .collect();
 
     // Register default tools
-    let tool_manager = ctx.tool_manager();
+    let tool_manager = wing.tool_manager();
     tool_manager.register(Arc::new(ShellTool::new()));
     tool_manager.register(Arc::new(ReadTool::new()));
     tool_manager.register(Arc::new(GrepTool::new()));
     tool_manager.register(Arc::new(GlobTool::new()));
 
     // Use the default ArgusWing agent
-    let agent_id = ctx
-        .create_default_agent_with_approval(effective_approval_tools.clone(), auto_approve)
+    let (session_id, thread_id) = wing
+        .create_session_with_approval("default", effective_approval_tools.clone(), auto_approve)
         .await
-        .map_err(|e| anyhow!("Failed to create default agent: {}", e))?;
+        .map_err(|e| anyhow!("Failed to create session: {}", e))?;
 
-    // Create thread via AppContext
-    let thread_id = ctx
-        .create_thread(&agent_id, ThreadConfig::default())
-        .map_err(|e| anyhow!("Failed to create thread: {}", e))?;
-
-    // Subscribe to events via AppContext
-    let mut event_rx = ctx
-        .subscribe(&agent_id, &thread_id)
+    // Subscribe to events via ArgusWing
+    let mut event_rx = wing
+        .subscribe(session_id, thread_id)
         .await
         .ok_or_else(|| anyhow!("Failed to subscribe to thread events"))?;
 
@@ -118,8 +114,8 @@ async fn run_chat(
                 break;
             }
             Some(input) if !input.is_empty() => {
-                // Send message through AppContext
-                ctx.send_message(&agent_id, &thread_id, input)
+                // Send message through ArgusWing
+                wing.send_message(session_id, thread_id, input)
                     .await
                     .map_err(|e| anyhow!("Failed to send message: {}", e))?;
 
@@ -202,14 +198,12 @@ async fn run_chat(
                             if auto_approve {
                                 eprintln!("   ⚡ Auto-approving...");
                                 let request_id = request.id;
-                                let ctx_clone = ctx.clone();
-                                let agent_id_clone = agent_id.clone();
+                                let wing_clone = wing.clone();
                                 tokio::spawn(async move {
                                     let _ =
                                         tokio::time::sleep(std::time::Duration::from_millis(100))
                                             .await;
-                                    let _ = ctx_clone.resolve_approval(
-                                        &agent_id_clone,
+                                    let _ = wing_clone.resolve_approval(
                                         request_id,
                                         ApprovalDecision::Approved,
                                         Some("auto-approve".to_string()),
@@ -229,8 +223,7 @@ async fn run_chat(
                                             _ => ApprovalDecision::Approved,
                                         };
 
-                                        let _ = ctx.resolve_approval(
-                                            &agent_id,
+                                        let _ = wing.resolve_approval(
                                             request.id,
                                             decision,
                                             Some("cli-user".to_string()),
@@ -238,8 +231,7 @@ async fn run_chat(
                                     }
                                     Err(e) => {
                                         eprintln!("   Failed to read input: {}. Denying...", e);
-                                        let _ = ctx.resolve_approval(
-                                            &agent_id,
+                                        let _ = wing.resolve_approval(
                                             request.id,
                                             ApprovalDecision::Denied,
                                             Some("cli-error".to_string()),
@@ -258,6 +250,9 @@ async fn run_chat(
                                 }
                                 ApprovalDecision::TimedOut => {
                                     eprintln!("⏰ Approval: TIMED OUT");
+                                }
+                                ApprovalDecision::ApprovedSession => {
+                                    eprintln!("✅ Approval: APPROVED FOR SESSION");
                                 }
                             }
                         }

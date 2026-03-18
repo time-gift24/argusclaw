@@ -1,445 +1,277 @@
 //! Tauri Commands for frontend to backend communication.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use claw::{
-    AgentError, AgentId, AgentRecord, AppContext, DbError, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus, ProviderTestResult, SecretString,
+use argus_protocol::{
+    AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
+    LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
+    SecretString, SessionId, ThreadId,
 };
+use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
 use crate::subscription::ThreadSubscriptions;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProviderKind {
-    #[serde(rename = "openai-compatible", alias = "open-ai-compatible")]
-    OpenAiCompatible,
-}
-
-impl From<ProviderKind> for LlmProviderKind {
-    fn from(kind: ProviderKind) -> Self {
-        match kind {
-            ProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
-        }
-    }
-}
-
-impl From<LlmProviderKind> for ProviderKind {
-    fn from(kind: LlmProviderKind) -> Self {
-        match kind {
-            LlmProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
-        }
-    }
-}
-
-/// Input type for creating/updating an agent (all IDs as i64).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentInput {
-    pub id: i64,
-    pub display_name: String,
-    pub description: String,
-    pub version: String,
-    pub provider_id: Option<i64>,
-    pub system_prompt: String,
-    pub tool_names: Vec<String>,
-    pub max_tokens: Option<i64>,
-    pub temperature: Option<f32>,
-}
-
-impl From<AgentInput> for AgentRecord {
-    fn from(input: AgentInput) -> Self {
-        Self {
-            id: AgentId::new(input.id),
-            display_name: input.display_name,
-            description: input.description,
-            version: input.version,
-            provider_id: input.provider_id.map(LlmProviderId::new),
-            system_prompt: input.system_prompt,
-            tool_names: input.tool_names,
-            max_tokens: input.max_tokens.map(|t| t as u32),
-            temperature: input.temperature,
-        }
-    }
-}
-
-/// Input type for creating/updating a provider (api_key as plain string).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderInput {
-    pub id: i64,
-    pub kind: ProviderKind,
-    pub display_name: String,
-    pub base_url: String,
-    pub api_key: String,
-    pub models: Vec<String>,
-    pub default_model: String,
-    pub is_default: bool,
-    pub extra_headers: HashMap<String, String>,
-}
-
-impl From<ProviderInput> for LlmProviderRecord {
-    fn from(input: ProviderInput) -> Self {
-        Self {
-            id: LlmProviderId::new(input.id),
-            kind: input.kind.into(),
-            display_name: input.display_name,
-            base_url: input.base_url,
-            api_key: SecretString::new(input.api_key),
-            models: input.models,
-            default_model: input.default_model,
-            is_default: input.is_default,
-            extra_headers: input.extra_headers,
-            secret_status: ProviderSecretStatus::Ready,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderSummary {
-    pub id: i64,
-    pub kind: ProviderKind,
-    pub display_name: String,
-    pub base_url: String,
-    pub models: Vec<String>,
-    pub default_model: String,
-    pub is_default: bool,
-    pub extra_headers: HashMap<String, String>,
-    pub secret_status: ProviderSecretStatus,
-}
-
-impl From<LlmProviderSummary> for ProviderSummary {
-    fn from(summary: LlmProviderSummary) -> Self {
-        Self {
-            id: summary.id.into_inner(),
-            kind: summary.kind.into(),
-            display_name: summary.display_name,
-            base_url: summary.base_url,
-            models: summary.models,
-            default_model: summary.default_model,
-            is_default: summary.is_default,
-            extra_headers: summary.extra_headers,
-            secret_status: summary.secret_status,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderRecord {
-    pub id: i64,
-    pub kind: ProviderKind,
-    pub display_name: String,
-    pub base_url: String,
-    pub api_key: String,
-    pub models: Vec<String>,
-    pub default_model: String,
-    pub is_default: bool,
-    pub extra_headers: HashMap<String, String>,
-    pub secret_status: ProviderSecretStatus,
-}
-
-impl From<LlmProviderRecord> for ProviderRecord {
-    fn from(record: LlmProviderRecord) -> Self {
-        Self {
-            id: record.id.into_inner(),
-            kind: record.kind.into(),
-            display_name: record.display_name,
-            base_url: record.base_url,
-            api_key: record.api_key.expose_secret().to_string(),
-            models: record.models,
-            default_model: record.default_model,
-            is_default: record.is_default,
-            extra_headers: record.extra_headers,
-            secret_status: record.secret_status,
-        }
-    }
-}
-
-fn build_provider_reentry_record(summary: LlmProviderSummary) -> ProviderRecord {
-    ProviderRecord {
-        id: summary.id.into_inner(),
-        kind: summary.kind.into(),
-        display_name: summary.display_name,
-        base_url: summary.base_url,
-        api_key: String::new(),
-        models: summary.models,
-        default_model: summary.default_model,
-        is_default: summary.is_default,
-        extra_headers: summary.extra_headers,
-        secret_status: summary.secret_status,
-    }
-}
-
-#[cfg(test)]
-fn map_provider_lookup_result(
-    result: Result<LlmProviderRecord, AgentError>,
-) -> Result<Option<ProviderRecord>, String> {
-    match result {
-        Ok(record) => Ok(Some(record.into())),
-        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-// === LLMProvider Commands ===
+// ============================================================================
+// LLM Provider Commands
+// ============================================================================
 
 #[tauri::command]
 pub async fn list_providers(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-) -> Result<Vec<ProviderSummary>, String> {
-    let providers = ctx.list_providers().await.map_err(|e| e.to_string())?;
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<LlmProviderRecordJson>, String> {
+    let providers = wing.list_providers().await.map_err(|e| e.to_string())?;
     Ok(providers.into_iter().map(Into::into).collect())
 }
 
 #[tauri::command]
 pub async fn get_provider(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
+    wing: State<'_, Arc<ArgusWing>>,
     id: i64,
-) -> Result<Option<ProviderRecord>, String> {
+) -> Result<Option<LlmProviderRecordJson>, String> {
     let provider_id = LlmProviderId::new(id);
-    match ctx.get_provider_record(&provider_id).await {
-        Ok(record) => Ok(Some(record.into())),
-        Err(AgentError::ProviderNotFound { .. }) => Ok(None),
-        Err(AgentError::Database(DbError::SecretDecryptionFailed { .. })) => {
-            let summary = ctx
-                .get_provider_summary(&provider_id)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(Some(build_provider_reentry_record(summary)))
+    match wing.get_provider_record(provider_id).await {
+        Ok(record) => {
+            // If secret_status is RequiresReentry, build a re-entry record with blank api_key
+            if record.secret_status == ProviderSecretStatus::RequiresReentry {
+                Ok(Some(build_provider_reentry_record(record)))
+            } else {
+                Ok(Some(record.into()))
+            }
         }
+        Err(argus_protocol::ArgusError::ProviderNotFound(_)) => Ok(None),
         Err(error) => Err(error.to_string()),
+    }
+}
+
+fn build_provider_reentry_record(record: LlmProviderRecord) -> LlmProviderRecordJson {
+    LlmProviderRecordJson {
+        id: record.id.into_inner(),
+        kind: record.kind,
+        display_name: record.display_name,
+        base_url: record.base_url,
+        api_key: String::new(),
+        models: record.models,
+        default_model: record.default_model,
+        is_default: record.is_default,
+        extra_headers: record.extra_headers,
+        secret_status: record.secret_status,
     }
 }
 
 #[tauri::command]
 pub async fn upsert_provider(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    record: ProviderInput,
+    wing: State<'_, Arc<ArgusWing>>,
+    record: LlmProviderRecordJson,
 ) -> Result<String, String> {
-    let record: LlmProviderRecord = record.into();
-    let id = ctx.upsert_provider(record).await.map_err(|e| e.to_string())?;
+    let record = LlmProviderRecord {
+        id: LlmProviderId::new(record.id),
+        kind: record.kind,
+        display_name: record.display_name,
+        base_url: record.base_url,
+        api_key: SecretString::new(record.api_key),
+        models: record.models,
+        default_model: record.default_model,
+        is_default: record.is_default,
+        extra_headers: record.extra_headers,
+        secret_status: record.secret_status,
+    };
+    let id = wing
+        .upsert_provider(record)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(id.to_string())
 }
 
 #[tauri::command]
-pub async fn delete_provider(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: i64,
-) -> Result<bool, String> {
-    ctx.delete_provider(&LlmProviderId::new(id))
+pub async fn delete_provider(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
+    wing.delete_provider(LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_default_provider(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: i64,
-) -> Result<(), String> {
-    ctx.set_default_provider(&LlmProviderId::new(id))
+pub async fn set_default_provider(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<(), String> {
+    wing.set_default_provider(LlmProviderId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn test_provider_connection(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
+    wing: State<'_, Arc<ArgusWing>>,
     id: i64,
     model: String,
 ) -> Result<ProviderTestResult, String> {
-    ctx.test_provider_connection(&LlmProviderId::new(id), &model)
+    wing.test_provider_connection(LlmProviderId::new(id), &model)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn test_provider_input(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    record: ProviderInput,
+    wing: State<'_, Arc<ArgusWing>>,
+    record: LlmProviderRecordJson,
     model: String,
 ) -> Result<ProviderTestResult, String> {
-    let record: LlmProviderRecord = record.into();
-    ctx.test_provider_record(record, &model)
+    let record = LlmProviderRecord {
+        id: LlmProviderId::new(record.id),
+        kind: record.kind,
+        display_name: record.display_name,
+        base_url: record.base_url,
+        api_key: SecretString::new(record.api_key),
+        models: record.models,
+        default_model: record.default_model,
+        is_default: record.is_default,
+        extra_headers: record.extra_headers,
+        secret_status: record.secret_status,
+    };
+    wing.test_provider_record(record, &model)
         .await
         .map_err(|e| e.to_string())
 }
 
-// === Agent Commands ===
+// ============================================================================
+// Agent Template Commands
+// ============================================================================
 
 #[tauri::command]
 pub async fn list_agent_templates(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
+    wing: State<'_, Arc<ArgusWing>>,
 ) -> Result<Vec<AgentRecord>, String> {
-    ctx.list_templates().await.map_err(|e| e.to_string())
+    wing.list_templates().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_agent_template(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
+    wing: State<'_, Arc<ArgusWing>>,
     id: i64,
 ) -> Result<Option<AgentRecord>, String> {
-    ctx.get_template(&AgentId::new(id))
+    wing.get_template(AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn upsert_agent_template(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    record: AgentInput,
-) -> Result<(), String> {
-    let record: AgentRecord = record.into();
-    ctx.upsert_template(record).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn delete_agent_template(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    id: i64,
-) -> Result<bool, String> {
-    ctx.delete_template(&AgentId::new(id))
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_default_agent_template(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-) -> Result<AgentRecord, String> {
-    ctx.get_default_agent_template()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn create_default_agent(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
+    wing: State<'_, Arc<ArgusWing>>,
+    record: AgentRecord,
 ) -> Result<String, String> {
-    let agent_id = ctx
-        .create_default_agent()
+    let id = wing
+        .upsert_template(record)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(agent_id.to_string())
+    Ok(id.to_string())
 }
 
-// ========== User Auth Commands ==========
-
 #[tauri::command]
-pub async fn get_current_user(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-) -> Result<Option<claw::UserInfo>, String> {
-    ctx.user()
-        .get_current_user()
+pub async fn delete_agent_template(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<(), String> {
+    wing.delete_template(AgentId::new(id))
         .await
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub async fn has_any_user(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<bool, String> {
-    ctx.user().has_any_user().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn setup_account(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    username: String,
-    password: String,
-) -> Result<(), String> {
-    ctx.user()
-        .setup_account(&username, &password)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn login(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    username: String,
-    password: String,
-) -> Result<claw::UserInfo, String> {
-    ctx.user()
-        .login(&username, &password)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn logout(ctx: State<'_, std::sync::Arc<AppContext>>) -> Result<(), String> {
-    ctx.user().logout().await.map_err(|e| e.to_string())
-}
-
-// ========== Chat Session Commands ==========
+// ============================================================================
+// Chat Session Commands
+// ============================================================================
 
 /// Payload returned when creating a chat session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatSessionPayload {
     /// Unique session key (template_id::provider_preference_id).
     pub session_key: String,
+    /// The session ID for this chat.
+    pub session_id: i64,
     /// The template ID this session was created from.
-    pub template_id: String,
-    /// The runtime agent ID for this session.
-    pub runtime_agent_id: String,
+    pub template_id: i64,
     /// The thread ID for this session.
     pub thread_id: String,
     /// The effective provider ID bound to this session.
-    pub effective_provider_id: String,
-    /// The effective model being used for this session.
-    pub effective_model: String,
+    /// `None` if no provider is configured (session will fail on first LLM call).
+    pub effective_provider_id: Option<i64>,
+}
+
+/// Serialized message snapshot for frontend consumption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessagePayload {
+    pub role: Role,
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub name: Option<String>,
+    pub tool_calls: Option<Vec<argus_protocol::ToolCall>>,
+}
+
+impl From<&ChatMessage> for ChatMessagePayload {
+    fn from(message: &ChatMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content.clone(),
+            reasoning_content: message.reasoning_content.clone(),
+            tool_call_id: message.tool_call_id.clone(),
+            name: message.name.clone(),
+            tool_calls: message.tool_calls.clone(),
+        }
+    }
+}
+
+/// Current snapshot of a chat thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadSnapshotPayload {
+    pub session_id: i64,
+    pub thread_id: String,
+    pub messages: Vec<ChatMessagePayload>,
+    pub turn_count: u32,
+    pub token_count: u32,
 }
 
 #[tauri::command]
 pub async fn create_chat_session(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
+    wing: State<'_, Arc<ArgusWing>>,
     subscriptions: State<'_, ThreadSubscriptions>,
     app: tauri::AppHandle,
     template_id: String,
     provider_preference_id: Option<String>,
-    model_override: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
     let template_id_i64: i64 = template_id
         .parse()
         .map_err(|e| format!("Invalid template id: {}", e))?;
-    let provider_override = provider_preference_id
+
+    let provider_id = provider_preference_id
         .as_ref()
         .map(|id| {
             id.parse::<i64>()
-                .map(LlmProviderId::new)
+                .map(ProviderId::new)
                 .map_err(|e| format!("Invalid provider id: {}", e))
         })
         .transpose()?;
 
-    let runtime = ctx
-        .create_runtime_agent_from_template(
-            &AgentId::new(template_id_i64),
-            provider_override.as_ref(),
-        )
+    // Create a new session for this chat
+    let session_id = wing
+        .create_session(&format!("Chat-{}", template_id))
         .await
         .map_err(|e| e.to_string())?;
 
-    // Get provider record to determine effective model
-    let provider_record = ctx
-        .get_provider_record(&runtime.effective_provider_id)
+    // Create thread with template and provider
+    let thread_id = wing
+        .create_thread(session_id, AgentId::new(template_id_i64), provider_id)
         .await
         .map_err(|e| e.to_string())?;
 
-    // Calculate effective model from override or provider's default
-    let effective_model = model_override
-        .as_ref()
-        .filter(|m| !m.is_empty())
-        .cloned()
-        .unwrap_or_else(|| provider_record.default_model.clone());
+    // Get effective provider from the template or use the provided one
+    let template = wing
+        .get_template(AgentId::new(template_id_i64))
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Template not found".to_string())?;
 
-    // Validate model is in provider's list
-    if !provider_record.models.contains(&effective_model) {
-        return Err(format!(
-            "Model '{}' is not available in provider '{}'",
-            effective_model, provider_record.id
-        ));
-    }
-
-    let thread_id = ctx
-        .create_thread(&runtime.runtime_agent_id, claw::ThreadConfig::default())
-        .map_err(|e| e.to_string())?;
+    // Determine the effective provider ID:
+    // 1. Use the explicitly provided provider preference
+    // 2. Fall back to the template's configured provider
+    // 3. Return None if no provider is configured (frontend should handle this case)
+    let effective_provider_id = provider_id.or(template.provider_id).map(|p| p.inner());
 
     let session_key = format!(
         "{}::{}",
@@ -451,81 +283,91 @@ pub async fn create_chat_session(
     subscriptions
         .start_forwarder(
             session_key.clone(),
-            runtime.runtime_agent_id.clone(),
+            session_id,
             thread_id,
             app,
-            ctx.inner().clone(),
+            wing.inner().clone(),
         )
         .await
         .map_err(|e| e.to_string())?;
 
     Ok(ChatSessionPayload {
         session_key,
-        template_id,
-        runtime_agent_id: runtime.runtime_agent_id.to_string(),
+        session_id: session_id.inner(),
+        template_id: template_id_i64,
         thread_id: thread_id.to_string(),
-        effective_provider_id: runtime.effective_provider_id.to_string(),
-        effective_model,
+        effective_provider_id,
     })
 }
 
 #[tauri::command]
 pub async fn send_message(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    runtime_agent_id: String,
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: i64,
     thread_id: String,
     content: String,
 ) -> Result<(), String> {
-    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
-    let runtime_agent_id: i64 = runtime_agent_id
-        .parse()
-        .map_err(|e| format!("Invalid agent id: {}", e))?;
-    ctx.send_message(&AgentId::new(runtime_agent_id), &thread_id, content)
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    wing.send_message(SessionId::new(session_id), thread_id, content)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn get_thread_snapshot(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    runtime_agent_id: String,
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: i64,
     thread_id: String,
-) -> Result<claw::ThreadSnapshot, String> {
-    let thread_id = claw::ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
-    let runtime_agent_id: i64 = runtime_agent_id
-        .parse()
-        .map_err(|e| format!("Invalid agent id: {}", e))?;
-    ctx.get_thread_snapshot(&AgentId::new(runtime_agent_id), &thread_id)
+) -> Result<ThreadSnapshotPayload, String> {
+    let session_id = SessionId::new(session_id);
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+
+    let session = wing
+        .load_session(session_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let thread = session
+        .get_thread(&thread_id)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+
+    let thread = thread.lock().await;
+
+    Ok(ThreadSnapshotPayload {
+        session_id: session_id.inner(),
+        thread_id: thread_id.to_string(),
+        messages: thread
+            .history()
+            .iter()
+            .map(ChatMessagePayload::from)
+            .collect(),
+        turn_count: thread.turn_count(),
+        token_count: thread.token_count(),
+    })
 }
 
 #[tauri::command]
 pub fn resolve_approval(
-    ctx: State<'_, std::sync::Arc<AppContext>>,
-    runtime_agent_id: String,
+    wing: State<'_, Arc<ArgusWing>>,
     request_id: String,
     decision: String,
     resolved_by: Option<String>,
 ) -> Result<(), String> {
     let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
-    let runtime_agent_id: i64 = runtime_agent_id
-        .parse()
-        .map_err(|e| format!("Invalid agent id: {}", e))?;
     let decision = match decision.as_str() {
-        "approved" => claw::ApprovalDecision::Approved,
-        "denied" => claw::ApprovalDecision::Denied,
+        "approved" => ApprovalDecision::Approved,
+        "denied" => ApprovalDecision::Denied,
         _ => return Err(format!("Invalid approval decision: {}", decision)),
     };
 
-    ctx.resolve_approval(
-        &AgentId::new(runtime_agent_id),
-        request_id,
-        decision,
-        resolved_by,
-    )
-    .map_err(|e| e.to_string())
+    wing.resolve_approval(request_id, decision, resolved_by)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -533,77 +375,20 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{
-        build_provider_reentry_record, map_provider_lookup_result, ChatSessionPayload,
-        ProviderInput, ProviderKind, ProviderRecord, ProviderSummary,
-    };
-    use claw::{
-        AgentError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary,
-        ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, SecretString,
+    use super::build_provider_reentry_record;
+    use argus_protocol::{
+        LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus,
+        ProviderTestResult, ProviderTestStatus, SecretString, ThreadId,
     };
 
     #[test]
-    fn provider_input_converts_into_domain_record() {
-        let record: LlmProviderRecord = ProviderInput {
-            id: "1".to_string(),
-            kind: ProviderKind::OpenAiCompatible,
-            display_name: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: "sk-test".to_string(),
-            models: vec!["gpt-4.1".to_string()],
-            default_model: "gpt-4.1".to_string(),
-            is_default: true,
-            extra_headers: HashMap::new(),
-        }
-        .try_into()
-        .expect("conversion should succeed");
-
-        assert_eq!(record.id, LlmProviderId::new(1));
-        assert_eq!(record.kind, LlmProviderKind::OpenAiCompatible);
-        assert_eq!(record.api_key.expose_secret(), "sk-test");
-        assert_eq!(record.secret_status, ProviderSecretStatus::Ready);
-    }
-
-    #[test]
-    fn provider_lookup_returns_none_for_missing_provider() {
-        let result = map_provider_lookup_result(Err(AgentError::ProviderNotFound {
-            id: "999".to_string(),
-        }))
-        .expect("missing providers should map to None");
-
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn provider_record_conversion_exposes_plain_api_key() {
-        let record = LlmProviderRecord {
-            id: LlmProviderId::new(1),
-            kind: LlmProviderKind::OpenAiCompatible,
-            display_name: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            api_key: SecretString::new("sk-test"),
-            models: vec!["gpt-4.1".to_string()],
-            default_model: "gpt-4.1".to_string(),
-            is_default: true,
-            extra_headers: HashMap::new(),
-            secret_status: ProviderSecretStatus::Ready,
-        };
-
-        let output = ProviderRecord::from(record);
-
-        assert_eq!(output.id, "1");
-        assert_eq!(output.kind, ProviderKind::OpenAiCompatible);
-        assert_eq!(output.api_key, "sk-test");
-        assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
-    }
-
-    #[test]
-    fn provider_summary_can_build_a_reentry_record_with_a_blank_api_key() {
-        let record = build_provider_reentry_record(LlmProviderSummary {
+    fn provider_record_can_build_a_reentry_record_with_a_blank_api_key() {
+        let record = build_provider_reentry_record(LlmProviderRecord {
             id: LlmProviderId::new(2),
             kind: LlmProviderKind::OpenAiCompatible,
             display_name: "Legacy".to_string(),
             base_url: "https://legacy.example.com/v1".to_string(),
+            api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
             default_model: "gpt-4.1".to_string(),
             is_default: false,
@@ -611,38 +396,9 @@ mod tests {
             secret_status: ProviderSecretStatus::RequiresReentry,
         });
 
-        assert_eq!(record.id, "2");
+        assert_eq!(record.id, 2);
         assert_eq!(record.api_key, "");
         assert_eq!(record.secret_status, ProviderSecretStatus::RequiresReentry);
-    }
-
-    #[test]
-    fn provider_summary_conversion_exposes_secret_status_for_frontend() {
-        let output = ProviderSummary::from(LlmProviderSummary {
-            id: LlmProviderId::new(1),
-            kind: LlmProviderKind::OpenAiCompatible,
-            display_name: "OpenAI".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
-            models: vec!["gpt-4.1".to_string()],
-            default_model: "gpt-4.1".to_string(),
-            is_default: true,
-            extra_headers: HashMap::new(),
-            secret_status: ProviderSecretStatus::Ready,
-        });
-
-        assert_eq!(output.id, "1");
-        assert_eq!(output.secret_status, ProviderSecretStatus::Ready);
-    }
-
-    #[test]
-    fn provider_kind_serde_matches_frontend_payloads() {
-        let parsed: ProviderKind = serde_json::from_value(json!("openai-compatible"))
-            .expect("frontend value should parse");
-        assert_eq!(parsed, ProviderKind::OpenAiCompatible);
-
-        let serialized =
-            serde_json::to_value(ProviderKind::OpenAiCompatible).expect("kind should serialize");
-        assert_eq!(serialized, json!("openai-compatible"));
     }
 
     #[test]
@@ -676,18 +432,35 @@ mod tests {
 
     #[test]
     fn chat_session_payload_serializes_effective_provider_id() {
+        use super::ChatSessionPayload;
+
         let payload = ChatSessionPayload {
             session_key: "arguswing::__default__".to_string(),
-            template_id: "arguswing".to_string(),
-            runtime_agent_id: "arguswing--runtime".to_string(),
-            thread_id: claw::ThreadId::new().to_string(),
-            effective_provider_id: "openai".to_string(),
-            effective_model: "gpt-4.1".to_string(),
+            session_id: 1,
+            template_id: 1,
+            thread_id: ThreadId::new().to_string(),
+            effective_provider_id: Some(1),
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
-        assert_eq!(value["effective_provider_id"], json!("openai"));
-        assert_eq!(value["effective_model"], json!("gpt-4.1"));
+        assert_eq!(value["effective_provider_id"], json!(1));
         assert_eq!(value["session_key"], json!("arguswing::__default__"));
+        assert_eq!(value["session_id"], json!(1));
+    }
+
+    #[test]
+    fn chat_session_payload_serializes_none_effective_provider_id() {
+        use super::ChatSessionPayload;
+
+        let payload = ChatSessionPayload {
+            session_key: "arguswing::__default__".to_string(),
+            session_id: 1,
+            template_id: 1,
+            thread_id: ThreadId::new().to_string(),
+            effective_provider_id: None,
+        };
+
+        let value = serde_json::to_value(payload).expect("payload should serialize");
+        assert_eq!(value["effective_provider_id"], json!(null));
     }
 }

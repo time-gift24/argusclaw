@@ -15,10 +15,30 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 ## 设计与检视原则(非常重要)
 - YAGNI（You Ain't Gonna Need It，你不会需要它）
 - KISS (Keep It Simple and Stupid，尽可能保持简单)
-- DRY (Don't Repeat Yourself, 禁止重复你自身)
+- DRY (Don't Repeat Yourself，禁止重复你自身)
 
 ## 编码前检查
-- 务必使用 using-git-worktrees 去独立分支工作
+
+**禁令（极其重要）**
+- ❌ 禁止直接在 `main` 分支的文件夹中修改代码
+- ❌ 禁止直接在 `main` 分支创建或修改文件
+- ✅ 必须始终在 `.worktrees/` 中的某个独立分支工作
+
+使用 `using-git-worktrees` skill 创建独立工作区：
+
+```bash
+# 创建新功能分支
+.worktrees/feature-xxx  # 在这里工作
+```
+
+## 分支与文档规则
+
+- **docs/** 目录：始终放在 `main` 分支，不随功能分支
+- **清理分支时**：同时删除该分支关联的 docs/ 目录
+- **各 crate 特性**：一句话描述放在对应 crates/*/CLAUDE.md 顶部
+
+## 提交规则
+
 - 完成工作后无需提问直接发起 PR
 
 ## 代码风格
@@ -40,59 +60,110 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 
 所有 I/O 使用 tokio 异步。使用 Arc<T> 共享状态，RwLock 并发访问。
 
-## Crate 关系（极其重要）
+## Crate 依赖图
 
-```text
-crates/
-├── claw/          # 核心库：所有业务逻辑
-├── cli/           # CLI 前端
-└── desktop/       # Tauri 桌面前端（React + Rust）
+```
+                            ┌─────────────────────────────────────────────────────────┐
+                            │                        cli                              │
+                            │                    (命令行前端)                            │
+                            └──────────────────────┬──────────────────────────────────┘
+                                               │ 仅通过公共 API 依赖 claw
+                                               ▼
+┌─────────────┐    ┌──────────────────────────────────────────────────────────────────────────┐
+│   desktop   │    │                                   claw                                         │
+│  (Tauri 前端)│    │                              (核心库门面)                                        │
+└──────┬──────┘    └──────────────────────────────────┬───────────────────────────────────────────┘
+       │                      ▲                         │
+       │                      │ 仅通过公共 API 依赖        │ 内部模块
+       ▼                      │                         │
+                              │            ┌────────────┴────────────┐
+                              │            │                         │
+┌─────────────────┐    ┌──────┴──────────┐│                        ┌┴──────────────────┐
+│argus-protocol   │◄───│  argus-session  ││                        │ argus-thread      │
+│  ★ 核心类型 ★    │    │   会话管理      ││                        │  线程管理         │
+│                 │    └─────────────────┘│                        └───────────────────┘
+│ • ThreadId      │             ▲          │
+│ • ThreadEvent   │             │          │              ┌───────────────────┐
+│ • TokenUsage    │             └──────────┴──────────────│ argus-turn        │
+│ • Approval*     │                        │              │  轮次执行          │
+│ • RiskLevel     │             ┌───────────┴───────────┐  └───────────────────┘
+│ • Hook*         │             │                       │
+│ • LlmProvider   │    ┌────────┴───────┐    ┌─────────┴───────┐
+│ • NamedTool     │    │argus-approval │    │ argus-llm       │
+└─────────────────┘    │  审批系统       │    │  LLM 抽象层      │
+        ▲              └────────────────┘    └────────┬────────┘
+        │                                               │
+        │            ┌─────────────────────────────────┴────────────┐
+        │            │                                          │
+        │    ┌───────┴────────┐                      ┌─────────┴────────┐
+        ├────┤ argus-tool     │                      │ argus-repository │
+        │    │ 工具注册表      │                      │  持久化层        │
+        │    └─────────────────┘                      └──────────────────┘
+        │
+        │    ┌────────────────┐        ┌──────────────────┐
+        ├────┤ argus-log      │        │ argus-template   │
+        │    │  日志          │        │  模板            │
+        │    └────────────────┘        └──────────────────┘
+        │
+        │    ┌────────────────┐
+        ├────┤ argus-test-support │
+        │    │  测试辅助       │
+        │    └────────────────┘
+        │
+        │    ┌────────────────┐
+        ├────┤ argus-dev       │
+        │    │  开发工具       │
+        │    └────────────────┘
 ```
 
-**核心规则：cli 和 desktop 都只依赖 claw 暴露的公共 API，不可访问 claw 内部模块。**
+## 核心规则
 
-### claw — 核心库
+**cli 和 desktop 都只依赖 claw 暴露的公共 API，不可访问 argus-* 内部模块。**
 
-唯一的入口点是 `AppContext`（定义在 `claw.rs`）。cli 和 desktop 只能看到 `AppContext` 一个结构体来启动和操作系统。
+## argus-protocol — 核心类型（叶子模块）
 
-对话流程通过 `Agent` API 暴露：`AgentBuilder::build()` → `agent.create_thread()` → `agent.send_message()` / `agent.subscribe()` / `agent.resolve_approval()`。内部的 Thread、Turn、Compact 模块对消费者不可见（`pub(crate)`，仅 `dev` feature 下为 `pub`）。
+`argus-protocol` 是整个项目的**核心类型库**，不依赖其他 argus-* crates（仅依赖外部 crate 如 serde、uuid、chrono、thiserror）。
 
-### protocol — 跨模块共享类型（claw 内部）
+它存在的主要目的：
+1. **打破循环依赖**：`agents` ↔ `approval` ↔ `tool` 之间不能直接相互依赖
+2. **提供核心 trait**：`LlmProvider`、`NamedTool`、`HookHandler`
+3. **定义共享类型**：`ThreadId`、`ThreadEvent`、`TokenUsage`、`Approval*`、`RiskLevel`
 
-`protocol/` 是 claw 内部的**叶子模块**，不依赖其他 claw 模块（仅依赖外部 crate 如 serde、uuid、chrono）。它存在的目的是打破 `agents` ↔ `approval` ↔ `tool` 之间的循环依赖。
-
-包含以下共享类型：
+包含以下核心类型：
 - `ThreadId`：强类型 UUID 包装器
 - `ThreadEvent`：线程生命周期事件（Processing/TurnCompleted/TurnFailed/Idle/Compacted/WaitingForApproval/ApprovalResolved）
 - `TokenUsage`：token 使用统计
 - `ApprovalDecision` / `ApprovalRequest` / `ApprovalResponse`：审批协议类型
 - `RiskLevel`：操作风险等级
 - `HookEvent` / `HookHandler` / `HookRegistry`：生命周期 Hook 系统
+- `LlmProvider` trait：LLM 提供者抽象
+- `NamedTool` trait：工具抽象
 
-这些类型通过 `claw::lib.rs` 的 `pub use protocol::{ ... }` 重导出给 cli/desktop 消费。
+依赖方向：`argus-protocol` ← 所有其他 argus-* crates（**argus-protocol 不依赖它们**）
 
-依赖方向：`protocol` ← `agents`、`approval`、`tool`、`scheduler`（**protocol 不依赖它们**）
+## claw — 核心库门面
 
-### cli — 命令行前端
+`claw` 是面向 cli 和 desktop 的**唯一入口点**。它不包含核心逻辑，而是组合各个 argus-* 模块。
+
+唯一的入口点是 `AppContext`（定义在 `claw.rs`）。cli 和 desktop 只能看到 `AppContext` 一个结构体来启动和操作系统。
+
+对话流程通过 `Agent` API 暴露：`AgentBuilder::build()` → `agent.create_thread()` → `agent.send_message()` / `agent.subscribe()` / `agent.resolve_approval()`。
+
+## 各 argus-* crate 职责
+
+| Crate | 职责 | 关键依赖 |
+|-------|------|---------|
+| `argus-protocol` | 核心类型定义 | 无内部依赖 |
+| `argus-session` | 会话管理 | protocol, log, template, thread, tool |
+| `argus-thread` | 线程管理 | protocol, turn, tool |
+| `argus-turn` | 轮次执行 | protocol, test-support, tool, llm |
+| `argus-llm` | LLM 抽象层 | protocol, test-support |
+| `argus-approval` | 审批系统 | protocol |
+| `argus-tool` | 工具注册表 | protocol |
+| `argus-repository` | 持久化层 | protocol, llm |
+| `argus-log` | 日志 | protocol |
+| `argus-template` | 模板 | protocol |
+
+## cli — 命令行前端
 
 详见 `crates/cli/CLAUDE.md`。
-
-### desktop — 桌面前端
-
-Tauri + React + TypeScript + Vite + Tailwind CSS v4。Rust 后端通过 Tauri Commands 调用 claw API。
-
-## 测试
-
-- 优先使用 `#[cfg(test)]` 在实现文件中的内联测试
-- 只在需要测试多个模块组合的 E2E 场景使用 `crates/*/tests/`
-
-## 数据库
-
-- 默认 `DATABASE_URL` 为 `~/.arguswing/sqlite.db`
-- 使用 `sqlx::migrate!()` 宏，迁移在**编译时嵌入**到二进制文件中
-
-### 迁移规范
-
-- 文件位于 `crates/claw/migrations/` 目录
-- **使用 sqlx-cli 创建迁移**：`sqlx migrate add <name>`（在 `crates/claw` 目录下执行）
-- **并发开发注意**：多个 feature 分支并发开发时，rebase origin/main 后必须检查迁移文件时间戳顺序，必要时重新命名以保障时序正确

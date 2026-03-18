@@ -7,7 +7,11 @@ import {
   LoaderCircle,
   RefreshCw,
 } from "lucide-react";
-import type { ProviderTestResult, ProviderTestStatus } from "@/lib/tauri";
+import type {
+  ProviderSecretStatus,
+  ProviderTestResult,
+  ProviderTestStatus,
+} from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -31,6 +35,7 @@ interface ProviderTestPanelProps {
     default_model: string;
     is_default: boolean;
     extra_headers: Record<string, string>;
+    secret_status: ProviderSecretStatus;
   } | null;
   canTest: boolean;
 }

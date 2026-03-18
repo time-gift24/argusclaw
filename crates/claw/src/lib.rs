@@ -3,13 +3,10 @@
 #![allow(clippy::too_many_arguments)]
 
 // === 内部模块 (不对外暴露) ===
-pub(crate) mod agents;
-pub(crate) mod api;
+pub mod agents; // Public for argus-thread
 pub(crate) mod db;
 pub(crate) mod job;
-pub(crate) mod llm;
 pub(crate) mod scheduler;
-pub(crate) mod tool;
 pub(crate) mod workflow;
 
 // === 公开模块 ===
@@ -18,11 +15,11 @@ pub mod error; // AgentError
 pub mod protocol; // 稳定 DTO
 pub mod user; // User management
 
-// approval: dev feature 下公开，否则 crate 内部
-#[cfg(feature = "dev")]
-pub mod approval;
-#[cfg(not(feature = "dev"))]
-pub(crate) mod approval;
+// Approval types re-exported from argus-approval
+pub use argus_approval::{
+    ApprovalDecision, ApprovalError, ApprovalEvent, ApprovalHook, ApprovalManager,
+    ApprovalPolicy, ApprovalRequest, ApprovalResponse, RuntimeAllowList,
+};
 
 // === 稳定公共 API 重导出 ===
 
@@ -36,20 +33,26 @@ pub use agents::{AgentRecord, AgentRuntimeInfo, ThreadInfo};
 
 // Protocol Types (稳定 DTO)
 pub use protocol::{
-    ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmStreamEvent, RiskLevel,
-    RuntimeAgentHandle, ThreadEvent, ThreadId, ThreadMessageSnapshot, ThreadSnapshot, TokenUsage,
-    ToolCallSnapshot,
+    LlmEventStream, LlmStreamEvent, RiskLevel, RuntimeAgentHandle, ThreadEvent, ThreadId,
+    ThreadMessageSnapshot, ThreadSnapshot, TokenUsage, ToolCallSnapshot,
 };
 
 // LLM Provider Types (DTO)
 pub use db::DbError;
 pub use db::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderSummary, ProviderSecretStatus,
-    ProviderTestResult, ProviderTestStatus, SecretString,
+    LlmProviderId, LlmProviderKind, LlmProviderRecord, ProviderSecretStatus, ProviderTestResult,
+    ProviderTestStatus, SecretString,
 };
 
-// Tool Types
-pub use tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
+// Tool Types - from argus-tool
+pub use argus_tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolError, ToolManager};
+
+// LLM Types - from argus-protocol (types) and argus-llm (ProviderManager)
+pub use argus_llm::ProviderManager;
+pub use argus_protocol::{
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, ProviderId, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+};
 
 // User Types
 pub use user::UserInfo;
@@ -62,23 +65,13 @@ pub use agents::AgentRepository;
 #[cfg(feature = "dev")]
 pub use agents::turn;
 #[cfg(feature = "dev")]
-pub use approval::{ApprovalManager, ApprovalPolicy};
+pub use argus_approval::{ApprovalManager, ApprovalPolicy, RuntimeAllowList};
+#[cfg(feature = "dev")]
+pub use argus_repository::{
+    JobRecord, JobRepository, JobType, MessageRecord, ThreadRecord, ThreadRepository,
+    WorkflowRecord, WorkflowRepository, WorkflowStatus,
+};
 #[cfg(feature = "dev")]
 pub use db::llm::LlmProviderRepository;
 #[cfg(feature = "dev")]
-pub use db::sqlite::{
-    self, SqliteAgentRepository, SqliteLlmProviderRepository, SqliteThreadRepository, connect,
-    migrate,
-};
-#[cfg(feature = "dev")]
-pub use db::thread::{MessageRecord, ThreadRecord, ThreadRepository};
-#[cfg(feature = "dev")]
-pub use db::{ApprovalRepository, SqliteJobRepository, SqliteWorkflowRepository};
-#[cfg(feature = "dev")]
-pub use job::{JobRecord, JobRepository, JobType};
-#[cfg(feature = "dev")]
-pub use llm::provider::LlmEventStream;
-#[cfg(feature = "dev")]
-pub use llm::{ChatMessage, LLMManager, LlmProvider, Role};
-#[cfg(feature = "dev")]
-pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowRepository, WorkflowStatus};
+pub use workflow::{JobId, WorkflowId};

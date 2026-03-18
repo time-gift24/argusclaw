@@ -1,20 +1,20 @@
 //! Agent runtime implementation.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::agents::compact::{Compactor, CompactorManager};
-use crate::agents::thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord};
-use crate::approval::{ApprovalHook, ApprovalManager, ApprovalPolicy};
 use crate::error::AgentError;
-use crate::llm::{ChatMessage, LlmProvider};
-use crate::protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadEvent, ThreadId};
-use crate::tool::ToolManager;
+use argus_approval::{ApprovalHook, ApprovalManager, ApprovalPolicy, RuntimeAllowList};
+use argus_protocol::{ApprovalDecision, HookEvent, HookRegistry, SessionId, ThreadId};
+use argus_protocol::{AgentRecord as ProtocolAgentRecord, LlmProvider};
+use argus_thread::compact::{Compactor, CompactorManager};
+use argus_thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
+use argus_tool::ToolManager;
 
 /// Runtime information about an agent.
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ impl AgentBuilder {
     #[must_use]
     pub fn from_record(record: &AgentRecord, provider: Arc<dyn LlmProvider>) -> Self {
         Self::default()
-            .id(record.id.clone())
+            .id(record.id)
             .system_prompt(record.system_prompt.clone())
             .provider(provider)
     }
@@ -128,7 +128,8 @@ impl AgentBuilder {
         // Register approval hook if needed
         if let Some(manager) = &approval_manager {
             let policy = manager.policy();
-            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), "agent");
+            let allow_list = Arc::new(RwLock::new(RuntimeAllowList::new()));
+            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), allow_list, id.to_string());
             hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
         }
 
@@ -186,32 +187,40 @@ impl Agent {
     pub fn create_thread(&self, config: ThreadConfig) -> Result<ThreadId, AgentError> {
         let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
 
+        // Create AgentRecord from Agent's fields
+        let agent_record = ProtocolAgentRecord {
+            id: self.id,
+            display_name: format!("Agent {}", self.id.inner()),
+            description: "Runtime agent".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: None,
+            system_prompt: self.system_prompt.clone(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+        };
+
+        // Use a default session ID for runtime agents (not persisted)
+        let session_id = SessionId::new(0);
+
         let mut builder = ThreadBuilder::new()
             .provider(self.provider.clone())
             .tool_manager(self.tool_manager.clone())
             .compactor(compactor)
+            .agent_record(agent_record)
+            .session_id(session_id)
             .config(config);
 
         if let Some(hooks) = &self.hooks {
             builder = builder.hooks(Arc::clone(hooks));
         }
 
-        if let Some(manager) = &self.approval_manager {
-            builder = builder.approval_manager(Arc::clone(manager));
-        }
-
-        let mut thread = builder.build().map_err(|e| AgentError::ThreadBuildFailed {
+        let thread = builder.build().map_err(|e| AgentError::ThreadBuildFailed {
             reason: e.to_string(),
         })?;
 
-        // Add system prompt as first message
-        if !self.system_prompt.is_empty() {
-            thread
-                .messages_mut()
-                .push(ChatMessage::system(&self.system_prompt));
-        }
-
-        let id = *thread.id();
+        // Thread ID is now strongly typed
+        let id = thread.id();
         self.threads
             .insert(id, Arc::new(tokio::sync::Mutex::new(thread)));
         Ok(id)
@@ -252,7 +261,7 @@ impl Agent {
     pub async fn subscribe(
         &self,
         thread_id: &ThreadId,
-    ) -> Option<broadcast::Receiver<ThreadEvent>> {
+    ) -> Option<broadcast::Receiver<argus_protocol::ThreadEvent>> {
         let thread_arc = self.threads.get(thread_id)?.value().clone();
         Some(thread_arc.lock().await.subscribe())
     }
@@ -294,7 +303,7 @@ impl Agent {
     #[must_use]
     pub fn runtime_info(&self) -> AgentRuntimeInfo {
         AgentRuntimeInfo::new(
-            self.id.clone(),
+            self.id,
             self.threads.len(),
             self.provider.model_name().to_string(),
         )
@@ -322,17 +331,17 @@ impl Agent {
         let thread_arc = self.threads.get(thread_id)?.value().clone();
         let thread = thread_arc.lock().await;
         Some(crate::protocol::ThreadSnapshot {
-            runtime_agent_id: self.id.clone(),
-            thread_id: *thread.id(),
+            runtime_agent_id: self.id,
+            thread_id: thread.id(),
             messages: thread
                 .history()
                 .iter()
                 .map(|message| crate::protocol::ThreadMessageSnapshot {
                     role: match message.role {
-                        crate::llm::Role::System => "system".to_string(),
-                        crate::llm::Role::User => "user".to_string(),
-                        crate::llm::Role::Assistant => "assistant".to_string(),
-                        crate::llm::Role::Tool => "tool".to_string(),
+                        argus_protocol::Role::System => "system".to_string(),
+                        argus_protocol::Role::User => "user".to_string(),
+                        argus_protocol::Role::Assistant => "assistant".to_string(),
+                        argus_protocol::Role::Tool => "tool".to_string(),
                     },
                     content: message.content.clone(),
                     reasoning_content: message.reasoning_content.clone(),
@@ -359,7 +368,7 @@ impl Agent {
 impl Clone for Agent {
     fn clone(&self) -> Self {
         Self {
-            id: self.id.clone(),
+            id: self.id,
             system_prompt: self.system_prompt.clone(),
             provider: self.provider.clone(),
             tool_manager: self.tool_manager.clone(),
@@ -390,11 +399,11 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     use super::*;
-    use crate::llm::provider::{CompletionRequest, CompletionResponse};
-    use crate::llm::{
+    use crate::protocol::ThreadEvent;
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse};
+    use argus_protocol::{
         FinishReason, LlmError, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
     };
-    use crate::protocol::ThreadEvent;
 
     #[test]
     fn test_agent_runtime_info() {
@@ -469,7 +478,7 @@ mod tests {
                 match subscription.recv().await {
                     Ok(ThreadEvent::Idle {
                         thread_id: idle_thread_id,
-                    }) if idle_thread_id == thread_id => {
+                    }) if idle_thread_id == thread_id.inner().to_string() => {
                         break;
                     }
                     Ok(_) => {}

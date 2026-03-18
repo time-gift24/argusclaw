@@ -1,10 +1,12 @@
 //! LLM command - development only.
 
 use std::io::{self, Write};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use argus_protocol::LlmProviderId;
+use argus_wing::ArgusWing;
 use clap::Subcommand;
-use claw::{AppContext, LlmProviderId};
 use futures_util::StreamExt;
 
 use crate::{StreamRenderState, finish_stream_output, render_stream_event};
@@ -26,7 +28,7 @@ pub enum LlmCommand {
 }
 
 /// Run LLM command.
-pub async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()> {
+pub async fn run_llm_command(wing: Arc<ArgusWing>, command: LlmCommand) -> Result<()> {
     match command {
         LlmCommand::Complete {
             provider,
@@ -41,7 +43,7 @@ pub async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()>
                 })
                 .transpose()?;
             if stream {
-                let mut events = ctx.stream_text(provider_id.as_ref(), prompt).await?;
+                let mut events = wing.stream_text(provider_id.as_ref(), prompt).await?;
                 let mut render_state = StreamRenderState::default();
                 let mut stdout = io::stdout();
 
@@ -58,7 +60,7 @@ pub async fn run_llm_command(ctx: AppContext, command: LlmCommand) -> Result<()>
                     stdout.flush().context("failed to flush stream output")?;
                 }
             } else {
-                let content = ctx.complete_text(provider_id.as_ref(), prompt).await?;
+                let content = wing.complete_text(provider_id.as_ref(), prompt).await?;
                 println!("{content}");
             }
         }

@@ -8,16 +8,16 @@ license = "MIT OR Apache-2.0"
 name = "arguswing"
 path = "src/main.rs"
 
-[[bin]]
-name = "arguswing-dev"
-path = "src/main-dev.rs"
-required-features = ["dev"]
-
 [dependencies]
 anyhow = "1"
+argus-dev = { path = "../argus-dev", optional = true }
+argus-protocol = { path = "../argus-protocol" }
+argus-thread = { path = "../argus-thread" }
+argus-tool = { path = "../argus-tool" }
+argus-turn = { path = "../argus-turn", optional = true }
+argus-wing = { path = "../argus-wing" }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
-claw = { path = "../claw" }
 dirs = "5"
 futures-util = { version = "0.3", optional = true }
 owo-colors = { version = "4", optional = true }
@@ -32,4 +32,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["claw/dev", "dep:futures-util", "dep:owo-colors", "dep:serde_json", "dep:sqlx", "dep:toml"]
+dev = ["dep:argus-dev", "dep:argus-turn", "dep:futures-util", "dep:owo-colors", "dep:serde_json", "dep:sqlx", "dep:toml"]

@@ -29,11 +29,23 @@ export function DeleteConfirmDialog({
   onConfirm,
   loading = false,
 }: DeleteConfirmDialogProps) {
+  const [errorMessage, setErrorMessage] = React.useState("")
+
+  React.useEffect(() => {
+    if (open) {
+      setErrorMessage("")
+    }
+  }, [open])
+
   const handleConfirm = async () => {
+    setErrorMessage("")
+
     try {
       await onConfirm()
       onOpenChange(false)
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setErrorMessage(message)
       console.error("Delete failed:", error)
     }
   }
@@ -48,6 +60,9 @@ export function DeleteConfirmDialog({
           </div>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+        {errorMessage ? (
+          <p className="text-sm text-destructive">{errorMessage}</p>
+        ) : null}
         <DialogFooter className="gap-2 sm:gap-0">
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
             Cancel

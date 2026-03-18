@@ -12,8 +12,7 @@ use uuid::Uuid;
 
 use crate::agents::AgentManager;
 use crate::agents::thread::ThreadConfig;
-use crate::job::repository::JobRepository;
-use crate::job::types::{JobRecord, JobType};
+use crate::job::{JobRecord, JobRepository, JobType};
 use crate::workflow::{JobId, WorkflowStatus};
 
 use super::config::SchedulerConfig;
@@ -132,7 +131,7 @@ impl Scheduler {
                 job_type: JobType::Standalone,
                 name: template.name.clone(),
                 status: WorkflowStatus::Pending,
-                agent_id: template.agent_id.clone(),
+                agent_id: template.agent_id,
                 context: template.context.clone(),
                 prompt: template.prompt.clone(),
                 thread_id: None,

@@ -2,30 +2,19 @@
 
 pub mod agent;
 pub(crate) mod builtins;
-
-// Internal modules: pub for dev feature, otherwise crate-internal
-#[cfg(feature = "dev")]
-pub mod compact;
-#[cfg(not(feature = "dev"))]
-pub(crate) mod compact;
-
-#[cfg(feature = "dev")]
-pub mod thread;
-#[cfg(not(feature = "dev"))]
-pub(crate) mod thread;
-
-#[cfg(feature = "dev")]
-pub mod turn;
-#[cfg(not(feature = "dev"))]
-pub(crate) mod turn;
-
 mod types;
+
+// Re-export from argus-thread and argus-turn crates
+pub use argus_thread::{
+    self as thread, CompactContext, Compactor, CompactorManager, KeepRecentCompactor,
+    KeepTokensCompactor, Thread, ThreadBuilder, ThreadConfig, ThreadError, ThreadInfo, ThreadState,
+};
+pub use argus_turn::{
+    self as turn, TurnConfig, TurnError, TurnInput, TurnInputBuilder, TurnOutput, TurnStreamEvent,
+    execute_turn_streaming,
+};
 
 #[cfg(feature = "dev")]
 pub use agent::Agent;
 pub use agent::{AgentBuilder, AgentManager, AgentRuntimeInfo};
-pub use thread::ThreadInfo;
 pub use types::{AgentId, AgentRecord, AgentRepository};
-
-// Re-export thread types still needed by external consumers
-pub use thread::ThreadConfig;
