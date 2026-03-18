@@ -1,6 +1,6 @@
 //! Agent runtime implementation.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 use derive_builder::Builder;
@@ -8,9 +8,9 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::agents::types::{AgentId, AgentRecord};
-use crate::approval::{ApprovalHook, ApprovalManager, ApprovalPolicy};
 use crate::error::AgentError;
-use crate::protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadId};
+use argus_approval::{ApprovalHook, ApprovalManager, ApprovalPolicy, RuntimeAllowList};
+use argus_protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadId};
 use argus_protocol::{ChatMessage, LlmProvider};
 use argus_thread::compact::{Compactor, CompactorManager};
 use argus_thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
@@ -128,7 +128,8 @@ impl AgentBuilder {
         // Register approval hook if needed
         if let Some(manager) = &approval_manager {
             let policy = manager.policy();
-            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), "agent");
+            let allow_list = Arc::new(RwLock::new(RuntimeAllowList::new()));
+            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), allow_list, "agent");
             hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
         }
 

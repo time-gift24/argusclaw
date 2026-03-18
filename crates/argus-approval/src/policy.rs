@@ -2,7 +2,21 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{MAX_TIMEOUT_SECS, MAX_TOOL_NAME_LEN, MIN_TIMEOUT_SECS};
+// ---------------------------------------------------------------------------
+// Constants (defined locally, not from argus_protocol)
+// ---------------------------------------------------------------------------
+
+/// Maximum length of tool names (chars).
+pub const MAX_TOOL_NAME_LEN: usize = 64;
+
+/// Maximum length of an action summary (chars).
+pub const MAX_ACTION_LEN: usize = 512;
+
+/// Minimum approval timeout in seconds.
+pub const MIN_TIMEOUT_SECS: u64 = 10;
+
+/// Maximum approval timeout in seconds.
+pub const MAX_TIMEOUT_SECS: u64 = 300;
 
 // ---------------------------------------------------------------------------
 // ApprovalPolicy

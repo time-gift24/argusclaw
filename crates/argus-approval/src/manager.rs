@@ -1,5 +1,12 @@
 //! Execution approval manager — gates dangerous operations behind human approval.
 
+//!
+//! This module provides the runtime approval manager that:
+//! - Stores pending approval requests
+//! - Tracks per-agent limits
+//! - Provides event broadcasting
+//! - Handles request resolution
+
 use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -9,23 +16,24 @@ use uuid::Uuid;
 
 use super::error::ApprovalError;
 use super::policy::ApprovalPolicy;
-use super::types::{
-    ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse, MAX_PENDING_PER_AGENT,
-};
+use argus_protocol::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 
+/// Maximum pending requests per agent.
+pub const MAX_PENDING_PER_AGENT: usize = 5;
 /// Manages approval requests with oneshot channels for blocking resolution.
+///
+/// The manager is designed to be thread-safe and can be shared across multiple
+/// agents or components.
 pub struct ApprovalManager {
     pending: DashMap<Uuid, PendingRequest>,
     policy: std::sync::RwLock<ApprovalPolicy>,
     /// Broadcast sender for approval events (RequestCreated, Resolved).
     event_tx: broadcast::Sender<ApprovalEvent>,
 }
-
 struct PendingRequest {
     request: ApprovalRequest,
     sender: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
-
 impl ApprovalManager {
     /// Create a new approval manager with the given policy.
     pub fn new(policy: ApprovalPolicy) -> Self {
@@ -36,12 +44,10 @@ impl ApprovalManager {
             event_tx,
         }
     }
-
     /// Create a new approval manager wrapped in Arc.
     pub fn new_shared(policy: ApprovalPolicy) -> Arc<Self> {
         Arc::new(Self::new(policy))
     }
-
     /// Subscribe to approval events (RequestCreated, Resolved).
     ///
     /// The returned receiver will get all events broadcast after subscription.
@@ -49,14 +55,16 @@ impl ApprovalManager {
     pub fn subscribe(&self) -> broadcast::Receiver<ApprovalEvent> {
         self.event_tx.subscribe()
     }
-
     /// Check if a tool requires approval based on current policy.
     pub fn requires_approval(&self, tool_name: &str) -> bool {
         let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
         policy.requires_approval(tool_name)
     }
-
     /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ApprovalDecision::Denied` if the agent has too many pending requests.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
         // Check per-agent pending limit
         let agent_pending = self
@@ -73,10 +81,8 @@ impl ApprovalManager {
             );
             return ApprovalDecision::Denied;
         }
-
         let timeout = std::time::Duration::from_secs(req.timeout_secs);
         let id = req.id;
-
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending.insert(
             id,
@@ -85,12 +91,9 @@ impl ApprovalManager {
                 sender: tx,
             },
         );
-
         // Broadcast RequestCreated event (ignore if no subscribers)
         let _ = self.event_tx.send(ApprovalEvent::RequestCreated(req));
-
         info!(request_id = %id, "Approval request submitted, waiting for resolution");
-
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => {
                 debug!(request_id = %id, ?decision, "Approval resolved");
@@ -103,8 +106,11 @@ impl ApprovalManager {
             }
         }
     }
-
     /// Resolve a pending request (called by API/UI).
+    ///
+    /// # Errors
+    ///
+    /// - `ApprovalError::NotFound` if no pending request exists with the given ID.
     pub fn resolve(
         &self,
         request_id: Uuid,
@@ -121,19 +127,16 @@ impl ApprovalManager {
                 };
                 // Send decision to waiting agent (ignore error if receiver dropped)
                 let _ = pending.sender.send(decision);
-
                 // Broadcast Resolved event (ignore if no subscribers)
                 let _ = self
                     .event_tx
                     .send(ApprovalEvent::Resolved(response.clone()));
-
                 info!(request_id = %request_id, ?decision, "Approval request resolved");
                 Ok(response)
             }
             None => Err(ApprovalError::NotFound(request_id)),
         }
     }
-
     /// List all pending requests (for API/dashboard display).
     pub fn list_pending(&self) -> Vec<ApprovalRequest> {
         self.pending
@@ -141,17 +144,14 @@ impl ApprovalManager {
             .map(|r| r.value().request.clone())
             .collect()
     }
-
     /// Number of pending requests.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
-
     /// Update the approval policy (for hot-reload).
     pub fn update_policy(&self, policy: ApprovalPolicy) {
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
     }
-
     /// Get a copy of the current policy.
     pub fn policy(&self) -> ApprovalPolicy {
         self.policy
@@ -160,20 +160,16 @@ impl ApprovalManager {
             .clone()
     }
 }
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::RiskLevel;
-
+    use argus_protocol::RiskLevel;
     fn default_manager() -> ApprovalManager {
         ApprovalManager::new(ApprovalPolicy::default())
     }
-
     fn make_request(agent_id: &str, tool_name: &str, timeout_secs: u64) -> ApprovalRequest {
         ApprovalRequest::new(
             agent_id.to_string(),
@@ -183,18 +179,12 @@ mod tests {
             RiskLevel::Critical,
         )
     }
-
-    // -----------------------------------------------------------------------
-    // requires_approval
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_requires_approval_default() {
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
         assert!(!mgr.requires_approval("file_read"));
     }
-
     #[test]
     fn test_requires_approval_custom_policy() {
         let policy = ApprovalPolicy {
@@ -209,14 +199,8 @@ mod tests {
         assert!(!mgr.requires_approval("shell_exec"));
         assert!(!mgr.requires_approval("file_read"));
     }
-
-    // -----------------------------------------------------------------------
-    // resolve nonexistent
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_resolve_nonexistent() {
-        use crate::approval::ApprovalError;
         let mgr = default_manager();
         let result = mgr.resolve(Uuid::new_v4(), ApprovalDecision::Approved, None);
         assert!(result.is_err());
@@ -225,27 +209,16 @@ mod tests {
             other => panic!("expected NotFound error, got {other:?}"),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // list_pending empty
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_list_pending_empty() {
         let mgr = default_manager();
         assert!(mgr.list_pending().is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // update_policy
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_update_policy() {
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
         assert!(!mgr.requires_approval("file_write"));
-
         let new_policy = ApprovalPolicy {
             require_approval: vec!["file_write".to_string()],
             timeout_secs: 120,
@@ -253,29 +226,17 @@ mod tests {
             auto_approve: false,
         };
         mgr.update_policy(new_policy);
-
         assert!(!mgr.requires_approval("shell_exec"));
         assert!(mgr.requires_approval("file_write"));
-
         let policy = mgr.policy();
         assert_eq!(policy.timeout_secs, 120);
         assert!(policy.auto_approve_autonomous);
     }
-
-    // -----------------------------------------------------------------------
-    // pending_count
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_pending_count() {
         let mgr = default_manager();
         assert_eq!(mgr.pending_count(), 0);
     }
-
-    // -----------------------------------------------------------------------
-    // request_approval — timeout
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_request_approval_timeout() {
         let mgr = Arc::new(default_manager());
@@ -285,17 +246,11 @@ mod tests {
         // After timeout, pending map should be cleaned up
         assert_eq!(mgr.pending_count(), 0);
     }
-
-    // -----------------------------------------------------------------------
-    // request_approval — approve
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_request_approval_approve() {
         let mgr = Arc::new(default_manager());
         let req = make_request("agent-1", "shell_exec", 60);
         let request_id = req.id;
-
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {
             // Small delay to let the request register
@@ -310,40 +265,26 @@ mod tests {
             assert_eq!(resp.decision, ApprovalDecision::Approved);
             assert_eq!(resp.decided_by, Some("admin".to_string()));
         });
-
         let decision = mgr.request_approval(req).await;
         assert_eq!(decision, ApprovalDecision::Approved);
     }
-
-    // -----------------------------------------------------------------------
-    // request_approval — deny
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_request_approval_deny() {
         let mgr = Arc::new(default_manager());
         let req = make_request("agent-1", "shell_exec", 60);
         let request_id = req.id;
-
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let result = mgr2.resolve(request_id, ApprovalDecision::Denied, None);
             assert!(result.is_ok());
         });
-
         let decision = mgr.request_approval(req).await;
         assert_eq!(decision, ApprovalDecision::Denied);
     }
-
-    // -----------------------------------------------------------------------
-    // max pending per agent
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_max_pending_per_agent() {
         let mgr = Arc::new(default_manager());
-
         // Fill up 5 pending requests for agent-1 (they will all be waiting)
         let mut ids = Vec::new();
         for _ in 0..MAX_PENDING_PER_AGENT {
@@ -354,16 +295,13 @@ mod tests {
                 mgr_clone.request_approval(req).await;
             });
         }
-
         // Give spawned tasks time to register
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(mgr.pending_count(), MAX_PENDING_PER_AGENT);
-
         // 6th request for the same agent should be immediately denied
         let req6 = make_request("agent-1", "shell_exec", 300);
         let decision = mgr.request_approval(req6).await;
         assert_eq!(decision, ApprovalDecision::Denied);
-
         // A different agent should still be able to submit
         let req_other = make_request("agent-2", "shell_exec", 300);
         let other_id = req_other.id;
@@ -373,18 +311,12 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(mgr.pending_count(), MAX_PENDING_PER_AGENT + 1);
-
         // Cleanup: resolve all pending to avoid hanging tasks
         for id in &ids {
             let _ = mgr.resolve(*id, ApprovalDecision::Denied, None);
         }
         let _ = mgr.resolve(other_id, ApprovalDecision::Denied, None);
     }
-
-    // -----------------------------------------------------------------------
-    // policy defaults
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_policy_defaults() {
         let mgr = default_manager();
@@ -393,28 +325,19 @@ mod tests {
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
     }
-
-    // -----------------------------------------------------------------------
-    // event subscription
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_subscribe_request_created() {
         let mgr = Arc::new(default_manager());
         let mut rx = mgr.subscribe();
-
         let req = make_request("agent-1", "shell_exec", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
-
         // Spawn task to resolve after a short delay
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let _ = mgr2.resolve(request_id, ApprovalDecision::Approved, None);
         });
-
         let _ = mgr.request_approval(req).await;
-
         // Should receive RequestCreated event
         let event = rx.try_recv().expect("should receive RequestCreated event");
         match event {
@@ -426,16 +349,13 @@ mod tests {
             ApprovalEvent::Resolved(_) => panic!("expected RequestCreated, got Resolved"),
         }
     }
-
     #[tokio::test]
     async fn test_subscribe_resolved() {
         let mgr = Arc::new(default_manager());
         let mut rx = mgr.subscribe();
-
         let req = make_request("agent-1", "shell_exec", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
-
         // Spawn task to resolve after a short delay
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -445,12 +365,9 @@ mod tests {
                 Some("admin".to_string()),
             );
         });
-
         let _ = mgr.request_approval(req).await;
-
         // Skip RequestCreated event
         let _ = rx.try_recv();
-
         // Should receive Resolved event
         let event = rx.try_recv().expect("should receive Resolved event");
         match event {
@@ -462,43 +379,34 @@ mod tests {
             }
         }
     }
-
     #[tokio::test]
     async fn test_multiple_subscribers() {
         let mgr = Arc::new(default_manager());
         let mut rx1 = mgr.subscribe();
         let mut rx2 = mgr.subscribe();
-
         let req = make_request("agent-1", "shell_exec", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
-
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let _ = mgr2.resolve(request_id, ApprovalDecision::Denied, None);
         });
-
         let _ = mgr.request_approval(req).await;
-
         // Both subscribers should receive events
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
     }
-
     #[tokio::test]
     async fn test_no_subscribers_still_works() {
         let mgr = Arc::new(default_manager());
         // No subscription created
-
         let req = make_request("agent-1", "shell_exec", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
-
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let _ = mgr2.resolve(request_id, ApprovalDecision::Approved, None);
         });
-
         // Should still work without subscribers
         let decision = mgr.request_approval(req).await;
         assert_eq!(decision, ApprovalDecision::Approved);

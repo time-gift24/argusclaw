@@ -11,10 +11,10 @@ use super::runtime::{Agent, AgentBuilder, AgentRuntimeInfo};
 use crate::agents::CompactorManager;
 use crate::agents::thread::{ThreadConfig, ThreadInfo};
 use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
-use crate::approval::ApprovalManager;
+use argus_approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
-use crate::protocol::{ApprovalDecision, ThreadEvent, ThreadId};
+use argus_protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use argus_llm::ProviderManager;
 use argus_tool::ToolManager;
 

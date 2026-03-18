@@ -35,9 +35,14 @@ pub const MAX_PENDING_PER_AGENT: usize = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
+    /// Approved for this single operation.
     Approved,
+    /// Denied - the operation will not proceed.
     Denied,
+    /// Timed out waiting for a decision.
     TimedOut,
+    /// Approved for this session - all future tool calls are allowed.
+    ApprovedSession,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,21 +193,6 @@ pub trait ApprovalManager: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// ApprovalPolicy (placeholder - to be moved from claw)
-// ---------------------------------------------------------------------------
-
-/// Placeholder for ApprovalPolicy - actual implementation is in claw.
-#[derive(Debug, Clone)]
-pub struct ApprovalPolicy;
-
-impl ApprovalPolicy {
-    /// Check if a tool requires approval.
-    pub fn requires_approval(&self, _tool_name: &str) -> bool {
-        false
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -232,6 +222,7 @@ mod tests {
             ApprovalDecision::Approved,
             ApprovalDecision::Denied,
             ApprovalDecision::TimedOut,
+            ApprovalDecision::ApprovedSession,
         ] {
             let json = serde_json::to_string(&decision).unwrap();
             let back: ApprovalDecision = serde_json::from_str(&json).unwrap();

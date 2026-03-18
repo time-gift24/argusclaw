@@ -133,6 +133,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-approval"
+version = "0.1.0"
+dependencies = [
+ "argus-protocol",
+ "async-trait",
+ "chrono",
+ "dashmap 6.1.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "argus-llm"
 version = "0.1.0"
 dependencies = [
@@ -960,6 +976,7 @@ name = "claw"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "argus-approval",
  "argus-llm",
  "argus-log",
  "argus-protocol",

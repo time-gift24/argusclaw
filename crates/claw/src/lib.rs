@@ -16,8 +16,11 @@ pub mod error; // AgentError
 pub mod protocol; // 稳定 DTO
 pub mod user; // User management
 
-// approval: public for argus-thread
-pub mod approval;
+// Approval types re-exported from argus-approval
+pub use argus_approval::{
+    ApprovalDecision, ApprovalError, ApprovalEvent, ApprovalHook, ApprovalManager,
+    ApprovalPolicy, ApprovalRequest, ApprovalResponse, RuntimeAllowList,
+};
 
 // === 稳定公共 API 重导出 ===
 
@@ -31,9 +34,8 @@ pub use agents::{AgentRecord, AgentRuntimeInfo, ThreadInfo};
 
 // Protocol Types (稳定 DTO)
 pub use protocol::{
-    ApprovalDecision, ApprovalRequest, ApprovalResponse, LlmEventStream, LlmStreamEvent, RiskLevel,
-    RuntimeAgentHandle, ThreadEvent, ThreadId, ThreadMessageSnapshot, ThreadSnapshot, TokenUsage,
-    ToolCallSnapshot,
+    LlmEventStream, LlmStreamEvent, RiskLevel, RuntimeAgentHandle, ThreadEvent, ThreadId,
+    ThreadMessageSnapshot, ThreadSnapshot, TokenUsage, ToolCallSnapshot,
 };
 
 // LLM Provider Types (DTO)
@@ -64,11 +66,11 @@ pub use agents::AgentRepository;
 #[cfg(feature = "dev")]
 pub use agents::turn;
 #[cfg(feature = "dev")]
-pub use approval::{ApprovalManager, ApprovalPolicy};
+pub use argus_approval::{ApprovalManager, ApprovalPolicy, RuntimeAllowList};
 #[cfg(feature = "dev")]
 pub use argus_repository::{
-    JobRecord, JobRepository, JobType, MessageRecord, ThreadRecord,
-    ThreadRepository, WorkflowRecord, WorkflowRepository, WorkflowStatus,
+    JobRecord, JobRepository, JobType, MessageRecord, ThreadRecord, ThreadRepository,
+    WorkflowRecord, WorkflowRepository, WorkflowStatus,
 };
 #[cfg(feature = "dev")]
 pub use db::llm::LlmProviderRepository;
