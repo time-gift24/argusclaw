@@ -239,12 +239,37 @@ impl ArgusSqlite {
         .map_err(|e| ArgusError::from(DbError::QueryFailed {
             reason: format!("failed to parse extra_headers: {e}"),
         }))?;
-        let models: Vec<String> =
-            serde_json::from_str(&Self::get_column::<String>(&row, "models").map_err(map_err)?).map_err(|e| {
-                ArgusError::from(DbError::QueryFailed {
-                    reason: format!("failed to parse models: {e}"),
-                })
-            })?;
+        // Try to parse models as Vec<String> (new format)
+        // If that fails, try to parse as array of objects and extract the "id" or "name" field (old format)
+        let models_raw: String = Self::get_column::<String>(&row, "models").map_err(map_err)?;
+        let models: Vec<String> = match serde_json::from_str::<Vec<String>>(&models_raw) {
+            Ok(models) => models,
+            Err(_) => {
+                // Try old format: array of objects with "id" or "name" field
+                serde_json::from_str::<Vec<serde_json::Value>>(&models_raw)
+                    .map_err(|e| {
+                        ArgusError::from(DbError::QueryFailed {
+                            reason: format!("failed to parse models: {e}"),
+                        })
+                    })?
+                    .into_iter()
+                    .map(|v| {
+                        v.get("id")
+                            .or_else(|| v.get("name"))
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| {
+                                ArgusError::from(DbError::QueryFailed {
+                                    reason: format!(
+                                        "invalid model object format, expected 'id' or 'name' field: {}",
+                                        v
+                                    ),
+                                })
+                            })
+                    })
+                    .collect::<Result<Vec<String>, ArgusError>>()?
+            }
+        };
         let kind: LlmProviderKind = Self::get_column::<String>(&row, "kind").map_err(map_err)?.parse().map_err(
             |e: LlmProviderKindParseError| ArgusError::from(DbError::InvalidProviderKind {
                 kind: e.to_string(),
@@ -301,5 +326,51 @@ impl ArgusSqlite {
             extra_headers,
             secret_status,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json;
+
+    #[test]
+    fn test_parse_models_new_format() {
+        let models_json = r#"["model1", "model2"]"#;
+        let models: Vec<String> = serde_json::from_str(models_json).unwrap();
+        assert_eq!(models, vec!["model1", "model2"]);
+    }
+
+    #[test]
+    fn test_parse_models_old_format_with_id() {
+        let models_json = r#"[{"id":"model1","name":"Model 1"},{"id":"model2","name":"Model 2"}]"#;
+        let objects: Vec<serde_json::Value> = serde_json::from_str(models_json).unwrap();
+        let models: Vec<String> = objects
+            .into_iter()
+            .map(|v| {
+                v.get("id")
+                    .or_else(|| v.get("name"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(models, vec!["model1", "model2"]);
+    }
+
+    #[test]
+    fn test_parse_models_old_format_with_name_only() {
+        let models_json = r#"[{"name":"model1"},{"name":"model2"}]"#;
+        let objects: Vec<serde_json::Value> = serde_json::from_str(models_json).unwrap();
+        let models: Vec<String> = objects
+            .into_iter()
+            .map(|v| {
+                v.get("id")
+                    .or_else(|| v.get("name"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(models, vec!["model1", "model2"]);
     }
 }
