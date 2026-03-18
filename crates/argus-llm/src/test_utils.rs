@@ -15,26 +15,45 @@ use argus_protocol::llm::{
 
 /// Wrapper that injects intermittent failures into any provider.
 ///
-/// Pattern: Call 1 succeeds, calls 2-4 fail with RateLimited, call 5+ succeeds.
+/// Default pattern: Call 1 fails, calls 2-4 fail, call 5+ succeeds.
+/// This ensures the first call triggers retries.
 pub struct TestRetryProvider {
     inner: Arc<dyn LlmProvider>,
     call_count: AtomicUsize,
+    fail_first: bool,
 }
 
 impl TestRetryProvider {
-    /// Wrap a provider with test retry behavior.
+    /// Wrap a provider with test retry behavior (first call fails).
     pub fn new(inner: Arc<dyn LlmProvider>) -> Self {
         Self {
             inner,
             call_count: AtomicUsize::new(0),
+            fail_first: true,
+        }
+    }
+
+    /// Wrap a provider with custom fail behavior.
+    pub fn with_fail_first(inner: Arc<dyn LlmProvider>, fail_first: bool) -> Self {
+        Self {
+            inner,
+            call_count: AtomicUsize::new(0),
+            fail_first,
         }
     }
 
     /// Check if current call should fail.
     fn should_fail(&self) -> bool {
         let count = self.call_count.fetch_add(1, Ordering::Relaxed);
-        // Fail on calls 2, 3, 4 (1-indexed: 2, 3, 4)
-        matches!(count, 1 | 2 | 3)
+
+        if self.fail_first {
+            // Pattern: Call 1 fails, calls 2-4 fail, call 5+ succeeds
+            // This ensures first call triggers retries
+            matches!(count, 0 | 1 | 2 | 3)
+        } else {
+            // Original pattern: Call 1 succeeds, calls 2-4 fail, call 5+ succeeds
+            matches!(count, 1 | 2 | 3)
+        }
     }
 }
 

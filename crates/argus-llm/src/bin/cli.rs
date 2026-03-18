@@ -339,6 +339,12 @@ async fn complete_prompt(config: &ResolvedConfig, prompt: &str, stream: bool, te
             response.output_tokens,
             started.elapsed().as_millis()
         );
+
+        if test_retry {
+            println!();
+            println!("💡 Tip: Use --stream to see retry events in real-time");
+            println!("   Example: cargo run --bin argus-llm -- complete --prompt '{}' --stream --test-retry", prompt);
+        }
     }
 
     Ok(())
