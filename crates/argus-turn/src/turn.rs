@@ -404,23 +404,23 @@ impl Turn {
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
 
+        // Add system message about max_tool_calls ONCE before loop (not inside to avoid accumulation)
+        let max_tool_calls = self.config.max_tool_calls;
+        if let Some(max) = max_tool_calls
+            && !self.tools.is_empty()
+        {
+            let system_content = format!(
+                "IMPORTANT: You can only call at most {} tool(s) per response. \
+                If you need to call multiple tools, please proceed step by step - \
+                call tools one at a time and wait for the results before calling the next tool.",
+                max
+            );
+            messages.insert(0, ChatMessage::system(system_content));
+        }
+
         for iteration in 0..max_iterations {
             // Prepare tools from self.tools
             let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
-
-            // Add system message about max_tool_calls if configured
-            let max_tool_calls = self.config.max_tool_calls;
-            if let Some(max) = max_tool_calls
-                && !tools.is_empty()
-            {
-                let system_content = format!(
-                    "IMPORTANT: You can only call at most {} tool(s) per response. \
-                    If you need to call multiple tools, please proceed step by step - \
-                    call tools one at a time and wait for the results before calling the next tool.",
-                    max
-                );
-                messages.insert(0, ChatMessage::system(system_content));
-            }
 
             // Fire BeforeCallLLM hook (can modify messages/tools or block)
             let ctx = BeforeCallLLMContext {
