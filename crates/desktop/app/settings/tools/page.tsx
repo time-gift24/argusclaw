@@ -7,14 +7,16 @@ import { ToolCard } from "@/components/settings/tool-card"
 export default function ToolsPage() {
   const [toolList, setToolList] = React.useState<ToolInfo[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     const loadTools = async () => {
       try {
         const data = await tools.list()
         setToolList(data)
-      } catch (error) {
-        console.error("Failed to load tools:", error)
+      } catch (err) {
+        console.error("Failed to load tools:", err)
+        setError("加载工具列表失败")
       } finally {
         setLoading(false)
       }
@@ -26,6 +28,20 @@ export default function ToolsPage() {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-muted-foreground">加载中...</div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64">
+        <p className="text-destructive mb-2">{error}</p>
+        <button
+          onClick={() => { setLoading(true); setError(null); }}
+          className="text-sm text-muted-foreground hover:text-foreground"
+        >
+          重试
+        </button>
       </div>
     )
   }
