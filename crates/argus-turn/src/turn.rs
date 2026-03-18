@@ -14,7 +14,7 @@ use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCompletionRequest,
+    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::{
@@ -801,11 +801,6 @@ impl Turn {
 mod tests {
     use super::*;
     use tokio::sync::broadcast;
-    use argus_protocol::llm::{Role, ToolDefinition, FinishReason, LlmError};
-    use argus_protocol::tool::ToolError;
-    use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
-    use crate::TurnConfigBuilder;
 
     #[test]
     fn test_generate_turn_id() {

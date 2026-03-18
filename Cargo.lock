@@ -280,9 +280,12 @@ dependencies = [
 name = "argus-turn"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "argus-llm",
  "argus-protocol",
  "argus-tool",
  "async-trait",
+ "clap",
  "derive_builder",
  "futures-util",
  "rust_decimal",
@@ -290,6 +293,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
  "tracing",
 ]
 

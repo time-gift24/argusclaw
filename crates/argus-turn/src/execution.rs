@@ -120,7 +120,7 @@ fn turn_input_to_turn(input: TurnInput, config: TurnConfig) -> Result<Turn, Turn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TurnConfigBuilder, TurnInputBuilder};
+    use crate::TurnInputBuilder;
     use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
     use argus_protocol::{BeforeCallLLMContext, HookAction, HookHandler, HookRegistry};
     use async_trait::async_trait;
