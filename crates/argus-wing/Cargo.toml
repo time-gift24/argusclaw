@@ -1,0 +1,40 @@
+[package]
+name = "argus-wing"
+version = "0.1.0"
+edition = "2024"
+description = "Unified entry point for ArgusWing application"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# Logging
+tracing = "0.1"
+
+# Utilities
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+dirs = "6"
+
+# Internal crates
+argus-protocol = { path = "../argus-protocol" }
+argus-llm = { path = "../argus-llm" }
+argus-template = { path = "../argus-template" }
+argus-session = { path = "../argus-session" }
+argus-approval = { path = "../argus-approval" }
+argus-tool = { path = "../argus-tool" }
+argus-thread = { path = "../argus-thread" }
+argus-repository = { path = "../argus-repository" }
+
+[dev-dependencies]
+tempfile = "3"

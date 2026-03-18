@@ -58,7 +58,8 @@ impl fmt::Display for LlmProviderId {
 // ============================================================================
 
 /// Supported LLM provider kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LlmProviderKind {
     OpenAiCompatible,
 }
@@ -133,7 +134,7 @@ impl fmt::Debug for SecretString {
 
 /// Status of a provider's secret (API key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum ProviderSecretStatus {
     /// Secret is ready for use.
     Ready,
@@ -158,6 +159,45 @@ pub struct LlmProviderRecord {
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
+}
+
+// ============================================================================
+// JSON Serialization for Tauri
+// ============================================================================
+
+/// JSON representation of `LlmProviderRecord` for serialization over Tauri.
+///
+/// This allows the frontend to receive provider records with exposed API keys
+/// without requiring DTO conversions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProviderRecordJson {
+    pub id: i64,
+    pub kind: LlmProviderKind,
+    pub display_name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub models: Vec<String>,
+    pub default_model: String,
+    pub is_default: bool,
+    pub extra_headers: HashMap<String, String>,
+    pub secret_status: ProviderSecretStatus,
+}
+
+impl From<LlmProviderRecord> for LlmProviderRecordJson {
+    fn from(record: LlmProviderRecord) -> Self {
+        Self {
+            id: record.id.into_inner(),
+            kind: record.kind,
+            display_name: record.display_name,
+            base_url: record.base_url,
+            api_key: record.api_key.expose_secret().to_string(),
+            models: record.models,
+            default_model: record.default_model,
+            is_default: record.is_default,
+            extra_headers: record.extra_headers,
+            secret_status: record.secret_status,
+        }
+    }
 }
 
 // ============================================================================

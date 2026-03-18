@@ -37,6 +37,7 @@ pub use llm::{
     LlmProviderKind,
     LlmProviderKindParseError,
     LlmProviderRecord,
+    LlmProviderRecordJson,
     LlmProviderRepository,
     LlmStreamEvent,
     ModelMetadata,
