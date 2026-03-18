@@ -39,6 +39,7 @@ export interface ProviderInput {
   default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
+  secret_status: ProviderSecretStatus;
 }
 
 export type ProviderTestStatus =
