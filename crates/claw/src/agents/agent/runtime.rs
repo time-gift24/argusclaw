@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::agents::types::{AgentId, AgentRecord};
 use crate::error::AgentError;
 use argus_approval::{ApprovalHook, ApprovalManager, ApprovalPolicy, RuntimeAllowList};
-use argus_protocol::{ApprovalDecision, HookEvent, HookRegistry, ThreadId};
-use argus_protocol::{ChatMessage, LlmProvider};
+use argus_protocol::{ApprovalDecision, HookEvent, HookRegistry, SessionId, ThreadId};
+use argus_protocol::{AgentRecord as ProtocolAgentRecord, LlmProvider};
 use argus_thread::compact::{Compactor, CompactorManager};
 use argus_thread::{Thread, ThreadBuilder, ThreadConfig, ThreadInfo};
 use argus_tool::ToolManager;
@@ -129,7 +129,7 @@ impl AgentBuilder {
         if let Some(manager) = &approval_manager {
             let policy = manager.policy();
             let allow_list = Arc::new(RwLock::new(RuntimeAllowList::new()));
-            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), allow_list, "agent");
+            let hook = ApprovalHook::new(Arc::clone(manager), policy.clone(), allow_list, id.to_string());
             hooks.register(HookEvent::BeforeToolCall, Arc::new(hook));
         }
 
@@ -187,31 +187,40 @@ impl Agent {
     pub fn create_thread(&self, config: ThreadConfig) -> Result<ThreadId, AgentError> {
         let compactor: Arc<dyn Compactor> = self.compactor_manager.default_compactor().clone();
 
+        // Create AgentRecord from Agent's fields
+        let agent_record = ProtocolAgentRecord {
+            id: self.id,
+            display_name: format!("Agent {}", self.id.inner()),
+            description: "Runtime agent".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: None,
+            system_prompt: self.system_prompt.clone(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+        };
+
+        // Use a default session ID for runtime agents (not persisted)
+        let session_id = SessionId::new(0);
+
         let mut builder = ThreadBuilder::new()
             .provider(self.provider.clone())
             .tool_manager(self.tool_manager.clone())
             .compactor(compactor)
+            .agent_record(agent_record)
+            .session_id(session_id)
             .config(config);
 
         if let Some(hooks) = &self.hooks {
             builder = builder.hooks(Arc::clone(hooks));
         }
 
-        let mut thread = builder.build().map_err(|e| AgentError::ThreadBuildFailed {
+        let thread = builder.build().map_err(|e| AgentError::ThreadBuildFailed {
             reason: e.to_string(),
         })?;
 
-        // Add system prompt as first message
-        if !self.system_prompt.is_empty() {
-            thread
-                .messages_mut()
-                .push(ChatMessage::system(&self.system_prompt));
-        }
-
-        // Convert String ID to ThreadId
-        let id = ThreadId::parse(thread.id()).map_err(|e| AgentError::ThreadBuildFailed {
-            reason: format!("Invalid thread ID: {}", e),
-        })?;
+        // Thread ID is now strongly typed
+        let id = thread.id();
         self.threads
             .insert(id, Arc::new(tokio::sync::Mutex::new(thread)));
         Ok(id)
@@ -323,7 +332,7 @@ impl Agent {
         let thread = thread_arc.lock().await;
         Some(crate::protocol::ThreadSnapshot {
             runtime_agent_id: self.id,
-            thread_id: ThreadId::parse(thread.id()).unwrap_or_default(),
+            thread_id: thread.id(),
             messages: thread
                 .history()
                 .iter()

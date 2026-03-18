@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use argus_protocol::{SessionId, ThreadId};
+use argus_thread::Thread;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-
-use crate::RuntimeThread;
+use tokio::sync::Mutex;
 
 /// Summary of a session for listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct ThreadSummary {
 pub struct Session {
     pub id: SessionId,
     pub name: String,
-    pub threads: DashMap<ThreadId, Arc<RuntimeThread>>,
+    pub threads: DashMap<ThreadId, Arc<Mutex<Thread>>>,
 }
 
 impl Session {
@@ -42,15 +42,16 @@ impl Session {
         }
     }
 
-    pub fn add_thread(&self, thread: Arc<RuntimeThread>) {
-        self.threads.insert(thread.id, thread);
+    pub fn add_thread(&self, thread: Arc<Mutex<Thread>>) {
+        let thread_id = thread.try_lock().map(|t| t.id()).unwrap_or_default();
+        self.threads.insert(thread_id, thread);
     }
 
-    pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RuntimeThread>> {
+    pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<Thread>>> {
         self.threads.remove(thread_id).map(|pair| pair.1)
     }
 
-    pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<RuntimeThread>> {
+    pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<Thread>>> {
         self.threads.get(thread_id).map(|r| r.value().clone())
     }
 
@@ -58,15 +59,15 @@ impl Session {
         let mut summaries = Vec::new();
         for entry in self.threads.iter() {
             let thread = entry.value();
-            let turn_count = thread.turn_count().await as i64;
-            let token_count = thread.token_count().await as i64;
-            summaries.push(ThreadSummary {
-                id: thread.id,
-                title: thread.title.clone(),
-                turn_count,
-                token_count,
-                updated_at: thread.updated_at,
-            });
+            if let Ok(t) = thread.try_lock() {
+                summaries.push(ThreadSummary {
+                    id: t.id(),
+                    title: t.title().map(|s| s.to_string()),
+                    turn_count: t.turn_count() as i64,
+                    token_count: t.token_count() as i64,
+                    updated_at: t.updated_at(),
+                });
+            }
         }
         summaries
     }

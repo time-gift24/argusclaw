@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::error::DbError;
 use crate::traits::AgentRepository;
 use crate::types::{AgentId, AgentRecord};
-use argus_protocol::llm::LlmProviderId;
+use argus_protocol::ProviderId;
 
 use super::{ArgusSqlite, DbResult};
 
@@ -134,7 +134,7 @@ impl ArgusSqlite {
             display_name: Self::get_column(&row, "display_name")?,
             description: Self::get_column(&row, "description")?,
             version: Self::get_column(&row, "version")?,
-            provider_id: provider_id.map(LlmProviderId::new),
+            provider_id: provider_id.map(ProviderId::new),
             system_prompt: Self::get_column(&row, "system_prompt")?,
             tool_names,
             max_tokens: Self::get_column::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),

@@ -259,6 +259,9 @@ async fn run_chat(
                                 ApprovalDecision::TimedOut => {
                                     eprintln!("⏰ Approval: TIMED OUT");
                                 }
+                                ApprovalDecision::ApprovedSession => {
+                                    eprintln!("✅ Approval: APPROVED FOR SESSION");
+                                }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {

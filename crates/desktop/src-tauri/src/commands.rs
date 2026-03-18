@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use claw::{
     AgentError, AgentId, AgentRecord, AppContext, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, ProviderSecretStatus, ProviderTestResult, SecretString,
+    LlmProviderRecord, ProviderId, ProviderSecretStatus, ProviderTestResult, SecretString,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -55,7 +55,7 @@ impl From<AgentInput> for AgentRecord {
             display_name: input.display_name,
             description: input.description,
             version: input.version,
-            provider_id: input.provider_id.map(LlmProviderId::new),
+            provider_id: input.provider_id.map(ProviderId::new),
             system_prompt: input.system_prompt,
             tool_names: input.tool_names,
             max_tokens: input.max_tokens.map(|t| t as u32),

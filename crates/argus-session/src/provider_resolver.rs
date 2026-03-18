@@ -21,4 +21,11 @@ pub trait ProviderResolver: Send + Sync {
     ///
     /// Returns an error if the provider is not found or cannot be instantiated.
     async fn resolve(&self, id: ProviderId) -> Result<Arc<dyn LlmProvider>>;
+
+    /// Get the default provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no default provider is configured.
+    async fn default_provider(&self) -> Result<Arc<dyn LlmProvider>>;
 }

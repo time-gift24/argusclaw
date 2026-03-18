@@ -42,6 +42,14 @@ pub enum ThreadError {
     #[error("Compactor not configured")]
     CompactorNotConfigured,
 
+    /// Agent record not set.
+    #[error("Agent record not set")]
+    AgentRecordNotSet,
+
+    /// Session ID not set.
+    #[error("Session ID not set")]
+    SessionIdNotSet,
+
     /// Channel send error.
     #[error("Event channel closed")]
     ChannelClosed,

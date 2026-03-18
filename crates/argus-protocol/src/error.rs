@@ -23,6 +23,9 @@ pub enum ArgusError {
     #[error("Provider not found: {0}")]
     ProviderNotFound(i64),
 
+    #[error("No default provider configured")]
+    DefaultProviderNotConfigured,
+
     #[error("Turn log error: {reason}")]
     TurnLogError { reason: String },
 

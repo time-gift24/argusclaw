@@ -1,29 +1,5 @@
-use argus_protocol::{AgentId, ArgusError, ProviderId, Result};
-use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
-
-/// Agent template - a saved agent configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentTemplate {
-    /// Template ID.
-    pub id: AgentId,
-    /// Display name.
-    pub display_name: String,
-    /// Description.
-    pub description: String,
-    /// Version string.
-    pub version: String,
-    /// Associated provider ID (optional).
-    pub provider_id: Option<ProviderId>,
-    /// System prompt.
-    pub system_prompt: String,
-    /// List of tool names enabled for this template.
-    pub tool_names: Vec<String>,
-    /// Max tokens for LLM requests.
-    pub max_tokens: Option<i32>,
-    /// Temperature setting.
-    pub temperature: Option<i32>,
-}
+use argus_protocol::{AgentId, AgentRecord, ArgusError, ProviderId, Result};
+use sqlx::SqlitePool;
 
 /// Manager for agent templates.
 pub struct TemplateManager {
@@ -36,11 +12,14 @@ impl TemplateManager {
     }
 
     /// Upsert (create or update) an agent template.
-    pub async fn upsert(&self, template: AgentTemplate) -> Result<AgentId> {
+    pub async fn upsert(&self, template: AgentRecord) -> Result<AgentId> {
         let tool_names_json =
             serde_json::to_string(&template.tool_names).map_err(|e| ArgusError::SerdeError {
                 reason: e.to_string(),
             })?;
+
+        // Convert temperature from f32 to i64 (stored as INTEGER * 100)
+        let temperature_int = template.temperature.map(|t| (t * 100.0) as i64);
 
         sqlx::query(
             r#"
@@ -65,8 +44,8 @@ impl TemplateManager {
         .bind(template.provider_id.map(|p| p.inner()))
         .bind(&template.system_prompt)
         .bind(&tool_names_json)
-        .bind(template.max_tokens)
-        .bind(template.temperature)
+        .bind(template.max_tokens.map(|t| t as i64))
+        .bind(temperature_int)
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -75,7 +54,7 @@ impl TemplateManager {
     }
 
     /// Get a template by ID.
-    pub async fn get(&self, id: AgentId) -> Result<Option<AgentTemplate>> {
+    pub async fn get(&self, id: AgentId) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
             SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
@@ -88,31 +67,13 @@ impl TemplateManager {
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         match row {
-            Some(row) => {
-                let tool_names_str: String = row.get("tool_names");
-                let tool_names: Vec<String> =
-                    serde_json::from_str(&tool_names_str).unwrap_or_default();
-
-                Ok(Some(AgentTemplate {
-                    id: AgentId::new(row.get("id")),
-                    display_name: row.get("display_name"),
-                    description: row.get("description"),
-                    version: row.get("version"),
-                    provider_id: row
-                        .get::<Option<i64>, _>("provider_id")
-                        .map(ProviderId::new),
-                    system_prompt: row.get("system_prompt"),
-                    tool_names,
-                    max_tokens: row.get("max_tokens"),
-                    temperature: row.get("temperature"),
-                }))
-            }
+            Some(row) => Ok(Some(self.map_agent_record(row)?)),
             None => Ok(None),
         }
     }
 
     /// List all templates.
-    pub async fn list(&self) -> Result<Vec<AgentTemplate>> {
+    pub async fn list(&self) -> Result<Vec<AgentRecord>> {
         let rows = sqlx::query(
             r#"
             SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
@@ -123,30 +84,7 @@ impl TemplateManager {
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        let templates = rows
-            .into_iter()
-            .map(|row| {
-                let tool_names_str: String = row.get("tool_names");
-                let tool_names: Vec<String> =
-                    serde_json::from_str(&tool_names_str).unwrap_or_default();
-
-                AgentTemplate {
-                    id: AgentId::new(row.get("id")),
-                    display_name: row.get("display_name"),
-                    description: row.get("description"),
-                    version: row.get("version"),
-                    provider_id: row
-                        .get::<Option<i64>, _>("provider_id")
-                        .map(ProviderId::new),
-                    system_prompt: row.get("system_prompt"),
-                    tool_names,
-                    max_tokens: row.get("max_tokens"),
-                    temperature: row.get("temperature"),
-                }
-            })
-            .collect();
-
-        Ok(templates)
+        rows.into_iter().map(|row| self.map_agent_record(row)).collect()
     }
 
     /// Delete a template.
@@ -160,5 +98,63 @@ impl TemplateManager {
             })?;
 
         Ok(())
+    }
+}
+
+impl TemplateManager {
+    fn map_agent_record(
+        &self,
+        row: sqlx::sqlite::SqliteRow,
+    ) -> Result<AgentRecord> {
+        use sqlx::Row;
+
+        let tool_names_str: String = row.try_get("tool_names").map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+        let tool_names: Vec<String> =
+            serde_json::from_str(&tool_names_str).unwrap_or_default();
+
+        // Convert temperature from INTEGER to f32 (stored as value * 100)
+        let temperature: Option<f32> = row
+            .try_get::<Option<i64>, _>("temperature")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .map(|t| t as f32 / 100.0);
+
+        let provider_id: Option<i64> = row
+            .try_get("provider_id")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        let max_tokens: Option<u32> = row
+            .try_get::<Option<i64>, _>("max_tokens")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .map(|t| t as u32);
+
+        Ok(AgentRecord {
+            id: AgentId::new(row.try_get("id").map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?),
+            display_name: row.try_get("display_name").map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?,
+            description: row.try_get("description").map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?,
+            version: row.try_get("version").map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?,
+            provider_id: provider_id.map(ProviderId::new),
+            system_prompt: row.try_get("system_prompt").map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?,
+            tool_names,
+            max_tokens,
+            temperature,
+        })
     }
 }

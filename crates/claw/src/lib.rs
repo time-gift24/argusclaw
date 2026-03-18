@@ -51,7 +51,7 @@ pub use argus_tool::{GlobTool, GrepTool, NamedTool, ReadTool, ShellTool, ToolErr
 // LLM Types - from argus-protocol (types) and argus-llm (ProviderManager)
 pub use argus_llm::ProviderManager;
 pub use argus_protocol::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, ProviderId, Role,
     ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 

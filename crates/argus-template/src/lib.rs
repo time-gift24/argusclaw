@@ -1,3 +1,4 @@
 pub mod manager;
 
-pub use manager::{AgentTemplate, TemplateManager};
+pub use argus_protocol::AgentRecord;
+pub use manager::TemplateManager;

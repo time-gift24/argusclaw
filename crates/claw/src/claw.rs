@@ -74,6 +74,10 @@ impl ProviderResolverTrait for ProviderManagerResolver {
         let provider_id = LlmProviderId::new(id.inner());
         self.provider_manager.get_provider(&provider_id).await
     }
+
+    async fn default_provider(&self) -> std::result::Result<Arc<dyn LlmProvider>, ArgusError> {
+        self.provider_manager.get_default_provider().await
+    }
 }
 
 #[derive(Clone)]
@@ -329,14 +333,14 @@ impl AppContext {
 
         let thread_id = self
             .session_manager
-            .create_thread(session_id, template_id_proto, provider_id_proto)
+            .create_thread(session_id, template_id_proto, Some(provider_id_proto))
             .await
             .map_err(|e| AgentError::Session {
                 reason: e.to_string(),
             })?;
 
         // Convert back to claw's ThreadId
-        ThreadId::parse(&thread_id.inner().to_string()).map_err(|e| AgentError::Session {
+        ThreadId::parse(&thread_id.to_string()).map_err(|e| AgentError::Session {
             reason: e.to_string(),
         })
     }
@@ -576,7 +580,7 @@ impl AppContext {
         let template = self.get_default_agent_template().await?;
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
-        record.provider_id = Some(default_provider.id);
+        record.provider_id = Some(ProviderId::new(default_provider.id.into_inner()));
         self.agent_manager.create_agent(&record).await
     }
 
@@ -595,7 +599,7 @@ impl AppContext {
         let template = self.get_default_agent_template().await?;
         let default_provider = self.get_default_provider_record().await?;
         let mut record = template;
-        record.provider_id = Some(default_provider.id);
+        record.provider_id = Some(ProviderId::new(default_provider.id.into_inner()));
         self.agent_manager
             .create_agent_with_approval(&record, approval_tools, auto_approve)
             .await
@@ -631,7 +635,7 @@ impl AppContext {
         };
 
         let mut runtime_record = record;
-        runtime_record.provider_id = Some(effective_provider);
+        runtime_record.provider_id = Some(ProviderId::new(effective_provider.into_inner()));
 
         // Collect high/critical risk tools for approval
         let approval_tools: Vec<String> = runtime_record

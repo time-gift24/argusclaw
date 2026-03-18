@@ -65,6 +65,11 @@ impl AgentId {
     pub fn inner(&self) -> i64 {
         self.0
     }
+
+    /// Consumes this ID and returns the inner value.
+    pub fn into_inner(self) -> i64 {
+        self.0
+    }
 }
 
 impl std::fmt::Display for AgentId {
@@ -83,6 +88,11 @@ impl ProviderId {
     }
 
     pub fn inner(&self) -> i64 {
+        self.0
+    }
+
+    /// Consumes this ID and returns the inner value.
+    pub fn into_inner(self) -> i64 {
         self.0
     }
 }

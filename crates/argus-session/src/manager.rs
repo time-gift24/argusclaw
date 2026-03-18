@@ -2,14 +2,13 @@ use std::sync::Arc;
 
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
-use argus_thread::{CompactorManager, ThreadConfig};
+use argus_thread::{CompactorManager, ThreadBuilder, ThreadConfig};
 use argus_tool::ToolManager;
 use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 use crate::provider_resolver::ProviderResolver;
-use crate::runtime_thread::RuntimeThread;
 use crate::session::{Session, SessionSummary, ThreadSummary};
 
 /// Manages sessions and their threads.
@@ -122,16 +121,6 @@ impl SessionManager {
             let template_id: i64 = thread_row.get("template_id");
             let provider_id_val: i64 = thread_row.get("provider_id");
 
-            let created_at_str: String = thread_row.get("created_at");
-            let updated_at_str: String = thread_row.get("updated_at");
-
-            let _created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
-            let _updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
-
             // Resolve provider
             let provider_id = ProviderId::new(provider_id_val);
             let provider = match self.provider_resolver.resolve(provider_id).await {
@@ -147,45 +136,60 @@ impl SessionManager {
                 }
             };
 
-            // Get template for system prompt
-            let template = self
+            // Get agent record (template)
+            let agent_record = match self
                 .template_manager
                 .get(AgentId::new(template_id))
                 .await
-                .ok()
-                .flatten();
-
-            let system_prompt = template.map(|t| t.system_prompt).unwrap_or_default();
-
-            // Get compactor
-            let compactor = self.compactor_manager.default_compactor().clone();
-
-            // Build RuntimeThread
-            let title: Option<String> = thread_row.get("title");
-            let runtime_thread = match RuntimeThread::new(
-                thread_id,
-                session_id,
-                AgentId::new(template_id),
-                provider_id,
-                title,
-                provider,
-                self.tool_manager.clone(),
-                compactor,
-                system_prompt,
-                ThreadConfig::default(),
-            ) {
-                Ok(t) => Arc::new(t),
+            {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    tracing::warn!(
+                        thread_id = %thread_id_str,
+                        template_id = %template_id,
+                        "Template not found for thread, skipping"
+                    );
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!(
                         thread_id = %thread_id_str,
+                        template_id = %template_id,
                         error = %e,
-                        "Failed to build RuntimeThread, skipping"
+                        "Failed to get template for thread, skipping"
                     );
                     continue;
                 }
             };
 
-            session.add_thread(runtime_thread);
+            // Get compactor
+            let compactor = self.compactor_manager.default_compactor().clone();
+
+            // Build Thread directly
+            let title: Option<String> = thread_row.get("title");
+            let thread = match ThreadBuilder::new()
+                .id(thread_id)
+                .session_id(session_id)
+                .agent_record(agent_record)
+                .title(title)
+                .provider(provider)
+                .tool_manager(self.tool_manager.clone())
+                .compactor(compactor)
+                .config(ThreadConfig::default())
+                .build()
+            {
+                Ok(t) => Arc::new(Mutex::new(t)),
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id = %thread_id_str,
+                        error = %e,
+                        "Failed to build Thread, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            session.add_thread(thread);
         }
 
         // Store in memory
@@ -232,23 +236,32 @@ impl SessionManager {
     }
 
     /// Create a new thread in a session.
+    ///
+    /// Provider selection logic:
+    /// 1. Use `provider_id` if specified
+    /// 2. Use `agent_record.provider_id` if set
+    /// 3. Use default provider
     pub async fn create_thread(
         &self,
         session_id: SessionId,
         template_id: AgentId,
-        provider_id: ProviderId,
+        explicit_provider_id: Option<ProviderId>,
     ) -> Result<ThreadId> {
         // Ensure session is loaded
         let session = self.load(session_id).await?;
 
-        // Verify template exists and get system prompt
-        let template = self
+        // Get agent record (template)
+        let agent_record = self
             .template_manager
             .get(template_id)
             .await?
             .ok_or(ArgusError::TemplateNotFound(template_id.inner()))?;
 
-        // Resolve provider
+        // Resolve provider using priority: explicit > agent_record > default
+        let provider_id = explicit_provider_id
+            .or(agent_record.provider_id)
+            .ok_or(ArgusError::DefaultProviderNotConfigured)?;
+
         let provider = self.provider_resolver.resolve(provider_id).await?;
 
         // Generate thread ID (UUID)
@@ -257,22 +270,19 @@ impl SessionManager {
         // Get compactor
         let compactor = self.compactor_manager.default_compactor().clone();
 
-        // Create RuntimeThread
-        let runtime_thread = RuntimeThread::new(
-            thread_id,
-            session_id,
-            template_id,
-            provider_id,
-            None,
-            provider,
-            self.tool_manager.clone(),
-            compactor,
-            template.system_prompt.clone(),
-            ThreadConfig::default(),
-        )
-        .map_err(|e| ArgusError::ThreadBuildFailed {
-            reason: e.to_string(),
-        })?;
+        // Create Thread directly
+        let thread = ThreadBuilder::new()
+            .id(thread_id)
+            .session_id(session_id)
+            .agent_record(agent_record)
+            .provider(provider)
+            .tool_manager(self.tool_manager.clone())
+            .compactor(compactor)
+            .config(ThreadConfig::default())
+            .build()
+            .map_err(|e| ArgusError::ThreadBuildFailed {
+                reason: e.to_string(),
+            })?;
 
         // Insert into DB
         sqlx::query(
@@ -290,7 +300,7 @@ impl SessionManager {
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         // Add to in-memory session
-        session.add_thread(Arc::new(runtime_thread));
+        session.add_thread(Arc::new(Mutex::new(thread)));
 
         Ok(thread_id)
     }
@@ -370,6 +380,7 @@ impl SessionManager {
             .get_thread(thread_id)
             .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
+        let mut thread = thread.lock().await;
         thread
             .send_message(message)
             .await
@@ -386,6 +397,7 @@ impl SessionManager {
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
         let session = self.sessions.get(&session_id)?;
         let thread = session.get_thread(thread_id)?;
-        Some(thread.subscribe().await)
+        let thread = thread.lock().await;
+        Some(thread.subscribe())
     }
 }

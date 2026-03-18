@@ -14,6 +14,7 @@ use crate::agents::types::{AgentId, AgentRecord, AgentRepository};
 use argus_approval::ApprovalManager;
 use crate::db::DbError;
 use crate::error::AgentError;
+use argus_protocol::llm::LlmProviderId;
 use argus_protocol::{ApprovalDecision, ThreadEvent, ThreadId};
 use argus_llm::ProviderManager;
 use argus_tool::ToolManager;
@@ -94,7 +95,9 @@ impl AgentManager {
                 agent_id: record.id,
             })?;
 
-        let provider = self.provider_manager.get_provider(&provider_id).await?;
+        // Convert ProviderId to LlmProviderId
+        let llm_provider_id = LlmProviderId::new(provider_id.inner());
+        let provider = self.provider_manager.get_provider(&llm_provider_id).await?;
 
         // Generate a unique runtime agent ID
         let runtime_id = self.next_runtime_id();
@@ -126,7 +129,9 @@ impl AgentManager {
                 agent_id: record.id,
             })?;
 
-        let provider = self.provider_manager.get_provider(&provider_id).await?;
+        // Convert ProviderId to LlmProviderId
+        let llm_provider_id = LlmProviderId::new(provider_id.inner());
+        let provider = self.provider_manager.get_provider(&llm_provider_id).await?;
 
         // Generate a unique runtime agent ID
         let runtime_id = self.next_runtime_id();

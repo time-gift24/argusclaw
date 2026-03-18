@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod approval;
 pub mod config;
 pub mod error;
@@ -9,6 +10,7 @@ pub mod risk_level;
 pub mod token_usage;
 pub mod tool;
 
+pub use agent::AgentRecord;
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};
 pub use events::ThreadEvent;
