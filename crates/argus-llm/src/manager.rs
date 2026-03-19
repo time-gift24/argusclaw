@@ -14,7 +14,7 @@ use argus_protocol::Result;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
     LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus, ProviderTestResult,
-    ProviderTestStatus,
+    ProviderTestStatus, ToolCompletionRequest, ToolDefinition,
 };
 
 use crate::providers::{
@@ -308,31 +308,72 @@ async fn run_provider_connection_test(
     provider: Arc<dyn LlmProvider>,
 ) -> ProviderTestResult {
     let started = std::time::Instant::now();
-    let request = CompletionRequest::new(vec![ChatMessage::user("Reply with exactly OK.")])
-        .with_model(&model)
-        .with_temperature(0.0);
+
+    // 定义一个简单的 echo 工具
+    let echo_tool = ToolDefinition {
+        name: "echo".to_string(),
+        description: "Repeat back the input text exactly as received.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to echo back"
+                }
+            },
+            "required": ["text"]
+        }),
+    };
+
+    // 使用 ToolCompletionRequest，要求模型调用工具
+    let request = ToolCompletionRequest::new(
+        vec![ChatMessage::user("Please call the echo tool with the text 'OK'")],
+        vec![echo_tool],
+    )
+    .with_model(&model)
+    .with_temperature(0.0)
+    .with_tool_choice("required"); // 强制要求使用工具
 
     let request_json = serde_json::to_string(&request).ok();
 
-    match provider.complete(request).await {
+    match provider.complete_with_tools(request).await {
         Ok(resp) => {
-            let content_len = resp.content.len();
+            // 验证是否返回了工具调用
+            let has_tool_calls = !resp.tool_calls.is_empty();
+            let response_content = if has_tool_calls {
+                let tool_calls_json = serde_json::to_string_pretty(&resp.tool_calls).unwrap_or_default();
+                format!("Tool calls received:\n{}", tool_calls_json)
+            } else {
+                resp.content.unwrap_or_else(|| "No tool calls or content".to_string())
+            };
+
             tracing::debug!(
-                content_len,
-                content_preview = %resp.content.chars().take(100).collect::<String>(),
+                has_tool_calls,
+                tool_calls_count = resp.tool_calls.len(),
                 "provider test received response"
             );
-            // Always include response content, even if empty
-            let response = Some(resp.content);
+
+            let status = if has_tool_calls {
+                ProviderTestStatus::Success
+            } else {
+                ProviderTestStatus::InvalidResponse
+            };
+
+            let message = if has_tool_calls {
+                "Provider tool call test succeeded.".to_string()
+            } else {
+                "Provider did not return any tool calls.".to_string()
+            };
+
             build_provider_test_result(
                 provider_id,
                 model,
                 base_url,
                 started.elapsed(),
-                ProviderTestStatus::Success,
-                "Provider connection test succeeded.".to_string(),
+                status,
+                message,
                 request_json,
-                response,
+                Some(response_content),
             )
         }
         Err(error) => {
