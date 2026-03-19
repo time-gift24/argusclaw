@@ -25,6 +25,8 @@
 use std::sync::Arc;
 
 use argus_approval::{ApprovalManager, ApprovalPolicy};
+use argus_auth::{AccountManager, CredentialStore};
+use argus_crypto::{Cipher, FileKeySource};
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
@@ -84,6 +86,8 @@ pub struct ArgusWing {
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
+    pub account_manager: Arc<AccountManager>,
+    pub credential_store: Arc<CredentialStore>,
 }
 
 impl ArgusWing {
@@ -196,6 +200,11 @@ impl ArgusWing {
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        // Create auth components
+        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
+        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
+        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher));
+
         Ok(Arc::new(Self {
             pool,
             provider_manager,
@@ -204,6 +213,8 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            account_manager,
+            credential_store,
         }))
     }
 
@@ -225,6 +236,11 @@ impl ArgusWing {
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        // Create auth components
+        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
+        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
+        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher));
+
         Arc::new(Self {
             pool,
             provider_manager,
@@ -233,6 +249,8 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            account_manager,
+            credential_store,
         })
     }
 
@@ -262,6 +280,18 @@ impl ArgusWing {
     #[must_use]
     pub fn compactor_manager(&self) -> &Arc<CompactorManager> {
         &self.compactor_manager
+    }
+
+    /// Get a reference to the account manager.
+    #[must_use]
+    pub fn account_manager(&self) -> &Arc<AccountManager> {
+        &self.account_manager
+    }
+
+    /// Get a reference to the credential store.
+    #[must_use]
+    pub fn credential_store(&self) -> &Arc<CredentialStore> {
+        &self.credential_store
     }
 
     // =========================================================================

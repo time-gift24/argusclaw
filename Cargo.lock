@@ -364,6 +364,8 @@ name = "argus-wing"
 version = "0.1.0"
 dependencies = [
  "argus-approval",
+ "argus-auth",
+ "argus-crypto",
  "argus-llm",
  "argus-protocol",
  "argus-repository",
