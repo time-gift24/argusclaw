@@ -223,8 +223,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 })?;
         let usage = payload.usage.unwrap_or_default();
 
+        tracing::debug!(
+            content = ?choice.message.content,
+            reasoning_content = ?choice.message.reasoning_content,
+            finish_reason = ?choice.finish_reason,
+            "openai-compatible complete response"
+        );
+
         Ok(CompletionResponse {
-            content: choice.message.content.unwrap_or_default(),
+            content: choice.message.content.clone().unwrap_or_default(),
             reasoning_content: choice.message.reasoning_content,
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
