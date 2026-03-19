@@ -131,7 +131,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   }
 
   return (
-    <div className="w-full space-y-6">
+    <div className="w-full space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-base font-semibold">
@@ -143,27 +143,27 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         </Button>
       </div>
 
-      {/* Main Content - Two Column Layout */}
-      <div className="grid grid-cols-3 gap-6">
-        {/* Left Column - Basic Config */}
+      {/* Main Content */}
+      <div className="grid grid-cols-5 gap-6">
+        {/* Left Sidebar - Config */}
         <div className="col-span-2 space-y-4">
-          {/* Basic Info Card */}
+          {/* Basic Info */}
           <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
             <div className="px-4 py-3 border-b">
               <h2 className="text-sm font-medium">基本信息</h2>
             </div>
-            <div className="p-4 space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="display_name" className="text-xs">名称</Label>
-                  <Input
-                    id="display_name"
-                    value={formData.display_name}
-                    onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                    placeholder="我的智能体"
-                    required
-                  />
-                </div>
+            <div className="p-4 space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="display_name" className="text-xs">名称</Label>
+                <Input
+                  id="display_name"
+                  value={formData.display_name}
+                  onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+                  placeholder="我的智能体"
+                  required
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="version" className="text-xs">版本</Label>
                   <Input
@@ -174,26 +174,25 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                     required
                   />
                 </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <Label htmlFor="description" className="text-xs">描述</Label>
-                <Input
-                  id="description"
-                  value={formData.description}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                  placeholder="一个有用的智能体"
-                />
+                <div className="space-y-1.5">
+                  <Label htmlFor="description" className="text-xs">描述</Label>
+                  <Input
+                    id="description"
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                    placeholder="简短描述"
+                  />
+                </div>
               </div>
             </div>
           </div>
 
-          {/* LLM Config Card */}
+          {/* LLM Config */}
           <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
             <div className="px-4 py-3 border-b">
               <h2 className="text-sm font-medium">模型配置</h2>
             </div>
-            <div className="p-4 space-y-4">
+            <div className="p-4 space-y-3">
               <div className="space-y-1.5">
                 <Label htmlFor="provider_id" className="text-xs">LLM 提供者</Label>
                 <select
@@ -217,8 +216,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                   <p className="text-xs text-amber-600 mt-1">当前 Provider 的密钥需要重新填写</p>
                 )}
               </div>
-
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="max_tokens" className="text-xs">最大 Token</Label>
                   <Input
@@ -256,71 +254,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             </div>
           </div>
 
-          {/* Tools Card */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="text-sm font-medium">可用工具</h2>
-              <span className="text-xs text-muted-foreground">
-                已选择 {formData.tool_names.length} 个
-              </span>
-            </div>
-            <div className="p-4">
-              {toolList.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">暂无可用工具</p>
-              ) : (
-                <div className="grid grid-cols-2 gap-2 max-h-[200px] overflow-y-auto pr-1">
-                  {toolList.map((tool) => (
-                    <div
-                      key={tool.name}
-                      onClick={() => {
-                        const isSelected = formData.tool_names.includes(tool.name)
-                        setFormData((prev) => ({
-                          ...prev,
-                          tool_names: isSelected
-                            ? prev.tool_names.filter((n) => n !== tool.name)
-                            : [...prev.tool_names, tool.name],
-                        }))
-                      }}
-                      className={cn(
-                        "rounded-md border p-2.5 cursor-pointer transition-all",
-                        "hover:border-primary/50 hover:bg-primary/5",
-                        formData.tool_names.includes(tool.name)
-                          ? "border-primary/30 bg-primary/5"
-                          : "border-border"
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Checkbox
-                          id={`tool-${tool.name}`}
-                          checked={formData.tool_names.includes(tool.name)}
-                          onCheckedChange={(checked) => {
-                            setFormData((prev) => ({
-                              ...prev,
-                              tool_names: checked
-                                ? [...prev.tool_names, tool.name]
-                                : prev.tool_names.filter((n) => n !== tool.name),
-                            }))
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <Label
-                          htmlFor={`tool-${tool.name}`}
-                          className="text-sm font-medium cursor-pointer truncate"
-                        >
-                          {tool.name}
-                        </Label>
-                      </div>
-                      <p className="text-xs text-muted-foreground line-clamp-2 mt-1 ml-6">
-                        {tool.description}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Advanced Config Card */}
+          {/* Advanced */}
           <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
             <div className="px-4 py-3 border-b">
               <h2 className="text-sm font-medium">高级配置</h2>
@@ -344,56 +278,53 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                     启用思考模式
                   </Label>
                 </div>
-                {formData.thinking_config?.type === "enabled" && (
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={(
-                        <button
-                          type="button"
-                          className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                          aria-label="关于思考模式"
-                        />
-                      )}
-                    >
-                      <CircleHelp className="size-3.5" />
-                    </TooltipTrigger>
-                    <TooltipContent side="left">
-                      启用后，模型将输出思考过程
-                    </TooltipContent>
-                  </Tooltip>
-                )}
-              </div>
-
-              {formData.thinking_config?.type === "enabled" && (
-                <div className="flex items-center gap-2 ml-6">
-                  <Checkbox
-                    id="clear_thinking"
-                    checked={formData.thinking_config?.clear_thinking ?? false}
-                    onCheckedChange={(checked) => {
-                      setFormData((prev) => ({
-                        ...prev,
-                        thinking_config: prev.thinking_config
-                          ? { ...prev.thinking_config, clear_thinking: checked as boolean }
-                          : undefined,
-                      }))
-                    }}
+                <Tooltip>
+                  <TooltipTrigger
+                    render={(
+                      <button
+                        type="button"
+                        className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        <CircleHelp className="size-3.5" />
+                      </button>
+                    )}
                   />
-                  <Label htmlFor="clear_thinking" className="text-sm cursor-pointer text-muted-foreground">
-                    清除历史思考
-                  </Label>
+                  <TooltipContent side="right">
+                    启用后，模型将输出思考过程
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+              {formData.thinking_config?.type === "enabled" && (
+                <div className="flex items-center justify-between ml-6">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="clear_thinking"
+                      checked={formData.thinking_config?.clear_thinking ?? false}
+                      onCheckedChange={(checked) => {
+                        setFormData((prev) => ({
+                          ...prev,
+                          thinking_config: prev.thinking_config
+                            ? { ...prev.thinking_config, clear_thinking: checked as boolean }
+                            : undefined,
+                        }))
+                      }}
+                    />
+                    <Label htmlFor="clear_thinking" className="text-sm cursor-pointer text-muted-foreground">
+                      清除历史思考
+                    </Label>
+                  </div>
                   <Tooltip>
                     <TooltipTrigger
                       render={(
                         <button
                           type="button"
-                          className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                          aria-label="关于清除历史思考"
-                        />
+                          className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          <CircleHelp className="size-3" />
+                        </button>
                       )}
-                    >
-                      <CircleHelp className="size-3" />
-                    </TooltipTrigger>
-                    <TooltipContent side="left">
+                    />
+                    <TooltipContent side="right">
                       启用后，模型不会在后续对话中看到之前的思考内容
                     </TooltipContent>
                   </Tooltip>
@@ -401,28 +332,97 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               )}
             </div>
           </div>
+
+          {/* Tools */}
+          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <h2 className="text-sm font-medium">可用工具</h2>
+              <span className="text-xs text-muted-foreground">
+                {formData.tool_names.length} / {toolList.length}
+              </span>
+            </div>
+            <div className="p-3">
+              {toolList.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-4">暂无可用工具</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-2 max-h-[240px] overflow-y-auto pr-1">
+                  {toolList.map((tool) => (
+                    <div
+                      key={tool.name}
+                      onClick={() => {
+                        const isSelected = formData.tool_names.includes(tool.name)
+                        setFormData((prev) => ({
+                          ...prev,
+                          tool_names: isSelected
+                            ? prev.tool_names.filter((n) => n !== tool.name)
+                            : [...prev.tool_names, tool.name],
+                        }))
+                      }}
+                      className={cn(
+                        "rounded-md border p-2.5 cursor-pointer transition-all text-left",
+                        "hover:border-primary/50 hover:bg-primary/5",
+                        formData.tool_names.includes(tool.name)
+                          ? "border-primary/30 bg-primary/5"
+                          : "border-border"
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        <Checkbox
+                          id={`tool-${tool.name}`}
+                          checked={formData.tool_names.includes(tool.name)}
+                          onCheckedChange={(checked) => {
+                            setFormData((prev) => ({
+                              ...prev,
+                              tool_names: checked
+                                ? [...prev.tool_names, tool.name]
+                                : prev.tool_names.filter((n) => n !== tool.name),
+                            }))
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <Label
+                            htmlFor={`tool-${tool.name}`}
+                            className="text-sm font-medium cursor-pointer block truncate"
+                          >
+                            {tool.name}
+                          </Label>
+                          <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
+                            {tool.description}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* Right Column - System Prompt */}
-        <div className="col-span-1 space-y-4">
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm sticky top-4">
-            <div className="px-4 py-3 border-b">
+        {/* Right Main - System Prompt */}
+        <div className="col-span-3">
+          <div className="rounded-lg border bg-card text-card-foreground shadow-sm h-full">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
               <h2 className="text-sm font-medium">系统提示词</h2>
+              <span className="text-xs text-muted-foreground">
+                {formData.system_prompt.length} 字符
+              </span>
             </div>
-            <div className="p-4 space-y-3">
+            <div className="p-4 space-y-4">
               <textarea
                 id="system_prompt"
                 value={formData.system_prompt}
                 onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
-                placeholder="你是一个有帮助的助手..."
-                className="flex min-h-[300px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 resize-none"
+                placeholder="你是一个有帮助的助手...&#10;&#10;在这里定义智能体的角色、能力和行为规范。"
+                className="flex min-h-[300px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 resize-none font-mono"
                 required
               />
               <div className="border rounded-lg overflow-hidden">
                 <div className="px-3 py-2 bg-muted/50 border-b text-xs font-medium text-muted-foreground">
-                  预览
+                  实时预览
                 </div>
-                <div className="min-h-[200px] max-h-[300px] overflow-y-auto p-3">
+                <div className="min-h-[300px] max-h-[400px] overflow-y-auto p-4">
                   {formData.system_prompt ? (
                     <MessageProvider message={previewMessage} index={0} isLast>
                       <div className="wrap-break-word text-foreground leading-relaxed [&_.aui-md-h3]:text-sm">
@@ -430,8 +430,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                       </div>
                     </MessageProvider>
                   ) : (
-                    <div className="text-muted-foreground text-sm text-center py-8">
-                      暂无内容
+                    <div className="text-muted-foreground text-sm text-center py-12">
+                      输入系统提示词后，这里将显示渲染效果
                     </div>
                   )}
                 </div>
