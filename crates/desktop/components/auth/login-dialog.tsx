@@ -13,6 +13,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useAuthStore } from './use-auth-store';
+import { useLoginToastStore } from './login-toast';
 
 interface LoginDialogProps {
   open: boolean;
@@ -73,6 +74,7 @@ const getLoginErrorMessage = (message?: string): string => {
 export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
   const router = useRouter();
   const { checkHasUser, setupAccount, login } = useAuthStore();
+  const { showToast } = useLoginToastStore();
   const [mode, setMode] = useState<'setup' | 'login'>('setup');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -122,7 +124,8 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
         if (result.success) {
           onOpenChange(false);
           resetForm();
-          router.push('/settings/providers');
+          showToast('账号创建成功！请填写 LLM Provider 配置并测试连接。', 'success');
+          router.push('/settings/providers/1');
         } else {
           const nextError = getSetupErrorMessage(result.error);
           setError(nextError);
@@ -148,7 +151,8 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
         if (result.success) {
           onOpenChange(false);
           resetForm();
-          router.push('/settings/providers');
+          showToast('登录成功！', 'success');
+          router.push('/settings/providers/1');
         } else {
           setError(getLoginErrorMessage(result.error));
         }

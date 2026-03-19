@@ -69,6 +69,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   // Test connection state - one result per model
   const [testResults, setTestResults] = React.useState<Record<string, ProviderTestResult>>({})
   const [testingModels, setTestingModels] = React.useState<Set<string>>(new Set())
+  const [hasAutoTested, setHasAutoTested] = React.useState(false)
 
   // Load provider data if editing
   React.useEffect(() => {
@@ -104,6 +105,20 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     }
     loadData()
   }, [providerId])
+
+  // Auto-test all models when provider is loaded and has models
+  React.useEffect(() => {
+    if (!loading && isEditing && formData.models.length > 0 && !hasAutoTested) {
+      setHasAutoTested(true)
+      // Test all models after a short delay to let UI render
+      const timer = setTimeout(() => {
+        formData.models.forEach((model) => {
+          testModel(model, formData.models)
+        })
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [loading, isEditing, formData.models, hasAutoTested])
 
   const canSave = Boolean(
     formData.display_name.trim() &&
