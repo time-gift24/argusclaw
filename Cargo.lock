@@ -137,6 +137,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-crypto"
+version = "0.1.0"
+dependencies = [
+ "argus-protocol",
+ "dirs 6.0.0",
+ "mac_address",
+ "ring",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "argus-dev"
 version = "0.1.0"
 dependencies = [
@@ -155,18 +168,16 @@ name = "argus-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-crypto",
  "argus-protocol",
  "argus-test-support",
  "async-trait",
  "chrono",
  "clap",
- "dirs 6.0.0",
  "eventsource-stream",
  "futures-util",
- "mac_address",
  "rand 0.10.0",
  "reqwest 0.12.28",
- "ring",
  "rust_decimal",
  "serde",
  "serde_json",
