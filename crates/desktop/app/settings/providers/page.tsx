@@ -82,8 +82,6 @@ export default function ProvidersPage() {
       setTestingProviderId(id);
       try {
         const result = await providers.testConnection(id, model);
-        console.log("[ProvidersPage] test result:", result);
-        console.log("[ProvidersPage] response:", result.response);
         setTestResultsByProviderId((current) => ({ ...current, [id]: result }));
       } catch (error) {
         const fallbackResult: ProviderTestResult = {
