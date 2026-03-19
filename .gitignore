@@ -1,7 +1,10 @@
 /target
 /.worktrees
+.claude/worktrees/
 .vendor/
 .playwright-mcp/
 /tmp/
 **/tmp/
 *.tsbuildinfo
+# Auto-generated files
+crates/argus-template/src/generated_agents.rs
