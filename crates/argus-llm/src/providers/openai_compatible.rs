@@ -212,6 +212,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     reason: e.to_string(),
                 })?;
 
+        // Log the full payload for debugging provider test issues (before any moves)
+        tracing::trace!(
+            payload = ?payload,
+            "full openai-compatible response payload"
+        );
+
         let choice =
             payload
                 .choices
@@ -238,7 +244,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 tracing::warn!("content is None, using reasoning_content as fallback");
                 reasoning.clone()
             } else {
-                tracing::warn!("both content and reasoning_content are None");
+                tracing::warn!("both content and reasoning_content are None, returning empty string");
                 String::new()
             }
         } else {

@@ -114,9 +114,12 @@ impl ArgusWing {
             // Create file appender (blocking)
             let file_appender = tracing_appender::rolling::never(log_dir, "arguswing.log");
 
-            // Set up the tracing subscriber
-            let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into());
+            // Set up the tracing subscriber with environment variable support
+            // Users can set RUST_LOG=debug to override the default level
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("arguswing=debug,argus=debug,argus_llm=debug")
+                });
 
             // Create a subscriber that writes to file only (blocking)
             let result = tracing_subscriber::fmt()

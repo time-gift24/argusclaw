@@ -310,7 +310,6 @@ async fn run_provider_connection_test(
     let started = std::time::Instant::now();
     let request = CompletionRequest::new(vec![ChatMessage::user("Reply with exactly OK.")])
         .with_model(&model)
-        .with_max_tokens(8)
         .with_temperature(0.0);
 
     let request_json = serde_json::to_string(&request).ok();
@@ -318,12 +317,13 @@ async fn run_provider_connection_test(
     match provider.complete(request).await {
         Ok(resp) => {
             let content_len = resp.content.len();
-            tracing::debug!(content_len, "provider test received response");
-            let response = if resp.content.is_empty() {
-                None
-            } else {
-                Some(resp.content)
-            };
+            tracing::debug!(
+                content_len,
+                content_preview = %resp.content.chars().take(100).collect::<String>(),
+                "provider test received response"
+            );
+            // Always include response content, even if empty
+            let response = Some(resp.content);
             build_provider_test_result(
                 provider_id,
                 model,

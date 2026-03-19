@@ -198,7 +198,7 @@ export function ProviderTestDialog({
                   </CollapsibleTrigger>
                   <CollapsibleContent>
                     <pre className="mt-1 overflow-x-auto rounded-lg border border-border/60 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
-                      {result.response}
+                      {result.response || "(空响应)"}
                     </pre>
                   </CollapsibleContent>
                 </Collapsible>
