@@ -162,12 +162,7 @@ impl ArgusWing {
                 connect_path(path).await
             }
         }?;
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+        migrate(&pool).await?;
 
         // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
@@ -176,6 +171,9 @@ impl ArgusWing {
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         template_manager.repair_placeholder_ids().await?;
+
+        // Seed builtin agents from agents/ directory
+        template_manager.seed_builtin_agents().await?;
 
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
