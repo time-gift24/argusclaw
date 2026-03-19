@@ -430,6 +430,7 @@ mod tests {
         assert_eq!(
             map_llm_error_to_test_status(&LlmError::AuthFailed {
                 provider: "openai-compatible".to_string(),
+                reason: "auth error".to_string(),
             }),
             ProviderTestStatus::AuthFailed
         );
