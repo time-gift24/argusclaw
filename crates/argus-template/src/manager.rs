@@ -230,7 +230,14 @@ impl TemplateManager {
                 reason: format!("CARGO_MANIFEST_DIR not set: {}", e),
             })?;
 
-        let agents_dir = Path::new(&manifest_dir).join("../../agents");
+        // Find agents directory by traversing up from CARGO_MANIFEST_DIR
+        let agents_dir = find_agents_directory(&manifest_dir).map_err(|e| {
+            ArgusError::DatabaseError {
+                reason: format!("failed to find agents directory: {}", e),
+            }
+        })?;
+
+        tracing::info!("using agents directory: {}", agents_dir.display());
 
         // Load all TOML definitions
         let toml_defs =
@@ -262,6 +269,31 @@ impl TemplateManager {
 
         tracing::info!("successfully seeded builtin agents");
         Ok(())
+}
+
+/// Find the agents directory by traversing up from the given start path.
+fn find_agents_directory(start_path: &str) -> Result<std::path::PathBuf, String> {
+    let start = Path::new(start_path);
+
+    // Traverse up the directory tree looking for agents/ directory
+    let mut current = Some(start);
+
+    while let Some(path) = current {
+        // Check if agents/ exists at this level
+        let agents_path = path.join("agents");
+        if agents_path.exists() && agents_path.is_dir() {
+            return Ok(agents_path);
+        }
+
+        // Move up one directory
+        current = path.parent();
+    }
+
+    // If not found, provide a helpful error message
+    Err(format!(
+        "could not find agents/ directory starting from {}",
+        start.display()
+    ))
 }
 
     /// Get a template by ID.
