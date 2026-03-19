@@ -681,6 +681,7 @@ mod tests {
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
             temperature: None,
+            thinking_config: None,
         };
         wing.upsert_template(default_template)
             .await
@@ -718,6 +719,7 @@ mod tests {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
+            thinking_config: None,
         };
 
         let template_id = wing
@@ -817,6 +819,7 @@ mod tests {
                 tool_names: vec![],
                 max_tokens: None,
                 temperature: None,
+                thinking_config: None,
             })
             .await
             .expect("template should upsert");
@@ -895,6 +898,7 @@ mod tests {
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
             temperature: None,
+            thinking_config: None,
         };
         wing.upsert_template(default_template)
             .await

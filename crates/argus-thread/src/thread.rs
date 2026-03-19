@@ -310,6 +310,7 @@ impl Thread {
         // Pass agent-level model params directly to avoid builder setter type mismatch
         turn.max_tokens = self.agent_record.max_tokens;
         turn.temperature = self.agent_record.temperature;
+        turn.thinking = self.agent_record.thinking_config.clone();
 
         // Turn is responsible for execution
         let result = turn.execute().await;
@@ -350,6 +351,7 @@ mod tests {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
+            thinking_config: None,
         }
     }
 

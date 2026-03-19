@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use argus_protocol::llm::ThinkingConfig;
+
 /// Builtin agent definition from TOML file
 #[derive(Debug, Deserialize)]
 pub struct TomlAgentDef {
@@ -12,6 +14,8 @@ pub struct TomlAgentDef {
     max_tokens: Option<u32>,
     #[serde(default)]
     temperature: Option<f32>,
+    #[serde(default)]
+    thinking_config: Option<ThinkingConfig>,
 }
 
 impl TomlAgentDef {
@@ -27,6 +31,7 @@ impl TomlAgentDef {
             tool_names: self.tool_names.clone(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            thinking_config: self.thinking_config.clone(),
         }
     }
 }

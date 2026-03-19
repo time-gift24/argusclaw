@@ -398,6 +398,14 @@ impl TemplateManager {
             })?
             .map(|t| t as u32);
 
+        // Deserialize thinking_config from JSON
+        let thinking_config: Option<argus_protocol::llm::ThinkingConfig> = row
+            .try_get::<Option<String>, _>("thinking_config")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .and_then(|s| serde_json::from_str(&s).ok());
+
         Ok(AgentRecord {
             id: AgentId::new(row.try_get("id").map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
@@ -426,6 +434,7 @@ impl TemplateManager {
             tool_names,
             max_tokens,
             temperature,
+            thinking_config,
         })
     }
 }

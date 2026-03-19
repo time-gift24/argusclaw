@@ -14,7 +14,7 @@ use tracing;
 
 use argus_protocol::llm::{
     ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    ToolCompletionResponse, ToolDefinition, ThinkingConfig,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -220,6 +220,10 @@ pub struct Turn {
     /// Sampling temperature for LLM requests.
     #[builder(default, setter(strip_option))]
     pub temperature: Option<f32>,
+
+    /// Thinking configuration for LLM requests.
+    #[builder(default, setter(strip_option))]
+    pub thinking: Option<ThinkingConfig>,
 
     /// Internal stream event sender.
     stream_tx: broadcast::Sender<TurnStreamEvent>,
@@ -471,6 +475,9 @@ impl Turn {
             }
             if let Some(temperature) = self.temperature {
                 request.temperature = Some(temperature);
+            }
+            if let Some(thinking) = &self.thinking {
+                request.thinking = Some(thinking.clone());
             }
 
             // Call the LLM (streaming mode is always enabled in Turn)
