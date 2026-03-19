@@ -331,8 +331,7 @@ async fn run_provider_connection_test(
         vec![echo_tool],
     )
     .with_model(&model)
-    .with_temperature(0.0)
-    .with_tool_choice("required"); // 强制要求使用工具
+    .with_temperature(0.0);
 
     let request_json = serde_json::to_string(&request).ok();
 
