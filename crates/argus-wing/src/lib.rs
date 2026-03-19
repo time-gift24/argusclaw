@@ -644,6 +644,7 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ThinkingConfig;
 
     #[tokio::test]
     async fn init_creates_argus_wing_with_default_database() {
@@ -681,7 +682,7 @@ mod tests {
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
             temperature: None,
-            thinking_config: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         };
         wing.upsert_template(default_template)
             .await
@@ -719,7 +720,7 @@ mod tests {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
-            thinking_config: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         };
 
         let template_id = wing
@@ -819,7 +820,7 @@ mod tests {
                 tool_names: vec![],
                 max_tokens: None,
                 temperature: None,
-                thinking_config: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
             })
             .await
             .expect("template should upsert");
@@ -898,7 +899,7 @@ mod tests {
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
             temperature: None,
-            thinking_config: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         };
         wing.upsert_template(default_template)
             .await

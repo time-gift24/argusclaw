@@ -52,7 +52,7 @@ impl AgentRecord {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
-            thinking_config: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         }
     }
 }
