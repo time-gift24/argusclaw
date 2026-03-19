@@ -1,6 +1,4 @@
 use serde::Deserialize;
-use std::fs;
-use std::path::Path;
 
 /// Builtin agent definition from TOML file
 #[derive(Debug, Deserialize)]
@@ -33,41 +31,4 @@ impl TomlAgentDef {
             temperature: self.temperature,
         }
     }
-}
-
-/// Load all builtin agent TOML files from a directory
-pub fn load_builtin_agents_from_dir(dir: &Path) -> Result<Vec<TomlAgentDef>, String> {
-    if !dir.exists() {
-        return Err(format!("agents directory not found: {}", dir.display()));
-    }
-
-    let toml_files = fs::read_dir(dir)
-        .map_err(|e| format!("failed to read agents directory: {}", e))?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .map(|ext| ext == "toml")
-                .unwrap_or(false)
-        })
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-
-    if toml_files.is_empty() {
-        return Err(format!("no .toml files found in {}", dir.display()));
-    }
-
-    let mut agents = Vec::new();
-    for toml_path in toml_files {
-        let content = fs::read_to_string(&toml_path)
-            .map_err(|e| format!("failed to read {}: {}", toml_path.display(), e))?;
-
-        let def: TomlAgentDef = toml::from_str(&content)
-            .map_err(|e| format!("failed to parse {}: {}", toml_path.display(), e))?;
-
-        agents.push(def);
-    }
-
-    Ok(agents)
 }

@@ -32,32 +32,44 @@ fn format_delete_blocked_reason(
 }
 
 impl TemplateManager {
-    /// Find the agents directory by traversing up from the given start path.
-    fn find_agents_directory(start_path: &str) -> Result<std::path::PathBuf> {
-        use std::path::Path;
-        let start = Path::new(start_path);
+    /// Seed builtin agents from embedded TOML definitions at runtime.
+    pub async fn seed_builtin_agents(&self) -> Result<()> {
+        use crate::config::TomlAgentDef;
 
-        // Traverse up the directory tree looking for agents/ directory
-        let mut current = Some(start);
+        tracing::info!("seeding builtin agents from embedded TOML data");
 
-        while let Some(path) = current {
-            // Check if agents/ exists at this level
-            let agents_path = path.join("agents");
-            if agents_path.exists() && agents_path.is_dir() {
-                return Ok(agents_path);
-            }
+        // Embedded TOML definitions (compiled into binary)
+        const AGENT_DEFINITIONS: &[&str] = &[
+            include_str!("../../../agents/arguswing.toml"),
+        ];
 
-            // Move up one directory
-            current = path.parent();
+        let mut seeded_count = 0;
+
+        // Parse and upsert each agent definition
+        for toml_str in AGENT_DEFINITIONS {
+            let def: TomlAgentDef = toml::from_str(toml_str).map_err(|e| {
+                ArgusError::DatabaseError {
+                    reason: format!("failed to parse embedded TOML: {}", e),
+                }
+            })?;
+
+            let record = def.to_agent_record();
+            let agent_id = self.upsert_by_display_name(&record).await.map_err(|e| {
+                ArgusError::DatabaseError {
+                    reason: format!("failed to seed agent '{}': {}", record.display_name, e),
+                }
+            })?;
+
+            tracing::info!(
+                "seeded builtin agent '{}' (id={})",
+                record.display_name,
+                agent_id.inner()
+            );
+            seeded_count += 1;
         }
 
-        // If not found, provide a helpful error message
-        Err(ArgusError::DatabaseError {
-            reason: format!(
-                "could not find agents/ directory starting from {}",
-                start.display()
-            ),
-        })
+        tracing::info!("successfully seeded {} builtin agent(s)", seeded_count);
+        Ok(())
     }
 
     pub fn new(pool: SqlitePool) -> Self {
@@ -241,56 +253,6 @@ impl TemplateManager {
             reason: e.to_string(),
         })?;
 
-        Ok(())
-    }
-
-    /// Seed builtin agents from agents/ directory at runtime.
-    pub async fn seed_builtin_agents(&self) -> Result<()> {
-        use crate::config::load_builtin_agents_from_dir;
-        use std::env;
-
-        tracing::info!("seeding builtin agents from agents/ directory");
-
-        // Resolve agents directory using CARGO_MANIFEST_DIR
-        let manifest_dir =
-            env::var("CARGO_MANIFEST_DIR").map_err(|e| ArgusError::DatabaseError {
-                reason: format!("CARGO_MANIFEST_DIR not set: {}", e),
-            })?;
-
-        // Find agents directory by traversing up from CARGO_MANIFEST_DIR
-        let agents_dir = Self::find_agents_directory(&manifest_dir)?;
-
-        tracing::info!("using agents directory: {}", agents_dir.display());
-
-        // Load all TOML definitions
-        let toml_defs =
-            load_builtin_agents_from_dir(&agents_dir).map_err(|e| ArgusError::DatabaseError {
-                reason: format!("failed to load builtin agents: {}", e),
-            })?;
-
-        tracing::info!(
-            "loaded {} builtin agent definitions from {}",
-            toml_defs.len(),
-            agents_dir.display()
-        );
-
-        // Upsert each agent by display_name
-        for def in toml_defs {
-            let record = def.to_agent_record();
-            let agent_id = self.upsert_by_display_name(&record).await.map_err(|e| {
-                ArgusError::DatabaseError {
-                    reason: format!("failed to seed agent '{}': {}", record.display_name, e),
-                }
-            })?;
-
-            tracing::info!(
-                "seeded builtin agent '{}' (id={})",
-                record.display_name,
-                agent_id.inner()
-            );
-        }
-
-        tracing::info!("successfully seeded builtin agents");
         Ok(())
     }
 
