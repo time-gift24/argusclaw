@@ -1,6 +1,5 @@
 use argus_protocol::{AgentId, AgentRecord, ArgusError, ProviderId, Result};
 use sqlx::SqlitePool;
-use std::path::Path;
 
 /// Manager for agent templates.
 pub struct TemplateManager {
