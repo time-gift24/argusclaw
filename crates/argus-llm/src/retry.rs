@@ -425,6 +425,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Err(LlmError::AuthFailed {
                 provider: "non-retryable".to_string(),
+                reason: "auth error".to_string(),
             })
         }
 

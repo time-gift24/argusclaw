@@ -705,6 +705,7 @@ fn classify_http_error(
     match status.as_u16() {
         401 | 403 => LlmError::AuthFailed {
             provider: "openai-compatible".to_string(),
+            reason: format!("HTTP {}: {}", status, body),
         },
         404 if lower_body.contains("model") => LlmError::ModelNotAvailable {
             provider: "openai-compatible".to_string(),
