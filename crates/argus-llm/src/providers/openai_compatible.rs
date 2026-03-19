@@ -244,7 +244,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 tracing::warn!("content is None, using reasoning_content as fallback");
                 reasoning.clone()
             } else {
-                tracing::warn!("both content and reasoning_content are None, returning empty string");
+                tracing::warn!(
+                    "both content and reasoning_content are None, returning empty string"
+                );
                 String::new()
             }
         } else {

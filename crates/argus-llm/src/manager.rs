@@ -12,10 +12,10 @@ use chrono::Utc;
 
 use argus_protocol::Result;
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId,
+    ChatMessage, CompletionRequest, FinishReason, LlmError, LlmProvider, LlmProviderId,
     LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent,
-    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
 use futures_util::StreamExt;
 
@@ -329,7 +329,9 @@ async fn run_provider_connection_test(
 
     // 使用 ToolCompletionRequest，要求模型调用工具
     let request = ToolCompletionRequest::new(
-        vec![ChatMessage::user("Please call the echo tool with the text 'OK'")],
+        vec![ChatMessage::user(
+            "Please call the echo tool with the text 'OK'",
+        )],
         vec![echo_tool],
     )
     .with_model(&model)
@@ -411,9 +413,7 @@ async fn run_provider_connection_test(
         }
         Err(LlmError::UnsupportedCapability { .. }) => {
             // Provider 不支持流式，降级到非流式
-            tracing::debug!(
-                "Provider doesn't support streaming, falling back to non-streaming"
-            );
+            tracing::debug!("Provider doesn't support streaming, falling back to non-streaming");
 
             match provider.complete_with_tools(request.clone()).await {
                 Ok(resp) => {
@@ -423,7 +423,8 @@ async fn run_provider_connection_test(
                             serde_json::to_string_pretty(&resp.tool_calls).unwrap_or_default();
                         format!("Tool calls received:\n{}", tool_calls_json)
                     } else {
-                        resp.content.unwrap_or_else(|| "No tool calls or content".to_string())
+                        resp.content
+                            .unwrap_or_else(|| "No tool calls or content".to_string())
                     };
 
                     let status = if has_tool_calls {
@@ -587,7 +588,13 @@ impl TestStreamingAccumulator {
             let tool_info: Vec<String> = self
                 .tool_calls
                 .iter()
-                .filter_map(|(id, name, _)| Some(format!("{} ({})", name.as_deref().unwrap_or("?"), id.as_deref().unwrap_or("?"))))
+                .map(|(id, name, _)| {
+                    format!(
+                        "{} ({})",
+                        name.as_deref().unwrap_or("?"),
+                        id.as_deref().unwrap_or("?")
+                    )
+                })
                 .collect();
             parts.push(format!("Tools: {}", tool_info.join(", ")));
         }

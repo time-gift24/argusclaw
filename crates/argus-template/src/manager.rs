@@ -45,11 +45,10 @@ impl TemplateManager {
 
         // Parse and upsert each agent definition
         for toml_str in agent_definitions {
-            let def: TomlAgentDef = toml::from_str(toml_str).map_err(|e| {
-                ArgusError::DatabaseError {
+            let def: TomlAgentDef =
+                toml::from_str(toml_str).map_err(|e| ArgusError::DatabaseError {
                     reason: format!("failed to parse embedded TOML: {}", e),
-                }
-            })?;
+                })?;
 
             let record = def.to_agent_record();
             let agent_id = self.upsert_by_display_name(&record).await.map_err(|e| {

@@ -19,9 +19,10 @@ impl AgentRepository for ArgusSqlite {
         let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
 
         // Serialize thinking_config to JSON
-        let thinking_config_json = record.thinking_config
+        let thinking_config_json = record
+            .thinking_config
             .as_ref()
-            .map(|tc| serde_json::to_string(tc))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| DbError::QueryFailed {
                 reason: format!("failed to serialize thinking_config: {e}"),
@@ -144,12 +145,12 @@ impl ArgusSqlite {
         // Parse thinking_config from JSON
         let thinking_config: Option<argus_protocol::llm::ThinkingConfig> =
             Self::get_column::<Option<String>>(&row, "thinking_config")?
-            .as_ref()
-            .map(|json_str| serde_json::from_str(json_str))
-            .transpose()
-            .map_err(|e| DbError::QueryFailed {
-                reason: format!("failed to parse thinking_config: {e}"),
-            })?;
+                .as_ref()
+                .map(|json_str| serde_json::from_str(json_str))
+                .transpose()
+                .map_err(|e| DbError::QueryFailed {
+                    reason: format!("failed to parse thinking_config: {e}"),
+                })?;
 
         Ok(AgentRecord {
             id: AgentId::new(Self::get_column(&row, "id")?),

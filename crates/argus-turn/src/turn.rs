@@ -13,8 +13,8 @@ use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, ThinkingConfig,
+    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ThinkingConfig, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
