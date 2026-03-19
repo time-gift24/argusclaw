@@ -83,11 +83,21 @@ impl TemplateManager {
         // Convert temperature from f32 to i64 (stored as INTEGER * 100)
         let temperature_int = template.temperature.map(|t| (t * 100.0) as i64);
 
+        // Serialize thinking_config to JSON
+        let thinking_config_json = template
+            .thinking_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ArgusError::SerdeError {
+                reason: format!("failed to serialize thinking_config: {}", e),
+            })?;
+
         if template.id.inner() == 0 {
             let result = sqlx::query(
                 r#"
-                INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 "#,
             )
             .bind(&template.display_name)
@@ -98,6 +108,7 @@ impl TemplateManager {
             .bind(&tool_names_json)
             .bind(template.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
+            .bind(&thinking_config_json)
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -106,8 +117,8 @@ impl TemplateManager {
         } else {
             sqlx::query(
                 r#"
-                INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(id) DO UPDATE SET
                     display_name = excluded.display_name,
                     description = excluded.description,
@@ -117,6 +128,7 @@ impl TemplateManager {
                     tool_names = excluded.tool_names,
                     max_tokens = excluded.max_tokens,
                     temperature = excluded.temperature,
+                    thinking_config = excluded.thinking_config,
                     updated_at = datetime('now')
                 "#,
             )
@@ -129,6 +141,7 @@ impl TemplateManager {
             .bind(&tool_names_json)
             .bind(template.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
+            .bind(&thinking_config_json)
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
