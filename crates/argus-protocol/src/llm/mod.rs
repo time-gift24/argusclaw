@@ -444,18 +444,24 @@ pub struct ToolResult {
 }
 
 /// Request for a completion with tool use.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
     /// Optional per-request model override.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     /// How to handle tool use: "auto", "required", or "none".
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub metadata: std::collections::HashMap<String, String>,
 }
 

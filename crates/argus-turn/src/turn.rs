@@ -213,6 +213,14 @@ pub struct Turn {
     #[builder(default)]
     config: TurnConfig,
 
+    /// Maximum output tokens for LLM requests.
+    #[builder(default, setter(strip_option))]
+    pub max_tokens: Option<u32>,
+
+    /// Sampling temperature for LLM requests.
+    #[builder(default, setter(strip_option))]
+    pub temperature: Option<f32>,
+
     /// Internal stream event sender.
     stream_tx: broadcast::Sender<TurnStreamEvent>,
 
@@ -457,7 +465,13 @@ impl Turn {
             }
 
             // Build the request with current messages and tools
-            let request = ToolCompletionRequest::new(messages.clone(), tools.clone());
+            let mut request = ToolCompletionRequest::new(messages.clone(), tools.clone());
+            if let Some(max_tokens) = self.max_tokens {
+                request.max_tokens = Some(max_tokens);
+            }
+            if let Some(temperature) = self.temperature {
+                request.temperature = Some(temperature);
+            }
 
             // Call the LLM (streaming mode is always enabled in Turn)
             let response = self.call_llm_streaming(request).await?;
