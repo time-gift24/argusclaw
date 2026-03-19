@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AgentId;
 use crate::ids::ProviderId;
+use crate::llm::ThinkingConfig;
 
 /// Full agent record/template configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +33,9 @@ pub struct AgentRecord {
     pub max_tokens: Option<u32>,
     /// Sampling temperature (0.0-2.0).
     pub temperature: Option<f32>,
+    /// Thinking configuration for reasoning mode
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<ThinkingConfig>,
 }
 
 impl AgentRecord {
@@ -48,6 +52,7 @@ impl AgentRecord {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         }
     }
 }

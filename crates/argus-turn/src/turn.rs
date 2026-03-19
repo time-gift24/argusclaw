@@ -13,8 +13,8 @@ use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ThinkingConfig, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -220,6 +220,10 @@ pub struct Turn {
     /// Sampling temperature for LLM requests.
     #[builder(default, setter(strip_option))]
     pub temperature: Option<f32>,
+
+    /// Thinking configuration for LLM requests.
+    #[builder(default, setter(strip_option))]
+    pub thinking: Option<ThinkingConfig>,
 
     /// Internal stream event sender.
     stream_tx: broadcast::Sender<TurnStreamEvent>,
@@ -471,6 +475,9 @@ impl Turn {
             }
             if let Some(temperature) = self.temperature {
                 request.temperature = Some(temperature);
+            }
+            if let Some(thinking) = &self.thinking {
+                request.thinking = Some(thinking.clone());
             }
 
             // Call the LLM (streaming mode is always enabled in Turn)

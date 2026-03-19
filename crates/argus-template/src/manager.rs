@@ -45,11 +45,10 @@ impl TemplateManager {
 
         // Parse and upsert each agent definition
         for toml_str in agent_definitions {
-            let def: TomlAgentDef = toml::from_str(toml_str).map_err(|e| {
-                ArgusError::DatabaseError {
+            let def: TomlAgentDef =
+                toml::from_str(toml_str).map_err(|e| ArgusError::DatabaseError {
                     reason: format!("failed to parse embedded TOML: {}", e),
-                }
-            })?;
+                })?;
 
             let record = def.to_agent_record();
             let agent_id = self.upsert_by_display_name(&record).await.map_err(|e| {
@@ -258,7 +257,7 @@ impl TemplateManager {
     pub async fn get(&self, id: AgentId) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
             FROM agents WHERE id = ?
             "#,
         )
@@ -277,7 +276,7 @@ impl TemplateManager {
     pub async fn list(&self) -> Result<Vec<AgentRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
             FROM agents ORDER BY id ASC
             "#,
         )
@@ -294,7 +293,7 @@ impl TemplateManager {
     pub async fn find_by_display_name(&self, display_name: &str) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
             FROM agents WHERE display_name = ?
             "#,
         )
@@ -398,6 +397,14 @@ impl TemplateManager {
             })?
             .map(|t| t as u32);
 
+        // Deserialize thinking_config from JSON
+        let thinking_config: Option<argus_protocol::llm::ThinkingConfig> = row
+            .try_get::<Option<String>, _>("thinking_config")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .and_then(|s| serde_json::from_str(&s).ok());
+
         Ok(AgentRecord {
             id: AgentId::new(row.try_get("id").map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
@@ -426,6 +433,7 @@ impl TemplateManager {
             tool_names,
             max_tokens,
             temperature,
+            thinking_config,
         })
     }
 }

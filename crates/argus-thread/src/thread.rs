@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
-use argus_protocol::llm::{ChatMessage, LlmProvider};
+use argus_protocol::llm::{ChatMessage, LlmProvider, ThinkingConfig};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{AgentRecord, HookHandler, HookRegistry, SessionId, ThreadEvent, ThreadId};
 use argus_tool::ToolManager;
@@ -310,6 +310,12 @@ impl Thread {
         // Pass agent-level model params directly to avoid builder setter type mismatch
         turn.max_tokens = self.agent_record.max_tokens;
         turn.temperature = self.agent_record.temperature;
+        // Default to disabled when not configured in database to avoid provider's default behavior
+        turn.thinking = self
+            .agent_record
+            .thinking_config
+            .clone()
+            .or_else(|| Some(ThinkingConfig::disabled()));
 
         // Turn is responsible for execution
         let result = turn.execute().await;
@@ -350,6 +356,7 @@ mod tests {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
+            thinking_config: None,
         }
     }
 

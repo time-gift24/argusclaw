@@ -44,7 +44,14 @@ fn main() {
 
     // Sort for consistent ordering
     let mut toml_files = toml_files;
-    toml_files.sort_by_key(|entry| entry.path().file_name().unwrap().to_string_lossy().to_string());
+    toml_files.sort_by_key(|entry| {
+        entry
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    });
 
     // Generate the code
     let mut code = String::from(
@@ -63,7 +70,10 @@ pub fn get_builtin_agent_definitions() -> &'static [&'static str] {
         let filename = path.file_name().unwrap().to_string_lossy();
         // Calculate relative path from crates/argus-template/src/manager.rs to agents/
         // crates/argus-template/src/manager.rs -> agents/ is ../../../agents/
-        code.push_str(&format!("        include_str!(\"../../../agents/{}\"),\n", filename));
+        code.push_str(&format!(
+            "        include_str!(\"../../../agents/{}\"),\n",
+            filename
+        ));
     }
 
     code.push_str(
@@ -79,16 +89,15 @@ pub fn get_builtin_agent_definitions() -> &'static [&'static str] {
 
     // Only write if content changed to avoid triggering unnecessary rebuilds
     let should_write = if out_file.exists() {
-        let existing_content = fs::read_to_string(&out_file)
-            .expect("Failed to read existing generated_agents.rs");
+        let existing_content =
+            fs::read_to_string(&out_file).expect("Failed to read existing generated_agents.rs");
         existing_content != code
     } else {
         true
     };
 
     if should_write {
-        fs::write(&out_file, code)
-            .expect("Failed to write generated_agents.rs");
+        fs::write(&out_file, code).expect("Failed to write generated_agents.rs");
     }
 
     println!("cargo:rerun-if-changed=build.rs");

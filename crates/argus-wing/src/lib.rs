@@ -116,9 +116,11 @@ impl ArgusWing {
 
             // Set up the tracing subscriber with environment variable support
             // Users can set RUST_LOG=debug to override the default level
-            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("arguswing=debug,argus=debug,argus_llm=debug")
+            let env_filter =
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new(
+                        "arguswing=debug,argus=debug,argus_llm=debug",
+                    )
                 });
 
             // Create a subscriber that writes to file only (blocking)
@@ -644,6 +646,7 @@ fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ThinkingConfig;
 
     #[tokio::test]
     async fn init_creates_argus_wing_with_default_database() {
@@ -681,6 +684,7 @@ mod tests {
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
             temperature: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         };
         wing.upsert_template(default_template)
             .await
@@ -718,6 +722,7 @@ mod tests {
             tool_names: vec![],
             max_tokens: None,
             temperature: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         };
 
         let template_id = wing
@@ -817,6 +822,7 @@ mod tests {
                 tool_names: vec![],
                 max_tokens: None,
                 temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
             })
             .await
             .expect("template should upsert");
@@ -895,6 +901,7 @@ mod tests {
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
             temperature: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
         };
         wing.upsert_template(default_template)
             .await
