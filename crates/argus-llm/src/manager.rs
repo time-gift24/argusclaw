@@ -145,6 +145,8 @@ impl ProviderManager {
                 Duration::ZERO,
                 ProviderTestStatus::ProviderNotFound,
                 format!("provider {} not found", id),
+                None,
+                None,
             ));
         };
 
@@ -160,6 +162,8 @@ impl ProviderManager {
                     Duration::ZERO,
                     ProviderTestStatus::UnsupportedProviderKind,
                     reason,
+                    None,
+                    None,
                 ));
             }
             Err(e) => return Err(e),
@@ -186,6 +190,8 @@ impl ProviderManager {
                     Duration::ZERO,
                     ProviderTestStatus::UnsupportedProviderKind,
                     reason,
+                    None,
+                    None,
                 ));
             }
             Err(e) => return Err(e),
@@ -271,6 +277,7 @@ impl ProviderManager {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_provider_test_result(
     provider_id: String,
     model: String,
@@ -278,6 +285,8 @@ fn build_provider_test_result(
     latency: Duration,
     status: ProviderTestStatus,
     message: String,
+    request: Option<String>,
+    response: Option<String>,
 ) -> ProviderTestResult {
     ProviderTestResult {
         provider_id,
@@ -287,6 +296,8 @@ fn build_provider_test_result(
         latency_ms: duration_to_millis(latency),
         status,
         message,
+        request,
+        response,
     }
 }
 
@@ -301,14 +312,18 @@ async fn run_provider_connection_test(
         .with_max_tokens(8)
         .with_temperature(0.0);
 
+    let request_json = serde_json::to_string(&request).ok();
+
     match provider.complete(request).await {
-        Ok(_) => build_provider_test_result(
+        Ok(resp) => build_provider_test_result(
             provider_id,
             model,
             base_url,
             started.elapsed(),
             ProviderTestStatus::Success,
             "Provider connection test succeeded.".to_string(),
+            request_json,
+            Some(resp.content),
         ),
         Err(error) => build_provider_test_result(
             provider_id,
@@ -317,6 +332,8 @@ async fn run_provider_connection_test(
             started.elapsed(),
             map_llm_error_to_test_status(&error),
             error.to_string(),
+            request_json,
+            None,
         ),
     }
 }

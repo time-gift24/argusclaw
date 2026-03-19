@@ -6,6 +6,11 @@ import type { LlmProviderSummary, ProviderTestResult } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -164,6 +169,42 @@ export function ProviderTestDialog({
               </span>
             </div>
           </div>
+
+          {result && (
+            <div className="space-y-2">
+              {result.request && (
+                <Collapsible defaultOpen={false}>
+                  <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs font-medium hover:bg-muted/50">
+                    <span>请求</span>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <pre className="mt-1 overflow-x-auto rounded-lg border border-border/60 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                      {(() => {
+                        try {
+                          return JSON.stringify(JSON.parse(result.request!), null, 2);
+                        } catch {
+                          return result.request;
+                        }
+                      })()}
+                    </pre>
+                  </CollapsibleContent>
+                </Collapsible>
+              )}
+
+              {result.response && result.status === "success" && (
+                <Collapsible defaultOpen={false}>
+                  <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs font-medium hover:bg-muted/50">
+                    <span>响应</span>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <pre className="mt-1 overflow-x-auto rounded-lg border border-border/60 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed">
+                      {result.response}
+                    </pre>
+                  </CollapsibleContent>
+                </Collapsible>
+              )}
+            </div>
+          )}
         </div>
 
         <DialogFooter className="gap-2 sm:gap-0">

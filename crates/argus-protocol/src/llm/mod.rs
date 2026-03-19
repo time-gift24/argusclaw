@@ -304,7 +304,7 @@ impl ChatMessage {
 }
 
 /// Request for a chat completion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
     /// Optional per-request model override.
