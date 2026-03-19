@@ -9,7 +9,7 @@ prek                                           # 静态检查基线
                                                # - fmt 问题会自动修复，无需改动再次提交
                                                # - clippy 相关问题务必做修复
 cargo deny check                               # 发起 PR 前使用，检测下静态基线
-RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
+RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 ```
 
 ## 设计与检视原则(非常重要)
@@ -67,11 +67,11 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
                             │                        cli                              │
                             │                    (命令行前端)                            │
                             └──────────────────────┬──────────────────────────────────┘
-                                               │ 仅通过公共 API 依赖 claw
+                                               │ 仅通过公共 API 依赖 argus-wing
                                                ▼
 ┌─────────────┐    ┌──────────────────────────────────────────────────────────────────────────┐
-│   desktop   │    │                                   claw                                         │
-│  (Tauri 前端)│    │                              (核心库门面)                                        │
+│   desktop   │    │                              argus-wing                                │
+│  (Tauri 前端)│    │                         (核心库门面)                                      │
 └──────┬──────┘    └──────────────────────────────────┬───────────────────────────────────────────┘
        │                      ▲                         │
        │                      │ 仅通过公共 API 依赖        │ 内部模块
@@ -118,7 +118,7 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 
 ## 核心规则
 
-**cli 和 desktop 都只依赖 claw 暴露的公共 API，不可访问 argus-* 内部模块。**
+**cli 和 desktop 都只依赖 argus-wing 暴露的公共 API，不可访问 argus-* 内部模块。
 
 ## argus-protocol — 核心类型（叶子模块）
 
@@ -141,13 +141,11 @@ RUST_LOG=arguswing=debug,claw=debug cargo run  # 开启日志运行
 
 依赖方向：`argus-protocol` ← 所有其他 argus-* crates（**argus-protocol 不依赖它们**）
 
-## claw — 核心库门面
+## argus-wing — 核心库门面
 
-`claw` 是面向 cli 和 desktop 的**唯一入口点**。它不包含核心逻辑，而是组合各个 argus-* 模块。
+`argus-wing` 是面向 cli 和 desktop 的**唯一入口点**。它不包含核心逻辑，而是组合各个 argus-* 模块。
 
-唯一的入口点是 `AppContext`（定义在 `claw.rs`）。cli 和 desktop 只能看到 `AppContext` 一个结构体来启动和操作系统。
-
-对话流程通过 `Agent` API 暴露：`AgentBuilder::build()` → `agent.create_thread()` → `agent.send_message()` / `agent.subscribe()` / `agent.resolve_approval()`。
+唯一的入口点是 `ArgusWing::init()` / `ArgusWing::with_pool()`。cli 和 desktop 只能看到 `ArgusWing` 一个结构体来启动和操作系统。
 
 ## 各 argus-* crate 职责
 

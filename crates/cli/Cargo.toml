@@ -15,7 +15,7 @@ argus-protocol = { path = "../argus-protocol" }
 argus-thread = { path = "../argus-thread" }
 argus-tool = { path = "../argus-tool" }
 argus-turn = { path = "../argus-turn", optional = true }
-argus-wing = { path = "../argus-wing" }
+argus-wing = { path = "../argus-wing", features = ["dev"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
@@ -32,4 +32,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-dev = ["dep:argus-dev", "dep:argus-turn", "dep:futures-util", "dep:owo-colors", "dep:serde_json", "dep:sqlx", "dep:toml"]
+dev = ["dep:argus-dev", "dep:argus-turn", "dep:futures-util", "dep:owo-colors", "dep:serde_json", "dep:sqlx", "dep:toml", "argus-wing/dev"]
