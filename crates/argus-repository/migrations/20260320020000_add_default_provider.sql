@@ -8,8 +8,8 @@ VALUES (
     'https://placeholder.example.com/v1',
     '["gpt-4o-mini"]',
     'gpt-4o-mini',
-    X'',  -- empty encrypted api key
-    X'',  -- empty nonce
+    CAST(X'' AS BLOB),  -- empty encrypted api key
+    CAST(X'' AS BLOB),   -- empty nonce
     '{}',
     1
 );
