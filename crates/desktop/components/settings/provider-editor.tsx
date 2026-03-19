@@ -55,6 +55,9 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [formData, setFormData] = React.useState<LlmProviderRecord>(createDefaultFormData)
   const [newModel, setNewModel] = React.useState("")
+  const [newHeaderName, setNewHeaderName] = React.useState("")
+  const [newHeaderValue, setNewHeaderValue] = React.useState("")
+  const [headersExpanded, setHeadersExpanded] = React.useState(false)
 
   // Test connection state - one result per model
   const [testResults, setTestResults] = React.useState<Record<string, ProviderTestResult>>({})
@@ -130,6 +133,27 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
 
   const handleSetDefaultModel = (model: string) => {
     setFormData({ ...formData, default_model: model })
+  }
+
+  const handleAddHeader = () => {
+    const name = newHeaderName.trim()
+    const value = newHeaderValue.trim()
+    if (!name) return
+    if (formData.extra_headers[name] !== undefined) return
+    setFormData({
+      ...formData,
+      extra_headers: { ...formData.extra_headers, [name]: value },
+    })
+    setNewHeaderName("")
+    setNewHeaderValue("")
+  }
+
+  const handleRemoveHeader = (name: string) => {
+    setFormData((prev) => {
+      const next = { ...prev.extra_headers }
+      delete next[name]
+      return { ...prev, extra_headers: next }
+    })
   }
 
   const handleAddModel = async () => {
@@ -282,6 +306,69 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
             <Label htmlFor="is_default" className="cursor-pointer">
               设为默认提供者
             </Label>
+          </div>
+
+          {/* Extra Headers Section */}
+          <div className="space-y-2 pt-4 border-t">
+            <button
+              type="button"
+              className="flex items-center gap-2 text-sm font-medium w-full"
+              onClick={() => setHeadersExpanded((v) => !v)}
+            >
+              <span className="text-xs text-muted-foreground">▸</span>
+              Extra Headers
+            </button>
+            {headersExpanded && (
+              <div className="space-y-2 pl-3">
+                <div className="flex gap-2">
+                  <Input
+                    value={newHeaderName}
+                    onChange={(e) => setNewHeaderName(e.target.value)}
+                    placeholder="Header 名称"
+                    className="text-sm"
+                  />
+                  <Input
+                    value={newHeaderValue}
+                    onChange={(e) => setNewHeaderValue(e.target.value)}
+                    placeholder="Header 值"
+                    className="text-sm"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleAddHeader()}
+                    disabled={!newHeaderName.trim()}
+                  >
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+                {Object.keys(formData.extra_headers).length > 0 && (
+                  <div className="space-y-1">
+                    {Object.entries(formData.extra_headers).map(([name, value]) => (
+                      <div key={name} className="flex items-center gap-2 text-xs">
+                        <Badge variant="secondary" className="shrink-0 font-mono">
+                          {name}
+                        </Badge>
+                        <span className="truncate text-muted-foreground font-mono flex-1 min-w-0">
+                          {value || <span className="italic opacity-40">(空)</span>}
+                        </span>
+                        <button
+                          type="button"
+                          className="shrink-0 hover:text-destructive"
+                          onClick={() => handleRemoveHeader(name)}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="text-[11px] text-muted-foreground">
+                  用于向 API 请求添加自定义 HTTP Header
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Models Section */}

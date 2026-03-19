@@ -28,7 +28,7 @@ use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, SessionId, ThreadEvent, ThreadId,
+    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{ProviderResolver, SessionManager, SessionSummary, ThreadSummary};
@@ -498,6 +498,24 @@ impl ArgusWing {
                 reason: e.to_string(),
             })
     }
+
+    // =========================================================================
+    // Tool API
+    // =========================================================================
+
+    /// List all available tools with their metadata.
+    pub async fn list_tools(&self) -> Vec<ToolInfo> {
+        let definitions = self.tool_manager.list_definitions();
+        definitions
+            .into_iter()
+            .map(|def| ToolInfo {
+                name: def.name.clone(),
+                description: def.description.clone(),
+                risk_level: self.tool_manager.get_risk_level(&def.name),
+                parameters: def.parameters,
+            })
+            .collect()
+    }
 }
 
 // =========================================================================
@@ -507,6 +525,14 @@ impl ArgusWing {
 enum DatabaseTarget {
     Url(String),
     Path(std::path::PathBuf),
+}
+
+/// Tool information for frontend display.
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+    pub risk_level: RiskLevel,
+    pub parameters: serde_json::Value,
 }
 
 fn resolve_database_target(configured: Option<&str>) -> Result<DatabaseTarget> {

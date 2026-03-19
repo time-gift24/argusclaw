@@ -62,6 +62,13 @@ export interface ProviderTestResult {
   message: string;
 }
 
+export interface ToolInfo {
+  name: string;
+  description: string;
+  risk_level: "low" | "medium" | "high" | "critical";
+  parameters: Record<string, unknown>;
+}
+
 export interface AgentRecord {
   id: number;
   display_name: string;
@@ -109,6 +116,11 @@ export const agents = {
     }).then((id) => parseInt(id, 10)),
 
   delete: (id: number) => invoke<boolean>("delete_agent_template", { id }),
+};
+
+// Tools API
+export const tools = {
+  list: () => invoke<ToolInfo[]>("list_tools"),
 };
 
 // Chat API

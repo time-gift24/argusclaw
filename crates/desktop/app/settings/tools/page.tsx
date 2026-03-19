@@ -1,0 +1,71 @@
+"use client"
+
+import * as React from "react"
+import { tools, type ToolInfo } from "@/lib/tauri"
+import { ToolCard } from "@/components/settings/tool-card"
+
+export default function ToolsPage() {
+  const [toolList, setToolList] = React.useState<ToolInfo[]>([])
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    const loadTools = async () => {
+      try {
+        const data = await tools.list()
+        setToolList(data)
+      } catch (err) {
+        console.error("Failed to load tools:", err)
+        setError("加载工具列表失败")
+      } finally {
+        setLoading(false)
+      }
+    }
+    loadTools()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-muted-foreground">加载中...</div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64">
+        <p className="text-destructive mb-2">{error}</p>
+        <button
+          onClick={() => { setLoading(true); setError(null); }}
+          className="text-sm text-muted-foreground hover:text-foreground"
+        >
+          重试
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="w-full space-y-4">
+      <div>
+        <h1 className="text-sm font-semibold">工具</h1>
+        <p className="text-muted-foreground text-xs">
+          系统中的所有可用工具
+        </p>
+      </div>
+
+      {toolList.length === 0 ? (
+        <div className="flex flex-col items-center justify-center h-64 border rounded-lg border-dashed">
+          <p className="text-muted-foreground">暂无可用工具</p>
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {toolList.map((tool) => (
+            <ToolCard key={tool.name} tool={tool} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
