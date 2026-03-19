@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use argus_llm::retry::{RetryConfig, RetryProvider};
+use argus_protocol::AgentRecord;
 use argus_protocol::events::ThreadEvent;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
@@ -297,6 +298,7 @@ async fn test_turn_integration_simple() {
         .thread_id("test-thread".to_string())
         .messages(vec![ChatMessage::user("Hello")])
         .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
         .tools(vec![])
         .hooks(vec![])
         .config(TurnConfig::default())
@@ -341,6 +343,7 @@ async fn test_turn_integration_with_tool_call() {
         .thread_id("test-thread".to_string())
         .messages(vec![ChatMessage::user("Echo 'test message'")])
         .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
         .tools(vec![Arc::new(EchoTool)])
         .hooks(vec![])
         .config(TurnConfig::default())
@@ -390,6 +393,7 @@ async fn test_turn_builder_validation() {
         .thread_id("test".to_string())
         .messages(vec![ChatMessage::user("Hello")])
         .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
         .tools(vec![])
         .hooks(vec![])
         .config(TurnConfig::default())
@@ -415,6 +419,7 @@ async fn test_turn_streams_retry_events() {
         .thread_id("test-thread".to_string())
         .messages(vec![ChatMessage::user("Hello")])
         .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
         .tools(vec![])
         .hooks(vec![])
         .config(TurnConfig::default())

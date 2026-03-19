@@ -38,6 +38,23 @@ pub struct AgentRecord {
     pub thinking_config: Option<ThinkingConfig>,
 }
 
+impl Default for AgentRecord {
+    fn default() -> Self {
+        Self {
+            id: AgentId::new(0),
+            display_name: String::new(),
+            description: String::new(),
+            version: String::new(),
+            provider_id: None,
+            system_prompt: String::new(),
+            tool_names: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            thinking_config: None,
+        }
+    }
+}
+
 impl AgentRecord {
     /// Create a minimal agent record for testing.
     #[cfg(test)]

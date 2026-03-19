@@ -9,7 +9,7 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
-use argus_protocol::{HookRegistry, ThreadEvent};
+use argus_protocol::{AgentRecord, HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
 
 /// Turn execution configuration.
@@ -115,6 +115,9 @@ pub struct TurnInput {
     /// Stream event sender for real-time updates during streaming execution.
     #[builder(default, setter(strip_option))]
     pub stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
+    /// Agent record for LLM configuration (max_tokens, temperature, thinking_config).
+    #[builder(default)]
+    pub agent_record: Arc<AgentRecord>,
 }
 
 impl std::fmt::Debug for TurnInput {
@@ -160,6 +163,9 @@ impl TurnInputBuilder {
             thread_event_sender: self.thread_event_sender.flatten(),
             thread_id: self.thread_id.flatten(),
             stream_sender: self.stream_sender.flatten(),
+            agent_record: self
+                .agent_record
+                .unwrap_or_else(|| Arc::new(AgentRecord::default())),
         })
     }
 }
