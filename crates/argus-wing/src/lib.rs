@@ -30,7 +30,7 @@ use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
-use argus_repository::{connect, connect_path, ArgusSqlite};
+use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{ProviderResolver, SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
