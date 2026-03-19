@@ -18,6 +18,12 @@ export interface AgentRecord {
   tool_names: string[]
   max_tokens?: number
   temperature?: number
+  thinking_config?: ThinkingConfig
+}
+
+export interface ThinkingConfig {
+  type: "enabled" | "disabled"
+  clear_thinking: boolean
 }
 
 interface AgentCardProps {
@@ -139,6 +145,15 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
             <DetailRow label="温度">
               <span className="font-mono text-xs">{formatTemperature(agent.temperature)}</span>
             </DetailRow>
+
+            {agent.thinking_config && (
+              <DetailRow label="思考模式">
+                <span className="font-mono text-xs">
+                  {agent.thinking_config.type === "enabled" ? "已启用" : "未启用"}
+                  {agent.thinking_config.clear_thinking && "（清除历史）"}
+                </span>
+              </DetailRow>
+            )}
           </div>
         </div>
       </CardContent>

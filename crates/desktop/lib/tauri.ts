@@ -71,6 +71,11 @@ export interface ToolInfo {
   parameters: Record<string, unknown>;
 }
 
+export interface ThinkingConfig {
+  type: "enabled" | "disabled";
+  clear_thinking: boolean;
+}
+
 export interface AgentRecord {
   id: number;
   display_name: string;
@@ -81,6 +86,7 @@ export interface AgentRecord {
   tool_names: string[];
   max_tokens?: number;
   temperature?: number;
+  thinking_config?: ThinkingConfig;
 }
 
 // LLMProvider API

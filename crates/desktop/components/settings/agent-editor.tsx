@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 interface AgentEditorProps {
   agentId?: number
@@ -35,6 +36,7 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
     tool_names: [],
     max_tokens: undefined,
     temperature: undefined,
+    thinking_config: undefined,
   }
 }
 
@@ -234,6 +236,72 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               }
               placeholder="0.7"
             />
+          </div>
+        </div>
+
+        {/* Thinking Config */}
+        <div className="space-y-2">
+          <Label htmlFor="thinking_mode">思考模式（可选）</Label>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <select
+                id="thinking_mode"
+                value={formData.thinking_config?.type ?? ""}
+                onChange={(e) => {
+                  const mode = e.target.value as "enabled" | "disabled" | "";
+                  setFormData((prev) => ({
+                    ...prev,
+                    thinking_config: mode
+                      ? {
+                          type: mode,
+                          clear_thinking: prev.thinking_config?.clear_thinking ?? false
+                        }
+                      : undefined,
+                  }))
+                }}
+                className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
+              >
+                <option value="">不启用思考模式</option>
+                <option value="disabled">禁用（默认）</option>
+                <option value="enabled">启用推理模式</option>
+              </select>
+            </div>
+
+            {formData.thinking_config?.type === "enabled" && (
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="clear_thinking"
+                  checked={formData.thinking_config?.clear_thinking ?? false}
+                  onCheckedChange={(checked) => {
+                    setFormData((prev) => ({
+                      ...prev,
+                      thinking_config: prev.thinking_config
+                        ? { ...prev.thinking_config, clear_thinking: checked as boolean }
+                        : undefined,
+                    }))
+                  }}
+                />
+                <Label htmlFor="clear_thinking" className="text-sm cursor-pointer">
+                  清除历史思考内容
+                </Label>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={(
+                      <button
+                        type="button"
+                        className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        aria-label="清除历史思考内容说明"
+                      />
+                    )}
+                  >
+                    <CircleHelp className="size-3" />
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    启用后，模型不会在后续对话中看到之前的思考内容
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            )}
           </div>
         </div>
 
