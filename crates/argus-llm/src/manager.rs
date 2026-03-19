@@ -309,6 +309,7 @@ async fn run_provider_connection_test(
 ) -> ProviderTestResult {
     let started = std::time::Instant::now();
     let request = CompletionRequest::new(vec![ChatMessage::user("Reply with exactly OK.")])
+        .with_model(&model)
         .with_max_tokens(8)
         .with_temperature(0.0);
 
