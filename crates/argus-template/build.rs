@@ -3,8 +3,6 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    println!("cargo:rerun-if-changed=agents");
-
     // Find agents directory relative to build.rs
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace_root = Path::new(&manifest_dir)
@@ -17,6 +15,9 @@ fn main() {
     if !agents_dir.exists() {
         panic!("agents directory not found at {}", agents_dir.display());
     }
+
+    // Watch the agents directory for changes
+    println!("cargo:rerun-if-changed={}", agents_dir.display());
 
     // Find all .toml files
     let toml_files: Vec<_> = fs::read_dir(&agents_dir)
@@ -33,6 +34,12 @@ fn main() {
 
     if toml_files.is_empty() {
         panic!("No .toml files found in {}", agents_dir.display());
+    }
+
+    // Watch each individual TOML file
+    for entry in &toml_files {
+        let path = entry.path();
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 
     // Sort for consistent ordering
@@ -67,10 +74,22 @@ pub fn get_builtin_agent_definitions() -> &'static [&'static str] {
 "#,
     );
 
-    // Write to src/generated_agents.rs
-    let out_dir = Path::new(&manifest_dir).join("src");
-    fs::write(out_dir.join("generated_agents.rs"), code)
-        .expect("Failed to write generated_agents.rs");
+    // Write to src/generated_agents.rs (only if content changed)
+    let out_file = Path::new(&manifest_dir).join("src/generated_agents.rs");
+
+    // Only write if content changed to avoid triggering unnecessary rebuilds
+    let should_write = if out_file.exists() {
+        let existing_content = fs::read_to_string(&out_file)
+            .expect("Failed to read existing generated_agents.rs");
+        existing_content != code
+    } else {
+        true
+    };
+
+    if should_write {
+        fs::write(&out_file, code)
+            .expect("Failed to write generated_agents.rs");
+    }
 
     println!("cargo:rerun-if-changed=build.rs");
 }
