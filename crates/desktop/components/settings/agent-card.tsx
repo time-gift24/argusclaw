@@ -73,7 +73,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
     providers.find((provider) => provider.id === agent.provider_id)?.display_name ||
     agent.provider_id ||
     "未指定"
-  const toolNames = agent.tool_names.filter(Boolean)
+  const toolNames = [...new Set(agent.tool_names.filter(Boolean))]
 
   return (
     <Card>

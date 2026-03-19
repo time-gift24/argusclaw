@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { useToast } from "@/components/ui/toast"
 
 interface AgentEditorProps {
   agentId?: number
@@ -42,6 +43,7 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
 
 export function AgentEditor({ agentId }: AgentEditorProps) {
   const router = useRouter()
+  const { addToast } = useToast()
   const isEditing = agentId !== undefined
 
   const [loading, setLoading] = React.useState(isEditing)
@@ -114,9 +116,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     setSaving(true)
     try {
       const savedId = await agents.upsert(formData)
+      addToast("success", isEditing ? "智能体已更新" : "智能体已创建")
       router.push(`/settings/agents/${savedId}`)
     } catch (error) {
       console.error("Failed to save agent:", error)
+      addToast("error", "保存失败，请重试")
     } finally {
       setSaving(false)
     }
@@ -346,7 +350,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 <p className="text-sm text-muted-foreground text-center py-4">暂无可用工具</p>
               ) : (
                 <div className="grid grid-cols-2 gap-2 max-h-[240px] overflow-y-auto pr-1">
-                  {toolList.map((tool) => (
+                  {[...new Map(toolList.map((tool) => [tool.name, tool])).values()].map((tool) => (
                     <div
                       key={tool.name}
                       onClick={() => {

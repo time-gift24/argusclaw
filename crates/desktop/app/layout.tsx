@@ -5,6 +5,7 @@ import { useEffect } from "react"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { ToastProvider } from "@/components/ui/toast"
 import Navbar from "@/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06"
 import { useAuthStore } from "@/components/auth/use-auth-store"
 
@@ -32,10 +33,12 @@ export default function RootLayout({
     >
       <body className="flex h-dvh min-h-dvh flex-col overflow-hidden">
         <TooltipProvider>
-          <ThemeProvider>
-            <Navbar navigationItems={navigationItems} />
-            <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</main>
-          </ThemeProvider>
+          <ToastProvider>
+            <ThemeProvider>
+              <Navbar navigationItems={navigationItems} />
+              <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</main>
+            </ThemeProvider>
+          </ToastProvider>
         </TooltipProvider>
       </body>
     </html>
