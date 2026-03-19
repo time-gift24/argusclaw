@@ -936,4 +936,54 @@ mod tests {
             if provider == "openai-compatible" && model == "gpt-4.1"
         ));
     }
+
+    #[test]
+    fn tools_serialized_with_type_and_function_wrapper() {
+        use crate::providers::openai_compatible::ChatCompletionsRequest;
+        use argus_protocol::llm::{ChatMessage, ToolCompletionRequest, ToolDefinition};
+
+        let tool = ToolDefinition {
+            name: "echo".to_string(),
+            description: "Repeat back the input".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"}
+                },
+                "required": ["text"]
+            }),
+        };
+
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("test")],
+            vec![tool],
+        );
+
+        let body = ChatCompletionsRequest::from_tool_completion_request("glm-4", request, false);
+        let json = serde_json::to_value(&body).expect("should serialize");
+
+        // Verify the tools array has the correct OpenAI format with type and function wrapper
+        let tools = json["tools"].as_array().expect("tools should be an array");
+        assert_eq!(tools.len(), 1);
+
+        let tool_obj = &tools[0];
+        assert!(
+            tool_obj.get("type").is_some(),
+            "tool should have 'type' field"
+        );
+        assert_eq!(
+            tool_obj["type"].as_str().unwrap(),
+            "function",
+            "tool type should be 'function'"
+        );
+        assert!(
+            tool_obj.get("function").is_some(),
+            "tool should have 'function' field"
+        );
+        assert_eq!(
+            tool_obj["function"]["name"].as_str().unwrap(),
+            "echo",
+            "function name should be 'echo'"
+        );
+    }
 }
