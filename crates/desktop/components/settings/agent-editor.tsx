@@ -140,150 +140,152 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         </Button>
       </div>
 
-      <div className="grid grid-cols-2 gap-6 min-h-[calc(100vh-200px)]">
-        {/* Left: Form */}
-        <div className="space-y-4 overflow-y-auto pr-2">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="display_name">名称</Label>
-              <Input
-                id="display_name"
-                value={formData.display_name}
-                onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                placeholder="我的智能体"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="version">版本</Label>
-              <Input
-                id="version"
-                value={formData.version}
-                onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                placeholder="1.0.0"
-                required
-              />
-            </div>
-          </div>
-
+      {/* Basic Info */}
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="description">描述</Label>
+            <Label htmlFor="display_name">名称</Label>
             <Input
-              id="description"
-              value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              placeholder="一个有用的智能体"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="provider_id">LLM 提供者（可选）</Label>
-            <select
-              id="provider_id"
-              value={formData.provider_id ?? ""}
-              onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
-              className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
-            >
-              <option value="">不指定提供者</option>
-              {providerList.map((p) => (
-                <option
-                  key={p.id}
-                  value={p.id}
-                  disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
-                >
-                  {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写 API Key)" : ""}
-                </option>
-              ))}
-            </select>
-            {selectedProvider?.secret_status === "requires_reentry" && (
-              <p className="text-xs text-amber-700">
-                当前 Provider 的密钥需要重新填写，修复前无法正常用于新会话。
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="system_prompt">系统提示词</Label>
-            <textarea
-              id="system_prompt"
-              value={formData.system_prompt}
-              onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
-              placeholder="你是一个有帮助的助手..."
-              className="flex min-h-[400px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30 resize-none"
+              id="display_name"
+              value={formData.display_name}
+              onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+              placeholder="我的智能体"
               required
             />
           </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="max_tokens">最大 Token (可选)</Label>
-              <Input
-                id="max_tokens"
-                type="number"
-                value={formData.max_tokens || ""}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    max_tokens: e.target.value ? parseInt(e.target.value) : undefined,
-                  })
-                }
-                placeholder="4096"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="temperature">Temperature (可选)</Label>
-              <Input
-                id="temperature"
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                value={formData.temperature ?? ""}
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    temperature: e.target.value ? parseFloat(e.target.value) : undefined,
-              })
-                }
-                placeholder="0.7"
-              />
-            </div>
-          </div>
-
           <div className="space-y-2">
-            <Label htmlFor="tool_names">可用工具</Label>
-            <div className="space-y-2 max-h-48 overflow-y-auto border rounded-md p-3">
-              {toolList.length === 0 ? (
-                <p className="text-xs text-muted-foreground">暂无可用工具</p>
-              ) : (
-                toolList.map((tool) => (
-                  <div key={tool.name} className="flex items-start gap-2">
-                    <Checkbox
-                      id={`tool-${tool.name}`}
-                      aria-describedby={`tool-desc-${tool.name}`}
-                      checked={formData.tool_names.includes(tool.name)}
-                      onCheckedChange={(checked) => {
-                        setFormData((prev) => ({
-                          ...prev,
-                          tool_names: checked
-                            ? [...prev.tool_names, tool.name]
-                            : prev.tool_names.filter((n) => n !== tool.name),
-                        }))
-                      }}
-                    />
-                    <div className="flex-1">
-                      <Label htmlFor={`tool-${tool.name}`} className="text-sm font-normal cursor-pointer">
-                        {tool.name}
-                      </Label>
-                      <p id={`tool-desc-${tool.name}`} className="text-xs text-muted-foreground">
-                        {tool.description}
-                      </p>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+            <Label htmlFor="version">版本</Label>
+            <Input
+              id="version"
+              value={formData.version}
+              onChange={(e) => setFormData({ ...formData, version: e.target.value })}
+              placeholder="1.0.0"
+              required
+            />
           </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="description">描述</Label>
+          <Input
+            id="description"
+            value={formData.description}
+            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+            placeholder="一个有用的智能体"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="provider_id">LLM 提供者（可选）</Label>
+          <select
+            id="provider_id"
+            value={formData.provider_id ?? ""}
+            onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
+            className="flex h-7 w-full rounded-md border border-input bg-input/20 px-2 py-0.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30"
+          >
+            <option value="">不指定提供者</option>
+            {providerList.map((p) => (
+              <option
+                key={p.id}
+                value={p.id}
+                disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
+              >
+                {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写 API Key)" : ""}
+              </option>
+            ))}
+          </select>
+          {selectedProvider?.secret_status === "requires_reentry" && (
+            <p className="text-xs text-amber-700">
+              当前 Provider 的密钥需要重新填写，修复前无法正常用于新会话。
+            </p>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label htmlFor="max_tokens">最大 Token (可选)</Label>
+            <Input
+              id="max_tokens"
+              type="number"
+              value={formData.max_tokens || ""}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  max_tokens: e.target.value ? parseInt(e.target.value) : undefined,
+                })
+              }
+              placeholder="4096"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="temperature">Temperature (可选)</Label>
+            <Input
+              id="temperature"
+              type="number"
+              step="0.1"
+              min="0"
+              max="2"
+              value={formData.temperature ?? ""}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  temperature: e.target.value ? parseFloat(e.target.value) : undefined,
+                })
+              }
+              placeholder="0.7"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="tool_names">可用工具</Label>
+          <div className="space-y-2 max-h-48 overflow-y-auto border rounded-md p-3">
+            {toolList.length === 0 ? (
+              <p className="text-xs text-muted-foreground">暂无可用工具</p>
+            ) : (
+              toolList.map((tool) => (
+                <div key={tool.name} className="flex items-start gap-2">
+                  <Checkbox
+                    id={`tool-${tool.name}`}
+                    aria-describedby={`tool-desc-${tool.name}`}
+                    checked={formData.tool_names.includes(tool.name)}
+                    onCheckedChange={(checked) => {
+                      setFormData((prev) => ({
+                        ...prev,
+                        tool_names: checked
+                          ? [...prev.tool_names, tool.name]
+                          : prev.tool_names.filter((n) => n !== tool.name),
+                      }))
+                    }}
+                  />
+                  <div className="flex-1">
+                    <Label htmlFor={`tool-${tool.name}`} className="text-sm font-normal cursor-pointer">
+                      {tool.name}
+                    </Label>
+                    <p id={`tool-desc-${tool.name}`} className="text-xs text-muted-foreground">
+                      {tool.description}
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* System Prompt */}
+      <div className="grid grid-cols-2 gap-6">
+        {/* Left: Textarea */}
+        <div className="space-y-2">
+          <Label htmlFor="system_prompt">系统提示词</Label>
+          <textarea
+            id="system_prompt"
+            value={formData.system_prompt}
+            onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
+            placeholder="你是一个有帮助的助手..."
+            className="flex min-h-[400px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 dark:bg-input/30 resize-none"
+            required
+          />
         </div>
 
         {/* Right: Preview */}
