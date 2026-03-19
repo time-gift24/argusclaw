@@ -44,6 +44,17 @@ function formatCheckedAt(value: string) {
   });
 }
 
+function useResultLogger(result: ProviderTestResult | null | undefined) {
+  React.useEffect(() => {
+    if (result) {
+      console.log("[ProviderTestDialog] result:", result);
+      console.log("[ProviderTestDialog] result.response:", result.response);
+      console.log("[ProviderTestDialog] typeof result.response:", typeof result.response);
+      console.log("[ProviderTestDialog] result.request:", result.request);
+    }
+  }, [result]);
+}
+
 export function ProviderTestDialog({
   open,
   onOpenChange,
@@ -54,6 +65,7 @@ export function ProviderTestDialog({
   onModelChange,
   onRetest,
 }: ProviderTestDialogProps) {
+  useResultLogger(result);
   const statusTone = testing
     ? "border-sky-200 text-sky-700"
     : result?.status === "success"
