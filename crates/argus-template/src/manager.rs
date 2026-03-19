@@ -33,6 +33,34 @@ fn format_delete_blocked_reason(
 }
 
 impl TemplateManager {
+    /// Find the agents directory by traversing up from the given start path.
+    fn find_agents_directory(start_path: &str) -> Result<std::path::PathBuf> {
+        use std::path::Path;
+        let start = Path::new(start_path);
+
+        // Traverse up the directory tree looking for agents/ directory
+        let mut current = Some(start);
+
+        while let Some(path) = current {
+            // Check if agents/ exists at this level
+            let agents_path = path.join("agents");
+            if agents_path.exists() && agents_path.is_dir() {
+                return Ok(agents_path);
+            }
+
+            // Move up one directory
+            current = path.parent();
+        }
+
+        // If not found, provide a helpful error message
+        Err(ArgusError::DatabaseError {
+            reason: format!(
+                "could not find agents/ directory starting from {}",
+                start.display()
+            ),
+        })
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -231,11 +259,7 @@ impl TemplateManager {
             })?;
 
         // Find agents directory by traversing up from CARGO_MANIFEST_DIR
-        let agents_dir = find_agents_directory(&manifest_dir).map_err(|e| {
-            ArgusError::DatabaseError {
-                reason: format!("failed to find agents directory: {}", e),
-            }
-        })?;
+        let agents_dir = Self::find_agents_directory(&manifest_dir)?;
 
         tracing::info!("using agents directory: {}", agents_dir.display());
 
@@ -269,32 +293,7 @@ impl TemplateManager {
 
         tracing::info!("successfully seeded builtin agents");
         Ok(())
-}
-
-/// Find the agents directory by traversing up from the given start path.
-fn find_agents_directory(start_path: &str) -> Result<std::path::PathBuf, String> {
-    let start = Path::new(start_path);
-
-    // Traverse up the directory tree looking for agents/ directory
-    let mut current = Some(start);
-
-    while let Some(path) = current {
-        // Check if agents/ exists at this level
-        let agents_path = path.join("agents");
-        if agents_path.exists() && agents_path.is_dir() {
-            return Ok(agents_path);
-        }
-
-        // Move up one directory
-        current = path.parent();
     }
-
-    // If not found, provide a helpful error message
-    Err(format!(
-        "could not find agents/ directory starting from {}",
-        start.display()
-    ))
-}
 
     /// Get a template by ID.
     pub async fn get(&self, id: AgentId) -> Result<Option<AgentRecord>> {
