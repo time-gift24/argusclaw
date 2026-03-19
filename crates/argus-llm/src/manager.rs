@@ -12,10 +12,12 @@ use chrono::Utc;
 
 use argus_protocol::Result;
 use argus_protocol::llm::{
-    ChatMessage, CompletionRequest, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderRepository, ProviderSecretStatus, ProviderTestResult,
-    ProviderTestStatus, ToolCompletionRequest, ToolDefinition,
+    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId,
+    LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent,
+    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
+use futures_util::StreamExt;
 
 use crate::providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
@@ -336,21 +338,52 @@ async fn run_provider_connection_test(
 
     let request_json = serde_json::to_string(&request).ok();
 
-    match provider.complete_with_tools(request).await {
-        Ok(resp) => {
+    // 尝试使用流式 API
+    match provider.stream_complete_with_tools(request.clone()).await {
+        Ok(stream) => {
+            let mut accumulator = TestStreamingAccumulator::new();
+
+            // 收集所有流式事件
+            futures_util::pin_mut!(stream);
+            while let Some(event_result) = stream.next().await {
+                match event_result {
+                    Ok(event) => {
+                        accumulator.process(event);
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "stream error during provider test");
+                        return build_provider_test_result(
+                            provider_id,
+                            model,
+                            base_url,
+                            started.elapsed(),
+                            map_llm_error_to_test_status(&e),
+                            format!("Stream error: {}", e),
+                            request_json,
+                            Some(accumulator.build_response_summary()),
+                        );
+                    }
+                }
+            }
+
+            let response = accumulator.into_response();
+
             // 验证是否返回了工具调用
-            let has_tool_calls = !resp.tool_calls.is_empty();
+            let has_tool_calls = !response.tool_calls.is_empty();
             let response_content = if has_tool_calls {
-                let tool_calls_json = serde_json::to_string_pretty(&resp.tool_calls).unwrap_or_default();
+                let tool_calls_json =
+                    serde_json::to_string_pretty(&response.tool_calls).unwrap_or_default();
                 format!("Tool calls received:\n{}", tool_calls_json)
             } else {
-                resp.content.unwrap_or_else(|| "No tool calls or content".to_string())
+                response
+                    .content
+                    .unwrap_or_else(|| "No tool calls or content".to_string())
             };
 
             tracing::debug!(
                 has_tool_calls,
-                tool_calls_count = resp.tool_calls.len(),
-                "provider test received response"
+                tool_calls_count = response.tool_calls.len(),
+                "provider test received response via streaming"
             );
 
             let status = if has_tool_calls {
@@ -360,7 +393,7 @@ async fn run_provider_connection_test(
             };
 
             let message = if has_tool_calls {
-                "Provider tool call test succeeded.".to_string()
+                "Provider tool call test succeeded (streaming).".to_string()
             } else {
                 "Provider did not return any tool calls.".to_string()
             };
@@ -376,6 +409,61 @@ async fn run_provider_connection_test(
                 Some(response_content),
             )
         }
+        Err(LlmError::UnsupportedCapability { .. }) => {
+            // Provider 不支持流式，降级到非流式
+            tracing::debug!(
+                "Provider doesn't support streaming, falling back to non-streaming"
+            );
+
+            match provider.complete_with_tools(request.clone()).await {
+                Ok(resp) => {
+                    let has_tool_calls = !resp.tool_calls.is_empty();
+                    let response_content = if has_tool_calls {
+                        let tool_calls_json =
+                            serde_json::to_string_pretty(&resp.tool_calls).unwrap_or_default();
+                        format!("Tool calls received:\n{}", tool_calls_json)
+                    } else {
+                        resp.content.unwrap_or_else(|| "No tool calls or content".to_string())
+                    };
+
+                    let status = if has_tool_calls {
+                        ProviderTestStatus::Success
+                    } else {
+                        ProviderTestStatus::InvalidResponse
+                    };
+
+                    let message = if has_tool_calls {
+                        "Provider tool call test succeeded.".to_string()
+                    } else {
+                        "Provider did not return any tool calls.".to_string()
+                    };
+
+                    build_provider_test_result(
+                        provider_id,
+                        model,
+                        base_url,
+                        started.elapsed(),
+                        status,
+                        message,
+                        request_json,
+                        Some(response_content),
+                    )
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "provider test failed");
+                    build_provider_test_result(
+                        provider_id,
+                        model,
+                        base_url,
+                        started.elapsed(),
+                        map_llm_error_to_test_status(&error),
+                        error.to_string(),
+                        request_json,
+                        None,
+                    )
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(%error, "provider test failed");
             build_provider_test_result(
@@ -388,6 +476,126 @@ async fn run_provider_connection_test(
                 request_json,
                 None,
             )
+        }
+    }
+}
+
+/// Accumulates streaming events for provider connection test.
+struct TestStreamingAccumulator {
+    content: String,
+    reasoning_content: String,
+    tool_calls: Vec<(Option<String>, Option<String>, String)>,
+    input_tokens: u32,
+    output_tokens: u32,
+    finish_reason: FinishReason,
+}
+
+impl TestStreamingAccumulator {
+    fn new() -> Self {
+        Self {
+            content: String::new(),
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            finish_reason: FinishReason::Stop,
+        }
+    }
+
+    fn process(&mut self, event: LlmStreamEvent) {
+        match event {
+            LlmStreamEvent::ReasoningDelta { delta } => {
+                self.reasoning_content.push_str(&delta);
+            }
+            LlmStreamEvent::ContentDelta { delta } => {
+                self.content.push_str(&delta);
+            }
+            LlmStreamEvent::ToolCallDelta(tc) => {
+                // Ensure we have enough slots
+                while self.tool_calls.len() <= tc.index {
+                    self.tool_calls.push((None, None, String::new()));
+                }
+                if let Some(id) = tc.id {
+                    self.tool_calls[tc.index].0 = Some(id);
+                }
+                if let Some(name) = tc.name {
+                    self.tool_calls[tc.index].1 = Some(name);
+                }
+                if let Some(args_delta) = tc.arguments_delta {
+                    self.tool_calls[tc.index].2.push_str(&args_delta);
+                }
+            }
+            LlmStreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                self.input_tokens = input_tokens;
+                self.output_tokens = output_tokens;
+            }
+            LlmStreamEvent::Finished { finish_reason } => {
+                self.finish_reason = finish_reason;
+            }
+            LlmStreamEvent::RetryAttempt { .. } => {
+                // Retry events are informational, skip
+            }
+        }
+    }
+
+    fn into_response(self) -> ToolCompletionResponse {
+        let tool_calls: Vec<ToolCall> = self
+            .tool_calls
+            .into_iter()
+            .filter_map(|(id, name, args)| {
+                Some(ToolCall {
+                    id: id?,
+                    name: name?,
+                    arguments: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+
+        ToolCompletionResponse {
+            content: if self.content.is_empty() {
+                None
+            } else {
+                Some(self.content)
+            },
+            reasoning_content: if self.reasoning_content.is_empty() {
+                None
+            } else {
+                Some(self.reasoning_content)
+            },
+            tool_calls,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            finish_reason: self.finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
+    }
+
+    fn build_response_summary(&self) -> String {
+        let mut parts = Vec::new();
+
+        if !self.content.is_empty() {
+            parts.push(format!("Content: {}", self.content));
+        }
+        if !self.reasoning_content.is_empty() {
+            parts.push(format!("Reasoning: {}", self.reasoning_content));
+        }
+        if !self.tool_calls.is_empty() {
+            let tool_info: Vec<String> = self
+                .tool_calls
+                .iter()
+                .filter_map(|(id, name, _)| Some(format!("{} ({})", name.as_deref().unwrap_or("?"), id.as_deref().unwrap_or("?"))))
+                .collect();
+            parts.push(format!("Tools: {}", tool_info.join(", ")));
+        }
+
+        if parts.is_empty() {
+            "No content received".to_string()
+        } else {
+            parts.join("\n")
         }
     }
 }
