@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use argus_wing::ArgusWing;
 use subscription::ThreadSubscriptions;
 
@@ -7,21 +5,13 @@ mod commands;
 mod events;
 mod subscription;
 
-/// Register default tools with the tool manager.
-fn register_default_tools(tool_manager: &Arc<argus_tool::ToolManager>) {
-    tool_manager.register(Arc::new(argus_tool::ShellTool::new()));
-    tool_manager.register(Arc::new(argus_tool::ReadTool::new()));
-    tool_manager.register(Arc::new(argus_tool::GrepTool::new()));
-    tool_manager.register(Arc::new(argus_tool::GlobTool::new()));
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     let wing = rt.block_on(ArgusWing::init(None)).expect("初始化失败");
 
     // Register default tools
-    register_default_tools(wing.tool_manager());
+    wing.register_default_tools();
 
     let subscriptions = ThreadSubscriptions::new();
 
@@ -48,25 +38,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use argus_tool::ToolManager;
-
-    use super::register_default_tools;
-
-    #[test]
-    fn register_default_tools_registers_expected_ids() {
-        let tool_manager = Arc::new(ToolManager::new());
-        register_default_tools(&tool_manager);
-
-        let ids = tool_manager.list_ids();
-        assert!(ids.contains(&"shell".to_string()));
-        assert!(ids.contains(&"read".to_string()));
-        assert!(ids.contains(&"grep".to_string()));
-        assert!(ids.contains(&"glob".to_string()));
-    }
 }
