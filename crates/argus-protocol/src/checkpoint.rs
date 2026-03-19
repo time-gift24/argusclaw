@@ -184,3 +184,113 @@ pub struct ThreadState {
     /// Last turn sequence number
     pub last_turn_seq: Option<u32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::{ChatMessage, Role};
+
+    #[test]
+    fn test_tool_result_snapshot_success() {
+        let result = ToolResultSnapshot::Success {
+            output: "Test output".to_string(),
+        };
+        assert!(matches!(result, ToolResultSnapshot::Success { .. }));
+    }
+
+    #[test]
+    fn test_tool_result_snapshot_error() {
+        let result = ToolResultSnapshot::Error {
+            error: "Test error".to_string(),
+        };
+        assert!(matches!(result, ToolResultSnapshot::Error { .. }));
+    }
+
+    #[test]
+    fn test_tool_result_snapshot_timeout() {
+        let result = ToolResultSnapshot::Timeout;
+        assert!(matches!(result, ToolResultSnapshot::Timeout));
+    }
+
+    #[test]
+    fn test_llm_response_snapshot_serialization() {
+        let snapshot = LlmResponseSnapshot {
+            model: "gpt-4".to_string(),
+            raw_response: "Test response".to_string(),
+            finish_reason: Some("stop".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        let deserialized: LlmResponseSnapshot = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.model, "gpt-4");
+        assert_eq!(deserialized.raw_response, "Test response");
+        assert_eq!(deserialized.finish_reason, Some("stop".to_string()));
+    }
+
+    #[test]
+    fn test_token_diff_calculation() {
+        let diff = TokenDiff {
+            input_delta: 100,
+            output_delta: 50,
+            total_delta: 150,
+        };
+
+        assert_eq!(diff.input_delta, 100);
+        assert_eq!(diff.output_delta, 50);
+        assert_eq!(diff.total_delta, 150);
+    }
+
+    #[test]
+    fn test_message_diff_calculation() {
+        let diff = MessageDiff {
+            count_a: 10,
+            count_b: 15,
+            count_delta: 5,
+        };
+
+        assert_eq!(diff.count_a, 10);
+        assert_eq!(diff.count_b, 15);
+        assert_eq!(diff.count_delta, 5);
+    }
+
+    #[test]
+    fn test_thread_state_creation() {
+        let state = ThreadState {
+            thread_id: crate::ThreadId::new(),
+            title: Some("Test Thread".to_string()),
+            message_count: 100,
+            turn_count: 10,
+            token_count: 5000,
+            last_turn_seq: Some(10),
+        };
+
+        assert_eq!(state.title, Some("Test Thread".to_string()));
+        assert_eq!(state.message_count, 100);
+        assert_eq!(state.turn_count, 10);
+        assert_eq!(state.token_count, 5000);
+        assert_eq!(state.last_turn_seq, Some(10));
+    }
+
+    #[test]
+    fn test_checkpoint_summary_serialization() {
+        let summary = CheckpointSummary {
+            turn_seq: 5,
+            model: "gpt-4".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            latency_ms: 1000,
+            created_at: Utc::now(),
+            message_count: 3,
+        };
+
+        let serialized = serde_json::to_string(&summary).unwrap();
+        let deserialized: CheckpointSummary = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.turn_seq, 5);
+        assert_eq!(deserialized.model, "gpt-4");
+        assert_eq!(deserialized.input_tokens, 100);
+        assert_eq!(deserialized.output_tokens, 50);
+    }
+}
+

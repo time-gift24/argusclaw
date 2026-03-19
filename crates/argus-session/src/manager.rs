@@ -45,6 +45,11 @@ impl SessionManager {
         }
     }
 
+    /// Get a reference to the database pool (for testing).
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let rows = sqlx::query(
@@ -852,26 +857,48 @@ impl SessionManager {
             reason: e.to_string(),
         })?;
 
-        // 4. Reload thread into memory
-        // Remove from cache if present
-        if let Some(session) = self.sessions.get(&session_id) {
-            session.remove_thread(&thread_id);
-        }
+        // 4. Remove session from cache to force reload on next access
+        self.sessions.remove(&session_id);
 
-        // Reload the session
-        let session = self.load(session_id).await?;
-        let thread = session
-            .get_thread(&thread_id)
-            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        let thread = thread.lock().await;
+        // 5. Query thread state from database
+        let thread_row = sqlx::query(
+            "SELECT title, token_count, turn_count FROM threads WHERE id = ?"
+        )
+        .bind(thread_id.inner().to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
 
-        // 5. Return state
+        let (title, token_count, turn_count) = match thread_row {
+            Some(row) => {
+                let title: Option<String> = row.get("title");
+                let token_count: i64 = row.get("token_count");
+                let turn_count: i64 = row.get("turn_count");
+                (title, token_count as u32, turn_count as u32)
+            }
+            None => return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string())),
+        };
+
+        // Count remaining messages
+        let message_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ?"
+        )
+        .bind(thread_id.inner().to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        // 6. Return state
         Ok(ThreadState {
             thread_id,
-            title: thread.title().map(|s| s.to_string()),
-            message_count: thread.history().len(),
-            turn_count: thread.turn_count(),
-            token_count: thread.token_count(),
+            title,
+            message_count: message_count as usize,
+            turn_count,
+            token_count,
             last_turn_seq: Some(target_turn_seq),
         })
     }
