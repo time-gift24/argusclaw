@@ -108,7 +108,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   const canSave = Boolean(
     formData.display_name.trim() &&
     formData.base_url.trim() &&
-    formData.api_key.trim() &&
     formData.models.length > 0,
   )
 
@@ -297,14 +296,13 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="api_key">API Key</Label>
+            <Label htmlFor="api_key">API Key <span className="text-muted-foreground text-xs">(可选)</span></Label>
             <Input
               id="api_key"
               type="password"
               value={formData.api_key}
               onChange={(e) => setFormData({ ...formData, api_key: e.target.value })}
-              placeholder="sk-..."
-              required
+              placeholder="sk-... (可选，登录后配置)"
             />
           </div>
 
