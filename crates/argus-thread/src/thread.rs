@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
-use argus_protocol::llm::{ChatMessage, LlmProvider, ThinkingConfig};
+use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{AgentRecord, HookHandler, HookRegistry, SessionId, ThreadEvent, ThreadId};
 use argus_tool::ToolManager;
@@ -294,7 +294,7 @@ impl Thread {
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         // Build Turn using TurnBuilder
-        let mut turn = TurnBuilder::default()
+        let turn = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
             .messages(self.messages.clone())
@@ -302,20 +302,11 @@ impl Thread {
             .tools(tools)
             .hooks(hooks)
             .config(self.config.turn_config.clone())
+            .agent_record(Arc::new(self.agent_record.clone()))
             .stream_tx(stream_tx)
             .thread_event_tx(self.event_sender.clone())
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))?;
-
-        // Pass agent-level model params directly to avoid builder setter type mismatch
-        turn.max_tokens = self.agent_record.max_tokens;
-        turn.temperature = self.agent_record.temperature;
-        // Default to disabled when not configured in database to avoid provider's default behavior
-        turn.thinking = self
-            .agent_record
-            .thinking_config
-            .clone()
-            .or_else(|| Some(ThinkingConfig::disabled()));
 
         // Turn is responsible for execution
         let result = turn.execute().await;
