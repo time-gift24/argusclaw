@@ -3,8 +3,6 @@ use serde::Deserialize;
 /// Builtin agent definition from TOML file
 #[derive(Debug, Deserialize)]
 pub struct TomlAgentDef {
-    #[allow(dead_code)]
-    id: String, // For reference, not used in DB
     display_name: String,
     description: String,
     version: String,

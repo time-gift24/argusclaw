@@ -6,6 +6,7 @@ pub fn get_builtin_agent_definitions() -> &'static [&'static str] {
     // Relative paths from crates/argus-template/src/ to repository root
     const AGENT_DEFINITIONS: &[&str] = &[
         include_str!("../../../agents/arguswing.toml"),
+        include_str!("../../../agents/test.toml"),
     ];
 
     AGENT_DEFINITIONS

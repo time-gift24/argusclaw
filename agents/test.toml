@@ -1,4 +1,5 @@
-display_name = "ArgusWing"
+id = "test"
+display_name = "Test"
 description = "Default assistant for ArgusWing"
 version = "0.1.0"
 system_prompt = "You are ArgusWing, a helpful AI assistant."
