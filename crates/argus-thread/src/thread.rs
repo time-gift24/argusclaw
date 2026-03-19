@@ -8,7 +8,9 @@ use tokio::sync::broadcast;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
-use argus_protocol::{AgentRecord, HookHandler, HookRegistry, SessionId, ThreadEvent, ThreadId};
+use argus_protocol::{
+    AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadEvent, ThreadId,
+};
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnOutput};
 
@@ -252,7 +254,11 @@ impl Thread {
     }
 
     /// Send user message and execute Turn.
-    pub async fn send_message(&mut self, user_input: String) -> Result<(), ThreadError> {
+    pub async fn send_message(
+        &mut self,
+        user_input: String,
+        msg_override: Option<MessageOverride>,
+    ) -> Result<(), ThreadError> {
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
@@ -266,12 +272,39 @@ impl Thread {
             }
         }
 
+        // Apply message-level override if provided
+        let effective_record = if let Some(overrides) = msg_override {
+            let base = &self.agent_record;
+            AgentRecord {
+                max_tokens: overrides.max_tokens.or(base.max_tokens),
+                temperature: overrides.temperature.or(base.temperature),
+                thinking_config: overrides
+                    .thinking_config
+                    .clone()
+                    .or_else(|| base.thinking_config.clone()),
+                // Keep other fields from base record
+                id: base.id,
+                display_name: base.display_name.clone(),
+                description: base.description.clone(),
+                version: base.version.clone(),
+                provider_id: base.provider_id,
+                system_prompt: base.system_prompt.clone(),
+                tool_names: base.tool_names.clone(),
+            }
+        } else {
+            self.agent_record.clone()
+        };
+
         self.messages.push(ChatMessage::user(user_input));
         self.recalculate_token_count();
-        self.execute_turn_streaming().await
+        self.execute_turn_streaming(Arc::new(effective_record))
+            .await
     }
 
-    async fn execute_turn_streaming(&mut self) -> Result<(), ThreadError> {
+    async fn execute_turn_streaming(
+        &mut self,
+        agent_record: Arc<AgentRecord>,
+    ) -> Result<(), ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id.to_string();
@@ -302,7 +335,7 @@ impl Thread {
             .tools(tools)
             .hooks(hooks)
             .config(self.config.turn_config.clone())
-            .agent_record(Arc::new(self.agent_record.clone()))
+            .agent_record(agent_record)
             .stream_tx(stream_tx)
             .thread_event_tx(self.event_sender.clone())
             .build()

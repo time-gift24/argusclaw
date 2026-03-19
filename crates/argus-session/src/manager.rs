@@ -378,7 +378,7 @@ impl SessionManager {
 
         let mut thread = thread.lock().await;
         thread
-            .send_message(message)
+            .send_message(message, None)
             .await
             .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
