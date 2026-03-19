@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod approval;
+pub mod checkpoint;
 pub mod config;
 pub mod error;
 pub mod events;
@@ -12,6 +13,10 @@ pub mod tool;
 
 pub use agent::AgentRecord;
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
+pub use checkpoint::{
+    CheckpointComparison, CheckpointDetail, CheckpointSummary, LlmResponseSnapshot,
+    MessageDiff, ThreadState, TokenDiff, ToolCallDetail, ToolResultSnapshot, TurnSnapshot,
+};
 pub use error::{ArgusError, Result};
 pub use events::ThreadEvent;
 pub use hooks::{

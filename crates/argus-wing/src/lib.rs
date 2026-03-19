@@ -27,8 +27,9 @@ use std::sync::Arc;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
+    AgentId, AgentRecord, ArgusError, CheckpointComparison, CheckpointDetail, CheckpointSummary,
+    LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId, ProviderTestResult, Result,
+    RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadState,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{ProviderResolver, SessionManager, SessionSummary, ThreadSummary};
@@ -497,6 +498,93 @@ impl ArgusWing {
         thread_id: ThreadId,
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
         self.session_manager.subscribe(session_id, &thread_id).await
+    }
+
+    // =========================================================================
+    // Checkpoint API
+    // =========================================================================
+
+    /// List all checkpoints for a thread.
+    pub async fn list_checkpoints(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<CheckpointSummary>> {
+        self.session_manager
+            .list_checkpoints(session_id, thread_id)
+            .await
+    }
+
+    /// Get detailed information about a specific checkpoint.
+    pub async fn get_checkpoint(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_seq: u32,
+    ) -> Result<CheckpointDetail> {
+        self.session_manager
+            .get_checkpoint(session_id, thread_id, turn_seq)
+            .await
+    }
+
+    /// Compare two checkpoints.
+    pub async fn compare_checkpoints(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_seq_a: u32,
+        turn_seq_b: u32,
+    ) -> Result<CheckpointComparison> {
+        self.session_manager
+            .compare_checkpoints(session_id, thread_id, turn_seq_a, turn_seq_b)
+            .await
+    }
+
+    /// Get message history at a specific turn.
+    pub async fn get_history_at_turn(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_seq: u32,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        self.session_manager
+            .get_history_at_turn(session_id, thread_id, turn_seq)
+            .await
+    }
+
+    /// Get all messages for a thread.
+    pub async fn get_thread_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        self.session_manager
+            .get_thread_messages(session_id, thread_id)
+            .await
+    }
+
+    /// Get recent messages for a thread.
+    pub async fn get_recent_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        limit: u32,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        self.session_manager
+            .get_recent_messages(session_id, thread_id, limit)
+            .await
+    }
+
+    /// Rollback a thread to a specific turn.
+    pub async fn rollback_to_turn(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        target_turn_seq: u32,
+    ) -> Result<ThreadState> {
+        self.session_manager
+            .rollback_to_turn(session_id, thread_id, target_turn_seq)
+            .await
     }
 
     // =========================================================================
