@@ -258,7 +258,7 @@ impl TemplateManager {
     pub async fn get(&self, id: AgentId) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
             FROM agents WHERE id = ?
             "#,
         )
@@ -277,7 +277,7 @@ impl TemplateManager {
     pub async fn list(&self) -> Result<Vec<AgentRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
             FROM agents ORDER BY id ASC
             "#,
         )
@@ -294,7 +294,7 @@ impl TemplateManager {
     pub async fn find_by_display_name(&self, display_name: &str) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
             FROM agents WHERE display_name = ?
             "#,
         )
