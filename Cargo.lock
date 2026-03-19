@@ -257,6 +257,8 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
+ "tracing",
 ]
 
 [[package]]

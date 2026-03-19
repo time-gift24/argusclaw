@@ -32,6 +32,44 @@ fn format_delete_blocked_reason(
 }
 
 impl TemplateManager {
+    /// Seed builtin agents from embedded TOML definitions at runtime.
+    pub async fn seed_builtin_agents(&self) -> Result<()> {
+        use crate::config::TomlAgentDef;
+        use crate::generated_agents::get_builtin_agent_definitions;
+
+        tracing::info!("seeding builtin agents from embedded TOML data");
+
+        // Get auto-generated list of embedded TOML definitions
+        let agent_definitions = get_builtin_agent_definitions();
+        let mut seeded_count = 0;
+
+        // Parse and upsert each agent definition
+        for toml_str in agent_definitions {
+            let def: TomlAgentDef = toml::from_str(toml_str).map_err(|e| {
+                ArgusError::DatabaseError {
+                    reason: format!("failed to parse embedded TOML: {}", e),
+                }
+            })?;
+
+            let record = def.to_agent_record();
+            let agent_id = self.upsert_by_display_name(&record).await.map_err(|e| {
+                ArgusError::DatabaseError {
+                    reason: format!("failed to seed agent '{}': {}", record.display_name, e),
+                }
+            })?;
+
+            tracing::info!(
+                "seeded builtin agent '{}' (id={})",
+                record.display_name,
+                agent_id.inner()
+            );
+            seeded_count += 1;
+        }
+
+        tracing::info!("successfully seeded {} builtin agent(s)", seeded_count);
+        Ok(())
+    }
+
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
@@ -98,6 +136,54 @@ impl TemplateManager {
 
             Ok(template.id)
         }
+    }
+
+    /// Upsert an agent by display_name (insert or update if exists).
+    pub async fn upsert_by_display_name(&self, record: &AgentRecord) -> Result<AgentId> {
+        let tool_names_json =
+            serde_json::to_string(&record.tool_names).map_err(|e| ArgusError::SerdeError {
+                reason: e.to_string(),
+            })?;
+        let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
+
+        // Insert with ON CONFLICT(display_name) DO UPDATE
+        sqlx::query(
+            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(display_name) DO UPDATE SET
+                 description = excluded.description,
+                 version = excluded.version,
+                 provider_id = excluded.provider_id,
+                 system_prompt = excluded.system_prompt,
+                 tool_names = excluded.tool_names,
+                 max_tokens = excluded.max_tokens,
+                 temperature = excluded.temperature,
+                 updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(&record.display_name)
+        .bind(&record.description)
+        .bind(&record.version)
+        .bind(record.provider_id.as_ref().map(|id| id.inner()))
+        .bind(&record.system_prompt)
+        .bind(&tool_names_json)
+        .bind(record.max_tokens.map(|t| t as i64))
+        .bind(temperature_int)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        // Fetch the agent ID (either newly inserted or updated)
+        let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?1")
+            .bind(&record.display_name)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        Ok(AgentId::new(id))
     }
 
     /// Repair legacy placeholder agent IDs that were incorrectly persisted as `0`.

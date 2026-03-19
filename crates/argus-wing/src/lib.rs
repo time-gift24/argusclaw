@@ -172,6 +172,9 @@ impl ArgusWing {
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         template_manager.repair_placeholder_ids().await?;
 
+        // Seed builtin agents from agents/ directory
+        template_manager.seed_builtin_agents().await?;
+
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
 
