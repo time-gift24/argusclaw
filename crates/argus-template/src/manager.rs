@@ -35,18 +35,16 @@ impl TemplateManager {
     /// Seed builtin agents from embedded TOML definitions at runtime.
     pub async fn seed_builtin_agents(&self) -> Result<()> {
         use crate::config::TomlAgentDef;
+        use crate::generated_agents::get_builtin_agent_definitions;
 
         tracing::info!("seeding builtin agents from embedded TOML data");
 
-        // Embedded TOML definitions (compiled into binary)
-        const AGENT_DEFINITIONS: &[&str] = &[
-            include_str!("../../../agents/arguswing.toml"),
-        ];
-
+        // Get auto-generated list of embedded TOML definitions
+        let agent_definitions = get_builtin_agent_definitions();
         let mut seeded_count = 0;
 
         // Parse and upsert each agent definition
-        for toml_str in AGENT_DEFINITIONS {
+        for toml_str in agent_definitions {
             let def: TomlAgentDef = toml::from_str(toml_str).map_err(|e| {
                 ArgusError::DatabaseError {
                     reason: format!("failed to parse embedded TOML: {}", e),
