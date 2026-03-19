@@ -19,6 +19,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
+import { useToast } from "@/components/ui/toast"
 
 export interface LlmProviderRecord {
   id: number
@@ -54,6 +55,7 @@ function createDefaultFormData(): LlmProviderRecord {
 
 export function ProviderEditor({ providerId }: ProviderEditorProps) {
   const router = useRouter()
+  const { addToast } = useToast()
   const isEditing = !!providerId
 
   const [loading, setLoading] = React.useState(isEditing)
@@ -128,9 +130,11 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         secret_status: formData.secret_status,
       }
       await providers.upsert(input)
+      addToast("success", isEditing ? "LLM 提供者已更新" : "LLM 提供者已创建")
       router.push("/settings/providers")
     } catch (error) {
       console.error("Failed to save provider:", error)
+      addToast("error", "保存失败，请重试")
     } finally {
       setSaving(false)
     }
