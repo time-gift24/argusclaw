@@ -34,6 +34,7 @@ pub trait KeyMaterialSource: Send + Sync {
 )]
 pub struct HostMacAddressKeySource;
 
+#[allow(deprecated)]
 impl KeyMaterialSource for HostMacAddressKeySource {
     fn key_material(&self) -> Result<Vec<u8>, CryptoError> {
         let mac_address = get_mac_address()
