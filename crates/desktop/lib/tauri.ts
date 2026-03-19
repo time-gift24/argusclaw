@@ -60,6 +60,8 @@ export interface ProviderTestResult {
   latency_ms: number;
   status: ProviderTestStatus;
   message: string;
+  request?: string;
+  response?: string;
 }
 
 export interface ToolInfo {

@@ -228,6 +228,12 @@ pub struct ProviderTestResult {
     pub latency_ms: u64,
     pub status: ProviderTestStatus,
     pub message: String,
+    /// The JSON-serialized request sent to the LLM.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    /// The plain-text content of the LLM response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
 }
 
 // ============================================================================
@@ -289,9 +295,11 @@ mod tests {
             latency_ms: 42,
             status: ProviderTestStatus::ModelNotAvailable,
             message: "Model gpt-4.1 not available on provider openai-compatible".to_string(),
+            request: None,
+            response: None,
         };
 
-        let serialized = serde_json::to_value(result).expect("result should serialize");
+        let serialized = serde_json::to_value(&result).expect("result should serialize");
 
         assert_eq!(
             serialized,

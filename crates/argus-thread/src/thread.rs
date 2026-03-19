@@ -294,7 +294,7 @@ impl Thread {
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         // Build Turn using TurnBuilder
-        let turn = TurnBuilder::default()
+        let mut turn = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
             .messages(self.messages.clone())
@@ -306,6 +306,10 @@ impl Thread {
             .thread_event_tx(self.event_sender.clone())
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))?;
+
+        // Pass agent-level model params directly to avoid builder setter type mismatch
+        turn.max_tokens = self.agent_record.max_tokens;
+        turn.temperature = self.agent_record.temperature;
 
         // Turn is responsible for execution
         let result = turn.execute().await;

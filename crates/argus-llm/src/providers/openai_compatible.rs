@@ -212,6 +212,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     reason: e.to_string(),
                 })?;
 
+        // Log the full payload for debugging provider test issues (before any moves)
+        tracing::trace!(
+            payload = ?payload,
+            "full openai-compatible response payload"
+        );
+
         let choice =
             payload
                 .choices
@@ -223,8 +229,30 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 })?;
         let usage = payload.usage.unwrap_or_default();
 
+        // Log the raw response for debugging
+        tracing::debug!(
+            content = ?choice.message.content,
+            reasoning_content = ?choice.message.reasoning_content,
+            tool_calls = ?choice.message.tool_calls,
+            finish_reason = ?choice.finish_reason,
+            "openai-compatible complete response"
+        );
+
+        // If content is None but reasoning_content exists, use reasoning_content
+        let content = if choice.message.content.is_none() {
+            if let Some(ref reasoning) = choice.message.reasoning_content {
+                tracing::warn!("content is None, using reasoning_content as fallback");
+                reasoning.clone()
+            } else {
+                tracing::warn!("both content and reasoning_content are None, returning empty string");
+                String::new()
+            }
+        } else {
+            choice.message.content.clone().unwrap_or_default()
+        };
+
         Ok(CompletionResponse {
-            content: choice.message.content.unwrap_or_default(),
+            content,
             reasoning_content: choice.message.reasoning_content,
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,

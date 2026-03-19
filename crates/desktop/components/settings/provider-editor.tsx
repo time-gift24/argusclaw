@@ -11,6 +11,11 @@ import {
 } from "@/lib/tauri"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -207,6 +212,8 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         latency_ms: 0,
         status: "request_failed",
         message: error instanceof Error ? error.message : String(error),
+        request: undefined,
+        response: undefined,
       }
       setTestResults((prev) => ({ ...prev, [model]: fallbackResult }))
       console.error("Failed to test model:", error)
@@ -443,44 +450,81 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                 const isTesting = testingModels.has(model)
                 const isSuccess = result?.status === "success"
                 const isFailed = result && result.status !== "success"
+                const hasDetails = result && (result.request != null || result.response != null)
 
                 return (
-                  <div
-                    key={model}
-                    className="flex items-center justify-between px-3 py-2"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Badge
-                        variant={model === formData.default_model ? "default" : "secondary"}
-                        className="shrink-0"
-                      >
-                        {model}
-                      </Badge>
-                      {isTesting && (
-                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                      )}
-                      {isSuccess && (
-                        <Check className="h-4 w-4 text-green-500" />
-                      )}
-                      {isFailed && (
-                        <AlertCircle className="h-4 w-4 text-destructive" />
-                      )}
-                      {result && !isTesting && (
-                        <span className="text-xs text-muted-foreground">
-                          {result.latency_ms}ms
-                        </span>
-                      )}
+                  <Collapsible key={model} defaultOpen={false} className="w-full">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Badge
+                          variant={model === formData.default_model ? "default" : "secondary"}
+                          className="shrink-0"
+                        >
+                          {model}
+                        </Badge>
+                        {isTesting && (
+                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                        )}
+                        {isSuccess && (
+                          <Check className="h-4 w-4 text-green-500" />
+                        )}
+                        {isFailed && (
+                          <AlertCircle className="h-4 w-4 text-destructive" />
+                        )}
+                        {result && !isTesting && (
+                          <span className="text-xs text-muted-foreground">
+                            {result.latency_ms}ms
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {hasDetails && (
+                          <CollapsibleTrigger className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded border-0 cursor-pointer bg-transparent">
+                            详情
+                          </CollapsibleTrigger>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7"
+                          onClick={() => void handleRetestModel(model)}
+                          disabled={isTesting || !formData.api_key.trim()}
+                        >
+                          {isTesting ? "测试中..." : "重测"}
+                        </Button>
+                      </div>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="shrink-0 h-7"
-                      onClick={() => void handleRetestModel(model)}
-                      disabled={isTesting || !formData.api_key.trim()}
-                    >
-                      {isTesting ? "测试中..." : "重测"}
-                    </Button>
-                  </div>
+                    <CollapsibleContent>
+                      <div className="px-3 pb-3 pt-1 border-t space-y-2">
+                        {result?.request != null && (
+                          <div>
+                            <p className="text-[10px] font-medium text-muted-foreground mb-1">
+                              请求
+                            </p>
+                            <pre className="overflow-x-auto rounded bg-muted/30 p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-all">
+                              {(() => {
+                                try {
+                                  return JSON.stringify(JSON.parse(result!.request!), null, 2)
+                                } catch {
+                                  return result!.request
+                                }
+                              })()}
+                            </pre>
+                          </div>
+                        )}
+                        {result?.response != null && isSuccess && (
+                          <div>
+                            <p className="text-[10px] font-medium text-muted-foreground mb-1">
+                              响应
+                            </p>
+                            <pre className="overflow-x-auto rounded bg-muted/30 p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-all">
+                              {result!.response}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
                 )
               })
             )}

@@ -3,4 +3,5 @@
 .vendor/
 .playwright-mcp/
 /tmp/
+**/tmp/
 *.tsbuildinfo

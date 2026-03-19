@@ -87,6 +87,59 @@ pub struct ArgusWing {
 }
 
 impl ArgusWing {
+    /// Initialize tracing subscriber with file and console logging.
+    ///
+    /// This sets up logging to:
+    /// - Console (stdout)
+    /// - File at `./tmp/arguswing.log`
+    ///
+    /// The log level can be controlled via the `RUST_LOG` environment variable.
+    /// For example: `RUST_LOG=debug` or `RUST_LOG=arguswing=debug,argus=info`
+    ///
+    /// Note: This function is safe to call multiple times - it will only initialize
+    /// tracing once (subsequent calls will be no-ops).
+    fn init_tracing() {
+        // Use a static flag to ensure we only initialize once
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            // Create log directory if it doesn't exist
+            let log_dir = std::path::Path::new("./tmp");
+            if let Err(e) = std::fs::create_dir_all(log_dir) {
+                eprintln!("Failed to create log directory: {}", e);
+                return;
+            }
+
+            // Create file appender (blocking)
+            let file_appender = tracing_appender::rolling::never(log_dir, "arguswing.log");
+
+            // Set up the tracing subscriber with environment variable support
+            // Users can set RUST_LOG=debug to override the default level
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("arguswing=debug,argus=debug,argus_llm=debug")
+                });
+
+            // Create a subscriber that writes to file only (blocking)
+            let result = tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(file_appender)
+                .with_ansi(false)
+                .try_init();
+
+            match result {
+                Ok(()) => {
+                    // Write to stdout directly since tracing is set to file
+                    println!("Tracing initialized. Logs will be written to ./tmp/arguswing.log");
+                }
+                Err(e) => {
+                    eprintln!("Failed to initialize tracing: {}", e);
+                }
+            }
+        });
+    }
+
     /// Initialize ArgusWing with an optional database path.
     ///
     /// If no path is provided, defaults to `~/.arguswing/sqlite.db`.
@@ -98,6 +151,9 @@ impl ArgusWing {
     /// - Migrations fail
     /// - The default template cannot be ensured
     pub async fn init(database_path: Option<&str>) -> Result<Arc<Self>> {
+        // Initialize tracing first
+        Self::init_tracing();
+
         let database_path = resolve_database_target(database_path)?;
         let pool = match &database_path {
             DatabaseTarget::Url(database_url) => connect(database_url).await,
