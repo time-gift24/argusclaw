@@ -172,7 +172,7 @@ export function ProviderTestDialog({
 
           {result && (
             <div className="space-y-2">
-              {result.request && (
+              {result.request != null && (
                 <Collapsible defaultOpen={false}>
                   <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs font-medium hover:bg-muted/50">
                     <span>请求</span>
@@ -191,7 +191,7 @@ export function ProviderTestDialog({
                 </Collapsible>
               )}
 
-              {result.response && result.status === "success" && (
+              {result.response != null && result.status === "success" && (
                 <Collapsible defaultOpen={false}>
                   <CollapsibleTrigger className="flex w-full items-center justify-between rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-xs font-medium hover:bg-muted/50">
                     <span>响应</span>

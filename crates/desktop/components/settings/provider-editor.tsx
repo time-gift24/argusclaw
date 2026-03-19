@@ -491,9 +491,9 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                       </div>
                     </div>
                     <CollapsibleContent>
-                      {result && (result.request || result.response) && (
+                      {result && (result.request != null || result.response != null) && (
                         <div className="px-3 pb-3 pt-1 border-t space-y-2">
-                          {result.request && (
+                          {result.request != null && (
                             <div>
                               <p className="text-[10px] font-medium text-muted-foreground mb-1">
                                 请求
@@ -509,7 +509,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                               </pre>
                             </div>
                           )}
-                          {result.response && isSuccess && (
+                          {result.response != null && isSuccess && (
                             <div>
                               <p className="text-[10px] font-medium text-muted-foreground mb-1">
                                 响应
