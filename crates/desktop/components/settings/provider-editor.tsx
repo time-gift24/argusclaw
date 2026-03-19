@@ -202,6 +202,11 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         ? await providers.testConnection(formData.id, model)
         : await providers.testInput(input, model)
 
+      console.log("[ProviderTest] result:", result)
+      console.log("[ProviderTest] response:", result.response)
+      console.log("[ProviderTest] response type:", typeof result.response)
+      console.log("[ProviderTest] response JSON:", JSON.stringify(result.response))
+
       setTestResults((prev) => ({ ...prev, [model]: result }))
     } catch (error) {
       const fallbackResult: ProviderTestResult = {

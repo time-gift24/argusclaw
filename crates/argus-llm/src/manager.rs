@@ -316,26 +316,38 @@ async fn run_provider_connection_test(
     let request_json = serde_json::to_string(&request).ok();
 
     match provider.complete(request).await {
-        Ok(resp) => build_provider_test_result(
-            provider_id,
-            model,
-            base_url,
-            started.elapsed(),
-            ProviderTestStatus::Success,
-            "Provider connection test succeeded.".to_string(),
-            request_json,
-            Some(resp.content),
-        ),
-        Err(error) => build_provider_test_result(
-            provider_id,
-            model,
-            base_url,
-            started.elapsed(),
-            map_llm_error_to_test_status(&error),
-            error.to_string(),
-            request_json,
-            None,
-        ),
+        Ok(resp) => {
+            let content_len = resp.content.len();
+            tracing::debug!(content_len, "provider test received response");
+            let response = if resp.content.is_empty() {
+                None
+            } else {
+                Some(resp.content)
+            };
+            build_provider_test_result(
+                provider_id,
+                model,
+                base_url,
+                started.elapsed(),
+                ProviderTestStatus::Success,
+                "Provider connection test succeeded.".to_string(),
+                request_json,
+                response,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, "provider test failed");
+            build_provider_test_result(
+                provider_id,
+                model,
+                base_url,
+                started.elapsed(),
+                map_llm_error_to_test_status(&error),
+                error.to_string(),
+                request_json,
+                None,
+            )
+        }
     }
 }
 
