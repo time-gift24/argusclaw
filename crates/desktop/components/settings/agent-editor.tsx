@@ -297,33 +297,40 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="tool_names">可用工具</Label>
-          <div className="space-y-2 max-h-48 overflow-y-auto border rounded-md p-3">
+          <Label>可用工具</Label>
+          <div className="grid grid-cols-2 gap-3 max-h-48 overflow-y-auto pr-1">
             {toolList.length === 0 ? (
-              <p className="text-xs text-muted-foreground">暂无可用工具</p>
+              <p className="text-xs text-muted-foreground col-span-2">暂无可用工具</p>
             ) : (
               toolList.map((tool) => (
-                <div key={tool.name} className="flex items-start gap-2">
-                  <Checkbox
-                    id={`tool-${tool.name}`}
-                    aria-describedby={`tool-desc-${tool.name}`}
-                    checked={formData.tool_names.includes(tool.name)}
-                    onCheckedChange={(checked) => {
-                      setFormData((prev) => ({
-                        ...prev,
-                        tool_names: checked
-                          ? [...prev.tool_names, tool.name]
-                          : prev.tool_names.filter((n) => n !== tool.name),
-                      }))
-                    }}
-                  />
-                  <div className="flex-1">
-                    <Label htmlFor={`tool-${tool.name}`} className="text-sm font-normal cursor-pointer">
-                      {tool.name}
-                    </Label>
-                    <p id={`tool-desc-${tool.name}`} className="text-xs text-muted-foreground">
-                      {tool.description}
-                    </p>
+                <div
+                  key={tool.name}
+                  className="rounded-lg border border-border/60 p-3 cursor-pointer transition-colors hover:bg-muted/30"
+                >
+                  <div className="flex items-start gap-2">
+                    <Checkbox
+                      id={`tool-${tool.name}`}
+                      checked={formData.tool_names.includes(tool.name)}
+                      onCheckedChange={(checked) => {
+                        setFormData((prev) => ({
+                          ...prev,
+                          tool_names: checked
+                            ? [...prev.tool_names, tool.name]
+                            : prev.tool_names.filter((n) => n !== tool.name),
+                        }))
+                      }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <Label
+                        htmlFor={`tool-${tool.name}`}
+                        className="text-sm font-medium cursor-pointer block truncate"
+                      >
+                        {tool.name}
+                      </Label>
+                      <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
+                        {tool.description}
+                      </p>
+                    </div>
                   </div>
                 </div>
               ))
