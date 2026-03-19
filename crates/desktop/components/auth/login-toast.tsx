@@ -1,5 +1,6 @@
 'use client';
 
+import { create } from 'zustand';
 import { useEffect, useState } from 'react';
 
 interface ToastProps {
@@ -35,9 +36,6 @@ export function LoginToast({ message, type = 'success', duration = 3000, onClose
     </div>
   );
 }
-
-// Hook to manage toast state
-import { create } from 'zustand';
 
 interface ToastState {
   toast: { message: string; type: 'success' | 'error' | 'info' } | null;
