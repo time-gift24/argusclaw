@@ -1,5 +1,6 @@
 //! Thread implementation.
 
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -78,6 +79,10 @@ pub struct Thread {
     #[builder(default)]
     turn_count: u32,
 
+    /// Next message sequence number (internal, for thread-safe sequence tracking).
+    #[builder(default)]
+    next_message_seq: AtomicU32,
+
     /// Event broadcaster (internal).
     #[builder(default)]
     event_sender: broadcast::Sender<ThreadEvent>,
@@ -125,6 +130,9 @@ impl ThreadBuilder {
             messages.insert(0, ChatMessage::system(&agent_record.system_prompt));
         }
 
+        // Initialize next_message_seq based on existing messages
+        let next_message_seq = AtomicU32::new(messages.len() as u32);
+
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             agent_record,
@@ -142,6 +150,7 @@ impl ThreadBuilder {
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
+            next_message_seq,
             event_sender,
         })
     }
@@ -245,14 +254,14 @@ impl Thread {
             .sum();
     }
 
-    fn apply_turn_output(&mut self, output: TurnOutput) {
-        self.messages = output.messages;
+    fn apply_turn_output(&mut self, output: &TurnOutput) {
+        self.messages = output.messages.clone();
         self.recalculate_token_count();
         self.updated_at = Utc::now();
     }
 
     /// Send user message and execute Turn.
-    pub async fn send_message(&mut self, user_input: String) -> Result<(), ThreadError> {
+    pub async fn send_message(&mut self, user_input: String) -> Result<argus_turn::TurnOutput, ThreadError> {
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
@@ -271,7 +280,7 @@ impl Thread {
         self.execute_turn_streaming().await
     }
 
-    async fn execute_turn_streaming(&mut self) -> Result<(), ThreadError> {
+    async fn execute_turn_streaming(&mut self) -> Result<argus_turn::TurnOutput, ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id.to_string();
@@ -316,8 +325,8 @@ impl Thread {
 
         match result {
             Ok(output) => {
-                self.apply_turn_output(output);
-                Ok(())
+                self.apply_turn_output(&output);
+                Ok(output)
             }
             Err(error) => Err(ThreadError::TurnFailed(error)),
         }

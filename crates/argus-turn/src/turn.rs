@@ -411,10 +411,14 @@ impl Turn {
     /// This is where the core execution logic lives.
     #[allow(dead_code)]
     async fn execute_loop(&mut self) -> Result<TurnOutput, TurnError> {
+        let start_time = std::time::Instant::now();
+        let model = self.provider.model_name().to_string();
+
         let mut messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
+        let mut tool_calls = Vec::new();
 
         // Add system message about max_tool_calls ONCE before loop (not inside to avoid accumulation)
         let max_tool_calls = self.config.max_tool_calls;
@@ -477,7 +481,14 @@ impl Turn {
             let response = self.call_llm_streaming(request).await?;
 
             // Process response
-            match self.process_finish_reason(response, &mut messages, &mut token_usage)? {
+            match self.process_finish_reason(
+                response,
+                &mut messages,
+                &mut token_usage,
+                &mut tool_calls,
+                &model,
+                start_time,
+            )? {
                 NextAction::Return(output) => {
                     // Fire TurnEnd hook
                     let ctx = ToolHookContext {
@@ -570,6 +581,9 @@ impl Turn {
         response: ToolCompletionResponse,
         messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
+        tool_calls: &mut Vec<argus_protocol::ToolCallDetail>,
+        model: &str,
+        start_time: std::time::Instant,
     ) -> Result<NextAction, TurnError> {
         let ToolCompletionResponse {
             content,
@@ -602,6 +616,11 @@ impl Turn {
                 Ok(NextAction::Return(TurnOutput {
                     messages: std::mem::take(messages),
                     token_usage: token_usage.clone(),
+                    tool_calls: std::mem::take(tool_calls),
+                    raw_response: None, // TODO: Capture raw response
+                    model: model.to_string(),
+                    latency_ms: start_time.elapsed().as_millis() as u64,
+                    config: self.config.clone(),
                 }))
             }
             FinishReason::ToolUse => {
@@ -648,6 +667,11 @@ impl Turn {
                 Ok(NextAction::Return(TurnOutput {
                     messages: std::mem::take(messages),
                     token_usage: token_usage.clone(),
+                    tool_calls: std::mem::take(tool_calls),
+                    raw_response: None, // TODO: Capture raw response
+                    model: model.to_string(),
+                    latency_ms: start_time.elapsed().as_millis() as u64,
+                    config: self.config.clone(),
                 }))
             }
         }

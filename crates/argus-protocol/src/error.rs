@@ -14,6 +14,21 @@ pub enum ArgusError {
     #[error("Thread not found: {0}")]
     ThreadNotFound(String),
 
+    #[error("Thread {thread_id} not found in session {session_id}")]
+    ThreadNotFoundInSession { thread_id: String, session_id: i64 },
+
+    #[error("Checkpoint {turn_seq} not found for thread {thread_id}")]
+    CheckpointNotFound { thread_id: String, turn_seq: u32 },
+
+    #[error("Cannot rollback: turn {turn_seq} is already the latest")]
+    AlreadyAtLatestTurn { turn_seq: u32 },
+
+    #[error("Cannot rollback: no checkpoints available")]
+    NoCheckpointsAvailable,
+
+    #[error("Thread is busy, please retry later")]
+    ThreadBusy,
+
     #[error("Thread build failed: {reason}")]
     ThreadBuildFailed { reason: String },
 

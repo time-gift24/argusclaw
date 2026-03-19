@@ -1,10 +1,15 @@
 use std::sync::Arc;
 
-use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
+use argus_protocol::{
+    AgentId, ArgusError, CheckpointComparison, CheckpointDetail, CheckpointSummary,
+    MessageDiff, ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadState, TokenDiff,
+};
 use argus_template::TemplateManager;
 use argus_thread::{CompactorManager, ThreadBuilder, ThreadConfig};
 use argus_tool::ToolManager;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use serde_json;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{broadcast, Mutex};
 
@@ -161,6 +166,9 @@ impl SessionManager {
             // Get compactor
             let compactor = self.compactor_manager.default_compactor().clone();
 
+            // Load recent messages for this thread (most recent 50)
+            let messages = self.load_thread_messages(thread_id).await?;
+
             // Build Thread directly
             let title: Option<String> = thread_row.get("title");
             let thread = match ThreadBuilder::new()
@@ -172,6 +180,7 @@ impl SessionManager {
                 .tool_manager(self.tool_manager.clone())
                 .compactor(compactor)
                 .config(ThreadConfig::default())
+                .messages(messages)
                 .build()
             {
                 Ok(t) => Arc::new(Mutex::new(t)),
@@ -377,12 +386,24 @@ impl SessionManager {
             .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
         let mut thread = thread.lock().await;
-        thread
+        let turn_output = thread
             .send_message(message)
             .await
             .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
-            })
+            })?;
+
+        // TODO: Persist turn_output to database
+        // For now, just log it
+        tracing::debug!(
+            thread_id = %thread_id,
+            turn_seq = thread.turn_count(),
+            input_tokens = turn_output.token_usage.input_tokens,
+            output_tokens = turn_output.token_usage.output_tokens,
+            "Turn completed, persistence not yet implemented"
+        );
+
+        Ok(())
     }
 
     /// Subscribe to thread events.
@@ -395,5 +416,558 @@ impl SessionManager {
         let thread = session.get_thread(thread_id)?;
         let thread = thread.lock().await;
         Some(thread.subscribe())
+    }
+
+    /// Load recent messages for a thread (most recent 50).
+    async fn load_thread_messages(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        // Query recent messages from database
+        let rows = sqlx::query(
+            r#"
+            SELECT role, content, tool_call_id, tool_name, tool_calls
+            FROM messages
+            WHERE thread_id = ?
+            ORDER BY seq DESC
+            LIMIT 50
+            "#,
+        )
+        .bind(thread_id.inner().to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        // Convert rows to ChatMessage (reversing to get correct order)
+        let messages: Vec<_> = rows
+            .into_iter()
+            .rev()
+            .map(|row| {
+                let role: String = row.get("role");
+                let content: String = row.get("content");
+                let tool_call_id: Option<String> = row.get("tool_call_id");
+                let tool_name: Option<String> = row.get("tool_name");
+                let tool_calls: Option<String> = row.get("tool_calls");
+
+                // Parse role
+                let role = match role.as_str() {
+                    "system" => argus_protocol::llm::Role::System,
+                    "user" => argus_protocol::llm::Role::User,
+                    "assistant" => argus_protocol::llm::Role::Assistant,
+                    "tool" => argus_protocol::llm::Role::Tool,
+                    _ => return Err(ArgusError::DatabaseError {
+                        reason: format!("Invalid role: {}", role),
+                    }),
+                };
+
+                // Create ChatMessage based on role
+                let message = match role {
+                    argus_protocol::llm::Role::System => {
+                        argus_protocol::llm::ChatMessage::system(&content)
+                    }
+                    argus_protocol::llm::Role::User => {
+                        argus_protocol::llm::ChatMessage::user(content)
+                    }
+                    argus_protocol::llm::Role::Assistant => {
+                        // Check if there are tool calls
+                        if let Some(tool_calls_json) = tool_calls {
+                            match serde_json::from_str::<Vec<argus_protocol::llm::ToolCall>>(
+                                &tool_calls_json,
+                            ) {
+                                Ok(tool_calls) => argus_protocol::llm::ChatMessage::assistant_with_tool_calls(
+                                    Some(content), tool_calls,
+                                ),
+                                Err(_) => argus_protocol::llm::ChatMessage::assistant(content),
+                            }
+                        } else {
+                            argus_protocol::llm::ChatMessage::assistant(content)
+                        }
+                    }
+                    argus_protocol::llm::Role::Tool => {
+                        let tool_call_id = tool_call_id.ok_or_else(|| ArgusError::DatabaseError {
+                            reason: "Tool message missing tool_call_id".to_string(),
+                        })?;
+                        let tool_name = tool_name.ok_or_else(|| ArgusError::DatabaseError {
+                            reason: "Tool message missing tool_name".to_string(),
+                        })?;
+                        argus_protocol::llm::ChatMessage::tool_result(tool_call_id, tool_name, content)
+                    }
+                };
+
+                Ok(message)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(messages)
+    }
+
+    /// List all checkpoints for a thread.
+    pub async fn list_checkpoints(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<CheckpointSummary>> {
+        // Verify thread belongs to session
+        self.verify_thread_belongs_to_session(session_id, thread_id)
+            .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                turn_seq,
+                model,
+                input_tokens,
+                output_tokens,
+                latency_ms,
+                created_at,
+                messages_count
+            FROM turn_logs
+            WHERE thread_id = ? AND status = 'completed'
+            ORDER BY turn_seq ASC
+            "#,
+        )
+        .bind(thread_id.inner().to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        let checkpoints = rows
+            .into_iter()
+            .map(|row| {
+                let created_at_str: String = row.get("created_at");
+                let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(CheckpointSummary {
+                    turn_seq: row.get::<i64, _>("turn_seq") as u32,
+                    model: row.get("model"),
+                    input_tokens: row.get::<i64, _>("input_tokens") as u32,
+                    output_tokens: row.get::<i64, _>("output_tokens") as u32,
+                    latency_ms: row.get::<i64, _>("latency_ms") as u64,
+                    created_at,
+                    message_count: row.get::<i64, _>("messages_count") as u32,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(checkpoints)
+    }
+
+    /// Get detailed information about a specific checkpoint.
+    pub async fn get_checkpoint(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_seq: u32,
+    ) -> Result<CheckpointDetail> {
+        // Verify thread belongs to session
+        self.verify_thread_belongs_to_session(session_id, thread_id)
+            .await?;
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                turn_seq,
+                model,
+                input_tokens,
+                output_tokens,
+                latency_ms,
+                turn_data,
+                created_at
+            FROM turn_logs
+            WHERE thread_id = ? AND turn_seq = ? AND status = 'completed'
+            "#,
+        )
+        .bind(thread_id.inner().to_string())
+        .bind(turn_seq as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?
+        .ok_or_else(|| ArgusError::CheckpointNotFound {
+            thread_id: thread_id.inner().to_string(),
+            turn_seq,
+        })?;
+
+        let created_at_str: String = row.get("created_at");
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        // Parse turn_data JSON
+        let turn_data_json: String = row.get("turn_data");
+        let turn_snapshot: serde_json::Value =
+            serde_json::from_str(&turn_data_json).map_err(|e| ArgusError::SerdeError {
+                reason: e.to_string(),
+            })?;
+
+        // Extract messages from snapshot - simplified version
+        let messages = Vec::new(); // TODO: Parse messages from turn_data
+
+        let tool_calls = turn_snapshot["tool_calls"]
+            .as_array()
+            .map(|arr| serde_json::to_string(arr).unwrap_or_default())
+            .unwrap_or_default();
+
+        let llm_response = turn_snapshot["llm_response"].as_object().map(|obj| {
+            serde_json::to_string(obj).unwrap_or_default()
+        });
+
+        Ok(CheckpointDetail {
+            turn_seq: row.get::<i64, _>("turn_seq") as u32,
+            model: row.get("model"),
+            token_usage: argus_protocol::TokenUsage {
+                input_tokens: row.get::<i64, _>("input_tokens") as u32,
+                output_tokens: row.get::<i64, _>("output_tokens") as u32,
+                total_tokens: (row.get::<i64, _>("input_tokens") as u32
+                    + row.get::<i64, _>("output_tokens") as u32),
+            },
+            latency_ms: row.get::<i64, _>("latency_ms") as u64,
+            created_at,
+            messages,
+            tool_calls,
+            llm_response,
+        })
+    }
+
+    /// Compare two checkpoints.
+    pub async fn compare_checkpoints(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_seq_a: u32,
+        turn_seq_b: u32,
+    ) -> Result<CheckpointComparison> {
+        let turn_a = self
+            .get_checkpoint(session_id, thread_id, turn_seq_a)
+            .await?;
+        let turn_b = self
+            .get_checkpoint(session_id, thread_id, turn_seq_b)
+            .await?;
+
+        let token_diff = TokenDiff {
+            input_delta: turn_b.token_usage.input_tokens as i32
+                - turn_a.token_usage.input_tokens as i32,
+            output_delta: turn_b.token_usage.output_tokens as i32
+                - turn_a.token_usage.output_tokens as i32,
+            total_delta: turn_b.token_usage.total_tokens as i32
+                - turn_a.token_usage.total_tokens as i32,
+        };
+
+        let message_diff = MessageDiff {
+            count_a: turn_a.messages.len(),
+            count_b: turn_b.messages.len(),
+            count_delta: turn_b.messages.len() as isize - turn_a.messages.len() as isize,
+        };
+
+        Ok(CheckpointComparison {
+            turn_a,
+            turn_b,
+            token_diff,
+            message_diff,
+        })
+    }
+
+    /// Get message history at a specific turn.
+    pub async fn get_history_at_turn(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        turn_seq: u32,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        // Verify thread belongs to session
+        self.verify_thread_belongs_to_session(session_id, thread_id)
+            .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT role, content, tool_call_id, tool_name, tool_calls
+            FROM messages
+            WHERE thread_id = ? AND turn_seq <= ?
+            ORDER BY seq ASC
+            "#,
+        )
+        .bind(thread_id.inner().to_string())
+        .bind(turn_seq as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        self.parse_message_rows(rows)
+    }
+
+    /// Get all messages for a thread.
+    pub async fn get_thread_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        // Verify thread belongs to session
+        self.verify_thread_belongs_to_session(session_id, thread_id)
+            .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT role, content, tool_call_id, tool_name, tool_calls
+            FROM messages
+            WHERE thread_id = ?
+            ORDER BY seq ASC
+            "#,
+        )
+        .bind(thread_id.inner().to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        self.parse_message_rows(rows)
+    }
+
+    /// Get recent messages for a thread.
+    pub async fn get_recent_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        limit: u32,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        // Verify thread belongs to session
+        self.verify_thread_belongs_to_session(session_id, thread_id)
+            .await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT role, content, tool_call_id, tool_name, tool_calls
+            FROM messages
+            WHERE thread_id = ?
+            ORDER BY seq DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(thread_id.inner().to_string())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        // Reverse to get correct order
+        let messages = self.parse_message_rows(rows)?;
+        Ok(messages.into_iter().rev().collect())
+    }
+
+    /// Rollback a thread to a specific turn.
+    pub async fn rollback_to_turn(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        target_turn_seq: u32,
+    ) -> Result<ThreadState> {
+        // 1. Verify thread belongs to session
+        self.verify_thread_belongs_to_session(session_id, thread_id)
+            .await?;
+
+        // 2. Find last message seq of target turn
+        let last_seq: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(seq) FROM messages WHERE thread_id = ? AND turn_seq <= ?",
+        )
+        .bind(thread_id.inner().to_string())
+        .bind(target_turn_seq as i64)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        let last_seq = last_seq.ok_or_else(|| ArgusError::CheckpointNotFound {
+            thread_id: thread_id.inner().to_string(),
+            turn_seq: target_turn_seq,
+        })?;
+
+        // 3. Begin transaction for rollback
+        let mut tx = self.pool.begin().await.map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        // Delete messages after target turn
+        sqlx::query("DELETE FROM messages WHERE thread_id = ? AND seq > ?")
+            .bind(thread_id.inner().to_string())
+            .bind(last_seq)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        // Delete turn_logs after target turn
+        sqlx::query("DELETE FROM turn_logs WHERE thread_id = ? AND turn_seq > ?")
+            .bind(thread_id.inner().to_string())
+            .bind(target_turn_seq as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        // Update thread stats
+        let (token_count, turn_count): (i64, i64) = sqlx::query_as(
+            "SELECT
+                COALESCE(SUM(input_tokens + output_tokens), 0) as tokens,
+                COUNT(*) as turns
+             FROM turn_logs WHERE thread_id = ?",
+        )
+        .bind(thread_id.inner().to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        sqlx::query(
+            "UPDATE threads SET
+             token_count = ?,
+             turn_count = ?,
+             updated_at = datetime('now')
+             WHERE id = ?",
+        )
+        .bind(token_count)
+        .bind(turn_count)
+        .bind(thread_id.inner().to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        tx.commit().await.map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        // 4. Reload thread into memory
+        // Remove from cache if present
+        if let Some(session) = self.sessions.get(&session_id) {
+            session.remove_thread(&thread_id);
+        }
+
+        // Reload the session
+        let session = self.load(session_id).await?;
+        let thread = session
+            .get_thread(&thread_id)
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+        let thread = thread.lock().await;
+
+        // 5. Return state
+        Ok(ThreadState {
+            thread_id,
+            title: thread.title().map(|s| s.to_string()),
+            message_count: thread.history().len(),
+            turn_count: thread.turn_count(),
+            token_count: thread.token_count(),
+            last_turn_seq: Some(target_turn_seq),
+        })
+    }
+
+    /// Verify that a thread belongs to a session.
+    async fn verify_thread_belongs_to_session(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        let exists = sqlx::query(
+            "SELECT 1 FROM threads WHERE id = ? AND session_id = ?",
+        )
+        .bind(thread_id.inner().to_string())
+        .bind(session_id.inner())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        if exists.is_none() {
+            return Err(ArgusError::ThreadNotFoundInSession {
+                thread_id: thread_id.inner().to_string(),
+                session_id: session_id.inner(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Parse message rows into ChatMessage objects.
+    fn parse_message_rows(
+        &self,
+        rows: Vec<sqlx::sqlite::SqliteRow>,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        rows.into_iter()
+            .map(|row| {
+                let role: String = row.get("role");
+                let content: String = row.get("content");
+                let tool_call_id: Option<String> = row.get("tool_call_id");
+                let tool_name: Option<String> = row.get("tool_name");
+                let tool_calls: Option<String> = row.get("tool_calls");
+
+                let role = match role.as_str() {
+                    "system" => argus_protocol::llm::Role::System,
+                    "user" => argus_protocol::llm::Role::User,
+                    "assistant" => argus_protocol::llm::Role::Assistant,
+                    "tool" => argus_protocol::llm::Role::Tool,
+                    _ => {
+                        return Err(ArgusError::DatabaseError {
+                            reason: format!("Invalid role: {}", role),
+                        })
+                    }
+                };
+
+                let message = match role {
+                    argus_protocol::llm::Role::System => {
+                        argus_protocol::llm::ChatMessage::system(&content)
+                    }
+                    argus_protocol::llm::Role::User => {
+                        argus_protocol::llm::ChatMessage::user(content)
+                    }
+                    argus_protocol::llm::Role::Assistant => {
+                        if let Some(tool_calls_json) = tool_calls {
+                            match serde_json::from_str::<Vec<argus_protocol::llm::ToolCall>>(
+                                &tool_calls_json,
+                            ) {
+                                Ok(tool_calls) => {
+                                    argus_protocol::llm::ChatMessage::assistant_with_tool_calls(
+                                        Some(content), tool_calls,
+                                    )
+                                }
+                                Err(_) => argus_protocol::llm::ChatMessage::assistant(content),
+                            }
+                        } else {
+                            argus_protocol::llm::ChatMessage::assistant(content)
+                        }
+                    }
+                    argus_protocol::llm::Role::Tool => {
+                        let tool_call_id = tool_call_id.ok_or_else(|| ArgusError::DatabaseError {
+                            reason: "Tool message missing tool_call_id".to_string(),
+                        })?;
+                        let tool_name = tool_name.ok_or_else(|| ArgusError::DatabaseError {
+                            reason: "Tool message missing tool_name".to_string(),
+                        })?;
+                        argus_protocol::llm::ChatMessage::tool_result(
+                            tool_call_id,
+                            tool_name,
+                            content,
+                        )
+                    }
+                };
+
+                Ok(message)
+            })
+            .collect()
     }
 }

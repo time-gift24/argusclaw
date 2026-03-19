@@ -8,6 +8,7 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
+use argus_protocol::checkpoint::{LlmResponseSnapshot, ToolCallDetail};
 use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use argus_protocol::{HookRegistry, ThreadEvent};
 use argus_tool::ToolManager;
@@ -167,7 +168,7 @@ impl TurnInputBuilder {
 /// Output from a Turn execution.
 ///
 /// Contains the results of executing a turn, including the updated
-/// message history and token usage statistics.
+/// message history, token usage statistics, and execution metadata.
 #[derive(Debug, Clone, Builder)]
 pub struct TurnOutput {
     /// Updated message history (includes assistant response + tool results).
@@ -175,6 +176,20 @@ pub struct TurnOutput {
     /// Token usage statistics.
     #[builder(default)]
     pub token_usage: argus_protocol::TokenUsage,
+    /// Tool calls executed in this turn.
+    #[builder(default)]
+    pub tool_calls: Vec<ToolCallDetail>,
+    /// Raw LLM response (for debugging/checkpointing).
+    #[builder(default)]
+    pub raw_response: Option<LlmResponseSnapshot>,
+    /// Model name used.
+    #[builder(default)]
+    pub model: String,
+    /// Execution latency in milliseconds.
+    #[builder(default)]
+    pub latency_ms: u64,
+    /// Turn configuration used.
+    pub config: TurnConfig,
 }
 
 #[cfg(test)]
@@ -225,10 +240,15 @@ mod tests {
     fn test_turn_output_builder() {
         let output = TurnOutputBuilder::default()
             .messages(Vec::new())
+            .config(TurnConfig::default())
             .build()
             .unwrap();
         assert!(output.messages.is_empty());
         assert_eq!(output.token_usage.input_tokens, 0);
+        assert!(output.tool_calls.is_empty());
+        assert!(output.raw_response.is_none());
+        assert_eq!(output.model, "");
+        assert_eq!(output.latency_ms, 0);
     }
 
     #[test]
@@ -241,6 +261,7 @@ mod tests {
         let output = TurnOutputBuilder::default()
             .messages(Vec::new())
             .token_usage(token_usage.clone())
+            .config(TurnConfig::default())
             .build()
             .unwrap();
         assert_eq!(output.token_usage, token_usage);
