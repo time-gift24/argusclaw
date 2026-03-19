@@ -417,7 +417,7 @@ impl ChatCompletionsRequest {
                     .map(OpenAiToolDefinition::from)
                     .collect(),
             ),
-            tool_choice: request.tool_choice,
+            tool_choice: request.tool_choice.or_else(|| Some("auto".to_string())),
             stream,
             stream_options: stream.then_some(StreamOptions {
                 include_usage: true,
@@ -984,6 +984,63 @@ mod tests {
             tool_obj["function"]["name"].as_str().unwrap(),
             "echo",
             "function name should be 'echo'"
+        );
+    }
+
+    #[test]
+    fn tool_choice_defaults_to_auto_when_not_specified() {
+        use crate::providers::openai_compatible::ChatCompletionsRequest;
+        use argus_protocol::llm::{ChatMessage, ToolCompletionRequest, ToolDefinition};
+
+        let tool = ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echo".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        };
+
+        // Create request WITHOUT tool_choice
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("test")],
+            vec![tool],
+        );
+
+        let body = ChatCompletionsRequest::from_tool_completion_request("glm-4", request, false);
+        let json = serde_json::to_value(&body).expect("should serialize");
+
+        // Verify tool_choice defaults to "auto"
+        assert_eq!(
+            json["tool_choice"].as_str().unwrap(),
+            "auto",
+            "tool_choice should default to 'auto'"
+        );
+    }
+
+    #[test]
+    fn tool_choice_preserves_explicit_value() {
+        use crate::providers::openai_compatible::ChatCompletionsRequest;
+        use argus_protocol::llm::{ChatMessage, ToolCompletionRequest, ToolDefinition};
+
+        let tool = ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echo".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        };
+
+        // Create request WITH explicit tool_choice
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("test")],
+            vec![tool],
+        )
+        .with_tool_choice("required");
+
+        let body = ChatCompletionsRequest::from_tool_completion_request("glm-4", request, false);
+        let json = serde_json::to_value(&body).expect("should serialize");
+
+        // Verify explicit tool_choice is preserved
+        assert_eq!(
+            json["tool_choice"].as_str().unwrap(),
+            "required",
+            "tool_choice should be 'required'"
         );
     }
 }
