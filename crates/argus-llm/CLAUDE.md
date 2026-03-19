@@ -6,7 +6,6 @@
 - **OpenAI-compatible provider** 实现
 - **Retry 机制**：指数退避重试装饰器
 - **Provider 管理器**：provider 查找、实例化和测试
-- **密钥管理**：主机绑定的加密存储
 - **测试工具**：重试行为测试辅助
 
 ## 模块结构
@@ -16,7 +15,6 @@ src/
 ├── lib.rs                    # 公共 API 导出
 ├── manager.rs                # ProviderManager：provider 生命周期管理
 ├── retry.rs                  # RetryProvider：重试装饰器
-├── secret.rs                 # ApiKeyCipher：API 密钥加密
 ├── test_utils.rs             # TestRetryProvider：测试工具
 ├── providers/
 │   ├── mod.rs               # Provider 模块导出
@@ -94,31 +92,7 @@ pub enum LlmStreamEvent {
 
 **重要**：重试事件在流中**先于实际数据发送**（即使最终失败）。
 
-### 3. 密钥加密
-
-**ApiKeyCipher** 提供 API 密钥的安全存储：
-
-```rust
-let cipher = ApiKeyCipher::new(KeyMaterialSource::HostMacAddress);
-
-// 加密
-let encrypted = cipher.encrypt("sk-...")?;
-
-// 解密
-let api_key = cipher.decrypt(&encrypted.nonce, &encrypted.ciphertext)?;
-```
-
-**密钥源**：
-- `HostMacAddress`：使用主机 MAC 地址（默认）
-- `File`：主密钥文件 `~/.arguswing/master.key`
-- `Static`：静态字节（仅测试）
-
-**加密算法**：
-- AES-256-GCM
-- HKDF-SHA256 密钥派生
-- 12 字节随机 nonce
-
-### 4. OpenAI-Compatible Provider
+### 3. OpenAI-Compatible Provider
 
 **OpenAiCompatibleProvider** 实现完整的 `LlmProvider` trait：
 
@@ -184,22 +158,6 @@ match result.status {
     ProviderTestStatus::Ok => println!("Connected!"),
     ProviderTestStatus::Failed => eprintln!("Failed: {}", result.error),
 }
-```
-
-### 密钥管理
-
-```rust
-use argus_llm::ApiKeyCipher;
-use argus_protocol::llm::KeyMaterialSource;
-
-let cipher = ApiKeyCipher::new(KeyMaterialSource::HostMacAddress);
-
-// 加密存储
-let encrypted = cipher.encrypt("sk-...")?;
-store_to_db(&encrypted.nonce, &encrypted.ciphertext);
-
-// 解密使用
-let api_key = cipher.decrypt(&nonce, &ciphertext)?;
 ```
 
 ### 测试工具
@@ -397,7 +355,6 @@ WARN Retrying after transient error
 |------|------|
 | Provider 管理 | `src/manager.rs` |
 | 重试逻辑 | `src/retry.rs` |
-| 密钥加密 | `src/secret.rs` |
 | OpenAI provider | `src/providers/openai_compatible.rs` |
 | 测试工具 | `src/test_utils.rs` |
 | CLI 工具 | `src/bin/cli.rs` |
@@ -411,9 +368,6 @@ WARN Retrying after transient error
 
 ### Q: 如何禁用重试？
 **A**: 设置 `max_retries = 0` 或直接使用底层 provider 而不包装 `RetryProvider`。
-
-### Q: 密钥加密的性能开销？
-**A**: 加密/解密仅在 provider 创建时执行一次，运行时无性能影响。
 
 ### Q: 如何支持自定义重试策略？
 **A**: 当前 `RetryProvider` 使用固定的指数退避。如需自定义，可以实现自己的装饰器。

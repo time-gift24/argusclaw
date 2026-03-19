@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
+use subtle::ConstantTimeEq;
 
 use argus_crypto::Cipher;
 
@@ -66,18 +67,22 @@ impl AccountManager {
 
         match row {
             Some((stored_username, ciphertext, nonce)) => {
-                // Verify username matches
-                if stored_username != username {
+                // Verify username matches using constant-time comparison to prevent timing attacks
+                let username_matches = stored_username.as_bytes().ct_eq(username.as_bytes());
+                if !bool::from(username_matches) {
                     return Ok(false);
                 }
-                // Decrypt and verify password
+                // Decrypt and verify password using constant-time comparison
                 let decrypted = self
                     .cipher
                     .decrypt(&nonce, &ciphertext)
                     .map_err(|e| AuthError::DecryptionFailed {
                         reason: e.to_string(),
                     })?;
-                Ok(decrypted.expose_secret() == password)
+                let password_bytes = password.as_bytes();
+                let decrypted_bytes = decrypted.expose_secret().as_bytes();
+                let password_matches = decrypted_bytes.ct_eq(password_bytes);
+                Ok(bool::from(password_matches))
             }
             None => Ok(false),
         }

@@ -9,7 +9,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::DbError;
 use argus_llm::{
-    Cipher, FileKeySource, HostMacAddressKeySource, KeyMaterialSource, StaticKeySource,
+    Cipher, FileKeySource, KeyMaterialSource, StaticKeySource,
 };
 use argus_protocol::llm::SecretString;
 
@@ -86,7 +86,7 @@ impl ArgusSqlite {
         Self::with_key_sources(
             pool,
             Arc::new(FileKeySource::from_env_or_default()),
-            vec![Arc::new(HostMacAddressKeySource)],
+            vec![Arc::new(FileKeySource::from_env_or_default())],
         )
     }
 

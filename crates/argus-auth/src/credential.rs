@@ -8,11 +8,6 @@ use argus_crypto::Cipher;
 
 use super::error::AuthError;
 
-/// (id, name, username_ct, password_ct, nonce)
-type CredentialRow = (i64, String, Vec<u8>, Vec<u8>, Vec<u8>);
-/// (id, username_ct, password_ct, nonce)
-type CredentialByNameRow = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
-
 #[derive(Debug, Clone)]
 pub struct CredentialRecord {
     pub id: i64,
@@ -49,33 +44,34 @@ impl CredentialStore {
     }
 
     pub async fn get(&self, id: i64) -> Result<Option<CredentialRecord>, AuthError> {
-        let row: Option<CredentialRow> = sqlx::query_as(
-            "SELECT id, name, username, password, nonce FROM credentials WHERE id = ?1",
+        let row: Option<(i64, String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, name, username, nonce FROM credentials WHERE id = ?1",
         )
         .bind(id)
         .fetch_optional(self.pool.as_ref())
         .await?;
 
         match row {
-            Some((id, name, username_ct, password_ct, nonce)) => {
-                let username = self
+            Some((id, name, ciphertext, nonce)) => {
+                let decrypted = self
                     .cipher
-                    .decrypt(&nonce, &username_ct)
+                    .decrypt(&nonce, &ciphertext)
                     .map_err(|e| AuthError::DecryptionFailed {
                         reason: e.to_string(),
                     })?;
-                let password = self
-                    .cipher
-                    .decrypt(&nonce, &password_ct)
-                    .map_err(|e| AuthError::DecryptionFailed {
-                        reason: e.to_string(),
-                    })?;
+                let payload = decrypted.expose_secret();
+                let parts: Vec<&str> = payload.split("\x00").collect();
+                if parts.len() != 2 {
+                    return Err(AuthError::DecryptionFailed {
+                        reason: "invalid credential payload format".to_string(),
+                    });
+                }
 
                 Ok(Some(CredentialRecord {
                     id,
                     name,
-                    username: username.expose_secret().to_string(),
-                    password: password.expose_secret().to_string(),
+                    username: parts[0].to_string(),
+                    password: parts[1].to_string(),
                 }))
             }
             None => Ok(None),
@@ -83,33 +79,34 @@ impl CredentialStore {
     }
 
     pub async fn get_by_name(&self, name: &str) -> Result<Option<CredentialRecord>, AuthError> {
-        let row: Option<CredentialByNameRow> = sqlx::query_as(
-            "SELECT id, username, password, nonce FROM credentials WHERE name = ?1",
+        let row: Option<(i64, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, username, nonce FROM credentials WHERE name = ?1",
         )
         .bind(name)
         .fetch_optional(self.pool.as_ref())
         .await?;
 
         match row {
-            Some((id, username_ct, password_ct, nonce)) => {
-                let username = self
+            Some((id, ciphertext, nonce)) => {
+                let decrypted = self
                     .cipher
-                    .decrypt(&nonce, &username_ct)
+                    .decrypt(&nonce, &ciphertext)
                     .map_err(|e| AuthError::DecryptionFailed {
                         reason: e.to_string(),
                     })?;
-                let password = self
-                    .cipher
-                    .decrypt(&nonce, &password_ct)
-                    .map_err(|e| AuthError::DecryptionFailed {
-                        reason: e.to_string(),
-                    })?;
+                let payload = decrypted.expose_secret();
+                let parts: Vec<&str> = payload.split("\x00").collect();
+                if parts.len() != 2 {
+                    return Err(AuthError::DecryptionFailed {
+                        reason: "invalid credential payload format".to_string(),
+                    });
+                }
 
                 Ok(Some(CredentialRecord {
                     id,
                     name: name.to_string(),
-                    username: username.expose_secret().to_string(),
-                    password: password.expose_secret().to_string(),
+                    username: parts[0].to_string(),
+                    password: parts[1].to_string(),
                 }))
             }
             None => Ok(None),
@@ -122,10 +119,10 @@ impl CredentialStore {
         username: &str,
         password: &str,
     ) -> Result<i64, AuthError> {
-        let encrypted_username = self.cipher.encrypt(username).map_err(|e| AuthError::EncryptionFailed {
-            reason: e.to_string(),
-        })?;
-        let encrypted_password = self.cipher.encrypt(password).map_err(|e| AuthError::EncryptionFailed {
+        // Combine username and password into a single payload to encrypt together
+        // This allows storing only one nonce for both fields
+        let payload = format!("{}\x00{}\x00", username, password);
+        let encrypted = self.cipher.encrypt(&payload).map_err(|e| AuthError::EncryptionFailed {
             reason: e.to_string(),
         })?;
 
@@ -136,9 +133,8 @@ impl CredentialStore {
             "#,
         )
         .bind(name)
-        .bind(&encrypted_username.ciphertext)
-        .bind(&encrypted_password.ciphertext)
-        .bind(&encrypted_username.nonce)
+        .bind(&encrypted.ciphertext)
+        .bind(&encrypted.nonce) // Same nonce used for both username and password
         .execute(self.pool.as_ref())
         .await?;
 
@@ -151,26 +147,26 @@ impl CredentialStore {
         username: Option<&str>,
         password: Option<&str>,
     ) -> Result<(), AuthError> {
-        if let Some(username) = username {
-            let encrypted = self.cipher.encrypt(username).map_err(|e| AuthError::EncryptionFailed {
-                reason: e.to_string(),
-            })?;
-            sqlx::query("UPDATE credentials SET username = ?1, updated_at = datetime('now') WHERE id = ?2")
-                .bind(&encrypted.ciphertext)
-                .bind(id)
-                .execute(self.pool.as_ref())
-                .await?;
-        }
+        // If either field is being updated, re-encrypt both together
+        // This ensures they share the same nonce
+        if username.is_some() || password.is_some() {
+            let current = self.get(id).await?;
+            if let Some(current) = current {
+                let new_username = username.unwrap_or(&current.username);
+                let new_password = password.unwrap_or(&current.password);
 
-        if let Some(password) = password {
-            let encrypted = self.cipher.encrypt(password).map_err(|e| AuthError::EncryptionFailed {
-                reason: e.to_string(),
-            })?;
-            sqlx::query("UPDATE credentials SET password = ?1, updated_at = datetime('now') WHERE id = ?2")
-                .bind(&encrypted.ciphertext)
-                .bind(id)
-                .execute(self.pool.as_ref())
-                .await?;
+                let payload = format!("{}\x00{}\x00", new_username, new_password);
+                let encrypted = self.cipher.encrypt(&payload).map_err(|e| AuthError::EncryptionFailed {
+                    reason: e.to_string(),
+                })?;
+
+                sqlx::query("UPDATE credentials SET username = ?1, nonce = ?2, updated_at = datetime('now') WHERE id = ?3")
+                    .bind(&encrypted.ciphertext)
+                    .bind(&encrypted.nonce)
+                    .bind(id)
+                    .execute(self.pool.as_ref())
+                    .await?;
+            }
         }
 
         Ok(())

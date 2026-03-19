@@ -19,6 +19,19 @@ pub trait KeyMaterialSource: Send + Sync {
 }
 
 /// Key material source using the host's MAC address.
+///
+/// # ⚠️ DEPRECATED
+///
+/// This implementation is **not recommended for production use** because:
+/// - MAC addresses can be spoofed
+/// - They change when network hardware is replaced
+/// - A 6-byte MAC address provides only 48 bits of entropy, insufficient for AES-256
+///
+/// Use [`FileKeySource`] instead, which generates and manages a proper 256-bit master key.
+#[deprecated(
+    since = "0.1.0",
+    note = "HostMacAddressKeySource is not secure. Use FileKeySource instead."
+)]
 pub struct HostMacAddressKeySource;
 
 impl KeyMaterialSource for HostMacAddressKeySource {

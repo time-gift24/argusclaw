@@ -17,6 +17,6 @@ pub use test_utils::{TestRetryProvider, create_test_retry_provider};
 
 // Re-export crypto types for convenience
 pub use argus_crypto::{
-    Cipher, CryptoError, EncryptedSecret, FileKeySource, HostMacAddressKeySource, KeyMaterialSource,
+    Cipher, CryptoError, EncryptedSecret, FileKeySource, KeyMaterialSource,
     StaticKeySource,
 };
