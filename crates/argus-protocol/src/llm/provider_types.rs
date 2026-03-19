@@ -229,8 +229,10 @@ pub struct ProviderTestResult {
     pub status: ProviderTestStatus,
     pub message: String,
     /// The JSON-serialized request sent to the LLM.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<String>,
     /// The plain-text content of the LLM response.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<String>,
 }
 
@@ -309,8 +311,6 @@ mod tests {
                 "latency_ms": 42,
                 "status": "model_not_available",
                 "message": "Model gpt-4.1 not available on provider openai-compatible",
-                "request": null,
-                "response": null,
             })
         );
     }
