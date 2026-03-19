@@ -346,12 +346,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                 <p className="text-sm text-muted-foreground text-center py-4">暂无可用工具</p>
               ) : (
                 <div className="grid grid-cols-2 gap-2 max-h-[240px] overflow-y-auto pr-1">
-                  {toolList.reduce<ToolInfo[]>((acc, tool) => {
-                    if (!acc.some((t) => t.name === tool.name)) {
-                      acc.push(tool)
-                    }
-                    return acc
-                  }, []).map((tool) => (
+                  {[...new Map(toolList.map((tool) => [tool.name, tool])).values()].map((tool) => (
                     <div
                       key={tool.name}
                       onClick={() => {
