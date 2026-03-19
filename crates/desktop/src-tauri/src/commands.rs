@@ -392,6 +392,155 @@ pub fn resolve_approval(
 }
 
 // ============================================================================
+// Account Commands
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserInfoPayload {
+    pub username: String,
+}
+
+#[tauri::command]
+pub async fn get_current_user(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Option<UserInfoPayload>, String> {
+    wing.account_manager()
+        .get_current_user()
+        .await
+        .map(|opt| opt.map(|u| UserInfoPayload { username: u.username }))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn has_any_user(wing: State<'_, Arc<ArgusWing>>) -> Result<bool, String> {
+    wing.account_manager()
+        .has_account()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn setup_account(
+    wing: State<'_, Arc<ArgusWing>>,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    wing.account_manager()
+        .setup_account(&username, &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn login(
+    wing: State<'_, Arc<ArgusWing>>,
+    username: String,
+    password: String,
+) -> Result<bool, String> {
+    wing.account_manager()
+        .login(&username, &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn logout(wing: State<'_, Arc<ArgusWing>>) -> Result<(), String> {
+    wing.account_manager()
+        .logout()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// Credential Commands
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CredentialSummaryPayload {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CredentialRecordPayload {
+    pub id: i64,
+    pub name: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[tauri::command]
+pub async fn list_credentials(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<CredentialSummaryPayload>, String> {
+    wing.credential_store()
+        .list()
+        .await
+        .map(|list| {
+            list.into_iter()
+                .map(|c| CredentialSummaryPayload { id: c.id, name: c.name })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_credential(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<Option<CredentialRecordPayload>, String> {
+    wing.credential_store()
+        .get(id)
+        .await
+        .map(|opt| {
+            opt.map(|c| CredentialRecordPayload {
+                id: c.id,
+                name: c.name,
+                username: c.username,
+                password: c.password,
+            })
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn add_credential(
+    wing: State<'_, Arc<ArgusWing>>,
+    name: String,
+    username: String,
+    password: String,
+) -> Result<i64, String> {
+    wing.credential_store()
+        .add(&name, &username, &password)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_credential(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<(), String> {
+    wing.credential_store()
+        .update(id, username.as_deref(), password.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_credential(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<bool, String> {
+    wing.credential_store()
+        .delete(id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

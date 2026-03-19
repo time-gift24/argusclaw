@@ -35,6 +35,18 @@ pub fn run() {
             commands::get_thread_snapshot,
             commands::resolve_approval,
             commands::list_tools,
+            // Account commands
+            commands::get_current_user,
+            commands::has_any_user,
+            commands::setup_account,
+            commands::login,
+            commands::logout,
+            // Credential commands
+            commands::list_credentials,
+            commands::get_credential,
+            commands::add_credential,
+            commands::update_credential,
+            commands::delete_credential,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
