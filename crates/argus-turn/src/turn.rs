@@ -277,8 +277,23 @@ impl Turn {
         // Spawn event forwarder
         self.spawn_event_forwarder();
 
+        tracing::info!(
+            thread_id = %self.thread_id,
+            turn_number = %self.turn_number,
+            tool_count = %self.tools.len(),
+            hook_count = %self.hooks.len(),
+            "Turn execution started"
+        );
+
         // Execute main loop
         let result = self.execute_loop().await;
+
+        tracing::info!(
+            thread_id = %self.thread_id,
+            turn_number = %self.turn_number,
+            result = ?result.as_ref().map(|_| "ok"),
+            "Turn execution completed"
+        );
 
         // Send completion event
         match &result {
@@ -426,6 +441,15 @@ impl Turn {
         }
 
         for iteration in 0..max_iterations {
+            tracing::debug!(
+                thread_id = %self.thread_id,
+                turn_number = %self.turn_number,
+                iteration = %iteration,
+                max_iterations = %max_iterations,
+                message_count = %messages.len(),
+                "Turn iteration started"
+            );
+
             // Prepare tools from self.tools
             let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
 
@@ -472,7 +496,21 @@ impl Turn {
             }
 
             // Call the LLM (streaming mode is always enabled in Turn)
+            tracing::debug!(
+                thread_id = %self.thread_id,
+                turn_number = %self.turn_number,
+                iteration = %iteration,
+                tool_count = %tools.len(),
+                message_count = %messages.len(),
+                "Calling LLM"
+            );
             let response = self.call_llm_streaming(request).await?;
+            tracing::debug!(
+                thread_id = %self.thread_id,
+                turn_number = %self.turn_number,
+                iteration = %iteration,
+                "LLM call completed"
+            );
 
             // Process response
             match self.process_finish_reason(response, &mut messages, &mut token_usage)? {
@@ -497,14 +535,40 @@ impl Turn {
 
                     return Ok(output);
                 }
-                NextAction::ContinueWithTools { tool_calls, .. } => {
+                NextAction::ContinueWithTools { tool_calls, content } => {
+                    tracing::debug!(
+                        thread_id = %self.thread_id,
+                        turn_number = %self.turn_number,
+                        iteration = %iteration,
+                        tool_count = %tool_calls.len(),
+                        content_preview = %content.as_ref().map(|c| &c[..c.len().min(100)]).unwrap_or(""),
+                        "Tool calls detected, executing tools"
+                    );
+
                     // Execute tools in parallel
                     let tool_results = self
                         .execute_tools_parallel(tool_calls, tool_timeout_secs)
                         .await;
 
+                    tracing::debug!(
+                        thread_id = %self.thread_id,
+                        turn_number = %self.turn_number,
+                        iteration = %iteration,
+                        result_count = %tool_results.len(),
+                        "Tools executed, adding results to message history"
+                    );
+
                     // Add tool result messages to history
                     for result in tool_results {
+                        let preview = &result.content[..result.content.len().min(200)];
+                        tracing::info!(
+                            thread_id = %self.thread_id,
+                            turn_number = %self.turn_number,
+                            tool_call_id = %result.tool_call_id,
+                            tool_name = %result.name,
+                            result_preview = %preview,
+                            "Tool result added to history"
+                        );
                         messages.push(ChatMessage::tool_result(
                             result.tool_call_id,
                             result.name,
@@ -539,6 +603,11 @@ impl Turn {
             .await
         {
             Ok(mut stream) => {
+                tracing::debug!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    "LLM stream started"
+                );
                 let mut accumulator = StreamingAccumulator::new();
                 while let Some(event_result) = stream.next().await {
                     let event = event_result.map_err(TurnError::LlmFailed)?;
@@ -548,7 +617,15 @@ impl Turn {
                         .send(TurnStreamEvent::LlmEvent(event.clone()));
                     accumulator.process(event);
                 }
-                Ok(accumulator.into_response())
+                let response = accumulator.into_response();
+                tracing::debug!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    finish_reason = ?response.finish_reason,
+                    tool_call_count = %response.tool_calls.len(),
+                    "LLM stream completed"
+                );
+                Ok(response)
             }
             Err(argus_protocol::llm::LlmError::UnsupportedCapability { .. }) => {
                 // Fallback to non-streaming
@@ -741,8 +818,23 @@ impl Turn {
         let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
         let execute_future = async {
             if let Some(tool) = tool {
+                tracing::debug!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    tool_call_id = %tool_call_id,
+                    tool_name = %tool_name,
+                    "Executing tool"
+                );
                 tool.execute(tool_input.clone()).await
             } else {
+                tracing::error!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    tool_call_id = %tool_call_id,
+                    tool_name = %tool_name,
+                    available_tools = ?self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+                    "Tool not found in registry"
+                );
                 Err(argus_protocol::tool::ToolError::NotFound {
                     id: tool_name.clone(),
                 })
@@ -750,12 +842,42 @@ impl Turn {
         };
 
         let result = match timeout(timeout_duration, execute_future).await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(Elapsed { .. }) => Err(format!(
-                "Tool execution timed out after {}s",
-                tool_timeout_secs
-            )),
+            Ok(Ok(value)) => {
+                tracing::info!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    tool_call_id = %tool_call_id,
+                    tool_name = %tool_name,
+                    result_preview = %value.to_string().chars().take(200).collect::<String>(),
+                    "Tool executed successfully"
+                );
+                Ok(value)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    tool_call_id = %tool_call_id,
+                    tool_name = %tool_name,
+                    error = %e,
+                    "Tool execution returned error"
+                );
+                Err(e.to_string())
+            }
+            Err(Elapsed { .. }) => {
+                tracing::error!(
+                    thread_id = %self.thread_id,
+                    turn_number = %self.turn_number,
+                    tool_call_id = %tool_call_id,
+                    tool_name = %tool_name,
+                    timeout_secs = %tool_timeout_secs,
+                    "Tool execution timed out"
+                );
+                Err(format!(
+                    "Tool execution timed out after {}s",
+                    tool_timeout_secs
+                ))
+            }
         };
 
         // Send ToolCompleted events
