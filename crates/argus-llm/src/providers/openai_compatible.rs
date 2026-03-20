@@ -672,11 +672,14 @@ fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
 }
 
 fn parse_finish_reason(reason: Option<&str>) -> argus_protocol::llm::FinishReason {
+    tracing::debug!(raw_finish_reason = ?reason, "parse_finish_reason");
     match reason {
         Some("stop") => argus_protocol::llm::FinishReason::Stop,
         Some("length") => argus_protocol::llm::FinishReason::Length,
         Some("tool_calls") => argus_protocol::llm::FinishReason::ToolUse,
         Some("content_filter") => argus_protocol::llm::FinishReason::ContentFilter,
+        // BigModel uses "model_context_window_exceeded" for context length exceeded
+        Some("model_context_window_exceeded") => argus_protocol::llm::FinishReason::Length,
         _ => argus_protocol::llm::FinishReason::Unknown,
     }
 }

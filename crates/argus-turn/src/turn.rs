@@ -618,12 +618,14 @@ impl Turn {
 
                     // Add tool result messages to history
                     for result in tool_results {
+                        let result_len = result.content.len();
                         let preview = result.content.chars().take(200).collect::<String>();
                         tracing::info!(
                             thread_id = %self.thread_id,
                             turn_number = %self.turn_number,
                             tool_call_id = %result.tool_call_id,
                             tool_name = %result.name,
+                            result_len,
                             result_preview = %preview,
                             "Tool result added to history"
                         );
