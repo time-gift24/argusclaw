@@ -6,9 +6,11 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::broadcast;
 
-use argus_protocol::llm::{ChatMessage, LlmProvider, ThinkingConfig};
+use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
-use argus_protocol::{AgentRecord, HookHandler, HookRegistry, SessionId, ThreadEvent, ThreadId};
+use argus_protocol::{
+    AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadEvent, ThreadId,
+};
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnOutput};
 
@@ -31,7 +33,7 @@ pub struct Thread {
     id: ThreadId,
 
     /// Agent record with configuration.
-    agent_record: AgentRecord,
+    agent_record: Arc<AgentRecord>,
 
     /// Parent session ID.
     session_id: SessionId,
@@ -159,8 +161,9 @@ impl Thread {
     }
 
     /// Get the Agent Record.
+    #[allow(clippy::explicit_auto_deref)]
     pub fn agent_record(&self) -> &AgentRecord {
-        &self.agent_record
+        &*self.agent_record
     }
 
     /// Get the thread title.
@@ -252,7 +255,11 @@ impl Thread {
     }
 
     /// Send user message and execute Turn.
-    pub async fn send_message(&mut self, user_input: String) -> Result<(), ThreadError> {
+    pub async fn send_message(
+        &mut self,
+        user_input: String,
+        msg_override: Option<MessageOverride>,
+    ) -> Result<(), ThreadError> {
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
@@ -266,12 +273,35 @@ impl Thread {
             }
         }
 
+        // Apply message-level override in-place if provided.
+        // Arc::make_mut clones the inner record only if this Arc is shared (multiple owners).
+        // If no override is provided, just clone the Arc reference (O(1)).
+        let effective_record = if let Some(overrides) = msg_override {
+            let record = Arc::make_mut(&mut self.agent_record);
+            if let Some(v) = overrides.max_tokens {
+                record.max_tokens = Some(v);
+            }
+            if let Some(v) = overrides.temperature {
+                record.temperature = Some(v);
+            }
+            if let Some(v) = overrides.thinking_config {
+                record.thinking_config = Some(v);
+            }
+            self.agent_record.clone()
+        } else {
+            self.agent_record.clone()
+        };
+
         self.messages.push(ChatMessage::user(user_input));
         self.recalculate_token_count();
-        self.execute_turn_streaming().await
+        self.execute_turn_streaming(effective_record)
+            .await
     }
 
-    async fn execute_turn_streaming(&mut self) -> Result<(), ThreadError> {
+    async fn execute_turn_streaming(
+        &mut self,
+        agent_record: Arc<AgentRecord>,
+    ) -> Result<(), ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id.to_string();
@@ -294,7 +324,7 @@ impl Thread {
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         // Build Turn using TurnBuilder
-        let mut turn = TurnBuilder::default()
+        let turn = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
             .messages(self.messages.clone())
@@ -302,20 +332,11 @@ impl Thread {
             .tools(tools)
             .hooks(hooks)
             .config(self.config.turn_config.clone())
+            .agent_record(agent_record)
             .stream_tx(stream_tx)
             .thread_event_tx(self.event_sender.clone())
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))?;
-
-        // Pass agent-level model params directly to avoid builder setter type mismatch
-        turn.max_tokens = self.agent_record.max_tokens;
-        turn.temperature = self.agent_record.temperature;
-        // Default to disabled when not configured in database to avoid provider's default behavior
-        turn.thinking = self
-            .agent_record
-            .thinking_config
-            .clone()
-            .or_else(|| Some(ThinkingConfig::disabled()));
 
         // Turn is responsible for execution
         let result = turn.execute().await;
@@ -345,8 +366,8 @@ mod tests {
     use crate::compact::KeepRecentCompactor;
     use argus_protocol::{AgentId, ProviderId};
 
-    fn test_agent_record() -> AgentRecord {
-        AgentRecord {
+    fn test_agent_record() -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
             id: AgentId::new(1),
             display_name: "Test Agent".to_string(),
             description: "A test agent".to_string(),
@@ -357,7 +378,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: None,
-        }
+        })
     }
 
     #[test]

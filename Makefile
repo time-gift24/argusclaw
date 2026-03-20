@@ -55,11 +55,11 @@ fmt:
 
 # Run Tauri desktop app in dev mode
 tauri-dev:
-	cd crates/desktop && pnpm tauri dev
+	cd crates/desktop && pnpm install && pnpm tauri dev
 
 # Build Tauri desktop app for production
 tauri-build:
-	cd crates/desktop && pnpm tauri build
+	cd crates/desktop && pnpm install && pnpm tauri build
 
 # Aliases for desktop development
 desktop-dev: tauri-dev

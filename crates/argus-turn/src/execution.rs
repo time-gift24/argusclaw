@@ -104,6 +104,7 @@ fn turn_input_to_turn(input: TurnInput, config: TurnConfig) -> Result<Turn, Turn
         .thread_id(thread_id)
         .messages(input.messages)
         .provider(input.provider)
+        .agent_record(input.agent_record)
         .tools(tools)
         .hooks(hooks)
         .config(config)

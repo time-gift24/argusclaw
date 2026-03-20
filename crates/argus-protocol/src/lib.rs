@@ -6,6 +6,7 @@ pub mod events;
 pub mod hooks;
 pub mod ids;
 pub mod llm;
+pub mod message_override;
 pub mod risk_level;
 pub mod token_usage;
 pub mod tool;
@@ -19,6 +20,7 @@ pub use hooks::{
     HookRegistry, ToolHookContext,
 };
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
+pub use message_override::MessageOverride;
 pub use risk_level::RiskLevel;
 pub use token_usage::TokenUsage;
 

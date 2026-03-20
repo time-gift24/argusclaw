@@ -13,13 +13,13 @@ use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ThinkingConfig, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler, ThreadEvent, TokenUsage,
-    ToolHookContext,
+    AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
+    ThreadEvent, TokenUsage, ToolHookContext,
 };
 
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
@@ -213,17 +213,8 @@ pub struct Turn {
     #[builder(default)]
     config: TurnConfig,
 
-    /// Maximum output tokens for LLM requests.
-    #[builder(default, setter(strip_option))]
-    pub max_tokens: Option<u32>,
-
-    /// Sampling temperature for LLM requests.
-    #[builder(default, setter(strip_option))]
-    pub temperature: Option<f32>,
-
-    /// Thinking configuration for LLM requests.
-    #[builder(default, setter(strip_option))]
-    pub thinking: Option<ThinkingConfig>,
+    /// Agent record (shared from Thread).
+    agent_record: Arc<AgentRecord>,
 
     /// Internal stream event sender.
     stream_tx: broadcast::Sender<TurnStreamEvent>,
@@ -470,14 +461,14 @@ impl Turn {
 
             // Build the request with current messages and tools
             let mut request = ToolCompletionRequest::new(messages.clone(), tools.clone());
-            if let Some(max_tokens) = self.max_tokens {
+            if let Some(max_tokens) = self.agent_record.max_tokens {
                 request.max_tokens = Some(max_tokens);
             }
-            if let Some(temperature) = self.temperature {
+            if let Some(temperature) = self.agent_record.temperature {
                 request.temperature = Some(temperature);
             }
-            if let Some(thinking) = &self.thinking {
-                request.thinking = Some(thinking.clone());
+            if let Some(thinking_config) = &self.agent_record.thinking_config {
+                request.thinking = Some(thinking_config.clone());
             }
 
             // Call the LLM (streaming mode is always enabled in Turn)

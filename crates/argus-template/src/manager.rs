@@ -94,10 +94,20 @@ impl TemplateManager {
             })?;
 
         if template.id.inner() == 0 {
-            let result = sqlx::query(
+            sqlx::query(
                 r#"
                 INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(display_name) DO UPDATE SET
+                    description = excluded.description,
+                    version = excluded.version,
+                    provider_id = excluded.provider_id,
+                    system_prompt = excluded.system_prompt,
+                    tool_names = excluded.tool_names,
+                    max_tokens = excluded.max_tokens,
+                    temperature = excluded.temperature,
+                    thinking_config = excluded.thinking_config,
+                    updated_at = datetime('now')
                 "#,
             )
             .bind(&template.display_name)
@@ -113,7 +123,15 @@ impl TemplateManager {
             .await
             .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-            Ok(AgentId::new(result.last_insert_rowid()))
+            let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?")
+                .bind(&template.display_name)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: format!("failed to fetch agent id after upsert: {}", e),
+                })?;
+
+            Ok(AgentId::new(id))
         } else {
             sqlx::query(
                 r#"
@@ -157,11 +175,19 @@ impl TemplateManager {
                 reason: e.to_string(),
             })?;
         let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
+        let thinking_config_json = record
+            .thinking_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ArgusError::SerdeError {
+                reason: format!("failed to serialize thinking_config: {}", e),
+            })?;
 
         // Insert with ON CONFLICT(display_name) DO UPDATE
         sqlx::query(
-            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(display_name) DO UPDATE SET
                  description = excluded.description,
                  version = excluded.version,
@@ -170,6 +196,7 @@ impl TemplateManager {
                  tool_names = excluded.tool_names,
                  max_tokens = excluded.max_tokens,
                  temperature = excluded.temperature,
+                 thinking_config = excluded.thinking_config,
                  updated_at = CURRENT_TIMESTAMP",
         )
         .bind(&record.display_name)
@@ -180,6 +207,7 @@ impl TemplateManager {
         .bind(&tool_names_json)
         .bind(record.max_tokens.map(|t| t as i64))
         .bind(temperature_int)
+        .bind(&thinking_config_json)
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {
@@ -187,7 +215,7 @@ impl TemplateManager {
         })?;
 
         // Fetch the agent ID (either newly inserted or updated)
-        let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?1")
+        let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?")
             .bind(&record.display_name)
             .fetch_one(&self.pool)
             .await
@@ -211,6 +239,31 @@ impl TemplateManager {
             return Ok(());
         }
 
+        // Read all placeholder row data into Rust memory first (outside the transaction)
+        #[derive(sqlx::FromRow)]
+        struct AgentRow {
+            display_name: String,
+            description: String,
+            version: String,
+            provider_id: Option<i64>,
+            system_prompt: String,
+            tool_names: String,
+            max_tokens: Option<i64>,
+            temperature: Option<i64>,
+            thinking_config: Option<String>,
+        }
+
+        let placeholder: AgentRow = sqlx::query_as(
+            "SELECT display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config FROM agents WHERE id = 0",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: format!("failed to fetch placeholder: {}", e),
+        })?;
+
+        let AgentRow { display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config } = placeholder;
+
         let mut tx = self
             .pool
             .begin()
@@ -219,25 +272,54 @@ impl TemplateManager {
                 reason: e.to_string(),
             })?;
 
+        // Delete the placeholder row first (no conflict possible now)
+        sqlx::query("DELETE FROM agents WHERE id = 0")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        // Insert the new row with auto-generated id.
+        // ON CONFLICT: if name already exists (from seed), do nothing.
         sqlx::query(
-            r#"
-            INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
-            SELECT display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at
-            FROM agents
-            WHERE id = 0
-            "#,
+            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(display_name) DO NOTHING",
         )
+        .bind(&display_name)
+        .bind(&description)
+        .bind(&version)
+        .bind(provider_id)
+        .bind(&system_prompt)
+        .bind(&tool_names)
+        .bind(max_tokens)
+        .bind(temperature)
+        .bind(&thinking_config)
         .execute(&mut *tx)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        let repaired_id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
+        // Get the new id: last_insert_rowid if inserted, otherwise find by display_name
+        let last_id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
+                reason: format!("failed to get last_insert_rowid: {}", e),
             })?;
 
+        let repaired_id = if last_id == 0 {
+            // ON CONFLICT fired: name already exists from seed, find it
+            sqlx::query_scalar(
+                "SELECT id FROM agents WHERE display_name = ? AND id != 0",
+            )
+            .bind(&display_name)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: format!("failed to get existing id for '{}': {}", display_name, e),
+            })?
+        } else {
+            last_id
+        };
+
+        // Update foreign keys to point to the new id
         for statement in [
             "UPDATE threads SET template_id = ? WHERE template_id = 0",
             "UPDATE approval_requests SET agent_id = ? WHERE agent_id = 0",
@@ -251,13 +333,6 @@ impl TemplateManager {
                     reason: e.to_string(),
                 })?;
         }
-
-        sqlx::query("DELETE FROM agents WHERE id = 0")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
 
         tx.commit().await.map_err(|e| ArgusError::DatabaseError {
             reason: e.to_string(),
