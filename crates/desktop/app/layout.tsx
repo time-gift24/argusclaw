@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { ToastProvider } from "@/components/ui/toast"
 import Navbar from "@/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06"
 import { useAuthStore } from "@/components/auth/use-auth-store"
+import { LoginToast, useLoginToastStore } from "@/components/auth/login-toast"
 
 const navigationItems = [
   { title: "Home", href: "/", isActive: true },
@@ -20,6 +21,7 @@ export default function RootLayout({
 }>) {
   // Initialize auth state on mount
   const fetchCurrentUser = useAuthStore((state) => state.fetchCurrentUser)
+  const { toast, hideToast } = useLoginToastStore()
 
   useEffect(() => {
     void fetchCurrentUser()
@@ -40,6 +42,13 @@ export default function RootLayout({
             </ThemeProvider>
           </ToastProvider>
         </TooltipProvider>
+        {toast && (
+          <LoginToast
+            message={toast.message}
+            type={toast.type}
+            onClose={hideToast}
+          />
+        )}
       </body>
     </html>
   )

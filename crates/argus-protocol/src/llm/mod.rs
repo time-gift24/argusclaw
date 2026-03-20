@@ -53,8 +53,8 @@ pub enum LlmError {
     ModelNotAvailable { provider: String, model: String },
 
     /// Authentication failed for the provider.
-    #[error("Authentication failed for provider {provider}")]
-    AuthFailed { provider: String },
+    #[error("Authentication failed for provider {provider}: {reason}")]
+    AuthFailed { provider: String, reason: String },
 
     /// Provider session expired and requires renewal.
     #[error("Session expired for provider {provider}")]
@@ -321,6 +321,10 @@ pub struct CompletionRequest {
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub metadata: std::collections::HashMap<String, String>,
+    /// Extra HTTP headers injected by wrappers (e.g. auth token headers).
+    /// Not serialized — only used at runtime by transport-layer wrappers.
+    #[serde(skip)]
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl CompletionRequest {
@@ -334,6 +338,7 @@ impl CompletionRequest {
             stop_sequences: None,
             thinking: None,
             metadata: std::collections::HashMap::new(),
+            extra_headers: Vec::new(),
         }
     }
 
@@ -463,6 +468,10 @@ pub struct ToolCompletionRequest {
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub metadata: std::collections::HashMap<String, String>,
+    /// Extra HTTP headers injected by wrappers (e.g. auth token headers).
+    /// Not serialized — only used at runtime by transport-layer wrappers.
+    #[serde(skip)]
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl ToolCompletionRequest {
@@ -477,6 +486,7 @@ impl ToolCompletionRequest {
             tool_choice: None,
             thinking: None,
             metadata: std::collections::HashMap::new(),
+            extra_headers: Vec::new(),
         }
     }
 

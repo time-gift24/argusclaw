@@ -176,7 +176,6 @@ export function ProviderFormDialog({
 
   const canTest = Boolean(
     formData.base_url.trim() &&
-    formData.api_key.trim() &&
     formData.models.length > 0,
   );
 
@@ -248,7 +247,7 @@ export function ProviderFormDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="api_key">API Key</Label>
+            <Label htmlFor="api_key">API Key <span className="text-muted-foreground text-xs">(可选)</span></Label>
             <Input
               id="api_key"
               type="password"
@@ -256,8 +255,7 @@ export function ProviderFormDialog({
               onChange={(e) =>
                 setFormData({ ...formData, api_key: e.target.value })
               }
-              placeholder="sk-..."
-              required
+              placeholder="sk-... (可选)"
             />
           </div>
           <div className="space-y-2">

@@ -8,9 +8,8 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::DbError;
-use argus_llm::secret::{
-    ApiKeyCipher, FileKeyMaterialSource, HostMacAddressKeyMaterialSource, KeyMaterialSource,
-    StaticKeyMaterialSource,
+use argus_llm::{
+    Cipher, FileKeySource, KeyMaterialSource, StaticKeySource,
 };
 use argus_protocol::llm::SecretString;
 
@@ -76,8 +75,8 @@ pub async fn migrate(pool: &SqlitePool) -> DbResult<()> {
 /// sharing a connection pool and encryption keys across all repositories.
 pub struct ArgusSqlite {
     pool: SqlitePool,
-    write_cipher: ApiKeyCipher,
-    read_ciphers: Vec<ApiKeyCipher>,
+    write_cipher: Cipher,
+    read_ciphers: Vec<Cipher>,
 }
 
 impl ArgusSqlite {
@@ -86,8 +85,8 @@ impl ArgusSqlite {
     pub fn new(pool: SqlitePool) -> Self {
         Self::with_key_sources(
             pool,
-            Arc::new(FileKeyMaterialSource::from_env_or_default()),
-            vec![Arc::new(HostMacAddressKeyMaterialSource)],
+            Arc::new(FileKeySource::from_env_or_default()),
+            vec![Arc::new(FileKeySource::from_env_or_default())],
         )
     }
 
@@ -96,7 +95,7 @@ impl ArgusSqlite {
     pub fn new_with_key_material(pool: SqlitePool, key_material: Vec<u8>) -> Self {
         Self::with_key_sources(
             pool,
-            Arc::new(StaticKeyMaterialSource::new(key_material)),
+            Arc::new(StaticKeySource::new(key_material)),
             Vec::new(),
         )
     }
@@ -110,12 +109,12 @@ impl ArgusSqlite {
     ) -> Self {
         let fallback_sources: Vec<Arc<dyn KeyMaterialSource>> = fallback_key_materials
             .into_iter()
-            .map(|km| Arc::new(StaticKeyMaterialSource::new(km)) as Arc<dyn KeyMaterialSource>)
+            .map(|km| Arc::new(StaticKeySource::new(km)) as Arc<dyn KeyMaterialSource>)
             .collect();
 
         Self::with_key_sources(
             pool,
-            Arc::new(StaticKeyMaterialSource::new(key_material)),
+            Arc::new(StaticKeySource::new(key_material)),
             fallback_sources,
         )
     }
@@ -127,12 +126,12 @@ impl ArgusSqlite {
         key_source: Arc<dyn KeyMaterialSource>,
         fallback_sources: Vec<Arc<dyn KeyMaterialSource>>,
     ) -> Self {
-        let mut read_ciphers = vec![ApiKeyCipher::new_arc(Arc::clone(&key_source))];
-        read_ciphers.extend(fallback_sources.into_iter().map(ApiKeyCipher::new_arc));
+        let mut read_ciphers = vec![Cipher::new_arc(Arc::clone(&key_source))];
+        read_ciphers.extend(fallback_sources.into_iter().map(Cipher::new_arc));
 
         Self {
             pool,
-            write_cipher: ApiKeyCipher::new_arc(key_source),
+            write_cipher: Cipher::new_arc(key_source),
             read_ciphers,
         }
     }

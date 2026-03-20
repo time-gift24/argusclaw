@@ -14,17 +14,15 @@ path = "../../examples/test_real_retry.rs"
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
 argus-test-support = { path = "../argus-test-support" }
+argus-crypto = { path = "../argus-crypto" }
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
-dirs = "6"
 eventsource-stream = "0.2"
 futures-util = "0.3"
-mac_address = "1.1"
 rand = "0.10.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls-native-roots"] }
-ring = "0.17"
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

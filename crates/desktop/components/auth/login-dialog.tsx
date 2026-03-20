@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useAuthStore } from './use-auth-store';
+import { useLoginToastStore } from './login-toast';
 
 interface LoginDialogProps {
   open: boolean;
@@ -70,11 +72,12 @@ const getLoginErrorMessage = (message?: string): string => {
 };
 
 export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
+  const router = useRouter();
   const { checkHasUser, setupAccount, login } = useAuthStore();
+  const { showToast } = useLoginToastStore();
   const [mode, setMode] = useState<'setup' | 'login'>('setup');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isCheckingMode, setIsCheckingMode] = useState(true);
@@ -111,11 +114,6 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
           setIsLoading(false);
           return;
         }
-        if (password !== confirmPassword) {
-          setError('两次输入的密码不一致。');
-          setIsLoading(false);
-          return;
-        }
         if (password.length < 4) {
           setError('密码至少需要 4 个字符。');
           setIsLoading(false);
@@ -126,6 +124,8 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
         if (result.success) {
           onOpenChange(false);
           resetForm();
+          showToast('账号创建成功！请填写 LLM Provider 配置并测试连接。', 'success');
+          router.push('/settings/providers/1');
         } else {
           const nextError = getSetupErrorMessage(result.error);
           setError(nextError);
@@ -151,6 +151,8 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
         if (result.success) {
           onOpenChange(false);
           resetForm();
+          showToast('登录成功！', 'success');
+          router.push('/settings/providers/1');
         } else {
           setError(getLoginErrorMessage(result.error));
         }
@@ -163,7 +165,6 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
   const resetForm = () => {
     setUsername('');
     setPassword('');
-    setConfirmPassword('');
     setError('');
   };
 
@@ -221,22 +222,6 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
                 className="h-9 px-3 text-sm md:text-sm"
               />
             </div>
-
-            {mode === 'setup' && (
-              <div className="space-y-2">
-                <Label htmlFor="confirmPassword" className="text-sm">确认密码</Label>
-                <Input
-                  id="confirmPassword"
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="请再次输入密码"
-                  disabled={isLoading}
-                  maxLength={100}
-                  className="h-9 px-3 text-sm md:text-sm"
-                />
-              </div>
-            )}
 
             {error && <p className="text-sm leading-6 text-destructive">{error}</p>}
 

@@ -137,6 +137,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-auth"
+version = "0.1.0"
+dependencies = [
+ "argus-crypto",
+ "argus-protocol",
+ "async-trait",
+ "reqwest 0.12.28",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "argus-crypto"
+version = "0.1.0"
+dependencies = [
+ "argus-protocol",
+ "dirs 6.0.0",
+ "mac_address",
+ "ring",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "argus-dev"
 version = "0.1.0"
 dependencies = [
@@ -155,18 +187,16 @@ name = "argus-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-crypto",
  "argus-protocol",
  "argus-test-support",
  "async-trait",
  "chrono",
  "clap",
- "dirs 6.0.0",
  "eventsource-stream",
  "futures-util",
- "mac_address",
  "rand 0.10.0",
  "reqwest 0.12.28",
- "ring",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -335,6 +365,8 @@ name = "argus-wing"
 version = "0.1.0"
 dependencies = [
  "argus-approval",
+ "argus-auth",
+ "argus-crypto",
  "argus-llm",
  "argus-protocol",
  "argus-repository",
@@ -4307,6 +4339,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
