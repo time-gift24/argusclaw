@@ -182,8 +182,9 @@ mod tests {
     #[test]
     fn test_requires_approval_default() {
         let mgr = default_manager();
-        assert!(mgr.requires_approval("shell_exec"));
+        assert!(mgr.requires_approval("shell"));
         assert!(!mgr.requires_approval("file_read"));
+        assert!(mgr.requires_approval("http"));
     }
     #[test]
     fn test_requires_approval_custom_policy() {
@@ -196,7 +197,8 @@ mod tests {
         let mgr = ApprovalManager::new(policy);
         assert!(mgr.requires_approval("file_write"));
         assert!(mgr.requires_approval("file_delete"));
-        assert!(!mgr.requires_approval("shell_exec"));
+        assert!(!mgr.requires_approval("shell"));
+        assert!(!mgr.requires_approval("http"));
         assert!(!mgr.requires_approval("file_read"));
     }
     #[test]
@@ -217,7 +219,8 @@ mod tests {
     #[test]
     fn test_update_policy() {
         let mgr = default_manager();
-        assert!(mgr.requires_approval("shell_exec"));
+        assert!(mgr.requires_approval("shell"));
+        assert!(mgr.requires_approval("http"));
         assert!(!mgr.requires_approval("file_write"));
         let new_policy = ApprovalPolicy {
             require_approval: vec!["file_write".to_string()],
@@ -226,7 +229,8 @@ mod tests {
             auto_approve: false,
         };
         mgr.update_policy(new_policy);
-        assert!(!mgr.requires_approval("shell_exec"));
+        assert!(!mgr.requires_approval("shell"));
+        assert!(!mgr.requires_approval("http"));
         assert!(mgr.requires_approval("file_write"));
         let policy = mgr.policy();
         assert_eq!(policy.timeout_secs, 120);
@@ -240,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_approval_timeout() {
         let mgr = Arc::new(default_manager());
-        let req = make_request("agent-1", "shell_exec", 10);
+        let req = make_request("agent-1", "shell", 10);
         let decision = mgr.request_approval(req).await;
         assert_eq!(decision, ApprovalDecision::TimedOut);
         // After timeout, pending map should be cleaned up
@@ -249,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_approval_approve() {
         let mgr = Arc::new(default_manager());
-        let req = make_request("agent-1", "shell_exec", 60);
+        let req = make_request("agent-1", "shell", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {
@@ -271,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn test_request_approval_deny() {
         let mgr = Arc::new(default_manager());
-        let req = make_request("agent-1", "shell_exec", 60);
+        let req = make_request("agent-1", "shell", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {
@@ -288,7 +292,7 @@ mod tests {
         // Fill up 5 pending requests for agent-1 (they will all be waiting)
         let mut ids = Vec::new();
         for _ in 0..MAX_PENDING_PER_AGENT {
-            let req = make_request("agent-1", "shell_exec", 300);
+            let req = make_request("agent-1", "shell", 300);
             ids.push(req.id);
             let mgr_clone = Arc::clone(&mgr);
             tokio::spawn(async move {
@@ -299,11 +303,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(mgr.pending_count(), MAX_PENDING_PER_AGENT);
         // 6th request for the same agent should be immediately denied
-        let req6 = make_request("agent-1", "shell_exec", 300);
+        let req6 = make_request("agent-1", "shell", 300);
         let decision = mgr.request_approval(req6).await;
         assert_eq!(decision, ApprovalDecision::Denied);
         // A different agent should still be able to submit
-        let req_other = make_request("agent-2", "shell_exec", 300);
+        let req_other = make_request("agent-2", "shell", 300);
         let other_id = req_other.id;
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {
@@ -321,7 +325,10 @@ mod tests {
     fn test_policy_defaults() {
         let mgr = default_manager();
         let policy = mgr.policy();
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell".to_string(), "http".to_string()]
+        );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
     }
@@ -329,7 +336,7 @@ mod tests {
     async fn test_subscribe_request_created() {
         let mgr = Arc::new(default_manager());
         let mut rx = mgr.subscribe();
-        let req = make_request("agent-1", "shell_exec", 60);
+        let req = make_request("agent-1", "shell", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
         // Spawn task to resolve after a short delay
@@ -344,7 +351,7 @@ mod tests {
             ApprovalEvent::RequestCreated(r) => {
                 assert_eq!(r.id, request_id);
                 assert_eq!(r.agent_id, "agent-1");
-                assert_eq!(r.tool_name, "shell_exec");
+                assert_eq!(r.tool_name, "shell");
             }
             ApprovalEvent::Resolved(_) => panic!("expected RequestCreated, got Resolved"),
         }
@@ -353,7 +360,7 @@ mod tests {
     async fn test_subscribe_resolved() {
         let mgr = Arc::new(default_manager());
         let mut rx = mgr.subscribe();
-        let req = make_request("agent-1", "shell_exec", 60);
+        let req = make_request("agent-1", "shell", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
         // Spawn task to resolve after a short delay
@@ -384,7 +391,7 @@ mod tests {
         let mgr = Arc::new(default_manager());
         let mut rx1 = mgr.subscribe();
         let mut rx2 = mgr.subscribe();
-        let req = make_request("agent-1", "shell_exec", 60);
+        let req = make_request("agent-1", "shell", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {
@@ -400,7 +407,7 @@ mod tests {
     async fn test_no_subscribers_still_works() {
         let mgr = Arc::new(default_manager());
         // No subscription created
-        let req = make_request("agent-1", "shell_exec", 60);
+        let req = make_request("agent-1", "shell", 60);
         let request_id = req.id;
         let mgr2 = Arc::clone(&mgr);
         tokio::spawn(async move {

@@ -1,5 +1,6 @@
 use argus_wing::ArgusWing;
 use subscription::ThreadSubscriptions;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod commands;
 mod events;
@@ -7,6 +8,14 @@ mod subscription;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize tracing subscriber — logs go to stderr, controlled by RUST_LOG env var
+    // e.g., RUST_LOG=arguswing=debug,argus-turn=debug,argus=debug
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_target(true))
+        .with(filter)
+        .init();
+
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
     let wing = rt.block_on(ArgusWing::init(None)).expect("初始化失败");
 

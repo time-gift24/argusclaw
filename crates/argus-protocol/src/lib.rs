@@ -4,10 +4,12 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod hooks;
+pub mod http_client;
 pub mod ids;
 pub mod llm;
 pub mod message_override;
 pub mod risk_level;
+pub mod ssrf;
 pub mod token_usage;
 pub mod tool;
 
@@ -60,4 +62,8 @@ pub use llm::{
     sanitize_tool_messages,
 };
 
+pub use ssrf::{
+    MAX_RESPONSE_SIZE, MAX_TIMEOUT_SECS, is_blocked_ip, is_blocked_ip_v4, is_blocked_ip_v6,
+    validate_url,
+};
 pub use tool::{NamedTool, ToolError};

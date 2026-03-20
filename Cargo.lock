@@ -230,6 +230,8 @@ dependencies = [
  "dashmap 5.5.3",
  "futures-core",
  "futures-util",
+ "once_cell",
+ "reqwest 0.12.28",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -329,13 +331,16 @@ dependencies = [
  "async-trait",
  "dashmap 6.1.0",
  "glob",
+ "once_cell",
  "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1465,6 +1470,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

@@ -262,7 +262,17 @@ impl TemplateManager {
             reason: format!("failed to fetch placeholder: {}", e),
         })?;
 
-        let AgentRow { display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config } = placeholder;
+        let AgentRow {
+            display_name,
+            description,
+            version,
+            provider_id,
+            system_prompt,
+            tool_names,
+            max_tokens,
+            temperature,
+            thinking_config,
+        } = placeholder;
 
         let mut tx = self
             .pool
@@ -276,7 +286,9 @@ impl TemplateManager {
         sqlx::query("DELETE FROM agents WHERE id = 0")
             .execute(&mut *tx)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Insert the new row with auto-generated id.
         // ON CONFLICT: if name already exists (from seed), do nothing.
@@ -306,15 +318,13 @@ impl TemplateManager {
 
         let repaired_id = if last_id == 0 {
             // ON CONFLICT fired: name already exists from seed, find it
-            sqlx::query_scalar(
-                "SELECT id FROM agents WHERE display_name = ? AND id != 0",
-            )
-            .bind(&display_name)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: format!("failed to get existing id for '{}': {}", display_name, e),
-            })?
+            sqlx::query_scalar("SELECT id FROM agents WHERE display_name = ? AND id != 0")
+                .bind(&display_name)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: format!("failed to get existing id for '{}': {}", display_name, e),
+                })?
         } else {
             last_id
         };

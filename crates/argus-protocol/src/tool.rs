@@ -17,6 +17,10 @@ pub enum ToolError {
     /// Tool execution failed.
     #[error("Tool '{tool_name}' execution failed: {reason}")]
     ExecutionFailed { tool_name: String, reason: String },
+
+    /// Request blocked by security policy (e.g., SSRF protection).
+    #[error("HTTP request to '{url}' blocked: {reason}")]
+    SecurityBlocked { url: String, reason: String },
 }
 
 /// Trait for defining tools that can be used by agents and LLMs.

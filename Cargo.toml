@@ -1,3 +1,10 @@
 [workspace]
 members = ["crates/argus-protocol", "crates/argus-log", "crates/argus-template", "crates/argus-session", "crates/argus-turn", "crates/argus-thread", "crates/argus-llm", "crates/argus-tool", "crates/argus-repository", "crates/argus-approval", "crates/argus-wing", "crates/argus-dev", "crates/argus-crypto", "crates/argus-auth", "crates/cli", "crates/desktop/src-tauri", "crates/argus-test-support"]
 resolver = "3"
+
+[workspace.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+once_cell = "1"
+url = "2"
+dashmap = "5"
+uuid = { version = "1", features = ["serde", "v4"] }

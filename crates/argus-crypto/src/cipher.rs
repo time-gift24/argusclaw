@@ -103,11 +103,11 @@ impl Cipher {
         let key_material = self.key_source.key_material()?;
         let salt = Salt::new(HKDF_SHA256, ARGUSCLAW_KEY_SALT);
         let prk = salt.extract(&key_material);
-        let okm = prk
-            .expand(&[ARGUSCLAW_KEY_INFO], Aes256Key)
-            .map_err(|_| CryptoError::SecretEncryptionFailed {
+        let okm = prk.expand(&[ARGUSCLAW_KEY_INFO], Aes256Key).map_err(|_| {
+            CryptoError::SecretEncryptionFailed {
                 reason: "hkdf expansion failed".to_string(),
-            })?;
+            }
+        })?;
 
         let mut key_bytes = [0_u8; 32];
         okm.fill(&mut key_bytes)
@@ -115,12 +115,11 @@ impl Cipher {
                 reason: "hkdf fill failed".to_string(),
             })?;
 
-        let unbound_key =
-            UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
-                CryptoError::SecretEncryptionFailed {
-                    reason: "failed to initialize aes-256-gcm key".to_string(),
-                }
-            })?;
+        let unbound_key = UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| {
+            CryptoError::SecretEncryptionFailed {
+                reason: "failed to initialize aes-256-gcm key".to_string(),
+            }
+        })?;
 
         Ok(LessSafeKey::new(unbound_key))
     }

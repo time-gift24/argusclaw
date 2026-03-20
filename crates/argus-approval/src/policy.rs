@@ -26,11 +26,11 @@ pub const MAX_TIMEOUT_SECS: u64 = 300;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApprovalPolicy {
-    /// Tools that always require approval. Default: `["shell_exec"]`.
+    /// Tools that always require approval. Default: `["shell", "http"]`.
     ///
     /// Accepts either a list of tool names or a boolean shorthand:
     /// - `require_approval = false` → empty list (no tools require approval)
-    /// - `require_approval = true`  → `["shell_exec"]` (the default set)
+    /// - `require_approval = true`  → `["shell", "http"]` (the default set)
     #[serde(deserialize_with = "deserialize_require_approval")]
     pub require_approval: Vec<String>,
     /// Timeout in seconds. Default: 60, range: 10..=300.
@@ -45,7 +45,7 @@ pub struct ApprovalPolicy {
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
-            require_approval: vec!["shell_exec".to_string()],
+            require_approval: vec!["shell".to_string(), "http".to_string()],
             timeout_secs: 60,
             auto_approve_autonomous: false,
             auto_approve: false,
@@ -54,8 +54,8 @@ impl Default for ApprovalPolicy {
 }
 
 /// Custom deserializer that accepts:
-/// - A list of strings: `["shell_exec", "file_write"]`
-/// - A boolean: `false` → `[]`, `true` → `["shell_exec"]`
+/// - A list of strings: `["shell", "http", "file_write"]`
+/// - A boolean: `false` → `[]`, `true` → `["shell", "http"]`
 fn deserialize_require_approval<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -73,7 +73,7 @@ where
 
         fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
             Ok(if v {
-                vec!["shell_exec".to_string()]
+                vec!["shell".to_string(), "http".to_string()]
             } else {
                 vec![]
             })
@@ -164,7 +164,10 @@ mod tests {
     fn policy_default_valid() {
         let policy = ApprovalPolicy::default();
         assert!(policy.validate().is_ok());
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell".to_string(), "http".to_string()]
+        );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
         assert!(!policy.auto_approve);
@@ -174,7 +177,10 @@ mod tests {
     fn policy_serde_default() {
         let policy: ApprovalPolicy = serde_json::from_str("{}").unwrap();
         assert_eq!(policy.timeout_secs, 60);
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell".to_string(), "http".to_string()]
+        );
         assert!(!policy.auto_approve_autonomous);
     }
 
@@ -188,14 +194,15 @@ mod tests {
     #[test]
     fn policy_require_approval_bool_true() {
         let policy: ApprovalPolicy = serde_json::from_str(r#"{"require_approval": true}"#).unwrap();
-        assert_eq!(policy.require_approval, vec!["shell_exec"]);
+        assert_eq!(policy.require_approval, vec!["shell", "http"]);
     }
 
     #[test]
     fn policy_requires_approval_method() {
         let policy = ApprovalPolicy::default();
-        assert!(policy.requires_approval("shell_exec"));
+        assert!(policy.requires_approval("shell"));
         assert!(!policy.requires_approval("file_read"));
+        assert!(policy.requires_approval("http"));
     }
 
     #[test]
@@ -243,7 +250,7 @@ mod tests {
     #[test]
     fn policy_empty_tool_name() {
         let mut policy = valid_policy();
-        policy.require_approval = vec!["shell_exec".into(), "".into()];
+        policy.require_approval = vec!["http".into(), "".into()];
         let err = policy.validate().unwrap_err();
         assert!(err.contains("require_approval[1]"), "{err}");
         assert!(err.contains("empty"), "{err}");
@@ -298,7 +305,7 @@ mod tests {
     #[test]
     fn policy_serde_roundtrip() {
         let policy = ApprovalPolicy {
-            require_approval: vec!["shell_exec".into(), "file_delete".into()],
+            require_approval: vec!["shell".into(), "file_delete".into()],
             timeout_secs: 120,
             auto_approve_autonomous: true,
             auto_approve: false,
