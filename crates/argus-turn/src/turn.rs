@@ -19,7 +19,7 @@ use argus_protocol::llm::{
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
-    ThreadEvent, TokenUsage, ToolHookContext,
+    ThreadEvent, TokenUsage, ToolHookContext, sanitize_tool_output,
 };
 
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
@@ -619,8 +619,24 @@ impl Turn {
 
                     // Add tool result messages to history
                     for result in tool_results {
-                        let result_len = result.content.len();
-                        let preview = result.content.chars().take(200).collect::<String>();
+                        let (sanitized_content, warning) =
+                            sanitize_tool_output(&result.content, &self.config.safety_config);
+
+                        if let Some(w) = &warning {
+                            tracing::warn!(
+                                thread_id = %self.thread_id,
+                                turn_number = %self.turn_number,
+                                tool_call_id = %result.tool_call_id,
+                                tool_name = %result.name,
+                                pattern = %w.pattern,
+                                original_len = w.original_len,
+                                truncated_len = w.truncated_len,
+                                "Tool output was truncated"
+                            );
+                        }
+
+                        let result_len = sanitized_content.len();
+                        let preview = sanitized_content.chars().take(200).collect::<String>();
                         tracing::info!(
                             thread_id = %self.thread_id,
                             turn_number = %self.turn_number,
@@ -633,7 +649,7 @@ impl Turn {
                         messages.push(ChatMessage::tool_result(
                             result.tool_call_id,
                             result.name,
-                            result.content,
+                            sanitized_content,
                         ));
                     }
 

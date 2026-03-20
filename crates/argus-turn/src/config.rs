@@ -9,7 +9,7 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
-use argus_protocol::{AgentRecord, HookRegistry, ThreadEvent};
+use argus_protocol::{AgentRecord, HookRegistry, SafetyConfig, ThreadEvent};
 use argus_tool::ToolManager;
 
 /// Turn execution configuration.
@@ -32,6 +32,9 @@ pub struct TurnConfig {
     /// Maximum number of loop iterations (LLM -> Tool -> LLM cycles).
     #[builder(default = Some(50))]
     pub max_iterations: Option<u32>,
+    /// Safety configuration for tool output sanitization.
+    #[builder(default = "SafetyConfig::new()")]
+    pub safety_config: SafetyConfig,
 }
 
 impl TurnConfig {
@@ -41,6 +44,7 @@ impl TurnConfig {
             max_tool_calls: Some(10),
             tool_timeout_secs: Some(120),
             max_iterations: Some(50),
+            safety_config: SafetyConfig::new(),
         }
     }
 }
