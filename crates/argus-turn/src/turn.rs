@@ -357,7 +357,7 @@ impl Turn {
     ) -> tokio::task::JoinHandle<()> {
         let mut stream_rx = stream_tx.subscribe();
 
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             tracing::debug!(
                 thread_id = %thread_id,
                 turn_number = %turn_number,
@@ -426,9 +426,7 @@ impl Turn {
                 turn_number = %turn_number,
                 "Event forwarder stopped (stream channel closed)"
             );
-        });
-
-        handle
+        })
     }
 
     /// Internal method: trigger hooks and return the action.
@@ -593,7 +591,10 @@ impl Turn {
 
                     return Ok(output);
                 }
-                NextAction::ContinueWithTools { tool_calls, content } => {
+                NextAction::ContinueWithTools {
+                    tool_calls,
+                    content,
+                } => {
                     tracing::debug!(
                         thread_id = %self.thread_id,
                         turn_number = %self.turn_number,
@@ -790,7 +791,10 @@ impl Turn {
                     );
                     messages.push(assistant_msg);
 
-                    Ok(NextAction::ContinueWithTools { tool_calls, content })
+                    Ok(NextAction::ContinueWithTools {
+                        tool_calls,
+                        content,
+                    })
                 } else if content.as_deref().is_some_and(|value| !value.is_empty())
                     || reasoning_content
                         .as_deref()

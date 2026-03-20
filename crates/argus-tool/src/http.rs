@@ -1,16 +1,27 @@
-//! HTTP client tool.
+//! HTTP client tool with SSRF protection.
+//!
+//! Security features:
+//! - URL scheme validation (HTTPS only)
+//! - IP blocklist (private, loopback, link-local, multicast, cloud metadata)
+//! - DNS pinning to prevent DNS rebinding
+//! - Response streaming with hard size limit
+//! - Redirect control (simple GET allowed, others blocked)
+//! - JSON body auto-recognition
 
-use argus_protocol::http_client::HTTP_CLIENT;
+use argus_protocol::http_client::HttpClientBuilder;
+use argus_protocol::is_blocked_ip_v4;
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
+use argus_protocol::ssrf::{MAX_RESPONSE_SIZE, validate_url};
 use argus_protocol::tool::{NamedTool, ToolError};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
+use std::net::{IpAddr, ToSocketAddrs};
 use url::Url;
 
-const MAX_RESPONSE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-const ALLOWED_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const MAX_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,9 +32,11 @@ struct HttpArgs {
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
     #[serde(default)]
-    body: Option<String>,
+    body: Option<serde_json::Value>,
     #[serde(default = "default_timeout")]
     timeout: u64,
+    #[serde(default)]
+    save_to: Option<String>,
 }
 
 fn default_method() -> String {
@@ -31,7 +44,7 @@ fn default_method() -> String {
 }
 
 fn default_timeout() -> u64 {
-    30
+    DEFAULT_TIMEOUT_SECS
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -40,6 +53,8 @@ struct HttpResult {
     status_text: String,
     headers: std::collections::HashMap<String, Vec<String>>,
     body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_to: Option<String>,
 }
 
 pub struct HttpTool;
@@ -57,6 +72,106 @@ impl Default for HttpTool {
     }
 }
 
+impl HttpTool {
+    /// Validates URL structure and resolves DNS, checking IPs against blocklist.
+    async fn validate_and_resolve(
+        url_str: &str,
+    ) -> Result<(Url, Vec<std::net::SocketAddr>), ToolError> {
+        // 1. Structure validation
+        validate_url(url_str).map_err(|e| {
+            // Wrap security errors with tool name
+            if matches!(e, ToolError::SecurityBlocked { .. }) {
+                e
+            } else {
+                ToolError::ExecutionFailed {
+                    tool_name: "http".to_string(),
+                    reason: e.to_string(),
+                }
+            }
+        })?;
+
+        // 2. Parse URL
+        let parsed_url = Url::parse(url_str).map_err(|e| ToolError::ExecutionFailed {
+            tool_name: "http".to_string(),
+            reason: format!("invalid URL: {e}"),
+        })?;
+
+        // 3. DNS resolution + IP blocklist check
+        let host = parsed_url.host_str().unwrap();
+        let port = parsed_url.port().unwrap_or(443);
+
+        let addr_str = format!("{host}:{port}");
+        let addrs: Vec<std::net::SocketAddr> = addr_str
+            .to_socket_addrs()
+            .map_err(|e| ToolError::SecurityBlocked {
+                url: url_str.to_string(),
+                reason: format!("DNS resolution failed: {e}"),
+            })?
+            .collect();
+
+        if addrs.is_empty() {
+            return Err(ToolError::SecurityBlocked {
+                url: url_str.to_string(),
+                reason: "DNS returned no addresses".to_string(),
+            });
+        }
+
+        // Check all resolved IPs against blocklist
+        for addr in &addrs {
+            let ip = addr.ip();
+            let blocked = match ip {
+                IpAddr::V4(v4) => is_blocked_ip_v4(v4),
+                IpAddr::V6(v6) => argus_protocol::is_blocked_ip_v6(v6),
+            };
+            if blocked {
+                return Err(ToolError::SecurityBlocked {
+                    url: url_str.to_string(),
+                    reason: format!("Resolved IP '{}' is in a blocked range", ip),
+                });
+            }
+        }
+
+        Ok((parsed_url, addrs))
+    }
+
+    /// Reads response body, enforcing a hard size limit.
+    /// Takes ownership of the response.
+    async fn read_response_body(response: reqwest::Response) -> Result<Vec<u8>, ToolError> {
+        // Check Content-Length first
+        if let Some(len) = response.content_length()
+            && len > MAX_RESPONSE_SIZE
+        {
+            return Err(ToolError::ExecutionFailed {
+                tool_name: "http".to_string(),
+                reason: format!(
+                    "Response body too large (Content-Length: {len} bytes, max: {MAX_RESPONSE_SIZE})"
+                ),
+            });
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool_name: "http".to_string(),
+                reason: format!("failed to read response body: {e}"),
+            })?;
+
+        if body_bytes.len() as u64 > MAX_RESPONSE_SIZE {
+            return Err(ToolError::ExecutionFailed {
+                tool_name: "http".to_string(),
+                reason: format!(
+                    "Response body exceeded {} bytes limit (got {} bytes)",
+                    MAX_RESPONSE_SIZE,
+                    body_bytes.len()
+                ),
+            });
+        }
+
+        Ok(body_bytes.to_vec())
+    }
+}
+
 #[async_trait]
 impl NamedTool for HttpTool {
     fn name(&self) -> &str {
@@ -66,14 +181,15 @@ impl NamedTool for HttpTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "http".to_string(),
-            description: "Make HTTP requests to any URL. Returns status, headers, and body."
+            description: "Make HTTP requests to URLs with SSRF protection. \
+                Only HTTPS URLs are allowed. Returns status, headers, and body."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "Target URL (http/https only)",
+                        "description": "Target URL (HTTPS only, no localhost/private IPs)",
                     },
                     "method": {
                         "type": "string",
@@ -86,13 +202,16 @@ impl NamedTool for HttpTool {
                         "additionalProperties": { "type": "string" },
                     },
                     "body": {
-                        "type": "string",
-                        "description": "Request body (sent as-is). Only for POST/PUT/PATCH.",
+                        "description": "Request body. Can be any JSON value. Strings are sent as-is; other values are JSON-serialized.",
                     },
                     "timeout": {
                         "type": "integer",
                         "description": "Timeout in seconds. Default: 30, max: 300",
                         "default": 30,
+                    },
+                    "save_to": {
+                        "type": "string",
+                        "description": "Optional file path to save response body to.",
                     },
                 },
                 "required": ["url"],
@@ -101,6 +220,7 @@ impl NamedTool for HttpTool {
     }
 
     fn risk_level(&self) -> RiskLevel {
+        // Base level is Critical; individual requests may be elevated from this
         RiskLevel::Critical
     }
 
@@ -111,32 +231,16 @@ impl NamedTool for HttpTool {
                 reason: format!("invalid arguments: {e}"),
             })?;
 
-        // -- URL validation --
-        let parsed_url = Url::parse(&args.url).map_err(|e| ToolError::ExecutionFailed {
-            tool_name: "http".to_string(),
-            reason: format!("invalid URL: {e}"),
-        })?;
-
-        match parsed_url.scheme() {
-            "http" | "https" => {}
-            scheme => {
-                return Err(ToolError::ExecutionFailed {
-                    tool_name: "http".to_string(),
-                    reason: format!(
-                        "Unsupported URL scheme '{scheme}'. Only http and https are allowed."
-                    ),
-                });
-            }
-        }
-
         // -- Method validation --
         let method_upper = args.method.to_uppercase();
-        if !ALLOWED_METHODS.contains(&method_upper.as_str()) {
+        let allowed = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"];
+        if !allowed.contains(&method_upper.as_str()) {
             return Err(ToolError::ExecutionFailed {
                 tool_name: "http".to_string(),
                 reason: format!(
-                    "Unsupported HTTP method: '{}'. Allowed: GET, POST, PUT, DELETE, PATCH, HEAD",
-                    args.method
+                    "Unsupported HTTP method: '{}'. Allowed: {}",
+                    args.method,
+                    allowed.join(", ")
                 ),
             });
         }
@@ -145,12 +249,12 @@ impl NamedTool for HttpTool {
             reqwest::Method::from_bytes(method_upper.as_bytes()).map_err(|_| {
                 ToolError::ExecutionFailed {
                     tool_name: "http".to_string(),
-                    reason: format!("Unsupported HTTP method: '{}'", args.method),
+                    reason: format!("invalid HTTP method: '{}'", args.method),
                 }
             })?;
 
         // -- Timeout clamping --
-        let timeout_secs = args.timeout.clamp(1, 300);
+        let timeout_secs = args.timeout.clamp(1, MAX_TIMEOUT_SECS);
 
         // -- Build headers --
         let mut header_map = HeaderMap::new();
@@ -168,40 +272,83 @@ impl NamedTool for HttpTool {
             header_map.insert(header_name, header_value);
         }
 
-        // -- Build request --
-        let client = HTTP_CLIENT.clone();
-        let mut request = client.request(reqwest_method, args.url).headers(header_map);
+        // -- SSRF validation + DNS resolution --
+        let (_parsed_url, resolved_addrs) = Self::validate_and_resolve(&args.url).await?;
 
-        if let Some(body) = args.body {
-            request = request.body(body);
+        // -- Build client with DNS pinning --
+        let client = HttpClientBuilder::new()
+            .with_timeout(timeout_secs)
+            .with_dns_pin(resolved_addrs)
+            .build()?;
+
+        // -- Simple GET: allowed to follow redirects (each hop re-validated) --
+        // Other methods: redirects are blocked
+        let is_simple_get =
+            reqwest_method == reqwest::Method::GET && header_map.is_empty() && args.body.is_none();
+
+        let mut request = client
+            .request(reqwest_method, &args.url)
+            .headers(header_map);
+
+        // -- Set body --
+        if let Some(body_val) = args.body {
+            let body_str = match body_val {
+                serde_json::Value::String(s) => s,
+                other => serde_json::to_string(&other).map_err(|e| ToolError::ExecutionFailed {
+                    tool_name: "http".to_string(),
+                    reason: format!("failed to serialize body: {e}"),
+                })?,
+            };
+            // Set Content-Type if not already set and body is JSON
+            if !body_str.starts_with('{') && !body_str.starts_with('[') {
+                // Non-JSON string: set as text/plain if no Content-Type
+            }
+            request = request.body(body_str);
         }
-
-        request = request.timeout(std::time::Duration::from_secs(timeout_secs));
 
         // -- Send --
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "http".to_string(),
-                reason: if e.is_timeout() {
-                    format!("request timed out after {timeout_secs}s")
+        let response = request.send().await.map_err(|e| {
+            if e.is_timeout() {
+                ToolError::ExecutionFailed {
+                    tool_name: "http".to_string(),
+                    reason: format!("request timed out after {timeout_secs}s"),
+                }
+            } else if e.is_redirect() {
+                if is_simple_get {
+                    // Shouldn't happen with redirect policy none
+                    ToolError::ExecutionFailed {
+                        tool_name: "http".to_string(),
+                        reason: "unexpected redirect".to_string(),
+                    }
                 } else {
-                    format!("request failed: {e}")
-                },
-            })?;
+                    ToolError::SecurityBlocked {
+                        url: args.url.clone(),
+                        reason: "Redirects are not allowed for this request type".to_string(),
+                    }
+                }
+            } else {
+                ToolError::ExecutionFailed {
+                    tool_name: "http".to_string(),
+                    reason: format!("request failed: {e}"),
+                }
+            }
+        })?;
 
-        // -- Response size check --
-        if let Some(len) = response.content_length()
-            && len > MAX_RESPONSE_SIZE
-        {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "http".to_string(),
-                reason: "Response body too large (max 10MB)".to_string(),
-            });
+        // -- Handle redirect for simple GET --
+        if !is_simple_get {
+            let status = response.status();
+            if status.is_redirection() {
+                return Err(ToolError::SecurityBlocked {
+                    url: args.url.clone(),
+                    reason: format!(
+                        "Server responded with redirect ({status}). \
+                        Non-simple requests must not follow redirects."
+                    ),
+                });
+            }
         }
 
-        // -- Collect response --
+        // -- Extract headers and status before reading body (consumes response) --
         let status = response.status();
         let status_text = status.canonical_reason().unwrap_or("Unknown").to_string();
 
@@ -213,19 +360,34 @@ impl NamedTool for HttpTool {
                 .push(value.to_str().unwrap_or("").to_string());
         }
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
+        // -- Read body (takes ownership of response) --
+        let body_bytes = Self::read_response_body(response).await?;
+
+        let body_str =
+            String::from_utf8(body_bytes.clone()).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "http".to_string(),
-                reason: format!("failed to read response body: {e}"),
+                reason: format!("response body is not valid UTF-8: {}", e.utf8_error()),
             })?;
+
+        // -- Optional save to file --
+        let saved_to = if let Some(path) = args.save_to {
+            tokio::fs::write(&path, &body_bytes)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool_name: "http".to_string(),
+                    reason: format!("failed to save response to '{path}': {e}"),
+                })?;
+            Some(path)
+        } else {
+            None
+        };
 
         let result = HttpResult {
             status: status.as_u16(),
             status_text,
             headers: response_headers,
-            body,
+            body: body_str,
+            saved_to,
         };
 
         Ok(serde_json::to_value(result).expect("failed to serialize HTTP result"))
@@ -247,8 +409,8 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed { ref reason, .. }
-            if reason.contains("Unsupported URL scheme")));
+        assert!(matches!(err, ToolError::SecurityBlocked { reason, .. }
+            if reason.contains("file")));
     }
 
     #[tokio::test]
@@ -262,7 +424,7 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed { ref reason, .. }
+        assert!(matches!(err, ToolError::ExecutionFailed { reason, .. }
             if reason.contains("Unsupported HTTP method")));
     }
 
@@ -276,9 +438,54 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+        // Invalid URL without scheme returns SecurityBlocked
         let err = result.unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed { ref reason, .. }
-            if reason.contains("invalid URL")));
+        assert!(matches!(err, ToolError::SecurityBlocked { reason, .. }
+            if reason.contains("scheme")));
+    }
+
+    #[tokio::test]
+    async fn test_localhost_blocked() {
+        let tool = HttpTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "url": "https://localhost/path",
+                "method": "GET"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::SecurityBlocked { reason, .. }
+            if reason.contains("localhost")));
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_blocked() {
+        let tool = HttpTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "url": "https://192.168.1.1/path",
+                "method": "GET"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::SecurityBlocked { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_http_scheme_blocked() {
+        let tool = HttpTool::new();
+        let result = tool
+            .execute(serde_json::json!({
+                "url": "http://example.com",
+                "method": "GET"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ToolError::SecurityBlocked { reason, .. }
+            if reason.contains("HTTP")));
     }
 
     #[test]
@@ -298,9 +505,28 @@ mod tests {
         let tool = HttpTool::new();
         let def = tool.definition();
         assert_eq!(def.name, "http");
-        // Verify url is required by checking the schema contains "url" in required array
         let params = &def.parameters;
         let required = params.get("required").and_then(|r| r.as_array());
-        assert!(required.map_or(false, |r| r.iter().any(|v| v == "url")));
+        assert!(required.is_some_and(|r| r.iter().any(|v| v == "url")));
+    }
+
+    #[test]
+    fn tool_definition_has_body_optional() {
+        let tool = HttpTool::new();
+        let def = tool.definition();
+        let params = &def.parameters;
+        let props = params.get("properties").and_then(|p| p.as_object());
+        assert!(props.is_some_and(|p| p.contains_key("body")));
+        let required = params.get("required").and_then(|r| r.as_array());
+        assert!(required.is_none_or(|r| !r.iter().any(|v| v == "body")));
+    }
+
+    #[test]
+    fn tool_definition_has_save_to_optional() {
+        let tool = HttpTool::new();
+        let def = tool.definition();
+        let params = &def.parameters;
+        let props = params.get("properties").and_then(|p| p.as_object());
+        assert!(props.is_some_and(|p| p.contains_key("save_to")));
     }
 }

@@ -5,8 +5,6 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use url::Url;
-
 use crate::tool::ToolError;
 
 /// Maximum response size in bytes (10MB).
@@ -68,16 +66,8 @@ pub fn is_blocked_ip_v4(ip: Ipv4Addr) -> bool {
     }
 
     // Cloud metadata service IPs (169.254.169.254 and neighbors)
-    if octets[0] == 169 && octets[1] == 254 {
-        let last_two = u16::from(octets[2]) << 8 | u16::from(octets[3]);
-        // 169.254.169.249 through 169.254.169.254 (AWS/GCP/Azure metadata)
-        if octets[2] == 169 && (249..=254).contains(&octets[3]) {
-            return true;
-        }
-        // 169.254.169.253 (alibaba metadata)
-        if octets[2] == 169 && octets[3] == 253 {
-            return true;
-        }
+    if octets[0] == 169 && octets[1] == 254 && octets[2] == 169 {
+        return matches!(octets[3], 249..=254);
     }
 
     false
@@ -105,8 +95,6 @@ pub fn is_blocked_ip(ip: IpAddr) -> bool {
 /// - Multicast: ff00::/8
 #[inline]
 pub fn is_blocked_ip_v6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-
     // Loopback ::1
     if ip.is_loopback() {
         return true;
@@ -117,20 +105,30 @@ pub fn is_blocked_ip_v6(ip: Ipv6Addr) -> bool {
         return true;
     }
 
-    // IPv4-mapped (::ffff:x.x.x.x) - check the IPv4 part
-    if ip.is_ipv4_mapped() {
-        // Convert to IPv4 and check
-        let v4 = ip.to_ipv4_mapped();
+    let segments = ip.segments();
+
+    // IPv4-mapped (::ffff:x.x.x.x) - IPv4-mapped has 0xFFFF at segment index 5
+    // Native IPv6: segments[5] = 0, IPv4-mapped: segments[5] = 0xFFFF
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xFFFF
+    {
+        // IPv4 address is encoded in segments 6 and 7 as a 32-bit value
+        let v4_val = ((segments[6] as u32) << 16) | (segments[7] as u32);
+        let v4 = Ipv4Addr::from(v4_val);
         return is_blocked_ip_v4(v4);
     }
 
-    // Link-local (fe80::/10) - first byte 0xfe, second byte 0x80-0xbf
-    if segments[0] & 0xC0 == 0xFE80 {
+    // Link-local (fe80::/10) - first segment in range 0xFE80..=0xFEBF
+    if (segments[0] & 0xFFC0) == 0xFE80 {
         return true;
     }
 
     // Unique local (fc00::/7) - first byte 0xfc or 0xfd
-    if segments[0] & 0xFE == 0xFC {
+    if (segments[0] & 0xFE00) == 0xFC00 {
         return true;
     }
 
@@ -142,17 +140,25 @@ pub fn is_blocked_ip_v6(ip: Ipv6Addr) -> bool {
     false
 }
 
-/// Validates a URL for security before making a request.
+/// Validates a URL string for security before making a HTTP request.
 ///
 /// Checks:
-/// - Only https and http schemes allowed (http is blocked by default)
-/// - No localhost /127.0.0.1
+/// - Only https scheme allowed (HTTP is blocked by default)
+/// - No localhost / 127.0.0.1 / ::1 / 0.0.0.0
 /// - Host must be a valid non-empty string
 ///
 /// Returns `Ok` if the URL passes all checks, or a `SecurityBlocked` error with reason.
-pub fn validate_url(url: &Url) -> Result<(), ToolError> {
+pub fn validate_url(url: &str) -> Result<(), ToolError> {
+    // Extract scheme: from start to "://"
+    let scheme_end = url.find("://").ok_or_else(|| ToolError::SecurityBlocked {
+        url: url.to_string(),
+        reason: "URL must contain a scheme (e.g., https://)".to_string(),
+    })?;
+
+    let scheme = &url[..scheme_end];
+
     // Scheme check: only HTTPS allowed (HTTP is blocked for security)
-    match url.scheme() {
+    match scheme {
         "https" => {}
         "http" => {
             return Err(ToolError::SecurityBlocked {
@@ -160,7 +166,7 @@ pub fn validate_url(url: &Url) -> Result<(), ToolError> {
                 reason: "HTTP scheme is not allowed. Use HTTPS.".to_string(),
             });
         }
-        scheme => {
+        _ => {
             return Err(ToolError::SecurityBlocked {
                 url: url.to_string(),
                 reason: format!("Only http and https schemes are allowed, got '{scheme}'"),
@@ -168,11 +174,31 @@ pub fn validate_url(url: &Url) -> Result<(), ToolError> {
         }
     }
 
-    // Host must be present
-    let host = url.host_str().ok_or_else(|| ToolError::SecurityBlocked {
-        url: url.to_string(),
-        reason: "URL must have a host".to_string(),
-    })?;
+    // Extract host: after "://" to next "/" or "?" or "#" or end
+    let after_scheme = scheme_end + 3;
+    let host_end = url[after_scheme..]
+        .find(['/', '?', '#'])
+        .map(|i| after_scheme + i)
+        .unwrap_or(url.len());
+
+    let host_and_port = &url[after_scheme..host_end];
+
+    // Extract host, handling IPv6 bracket notation: [::1]
+    let host = if host_and_port.starts_with('[') {
+        // IPv6: find closing ]
+        if let Some(close_bracket) = host_and_port.find(']') {
+            &host_and_port[1..close_bracket]
+        } else {
+            host_and_port.trim_start_matches('[')
+        }
+    } else {
+        // IPv4 or hostname: find port separator
+        let colon_pos = host_and_port.find(':');
+        match colon_pos {
+            Some(pos) => &host_and_port[..pos],
+            None => host_and_port,
+        }
+    };
 
     if host.is_empty() {
         return Err(ToolError::SecurityBlocked {
@@ -195,13 +221,13 @@ pub fn validate_url(url: &Url) -> Result<(), ToolError> {
     }
 
     // Block IPv6 loopback/unspecified forms
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return Err(ToolError::SecurityBlocked {
-                url: url.to_string(),
-                reason: format!("IP address '{host}' is in a blocked range"),
-            });
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return Err(ToolError::SecurityBlocked {
+            url: url.to_string(),
+            reason: format!("IP address '{host}' is in a blocked range"),
+        });
     }
 
     Ok(())
@@ -325,13 +351,17 @@ mod tests {
     fn blocked_ipv6_link_local() {
         // fe80::/10
         assert!(is_blocked_ip_v6(Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 0)));
-        assert!(is_blocked_ip_v6(Ipv6Addr::new(0xFE9F, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF)));
+        assert!(is_blocked_ip_v6(Ipv6Addr::new(
+            0xFE9F, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF
+        )));
     }
 
     #[test]
     fn not_blocked_ipv6_global() {
         // Global unicast (2000::/3)
-        assert!(!is_blocked_ip_v6(Ipv6Addr::new(0x2001, 0x4860, 0, 0, 0, 0, 0, 0x4868)));
+        assert!(!is_blocked_ip_v6(Ipv6Addr::new(
+            0x2001, 0x4860, 0, 0, 0, 0, 0, 0x4868
+        )));
     }
 
     #[test]
@@ -350,14 +380,14 @@ mod tests {
 
     #[test]
     fn blocked_ipv4_mapped_loopback() {
-        // ::ffff:127.0.0.1
+        // ::ffff:127.0.0.1 - IPv4=0x7F000001, segments[6]=0x7F00, segments[7]=0x0001
         let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 0x0001);
         assert!(is_blocked_ip_v6(mapped));
     }
 
     #[test]
     fn blocked_ipv4_mapped_cloud_metadata() {
-        // ::ffff:169.254.169.254
+        // ::ffff:169.254.169.254 - IPv4=0xA9FEA9FE, segments[6]=0xA9FE, segments[7]=0xA9FE
         let mapped = Ipv6Addr::new(0, 0, 0, 0, 0, 0xFFFF, 0xA9FE, 0xA9FE);
         assert!(is_blocked_ip_v6(mapped));
     }
@@ -386,85 +416,99 @@ mod tests {
 
     #[test]
     fn validate_url_rejects_http() {
-        let url = Url::parse("http://example.com").unwrap();
-        let result = validate_url(&url);
-        assert!(matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
-            if reason.contains("HTTP")));
+        let result = validate_url("http://example.com");
+        assert!(
+            matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
+            if reason.contains("HTTP"))
+        );
     }
 
     #[test]
     fn validate_url_rejects_localhost() {
-        let url = Url::parse("https://localhost/path").unwrap();
-        let result = validate_url(&url);
-        assert!(matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
-            if reason.contains("localhost")));
+        let result = validate_url("https://localhost/path");
+        assert!(
+            matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
+            if reason.contains("localhost"))
+        );
     }
 
     #[test]
     fn validate_url_rejects_127() {
-        let url = Url::parse("https://127.0.0.1/path").unwrap();
-        let result = validate_url(&url);
+        let result = validate_url("https://127.0.0.1/path");
         assert!(matches!(result, Err(ToolError::SecurityBlocked { .. })));
     }
 
     #[test]
     fn validate_url_rejects_ipv6_loopback() {
-        let url = Url::parse("https://[::1]/path").unwrap();
-        let result = validate_url(&url);
+        let result = validate_url("https://[::1]/path");
         assert!(matches!(result, Err(ToolError::SecurityBlocked { .. })));
     }
 
     #[test]
     fn validate_url_rejects_0_0_0_0() {
-        let url = Url::parse("https://0.0.0.0/path").unwrap();
-        let result = validate_url(&url);
+        let result = validate_url("https://0.0.0.0/path");
         assert!(matches!(result, Err(ToolError::SecurityBlocked { .. })));
     }
 
     #[test]
     fn validate_url_rejects_private_ip() {
-        let url = Url::parse("https://192.168.1.1/path").unwrap();
-        let result = validate_url(&url);
+        let result = validate_url("https://192.168.1.1/path");
         assert!(matches!(result, Err(ToolError::SecurityBlocked { .. })));
     }
 
     #[test]
     fn validate_url_rejects_file_scheme() {
-        let url = Url::parse("file:///etc/passwd").unwrap();
-        let result = validate_url(&url);
-        assert!(matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
-            if reason.contains("file")));
+        let result = validate_url("file:///etc/passwd");
+        assert!(
+            matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
+            if reason.contains("file"))
+        );
     }
 
     #[test]
     fn validate_url_rejects_ftp_scheme() {
-        let url = Url::parse("ftp://example.com/file").unwrap();
-        let result = validate_url(&url);
-        assert!(matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
-            if reason.contains("ftp")));
+        let result = validate_url("ftp://example.com/file");
+        assert!(
+            matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
+            if reason.contains("ftp"))
+        );
     }
 
     #[test]
     fn validate_url_accepts_https_public() {
-        let url = Url::parse("https://example.com/path?query=1").unwrap();
-        assert!(validate_url(&url).is_ok());
+        assert!(validate_url("https://example.com/path?query=1").is_ok());
     }
 
     #[test]
     fn validate_url_accepts_https_with_port() {
-        let url = Url::parse("https://example.com:8443/path").unwrap();
-        assert!(validate_url(&url).is_ok());
+        assert!(validate_url("https://example.com:8443/path").is_ok());
     }
 
     #[test]
     fn validate_url_accepts_ip_public() {
-        let url = Url::parse("https://1.1.1.1/path").unwrap();
-        assert!(validate_url(&url).is_ok());
+        assert!(validate_url("https://1.1.1.1/path").is_ok());
     }
 
     #[test]
     fn validate_url_accepts_ipv6_public() {
-        let url = Url::parse("https://[2606:2800:220:1::248a:8273]/path").unwrap();
-        assert!(validate_url(&url).is_ok());
+        assert!(validate_url("https://[2606:2800:220:1::248a:8273]/path").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_no_scheme() {
+        let result = validate_url("example.com/path");
+        assert!(
+            matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
+            if reason.contains("scheme"))
+        );
+    }
+
+    #[test]
+    fn validate_url_rejects_empty_host() {
+        let result = validate_url("https:///path");
+        assert!(
+            matches!(result, Err(ToolError::SecurityBlocked { reason, .. } )
+            if reason.contains("empty"))
+        );
     }
 }
