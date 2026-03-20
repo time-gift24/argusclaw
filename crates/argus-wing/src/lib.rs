@@ -22,52 +22,37 @@
 //! }
 //! ```
 
+mod db;
+mod init;
+mod resolver;
+
 use std::sync::Arc;
+
+use crate::db::{ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::{AccountManager, CredentialStore};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_llm::ProviderManager;
+#[cfg(feature = "dev")]
+use argus_protocol::LlmProvider;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
+    AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
-use argus_session::{ProviderResolver, SessionManager, SessionSummary, ThreadSummary};
+use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
 use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
+pub use init::init_tracing;
+pub use resolver::ProviderManagerResolver;
+
 /// Default agent display name for the ArgusWing template.
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
-
-/// Wrapper that implements ProviderResolver for ProviderManager.
-///
-/// This bridges the argus-session ProviderResolver trait with argus-llm's ProviderManager.
-pub struct ProviderManagerResolver {
-    provider_manager: Arc<ProviderManager>,
-}
-
-impl ProviderManagerResolver {
-    /// Create a new resolver wrapper.
-    pub fn new(provider_manager: Arc<ProviderManager>) -> Self {
-        Self { provider_manager }
-    }
-}
-
-#[async_trait::async_trait]
-impl ProviderResolver for ProviderManagerResolver {
-    async fn resolve(&self, id: ProviderId) -> Result<Arc<dyn LlmProvider>> {
-        let provider_id = LlmProviderId::new(id.inner());
-        self.provider_manager.get_provider(&provider_id).await
-    }
-
-    async fn default_provider(&self) -> Result<Arc<dyn LlmProvider>> {
-        self.provider_manager.get_default_provider().await
-    }
-}
 
 /// Unified entry point for the ArgusWing application.
 ///
@@ -91,61 +76,6 @@ pub struct ArgusWing {
 }
 
 impl ArgusWing {
-    /// Initialize tracing subscriber with file and console logging.
-    ///
-    /// This sets up logging to:
-    /// - Console (stdout)
-    /// - File at `./tmp/arguswing.log`
-    ///
-    /// The log level can be controlled via the `RUST_LOG` environment variable.
-    /// For example: `RUST_LOG=debug` or `RUST_LOG=arguswing=debug,argus=info`
-    ///
-    /// Note: This function is safe to call multiple times - it will only initialize
-    /// tracing once (subsequent calls will be no-ops).
-    fn init_tracing() {
-        // Use a static flag to ensure we only initialize once
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-
-        INIT.call_once(|| {
-            // Create log directory if it doesn't exist
-            let log_dir = std::path::Path::new("./tmp");
-            if let Err(e) = std::fs::create_dir_all(log_dir) {
-                eprintln!("Failed to create log directory: {}", e);
-                return;
-            }
-
-            // Create file appender (blocking)
-            let file_appender = tracing_appender::rolling::never(log_dir, "arguswing.log");
-
-            // Set up the tracing subscriber with environment variable support
-            // Users can set RUST_LOG=debug to override the default level
-            let env_filter =
-                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new(
-                        "arguswing=debug,argus=debug,argus_llm=debug",
-                    )
-                });
-
-            // Create a subscriber that writes to file only (blocking)
-            let result = tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .with_writer(file_appender)
-                .with_ansi(false)
-                .try_init();
-
-            match result {
-                Ok(()) => {
-                    // Write to stdout directly since tracing is set to file
-                    println!("Tracing initialized. Logs will be written to ./tmp/arguswing.log");
-                }
-                Err(e) => {
-                    eprintln!("Failed to initialize tracing: {}", e);
-                }
-            }
-        });
-    }
-
     /// Initialize ArgusWing with an optional database path.
     ///
     /// If no path is provided, defaults to `~/.arguswing/sqlite.db`.
@@ -158,7 +88,7 @@ impl ArgusWing {
     /// - The default template cannot be ensured
     pub async fn init(database_path: Option<&str>) -> Result<Arc<Self>> {
         // Initialize tracing first
-        Self::init_tracing();
+        init_tracing();
 
         let database_path = resolve_database_target(database_path)?;
         let pool = match &database_path {
@@ -621,13 +551,8 @@ impl ArgusWing {
 }
 
 // =========================================================================
-// Helper Types and Functions
+// Helper Types
 // =========================================================================
-
-enum DatabaseTarget {
-    Url(String),
-    Path(std::path::PathBuf),
-}
 
 /// Tool information for frontend display.
 pub struct ToolInfo {
@@ -635,43 +560,6 @@ pub struct ToolInfo {
     pub description: String,
     pub risk_level: RiskLevel,
     pub parameters: serde_json::Value,
-}
-
-fn resolve_database_target(configured: Option<&str>) -> Result<DatabaseTarget> {
-    let configured = configured
-        .map(|s| s.to_string())
-        .unwrap_or_else(default_database_target);
-
-    if configured.starts_with("sqlite:") {
-        return Ok(DatabaseTarget::Url(configured));
-    }
-
-    Ok(DatabaseTarget::Path(expand_home_path(&configured)?))
-}
-
-fn default_database_target() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| "~/.arguswing/sqlite.db".to_string())
-}
-
-fn expand_home_path(path: &str) -> Result<std::path::PathBuf> {
-    if let Some(relative_path) = path.strip_prefix("~/") {
-        let home_dir = dirs::home_dir().ok_or_else(|| ArgusError::DatabaseError {
-            reason: "Cannot determine home directory".to_string(),
-        })?;
-        return Ok(home_dir.join(relative_path));
-    }
-
-    Ok(std::path::PathBuf::from(path))
-}
-
-fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| ArgusError::DatabaseError {
-        reason: format!("Invalid database path: {}", path.display()),
-    })?;
-    std::fs::create_dir_all(parent).map_err(|e| ArgusError::DatabaseError {
-        reason: format!("Cannot create database directory: {}", e),
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -692,7 +580,9 @@ mod tests {
             .list_providers()
             .await
             .expect("provider list should succeed");
-        assert!(providers.is_empty());
+        // A default provider is created by migration
+        assert_eq!(providers.len(), 1);
+        assert!(providers[0].is_default);
     }
 
     #[tokio::test]
