@@ -12,7 +12,7 @@ use chrono::Utc;
 
 use argus_protocol::Result;
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId,
+    ChatMessage, CompletionRequest, FinishReason, LlmError, LlmProvider, LlmProviderId,
     LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent,
     ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
