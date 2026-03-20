@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod hooks;
+pub mod http_client;
 pub mod ids;
 pub mod llm;
 pub mod message_override;
