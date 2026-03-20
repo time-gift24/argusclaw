@@ -14,6 +14,9 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["process", "fs", "time"] }
 tracing = "0.1"
+reqwest = { workspace = true }
+once_cell = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
