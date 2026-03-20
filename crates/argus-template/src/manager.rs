@@ -175,11 +175,19 @@ impl TemplateManager {
                 reason: e.to_string(),
             })?;
         let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
+        let thinking_config_json = record
+            .thinking_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| ArgusError::SerdeError {
+                reason: format!("failed to serialize thinking_config: {}", e),
+            })?;
 
         // Insert with ON CONFLICT(display_name) DO UPDATE
         sqlx::query(
-            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(display_name) DO UPDATE SET
                  description = excluded.description,
                  version = excluded.version,
@@ -188,6 +196,7 @@ impl TemplateManager {
                  tool_names = excluded.tool_names,
                  max_tokens = excluded.max_tokens,
                  temperature = excluded.temperature,
+                 thinking_config = excluded.thinking_config,
                  updated_at = CURRENT_TIMESTAMP",
         )
         .bind(&record.display_name)
@@ -198,6 +207,7 @@ impl TemplateManager {
         .bind(&tool_names_json)
         .bind(record.max_tokens.map(|t| t as i64))
         .bind(temperature_int)
+        .bind(&thinking_config_json)
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {
@@ -205,7 +215,7 @@ impl TemplateManager {
         })?;
 
         // Fetch the agent ID (either newly inserted or updated)
-        let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?1")
+        let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?")
             .bind(&record.display_name)
             .fetch_one(&self.pool)
             .await
@@ -271,7 +281,7 @@ impl TemplateManager {
         // Insert the new row with auto-generated id.
         // ON CONFLICT: if name already exists (from seed), do nothing.
         sqlx::query(
-            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT(display_name) DO NOTHING",
+            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(display_name) DO NOTHING",
         )
         .bind(&display_name)
         .bind(&description)
@@ -297,7 +307,7 @@ impl TemplateManager {
         let repaired_id = if last_id == 0 {
             // ON CONFLICT fired: name already exists from seed, find it
             sqlx::query_scalar(
-                "SELECT id FROM agents WHERE display_name = $1 AND id != 0",
+                "SELECT id FROM agents WHERE display_name = ? AND id != 0",
             )
             .bind(&display_name)
             .fetch_one(&mut *tx)
@@ -311,9 +321,9 @@ impl TemplateManager {
 
         // Update foreign keys to point to the new id
         for statement in [
-            "UPDATE threads SET template_id = $1 WHERE template_id = 0",
-            "UPDATE approval_requests SET agent_id = $1 WHERE agent_id = 0",
-            "UPDATE jobs SET agent_id = $1 WHERE agent_id = 0",
+            "UPDATE threads SET template_id = ? WHERE template_id = 0",
+            "UPDATE approval_requests SET agent_id = ? WHERE agent_id = 0",
+            "UPDATE jobs SET agent_id = ? WHERE agent_id = 0",
         ] {
             sqlx::query(statement)
                 .bind(repaired_id)
