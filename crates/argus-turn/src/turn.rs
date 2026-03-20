@@ -298,25 +298,43 @@ impl Turn {
         // Send completion event
         match &result {
             Ok(output) => {
-                let _ = self.thread_event_tx.send(ThreadEvent::TurnCompleted {
+                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnCompleted {
                     thread_id: self.thread_id.clone(),
                     turn_number: self.turn_number,
                     token_usage: output.token_usage.clone(),
-                });
+                }) {
+                    tracing::warn!(
+                        thread_id = %self.thread_id,
+                        error = %e,
+                        "Failed to send TurnCompleted event"
+                    );
+                }
             }
             Err(error) => {
-                let _ = self.thread_event_tx.send(ThreadEvent::TurnFailed {
+                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnFailed {
                     thread_id: self.thread_id.clone(),
                     turn_number: self.turn_number,
                     error: error.to_string(),
-                });
+                }) {
+                    tracing::warn!(
+                        thread_id = %self.thread_id,
+                        error = %e,
+                        "Failed to send TurnFailed event"
+                    );
+                }
             }
         }
 
         // Send Idle event
-        let _ = self.thread_event_tx.send(ThreadEvent::Idle {
+        if let Err(e) = self.thread_event_tx.send(ThreadEvent::Idle {
             thread_id: self.thread_id.clone(),
-        });
+        }) {
+            tracing::warn!(
+                thread_id = %self.thread_id,
+                error = %e,
+                "Failed to send Idle event"
+            );
+        }
 
         result
     }
@@ -331,43 +349,74 @@ impl Turn {
         let turn_number = self.turn_number;
 
         let handle = tokio::spawn(async move {
+            tracing::debug!(
+                thread_id = %thread_id,
+                turn_number = %turn_number,
+                "Event forwarder started"
+            );
             while let Ok(event) = stream_rx.recv().await {
                 match event {
                     TurnStreamEvent::LlmEvent(llm_event) => {
-                        let _ = thread_event_tx.send(ThreadEvent::Processing {
+                        if let Err(e) = thread_event_tx.send(ThreadEvent::Processing {
                             thread_id: thread_id.clone(),
                             turn_number,
                             event: llm_event,
-                        });
+                        }) {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_number = %turn_number,
+                                error = %e,
+                                "Failed to forward LlmEvent to thread_event_tx"
+                            );
+                        }
                     }
                     TurnStreamEvent::ToolStarted {
                         tool_call_id,
                         tool_name,
                         arguments,
                     } => {
-                        let _ = thread_event_tx.send(ThreadEvent::ToolStarted {
+                        if let Err(e) = thread_event_tx.send(ThreadEvent::ToolStarted {
                             thread_id: thread_id.clone(),
                             turn_number,
                             tool_call_id,
                             tool_name,
                             arguments,
-                        });
+                        }) {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_number = %turn_number,
+                                error = %e,
+                                "Failed to forward ToolStarted to thread_event_tx"
+                            );
+                        }
                     }
                     TurnStreamEvent::ToolCompleted {
                         tool_call_id,
                         tool_name,
                         result,
                     } => {
-                        let _ = thread_event_tx.send(ThreadEvent::ToolCompleted {
+                        if let Err(e) = thread_event_tx.send(ThreadEvent::ToolCompleted {
                             thread_id: thread_id.clone(),
                             turn_number,
                             tool_call_id,
                             tool_name,
                             result,
-                        });
+                        }) {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_number = %turn_number,
+                                error = %e,
+                                "Failed to forward ToolCompleted to thread_event_tx"
+                            );
+                        }
                     }
                 }
             }
+            tracing::warn!(
+                thread_id = %thread_id,
+                turn_number = %turn_number,
+                "Event forwarder stopped (stream channel closed)"
+            );
         });
 
         self._forwarder_handle = Some(handle);
@@ -801,13 +850,21 @@ impl Turn {
         }
 
         // Send ToolStarted events
-        let _ = self.thread_event_tx.send(ThreadEvent::ToolStarted {
+        if let Err(e) = self.thread_event_tx.send(ThreadEvent::ToolStarted {
             thread_id: self.thread_id.clone(),
             turn_number: self.turn_number,
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
             arguments: tool_input.clone(),
-        });
+        }) {
+            tracing::warn!(
+                thread_id = %self.thread_id,
+                turn_number = %self.turn_number,
+                tool_name = %tool_name,
+                error = %e,
+                "Failed to send ToolStarted event"
+            );
+        }
         let _ = self.stream_tx.send(TurnStreamEvent::ToolStarted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -885,13 +942,21 @@ impl Turn {
             Ok(value) => Ok(value.clone()),
             Err(e) => Err(e.clone()),
         };
-        let _ = self.thread_event_tx.send(ThreadEvent::ToolCompleted {
+        if let Err(e) = self.thread_event_tx.send(ThreadEvent::ToolCompleted {
             thread_id: self.thread_id.clone(),
             turn_number: self.turn_number,
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
             result: event_result.clone(),
-        });
+        }) {
+            tracing::warn!(
+                thread_id = %self.thread_id,
+                turn_number = %self.turn_number,
+                tool_name = %tool_name,
+                error = %e,
+                "Failed to send ToolCompleted event"
+            );
+        }
         let _ = self.stream_tx.send(TurnStreamEvent::ToolCompleted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
