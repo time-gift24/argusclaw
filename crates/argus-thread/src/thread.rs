@@ -33,7 +33,7 @@ pub struct Thread {
     id: ThreadId,
 
     /// Agent record with configuration.
-    agent_record: AgentRecord,
+    agent_record: Arc<AgentRecord>,
 
     /// Parent session ID.
     session_id: SessionId,
@@ -161,8 +161,9 @@ impl Thread {
     }
 
     /// Get the Agent Record.
+    #[allow(clippy::explicit_auto_deref)]
     pub fn agent_record(&self) -> &AgentRecord {
-        &self.agent_record
+        &*self.agent_record
     }
 
     /// Get the thread title.
@@ -272,32 +273,28 @@ impl Thread {
             }
         }
 
-        // Apply message-level override if provided
+        // Apply message-level override in-place if provided.
+        // Arc::make_mut clones the inner record only if this Arc is shared (multiple owners).
+        // If no override is provided, just clone the Arc reference (O(1)).
         let effective_record = if let Some(overrides) = msg_override {
-            let base = &self.agent_record;
-            AgentRecord {
-                max_tokens: overrides.max_tokens.or(base.max_tokens),
-                temperature: overrides.temperature.or(base.temperature),
-                thinking_config: overrides
-                    .thinking_config
-                    .clone()
-                    .or_else(|| base.thinking_config.clone()),
-                // Keep other fields from base record
-                id: base.id,
-                display_name: base.display_name.clone(),
-                description: base.description.clone(),
-                version: base.version.clone(),
-                provider_id: base.provider_id,
-                system_prompt: base.system_prompt.clone(),
-                tool_names: base.tool_names.clone(),
+            let record = Arc::make_mut(&mut self.agent_record);
+            if let Some(v) = overrides.max_tokens {
+                record.max_tokens = Some(v);
             }
+            if let Some(v) = overrides.temperature {
+                record.temperature = Some(v);
+            }
+            if let Some(v) = overrides.thinking_config {
+                record.thinking_config = Some(v);
+            }
+            self.agent_record.clone()
         } else {
             self.agent_record.clone()
         };
 
         self.messages.push(ChatMessage::user(user_input));
         self.recalculate_token_count();
-        self.execute_turn_streaming(Arc::new(effective_record))
+        self.execute_turn_streaming(effective_record)
             .await
     }
 
@@ -369,8 +366,8 @@ mod tests {
     use crate::compact::KeepRecentCompactor;
     use argus_protocol::{AgentId, ProviderId};
 
-    fn test_agent_record() -> AgentRecord {
-        AgentRecord {
+    fn test_agent_record() -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
             id: AgentId::new(1),
             display_name: "Test Agent".to_string(),
             description: "A test agent".to_string(),
@@ -381,7 +378,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: None,
-        }
+        })
     }
 
     #[test]
