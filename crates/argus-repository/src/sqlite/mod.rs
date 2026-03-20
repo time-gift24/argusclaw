@@ -8,9 +8,7 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::DbError;
-use argus_llm::{
-    Cipher, FileKeySource, KeyMaterialSource, StaticKeySource,
-};
+use argus_llm::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
 use argus_protocol::llm::SecretString;
 
 mod agent;

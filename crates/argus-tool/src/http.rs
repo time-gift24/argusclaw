@@ -1,10 +1,10 @@
 //! HTTP client tool.
 
-use async_trait::async_trait;
 use argus_protocol::http_client::HTTP_CLIENT;
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::tool::{NamedTool, ToolError};
+use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use url::Url;
@@ -66,7 +66,8 @@ impl NamedTool for HttpTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "http".to_string(),
-            description: "Make HTTP requests to any URL. Returns status, headers, and body.".to_string(),
+            description: "Make HTTP requests to any URL. Returns status, headers, and body."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -104,8 +105,8 @@ impl NamedTool for HttpTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        let args: HttpArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::ExecutionFailed {
+        let args: HttpArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "http".to_string(),
                 reason: format!("invalid arguments: {e}"),
             })?;
@@ -133,14 +134,19 @@ impl NamedTool for HttpTool {
         if !ALLOWED_METHODS.contains(&method_upper.as_str()) {
             return Err(ToolError::ExecutionFailed {
                 tool_name: "http".to_string(),
-                reason: format!("Unsupported HTTP method: '{}'. Allowed: GET, POST, PUT, DELETE, PATCH, HEAD", args.method),
+                reason: format!(
+                    "Unsupported HTTP method: '{}'. Allowed: GET, POST, PUT, DELETE, PATCH, HEAD",
+                    args.method
+                ),
             });
         }
 
-        let reqwest_method = reqwest::Method::from_bytes(method_upper.as_bytes())
-            .map_err(|_| ToolError::ExecutionFailed {
-                tool_name: "http".to_string(),
-                reason: format!("Unsupported HTTP method: '{}'", args.method),
+        let reqwest_method =
+            reqwest::Method::from_bytes(method_upper.as_bytes()).map_err(|_| {
+                ToolError::ExecutionFailed {
+                    tool_name: "http".to_string(),
+                    reason: format!("Unsupported HTTP method: '{}'", args.method),
+                }
             })?;
 
         // -- Timeout clamping --
@@ -149,18 +155,16 @@ impl NamedTool for HttpTool {
         // -- Build headers --
         let mut header_map = HeaderMap::new();
         for (key, value) in &args.headers {
-            let header_name = HeaderName::from_bytes(key.as_bytes()).map_err(|_| {
-                ToolError::ExecutionFailed {
+            let header_name =
+                HeaderName::from_bytes(key.as_bytes()).map_err(|_| ToolError::ExecutionFailed {
                     tool_name: "http".to_string(),
                     reason: format!("invalid header name: {key}"),
-                }
-            })?;
-            let header_value = HeaderValue::from_str(value).map_err(|_| {
-                ToolError::ExecutionFailed {
+                })?;
+            let header_value =
+                HeaderValue::from_str(value).map_err(|_| ToolError::ExecutionFailed {
                     tool_name: "http".to_string(),
                     reason: format!("invalid header value for '{key}'"),
-                }
-            })?;
+                })?;
             header_map.insert(header_name, header_value);
         }
 
@@ -188,13 +192,13 @@ impl NamedTool for HttpTool {
             })?;
 
         // -- Response size check --
-        if let Some(len) = response.content_length() {
-            if len > MAX_RESPONSE_SIZE {
-                return Err(ToolError::ExecutionFailed {
-                    tool_name: "http".to_string(),
-                    reason: "Response body too large (max 10MB)".to_string(),
-                });
-            }
+        if let Some(len) = response.content_length()
+            && len > MAX_RESPONSE_SIZE
+        {
+            return Err(ToolError::ExecutionFailed {
+                tool_name: "http".to_string(),
+                reason: "Response body too large (max 10MB)".to_string(),
+            });
         }
 
         // -- Collect response --

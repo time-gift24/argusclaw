@@ -148,10 +148,9 @@ fn create_master_key(path: &Path) -> Result<Vec<u8>, CryptoError> {
                 path.display()
             ),
         })?;
-    fs::create_dir_all(parent)
-        .map_err(|error| CryptoError::SecretKeyMaterialUnavailable {
-            reason: format!("failed to create `{}`: {error}", parent.display()),
-        })?;
+    fs::create_dir_all(parent).map_err(|error| CryptoError::SecretKeyMaterialUnavailable {
+        reason: format!("failed to create `{}`: {error}", parent.display()),
+    })?;
 
     let key_material = generate_master_key()?;
 
@@ -211,10 +210,11 @@ fn write_master_key_file(
 fn set_master_key_permissions(path: &Path) -> Result<(), CryptoError> {
     use std::os::unix::fs::PermissionsExt;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| CryptoError::SecretKeyMaterialUnavailable {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        CryptoError::SecretKeyMaterialUnavailable {
             reason: format!("failed to set permissions on `{}`: {error}", path.display()),
-        })
+        }
+    })
 }
 
 #[cfg(not(unix))]

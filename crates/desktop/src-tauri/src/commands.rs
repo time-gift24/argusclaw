@@ -407,7 +407,11 @@ pub async fn get_current_user(
     wing.account_manager()
         .get_current_user()
         .await
-        .map(|opt| opt.map(|u| UserInfoPayload { username: u.username }))
+        .map(|opt| {
+            opt.map(|u| UserInfoPayload {
+                username: u.username,
+            })
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -478,7 +482,10 @@ pub async fn list_credentials(
         .await
         .map(|list| {
             list.into_iter()
-                .map(|c| CredentialSummaryPayload { id: c.id, name: c.name })
+                .map(|c| CredentialSummaryPayload {
+                    id: c.id,
+                    name: c.name,
+                })
                 .collect()
         })
         .map_err(|e| e.to_string())
@@ -530,10 +537,7 @@ pub async fn update_credential(
 }
 
 #[tauri::command]
-pub async fn delete_credential(
-    wing: State<'_, Arc<ArgusWing>>,
-    id: i64,
-) -> Result<bool, String> {
+pub async fn delete_credential(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
     wing.credential_store()
         .delete(id)
         .await

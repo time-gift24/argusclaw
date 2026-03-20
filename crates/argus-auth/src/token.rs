@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+use async_trait::async_trait;
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 
@@ -56,11 +56,12 @@ impl TokenSource for SimpleTokenSource {
             });
         }
 
-        let body: serde_json::Value = response.json().map_err(|e: reqwest::Error| {
-            AuthError::TokenFetchFailed {
-                reason: format!("Failed to parse response: {e}"),
-            }
-        })?;
+        let body: serde_json::Value =
+            response
+                .json()
+                .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
+                    reason: format!("Failed to parse response: {e}"),
+                })?;
 
         body.get("token")
             .and_then(|t: &serde_json::Value| t.as_str())
@@ -149,11 +150,17 @@ impl<T: LlmProvider> LlmProvider for TokenLLMProvider<T> {
         self.inner.capabilities()
     }
 
-    async fn complete(&self, mut request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let extra_header = self.get_auth_header().await.map_err(|e| LlmError::AuthFailed {
-            provider: self.inner.active_model_name(),
-            reason: e.to_string(),
-        })?;
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        let extra_header = self
+            .get_auth_header()
+            .await
+            .map_err(|e| LlmError::AuthFailed {
+                provider: self.inner.active_model_name(),
+                reason: e.to_string(),
+            })?;
 
         request.extra_headers.push(extra_header);
         self.inner.complete(request).await
@@ -163,10 +170,13 @@ impl<T: LlmProvider> LlmProvider for TokenLLMProvider<T> {
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let extra_header = self.get_auth_header().await.map_err(|e| LlmError::AuthFailed {
-            provider: self.inner.active_model_name(),
-            reason: e.to_string(),
-        })?;
+        let extra_header = self
+            .get_auth_header()
+            .await
+            .map_err(|e| LlmError::AuthFailed {
+                provider: self.inner.active_model_name(),
+                reason: e.to_string(),
+            })?;
 
         request.extra_headers.push(extra_header);
         self.inner.complete_with_tools(request).await
@@ -176,10 +186,13 @@ impl<T: LlmProvider> LlmProvider for TokenLLMProvider<T> {
         &self,
         mut request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
-        let extra_header = self.get_auth_header().await.map_err(|e| LlmError::AuthFailed {
-            provider: self.inner.active_model_name(),
-            reason: e.to_string(),
-        })?;
+        let extra_header = self
+            .get_auth_header()
+            .await
+            .map_err(|e| LlmError::AuthFailed {
+                provider: self.inner.active_model_name(),
+                reason: e.to_string(),
+            })?;
 
         request.extra_headers.push(extra_header);
         self.inner.stream_complete(request).await
@@ -189,10 +202,13 @@ impl<T: LlmProvider> LlmProvider for TokenLLMProvider<T> {
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
-        let extra_header = self.get_auth_header().await.map_err(|e| LlmError::AuthFailed {
-            provider: self.inner.active_model_name(),
-            reason: e.to_string(),
-        })?;
+        let extra_header = self
+            .get_auth_header()
+            .await
+            .map_err(|e| LlmError::AuthFailed {
+                provider: self.inner.active_model_name(),
+                reason: e.to_string(),
+            })?;
 
         request.extra_headers.push(extra_header);
         self.inner.stream_complete_with_tools(request).await

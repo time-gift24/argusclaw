@@ -294,8 +294,7 @@ impl Thread {
 
         self.messages.push(ChatMessage::user(user_input));
         self.recalculate_token_count();
-        self.execute_turn_streaming(effective_record)
-            .await
+        self.execute_turn_streaming(effective_record).await
     }
 
     async fn execute_turn_streaming(

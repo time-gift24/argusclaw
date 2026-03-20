@@ -164,7 +164,10 @@ mod tests {
     fn policy_default_valid() {
         let policy = ApprovalPolicy::default();
         assert!(policy.validate().is_ok());
-        assert_eq!(policy.require_approval, vec!["shell".to_string(), "http".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell".to_string(), "http".to_string()]
+        );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
         assert!(!policy.auto_approve);
@@ -174,7 +177,10 @@ mod tests {
     fn policy_serde_default() {
         let policy: ApprovalPolicy = serde_json::from_str("{}").unwrap();
         assert_eq!(policy.timeout_secs, 60);
-        assert_eq!(policy.require_approval, vec!["shell".to_string(), "http".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell".to_string(), "http".to_string()]
+        );
         assert!(!policy.auto_approve_autonomous);
     }
 

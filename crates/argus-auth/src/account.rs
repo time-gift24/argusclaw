@@ -38,9 +38,12 @@ impl AccountManager {
         }
 
         // Encrypt password
-        let encrypted = self.cipher.encrypt(password).map_err(|e| AuthError::EncryptionFailed {
-            reason: e.to_string(),
-        })?;
+        let encrypted = self
+            .cipher
+            .encrypt(password)
+            .map_err(|e| AuthError::EncryptionFailed {
+                reason: e.to_string(),
+            })?;
 
         // Insert account (id is always 1 for single-user)
         sqlx::query(
@@ -59,11 +62,10 @@ impl AccountManager {
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Result<bool, AuthError> {
-        let row: Option<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
-            "SELECT username, password, nonce FROM accounts WHERE id = 1",
-        )
-        .fetch_optional(self.pool.as_ref())
-        .await?;
+        let row: Option<(String, Vec<u8>, Vec<u8>)> =
+            sqlx::query_as("SELECT username, password, nonce FROM accounts WHERE id = 1")
+                .fetch_optional(self.pool.as_ref())
+                .await?;
 
         match row {
             Some((stored_username, ciphertext, nonce)) => {
@@ -73,12 +75,11 @@ impl AccountManager {
                     return Ok(false);
                 }
                 // Decrypt and verify password using constant-time comparison
-                let decrypted = self
-                    .cipher
-                    .decrypt(&nonce, &ciphertext)
-                    .map_err(|e| AuthError::DecryptionFailed {
+                let decrypted = self.cipher.decrypt(&nonce, &ciphertext).map_err(|e| {
+                    AuthError::DecryptionFailed {
                         reason: e.to_string(),
-                    })?;
+                    }
+                })?;
                 let password_bytes = password.as_bytes();
                 let decrypted_bytes = decrypted.expose_secret().as_bytes();
                 let password_matches = decrypted_bytes.ct_eq(password_bytes);
