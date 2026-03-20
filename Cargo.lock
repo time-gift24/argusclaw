@@ -169,20 +169,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-dev"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argus-protocol",
- "argus-tool",
- "argus-turn",
- "argus-wing",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "argus-llm"
 version = "0.1.0"
 dependencies = [
@@ -1030,32 +1016,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argus-dev",
- "argus-protocol",
- "argus-thread",
- "argus-tool",
- "argus-turn",
- "argus-wing",
- "chrono",
- "clap",
- "dirs 5.0.1",
- "futures-util",
- "owo-colors",
- "serde",
- "serde_json",
- "sqlx",
- "tokio",
- "toml 0.8.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
 
 [[package]]
 name = "colorchoice"
@@ -3479,12 +3439,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "owo-colors"
-version = "4.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "pango"
