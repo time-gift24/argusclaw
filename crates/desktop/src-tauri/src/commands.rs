@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
-    LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
-    SecretString, SessionId, ThreadId,
+    AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProvider, LlmProviderId,
+    LlmProviderRecord, LlmProviderRecordJson, ProviderId, ProviderSecretStatus,
+    ProviderTestResult, Role, SecretString, SessionId, ThreadId,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -400,6 +400,79 @@ pub struct UserInfoPayload {
     pub username: String,
 }
 
+// === Hardcoded config (TODO: make configurable later) ===
+const AUTH_BASE_URL: &str = "http://localhost:8080";
+const TOKEN_URL: &str = "http://localhost:8080/api/auth/token";
+const TOKEN_HEADER_NAME: &str = "Authorization";
+const TOKEN_HEADER_PREFIX: &str = "Bearer ";
+const AUTH_MODEL: &str = "gpt-4o-mini";
+
+#[tauri::command]
+pub async fn login(
+    wing: State<'_, Arc<ArgusWing>>,
+    username: String,
+    password: String,
+) -> Result<UserInfoPayload, String> {
+    use argus_auth::{SimpleTokenSource, TokenLLMProvider};
+    use argus_llm::providers::openai_compatible::OpenAiCompatibleProvider;
+    use argus_llm::{OpenAiCompatibleConfig, RetryConfig, RetryProvider};
+    use std::time::Duration;
+
+    // Create token source
+    let token_source = SimpleTokenSource::new(
+        TOKEN_URL.to_string(),
+        TOKEN_HEADER_NAME.to_string(),
+        TOKEN_HEADER_PREFIX.to_string(),
+    );
+
+    // Verify password + fetch token
+    let ok = wing
+        .account_manager()
+        .login_verify(&username, &password, &token_source)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !ok {
+        return Err("用户名或密码错误".to_string());
+    }
+
+    // Build base LLM provider with hardcoded config
+    // TODO: Replace with configurable provider setup
+    let inner_config = OpenAiCompatibleConfig::new(
+        format!("{AUTH_BASE_URL}/v1"),
+        String::new(), // Token is injected via auth header, not API key
+        AUTH_MODEL.to_string(),
+    );
+    let inner_provider = OpenAiCompatibleProvider::new(inner_config)
+        .map_err(|e| format!("Failed to create base provider: {e}"))?;
+
+    // Wrap with retry provider
+    let retry_provider = RetryProvider::new(Arc::new(inner_provider), RetryConfig { max_retries: 3 });
+
+    // Wrap with TokenLLMProvider for automatic token injection
+    // TODO: Make refresh interval configurable
+    let auth_provider: Arc<dyn LlmProvider> = Arc::new(TokenLLMProvider::new(
+        retry_provider,
+        Arc::new(token_source),
+        username.clone(),
+        password,
+        Duration::from_secs(300), // 5 min token refresh
+    ));
+
+    // Store authenticated provider
+    wing.set_authenticated_provider(Some(auth_provider.clone())).await;
+
+    // Return user info
+    let user = wing
+        .account_manager()
+        .get_current_user()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("用户不存在")?;
+
+    Ok(UserInfoPayload { username: user.username })
+}
+
 #[tauri::command]
 pub async fn get_current_user(
     wing: State<'_, Arc<ArgusWing>>,
@@ -427,18 +500,6 @@ pub async fn setup_account(
 ) -> Result<(), String> {
     wing.account_manager()
         .setup_account(&username, &password)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn login(
-    wing: State<'_, Arc<ArgusWing>>,
-    username: String,
-    password: String,
-) -> Result<bool, String> {
-    wing.account_manager()
-        .login(&username, &password)
         .await
         .map_err(|e| e.to_string())
 }

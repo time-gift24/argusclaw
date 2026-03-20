@@ -38,7 +38,7 @@ use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
 use argus_tool::ToolManager;
 use sqlx::SqlitePool;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 /// Default agent display name for the ArgusWing template.
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
@@ -88,6 +88,8 @@ pub struct ArgusWing {
     compactor_manager: Arc<CompactorManager>,
     pub account_manager: Arc<AccountManager>,
     pub credential_store: Arc<CredentialStore>,
+    /// Authenticated provider with token-based auth. Set after successful login.
+    authenticated_provider: Mutex<Option<Arc<dyn LlmProvider>>>,
 }
 
 impl ArgusWing {
@@ -217,6 +219,7 @@ impl ArgusWing {
             compactor_manager,
             account_manager,
             credential_store,
+            authenticated_provider: Mutex::new(None),
         }))
     }
 
@@ -253,6 +256,7 @@ impl ArgusWing {
             compactor_manager,
             account_manager,
             credential_store,
+            authenticated_provider: Mutex::new(None),
         })
     }
 
@@ -294,6 +298,20 @@ impl ArgusWing {
     #[must_use]
     pub fn credential_store(&self) -> &Arc<CredentialStore> {
         &self.credential_store
+    }
+
+    /// Get the authenticated provider (set after successful login).
+    ///
+    /// Returns `None` if not logged in.
+    /// The returned provider has automatic token refresh via TokenLLMProvider.
+    pub async fn authenticated_provider(&self) -> Option<Arc<dyn LlmProvider>> {
+        self.authenticated_provider.lock().await.clone()
+    }
+
+    /// Set the authenticated provider.
+    pub async fn set_authenticated_provider(&self, provider: Option<Arc<dyn LlmProvider>>) {
+        let mut guard = self.authenticated_provider.lock().await;
+        *guard = provider;
     }
 
     // =========================================================================

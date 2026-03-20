@@ -9,11 +9,8 @@ interface AuthState {
   username: string | null;
   isLoggedIn: boolean;
   isLoading: boolean;
-  hasUser: boolean | null; // null = not checked yet
 
   fetchCurrentUser: () => Promise<void>;
-  checkHasUser: () => Promise<boolean>;
-  setupAccount: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
 }
@@ -43,7 +40,6 @@ export const useAuthStore = create<AuthState>((set) => ({
   username: null,
   isLoggedIn: false,
   isLoading: true,
-  hasUser: null,
 
   fetchCurrentUser: async () => {
     try {
@@ -58,30 +54,9 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  checkHasUser: async () => {
-    try {
-      const hasUser = await invoke<boolean>('has_any_user');
-      set({ hasUser });
-      return hasUser;
-    } catch {
-      set({ hasUser: false });
-      return false;
-    }
-  },
-
-  setupAccount: async (username: string, password: string) => {
-    try {
-      await invoke('setup_account', { username, password });
-      set({ username, isLoggedIn: true });
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: toErrorMessage(error) };
-    }
-  },
-
   login: async (username: string, password: string) => {
     try {
-      const user = await invoke<UserInfo>('login', { username, password });
+      const user = await invoke<{ username: string }>('login', { username, password });
       set({ username: user.username, isLoggedIn: true });
       return { success: true };
     } catch (error) {
