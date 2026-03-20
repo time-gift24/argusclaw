@@ -8,6 +8,15 @@ import type {
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
 
+export interface PendingToolCall {
+  tool_call_id: string;
+  tool_name: string;
+  arguments_text: string;
+  result?: unknown;
+  is_error: boolean;
+  status: "streaming" | "running" | "completed";
+}
+
 const toSessionKey = (templateId: number, providerPreferenceId: number | null) =>
   `${templateId}::${providerPreferenceId ?? "__default__"}`;
 
@@ -22,7 +31,7 @@ export interface ChatSessionState {
   effectiveProviderId: number | null;
   status: "idle" | "running" | "error";
   messages: ThreadSnapshotPayload["messages"];
-  pendingAssistant: { content: string; reasoning: string } | null;
+  pendingAssistant: { content: string; reasoning: string; toolCalls: PendingToolCall[] } | null;
   pendingApprovalRequest: {
     id: string;
     tool_name: string;
@@ -213,7 +222,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         [state.activeSessionKey!]: {
           ...session,
           status: "running",
-          pendingAssistant: { content: "", reasoning: "" },
+          pendingAssistant: { content: "", reasoning: "", toolCalls: [] },
           error: null,
         },
       },
@@ -331,6 +340,117 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           };
         });
         break;
+
+      case "tool_call_delta": {
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session?.pendingAssistant) return {};
+          const toolCalls = [...session.pendingAssistant.toolCalls];
+          while (toolCalls.length <= payload.index) {
+            toolCalls.push({
+              tool_call_id: "",
+              tool_name: "",
+              arguments_text: "",
+              is_error: false,
+              status: "streaming",
+            });
+          }
+          const tc = { ...toolCalls[payload.index] };
+          if (payload.id !== undefined && payload.id !== null) {
+            tc.tool_call_id = payload.id;
+          }
+          if (payload.name !== undefined && payload.name !== null) {
+            tc.tool_name = payload.name;
+          }
+          if (payload.arguments_delta !== undefined && payload.arguments_delta !== null) {
+            tc.arguments_text += payload.arguments_delta;
+          }
+          toolCalls[payload.index] = tc;
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  toolCalls,
+                },
+              },
+            },
+          };
+        });
+        break;
+      }
+
+      case "tool_started": {
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session?.pendingAssistant) return {};
+          const existingIndex = session.pendingAssistant.toolCalls.findIndex(
+            (tc) => tc.tool_call_id === payload.tool_call_id,
+          );
+          const toolCalls = [...session.pendingAssistant.toolCalls];
+          if (existingIndex >= 0) {
+            toolCalls[existingIndex] = {
+              ...toolCalls[existingIndex],
+              status: "running",
+            };
+          } else {
+            toolCalls.push({
+              tool_call_id: payload.tool_call_id,
+              tool_name: payload.tool_name,
+              arguments_text: JSON.stringify(payload.arguments ?? {}, null, 2),
+              is_error: false,
+              status: "running",
+            });
+          }
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  toolCalls,
+                },
+              },
+            },
+          };
+        });
+        break;
+      }
+
+      case "tool_completed": {
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session?.pendingAssistant) return {};
+          const existingIndex = session.pendingAssistant.toolCalls.findIndex(
+            (tc) => tc.tool_call_id === payload.tool_call_id,
+          );
+          if (existingIndex < 0) return {};
+          const toolCalls = [...session.pendingAssistant.toolCalls];
+          toolCalls[existingIndex] = {
+            ...toolCalls[existingIndex],
+            tool_name: payload.tool_name,
+            result: payload.result,
+            is_error: payload.is_error,
+            status: "completed",
+          };
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  toolCalls,
+                },
+              },
+            },
+          };
+        });
+        break;
+      }
 
       case "turn_completed":
         break;

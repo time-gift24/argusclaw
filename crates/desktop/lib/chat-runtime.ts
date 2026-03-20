@@ -1,7 +1,7 @@
 import { useExternalStoreRuntime } from "@assistant-ui/react";
 
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
-import { useChatStore } from "@/lib/chat-store";
+import { PendingToolCall, useChatStore } from "@/lib/chat-store";
 import type { ChatMessagePayload } from "@/lib/types/chat";
 
 type JsonValue =
@@ -96,6 +96,18 @@ const toReadonlyJsonObject = (value: unknown): JsonObject | undefined => {
 
 const stringifyValue = (value: unknown) =>
   typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2);
+
+function pendingToolCallToPart(tc: PendingToolCall): AssistantUiMessagePart {
+  return {
+    type: "tool-call",
+    toolCallId: tc.tool_call_id,
+    toolName: tc.tool_name,
+    args: undefined,
+    argsText: tc.arguments_text,
+    result: tc.result,
+    isError: tc.is_error,
+  };
+}
 
 const parseMessageContent = (content: string): unknown => {
   const trimmed = content.trim();
@@ -230,6 +242,10 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
 
     if (session.pendingAssistant.content) {
       pendingContent.push({ type: "text", text: session.pendingAssistant.content });
+    }
+
+    for (const tc of session.pendingAssistant.toolCalls) {
+      pendingContent.push(pendingToolCallToPart(tc));
     }
 
     messages.push({
