@@ -2,4 +2,4 @@ display_name = "ArgusWing"
 description = "Default assistant for ArgusWing"
 version = "0.1.0"
 system_prompt = "You are ArgusWing, a helpful AI assistant."
-tool_names = ["shell", "read", "grep", "glob"]
+tool_names = ["shell", "read", "grep", "glob", "http"]
