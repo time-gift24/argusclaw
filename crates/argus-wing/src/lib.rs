@@ -262,14 +262,15 @@ impl ArgusWing {
         &self.tool_manager
     }
 
-    /// Register default tools (shell, read, grep, glob) with the tool manager.
+    /// Register default tools (shell, read, grep, glob, http) with the tool manager.
     pub fn register_default_tools(&self) {
-        use argus_tool::{GlobTool, GrepTool, ReadTool, ShellTool};
+        use argus_tool::{GlobTool, GrepTool, HttpTool, ReadTool, ShellTool};
 
         self.tool_manager.register(Arc::new(ShellTool::new()));
         self.tool_manager.register(Arc::new(ReadTool::new()));
         self.tool_manager.register(Arc::new(GrepTool::new()));
         self.tool_manager.register(Arc::new(GlobTool::new()));
+        self.tool_manager.register(Arc::new(HttpTool::new()));
     }
 
     /// Get a reference to the approval manager.
