@@ -57,8 +57,6 @@ once_cell = { workspace = true }
 reqwest = { workspace = true }
 ```
 
-Remove line 10 (`futures-core = "0.3"`) — it is not used in argus-protocol.
-
 Run: `cargo build -p argus-protocol` — expect: compile success
 
 - [ ] **Step 2: Commit**
@@ -651,13 +649,14 @@ git commit -m "chore(argus-llm): remove unused http_client, use workspace reqwes
 
 Run: `grep -r 'reqwest\|once_cell' crates/*/Cargo.toml | grep -v workspace`
 
-Expected results (may vary based on current state):
-- `crates/argus-auth/Cargo.toml` — may have reqwest
-- `crates/argus-llm/Cargo.toml` — should now use workspace
-- Any others: update to `workspace = true`
-
-For each found:
-Replace version string with `{ workspace = true }` or `{ workspace = true, features = [...] }` if it has extra features.
+Expected results:
+- `crates/argus-auth/Cargo.toml` — has reqwest with `blocking` feature. Update to:
+  ```toml
+  reqwest = { workspace = true, features = ["json", "blocking"] }
+  ```
+  The workspace base `rustls-tls-native-roots` is inherited automatically.
+- `crates/argus-protocol/Cargo.toml` `[dev-dependencies]`: `futures-util = "0.3"` — also migrate to workspace for consistency, but this is optional.
+- Any others: update to `{ workspace = true }` or `{ workspace = true, features = [...] }` if they have extra features.
 
 Run: `cargo build --all` — expect: all compile
 
