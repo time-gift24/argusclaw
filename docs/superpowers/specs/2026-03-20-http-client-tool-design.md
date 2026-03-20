@@ -29,13 +29,9 @@ pub static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
 });
 ```
 
-**Reqwest features**:
-```
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
-```
-`rustls-tls-native-roots` enables TLS with the OS trust store (same as existing `argus-llm` usage). No `json` feature needed — we handle body parsing manually.
+**Reqwest features**: `rustls-tls-native-roots` — enables TLS with the OS trust store. `argus-protocol`'s http_client only needs basic HTTP, no JSON parsing. Individual consumers (`argus-llm`) add their own feature requirements locally.
 
-**Migration**: `crates/argus-llm/src/http_client.rs` is currently unused (the `OpenAiCompatibleProvider` creates its own `reqwest::Client`). Delete it and update `argus-llm`'s `Cargo.toml` to remove `reqwest`.
+**Migration**: `crates/argus-llm/src/http_client.rs` is currently unused (the `OpenAiCompatibleProvider` creates its own `reqwest::Client` at `openai_compatible.rs:125`). Delete it. `argus-llm`'s own `reqwest` dependency (with `json`, `stream`, `rustls-tls-native-roots` features) remains — it is not migrated; only the unused local file is removed.
 
 ### 2. HttpTool Implementation
 
@@ -75,7 +71,7 @@ Implements `NamedTool` for a general-purpose HTTP client.
 **Security measures**:
 - Scheme allowlist: only `http` and `https` permitted. Internal schemes like `file://` are blocked.
 - Response size limit: 10MB max. If `content-length > 10MB`, returns `ToolError::ExecutionFailed` with message.
-- Timeout enforced per-request (not global), clamped to user-specified value.
+- Timeout enforced per-request, clamped to user-specified value.
 
 ### 3. Default Registration
 
@@ -97,19 +93,27 @@ require_approval: vec!["shell".to_string(), "http".to_string()],
 
 This ensures every `http` call requires human approval by default, given its `Critical` risk level.
 
-**Template file**: `agents/arguswing.toml` (NOT `crates/argus-template/data/agents/`) — add `"http"` to `tool_names`.
+**Template file**: `agents/arguswing.toml` — add `"http"` to `tool_names`.
+
+## Implementation Order
+
+> **Important**: Changes must be applied in this order, as later steps depend on earlier ones.
+
+1. **Root `Cargo.toml`** — Create `[workspace.dependencies]` section with all shared dependencies
+2. **All member crate `Cargo.toml`** — Update to use `workspace = true` for shared deps
+3. **New files** — Create `argus-protocol/src/http_client.rs`, `argus-tool/src/http.rs`
+4. **Registration** — Update `argus-wing`, `argus-approval`, `argus-template`
 
 ## Changes Summary
 
 | File | Change |
 |------|--------|
-| `Cargo.toml` (root) | Add `reqwest`, `once_cell` to `workspace.dependencies` |
-| `crates/argus-protocol/Cargo.toml` | Add `once_cell`, `reqwest` (workspace) |
+| `Cargo.toml` (root) | **CREATE** `[workspace.dependencies]` with `reqwest`, `once_cell`, `url` |
+| `crates/argus-protocol/Cargo.toml` | Add `once_cell`, `reqwest` with `rustls-tls-native-roots` feature (workspace) |
 | `crates/argus-protocol/src/http_client.rs` | NEW — shared lazy HTTP client |
 | `crates/argus-protocol/src/lib.rs` | Export `http_client` module |
-| `crates/argus-llm/Cargo.toml` | Remove `reqwest`, `once_cell` (unused) |
+| `crates/argus-llm/Cargo.toml` | Remove local `reqwest` (replaced by workspace) |
 | `crates/argus-llm/src/http_client.rs` | DELETE — unused file |
-| `crates/argus-llm/src/lib.rs` | Re-export from `argus_protocol::http_client` if needed |
 | `crates/argus-tool/Cargo.toml` | Add `reqwest`, `once_cell`, `url` (workspace) |
 | `crates/argus-tool/src/http.rs` | NEW — HttpTool implementation |
 | `crates/argus-tool/src/lib.rs` | Export `HttpTool` |
@@ -117,7 +121,18 @@ This ensures every `http` call requires human approval by default, given its `Cr
 | `crates/argus-wing/src/lib.rs` | Register `HttpTool` as default |
 | `agents/arguswing.toml` | Add `"http"` to `tool_names` |
 
-**New dependency for `argus-tool`**: `url` crate (for URL parsing/validation), added to workspace.
+## Dependency Details
+
+**Root `Cargo.toml` `[workspace.dependencies]`**:
+```toml
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+once_cell = "1"
+url = "2"
+```
+
+**Crate-level overrides** (where features differ from workspace base):
+- `crates/argus-llm/Cargo.toml`: `reqwest = { workspace = true, features = ["json", "stream"] }` — adds json/stream features atop workspace base
+- `crates/argus-tool/Cargo.toml`: same as workspace (no extra features needed)
 
 ## Error Handling
 
