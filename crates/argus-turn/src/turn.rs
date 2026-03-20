@@ -274,8 +274,14 @@ impl Turn {
     /// - Hook blocks
     /// - Max iterations exceeded
     pub async fn execute(mut self) -> Result<TurnOutput, TurnError> {
-        // Spawn event forwarder
-        self.spawn_event_forwarder();
+        // Spawn event forwarder — clone stream_tx so it lives in the forwarder task.
+        // This prevents the channel from closing when the Turn is dropped.
+        self._forwarder_handle = Some(Self::spawn_event_forwarder(
+            self.stream_tx.clone(),
+            self.thread_event_tx.clone(),
+            self.thread_id.clone(),
+            self.turn_number,
+        ));
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -342,11 +348,14 @@ impl Turn {
     /// Internal method: spawn event forwarder task.
     ///
     /// Forwards TurnStreamEvent to ThreadEvent for external subscribers.
-    fn spawn_event_forwarder(&mut self) {
-        let mut stream_rx = self.stream_tx.subscribe();
-        let thread_event_tx = self.thread_event_tx.clone();
-        let thread_id = self.thread_id.clone();
-        let turn_number = self.turn_number;
+    /// Returns the JoinHandle so the caller can store it.
+    fn spawn_event_forwarder(
+        stream_tx: broadcast::Sender<TurnStreamEvent>,
+        thread_event_tx: broadcast::Sender<ThreadEvent>,
+        thread_id: String,
+        turn_number: u32,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut stream_rx = stream_tx.subscribe();
 
         let handle = tokio::spawn(async move {
             tracing::debug!(
@@ -419,7 +428,7 @@ impl Turn {
             );
         });
 
-        self._forwarder_handle = Some(handle);
+        handle
     }
 
     /// Internal method: trigger hooks and return the action.
@@ -590,7 +599,7 @@ impl Turn {
                         turn_number = %self.turn_number,
                         iteration = %iteration,
                         tool_count = %tool_calls.len(),
-                        content_preview = %content.as_ref().map(|c| &c[..c.len().min(100)]).unwrap_or(""),
+                        content_preview = %content.as_ref().map(|c| c.chars().take(100).collect::<String>()).unwrap_or_default(),
                         "Tool calls detected, executing tools"
                     );
 
@@ -609,7 +618,7 @@ impl Turn {
 
                     // Add tool result messages to history
                     for result in tool_results {
-                        let preview = &result.content[..result.content.len().min(200)];
+                        let preview = result.content.chars().take(200).collect::<String>();
                         tracing::info!(
                             thread_id = %self.thread_id,
                             turn_number = %self.turn_number,
@@ -757,8 +766,30 @@ impl Turn {
             }
             FinishReason::Length => Ok(NextAction::LengthExceeded),
             FinishReason::ContentFilter | FinishReason::Unknown => {
-                // For content filter or unknown reasons, return what we have
-                if content.as_deref().is_some_and(|value| !value.is_empty())
+                // If there are actual tool calls, treat as ToolUse (some providers
+                // return non-standard finish_reason values when tool calls are present)
+                if !response_tool_calls.is_empty() {
+                    let tool_calls: Vec<ToolCall> = match self.config.max_tool_calls {
+                        Some(max) if response_tool_calls.len() > max as usize => {
+                            tracing::debug!(
+                                requested = response_tool_calls.len(),
+                                max_allowed = max,
+                                "Limiting tool calls per iteration"
+                            );
+                            response_tool_calls.into_iter().take(max as usize).collect()
+                        }
+                        _ => response_tool_calls,
+                    };
+
+                    let assistant_msg = ChatMessage::assistant_with_tool_calls_and_reasoning(
+                        content.clone(),
+                        tool_calls.clone(),
+                        reasoning_content,
+                    );
+                    messages.push(assistant_msg);
+
+                    Ok(NextAction::ContinueWithTools { tool_calls, content })
+                } else if content.as_deref().is_some_and(|value| !value.is_empty())
                     || reasoning_content
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
@@ -767,12 +798,17 @@ impl Turn {
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
-                }
 
-                Ok(NextAction::Return(TurnOutput {
-                    messages: std::mem::take(messages),
-                    token_usage: token_usage.clone(),
-                }))
+                    Ok(NextAction::Return(TurnOutput {
+                        messages: std::mem::take(messages),
+                        token_usage: token_usage.clone(),
+                    }))
+                } else {
+                    Ok(NextAction::Return(TurnOutput {
+                        messages: std::mem::take(messages),
+                        token_usage: token_usage.clone(),
+                    }))
+                }
             }
         }
     }
