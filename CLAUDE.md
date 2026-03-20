@@ -109,16 +109,11 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
         ├────┤ argus-test-support │
         │    │  测试辅助       │
         │    └────────────────┘
-        │
-        │    ┌────────────────┐
-        ├────┤ argus-dev       │
-        │    │  开发工具       │
-        │    └────────────────┘
 ```
 
 ## 核心规则
 
-**cli 和 desktop 都只依赖 argus-wing 暴露的公共 API，不可访问 argus-* 内部模块。
+**desktop 只依赖 argus-wing 暴露的公共 API，不可访问 argus-* 内部模块。
 
 ## argus-protocol — 核心类型（叶子模块）
 
@@ -143,9 +138,9 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 
 ## argus-wing — 核心库门面
 
-`argus-wing` 是面向 cli 和 desktop 的**唯一入口点**。它不包含核心逻辑，而是组合各个 argus-* 模块。
+`argus-wing` 是面向 desktop 的**唯一入口点**。它不包含核心逻辑，而是组合各个 argus-* 模块。
 
-唯一的入口点是 `ArgusWing::init()` / `ArgusWing::with_pool()`。cli 和 desktop 只能看到 `ArgusWing` 一个结构体来启动和操作系统。
+唯一的入口点是 `ArgusWing::init()` / `ArgusWing::with_pool()`。desktop 只能看到 `ArgusWing` 一个结构体来启动和操作系统。
 
 ## 各 argus-* crate 职责
 
