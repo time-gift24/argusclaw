@@ -17,6 +17,8 @@ use argus_protocol::llm::{
     ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
 };
+#[cfg(feature = "dev")]
+use argus_protocol::llm::CompletionRequest;
 use futures_util::StreamExt;
 
 use crate::providers::{

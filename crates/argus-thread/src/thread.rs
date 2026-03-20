@@ -10,6 +10,7 @@ use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadEvent, ThreadId,
+    estimate_message_tokens,
 };
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnOutput};
@@ -244,13 +245,21 @@ impl Thread {
         self.token_count = self
             .messages
             .iter()
-            .map(|m| Self::estimate_tokens(&m.content))
+            .map(|m| estimate_message_tokens(m) as u32)
             .sum();
     }
 
     fn apply_turn_output(&mut self, output: TurnOutput) {
         self.messages = output.messages;
-        self.recalculate_token_count();
+        let prev_count = self.token_count;
+        self.token_count = output.token_usage.input_tokens;
+        tracing::debug!(
+            "Token usage - before: {}, after: {}, actual_prompt: {}, actual_completion: {}",
+            prev_count,
+            self.token_count,
+            output.token_usage.input_tokens,
+            output.token_usage.output_tokens
+        );
         self.updated_at = Utc::now();
     }
 
@@ -348,11 +357,6 @@ impl Thread {
             Err(error) => Err(ThreadError::TurnFailed(error)),
         }
     }
-
-    /// Estimate token count for a string.
-    fn estimate_tokens(content: &str) -> u32 {
-        (content.len() / 4).max(1) as u32
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,8 +426,10 @@ mod tests {
 
     #[test]
     fn estimate_tokens_reasonable() {
-        assert_eq!(Thread::estimate_tokens("test"), 1);
-        assert_eq!(Thread::estimate_tokens("test test"), 2);
-        assert_eq!(Thread::estimate_tokens(""), 1);
+        // Verify tiktoken-based estimation works
+        let count = argus_protocol::estimate_tokens("test");
+        assert!(count >= 1, "tiktoken should encode 'test' to at least 1 token");
+        let count2 = argus_protocol::estimate_tokens("test test");
+        assert!(count2 >= count, "longer text should have more tokens");
     }
 }

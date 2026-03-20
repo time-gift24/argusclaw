@@ -32,7 +32,6 @@ pub mod types;
 // Re-export main types
 pub use compact::{
     CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
-    estimate_tokens,
 };
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
