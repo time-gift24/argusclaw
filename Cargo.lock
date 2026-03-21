@@ -194,20 +194,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-log"
-version = "0.1.0"
-dependencies = [
- "argus-protocol",
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "argus-protocol"
 version = "0.1.0"
 dependencies = [
@@ -248,7 +234,6 @@ dependencies = [
 name = "argus-session"
 version = "0.1.0"
 dependencies = [
- "argus-log",
  "argus-protocol",
  "argus-template",
  "argus-thread",
