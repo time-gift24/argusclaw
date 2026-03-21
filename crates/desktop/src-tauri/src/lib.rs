@@ -56,6 +56,11 @@ pub fn run() {
             commands::add_credential,
             commands::update_credential,
             commands::delete_credential,
+            // Session management commands
+            commands::list_sessions,
+            commands::delete_session,
+            commands::update_session_title,
+            commands::cleanup_old_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

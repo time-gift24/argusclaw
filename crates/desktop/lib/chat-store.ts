@@ -58,6 +58,7 @@ export interface ChatStore {
 
   initialize: () => Promise<void>;
   activateSession: (templateId: number) => Promise<void>;
+  selectTemplateId: (templateId: number | null) => void;
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
@@ -158,6 +159,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
       throw error;
     }
+  },
+
+  selectTemplateId(templateId: number | null) {
+    set({ selectedTemplateId: templateId, errorMessage: null });
   },
 
   async selectProviderPreference(providerId: number | null) {

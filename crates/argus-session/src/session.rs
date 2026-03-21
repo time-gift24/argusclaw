@@ -13,6 +13,8 @@ pub struct SessionSummary {
     pub id: SessionId,
     pub name: String,
     pub thread_count: i64,
+    pub template_id: Option<i64>,
+    pub provider_id: Option<i64>,
     pub updated_at: DateTime<Utc>,
 }
 
