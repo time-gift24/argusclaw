@@ -214,6 +214,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-repl"
+version = "0.1.0"
+dependencies = [
+ "argus-approval",
+ "argus-llm",
+ "argus-protocol",
+ "argus-repository",
+ "argus-session",
+ "argus-template",
+ "argus-thread",
+ "argus-tool",
+ "argus-wing",
+ "clap",
+ "futures-util",
+ "rust_decimal",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "argus-repository"
 version = "0.1.0"
 dependencies = [

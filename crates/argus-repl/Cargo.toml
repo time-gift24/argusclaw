@@ -1,0 +1,22 @@
+[package]
+name = "argus-repl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+argus-wing = { path = "../argus-wing" }
+argus-protocol = { path = "../argus-protocol" }
+argus-session = { path = "../argus-session" }
+argus-thread = { path = "../argus-thread" }
+argus-tool = { path = "../argus-tool" }
+argus-template = { path = "../argus-template" }
+argus-approval = { path = "../argus-approval" }
+argus-repository = { path = "../argus-repository" }
+argus-llm = { path = "../argus-llm" }
+
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+rust_decimal = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
