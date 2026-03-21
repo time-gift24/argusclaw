@@ -50,7 +50,9 @@ impl SessionManager {
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let rows = sqlx::query(
             r#"
-            SELECT s.id, s.name, s.updated_at, COUNT(t.id) as thread_count
+            SELECT s.id, s.name, s.updated_at, COUNT(t.id) as thread_count,
+                   (SELECT t2.template_id FROM threads t2 WHERE t2.session_id = s.id LIMIT 1) as template_id,
+                   (SELECT t3.provider_id FROM threads t3 WHERE t3.session_id = s.id LIMIT 1) as provider_id
             FROM sessions s
             LEFT JOIN threads t ON t.session_id = s.id
             GROUP BY s.id
@@ -75,6 +77,8 @@ impl SessionManager {
                     id: SessionId::new(row.get("id")),
                     name: row.get("name"),
                     thread_count: row.get("thread_count"),
+                    template_id: row.get("template_id"),
+                    provider_id: row.get("provider_id"),
                     updated_at,
                 }
             })
@@ -420,5 +424,42 @@ impl SessionManager {
         let thread = session.get_thread(thread_id)?;
         let thread = thread.lock().await;
         Some(thread.subscribe())
+    }
+
+    /// Delete sessions with no thread activity for the specified number of days.
+    /// A session is considered stale if all its threads (or itself if it has no threads)
+    /// have not been updated within the cutoff period.
+    pub async fn cleanup_old_sessions(&self, days: u32) -> Result<u64> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM sessions WHERE id IN (
+                SELECT s.id FROM sessions s
+                WHERE COALESCE(
+                    (SELECT MAX(t.updated_at) FROM threads t WHERE t.session_id = s.id),
+                    s.updated_at
+                ) < datetime('now', '-' || ?1 || ' days')
+            )
+            "#,
+        )
+        .bind(days as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+        Ok(result.rows_affected())
+    }
+
+    /// Update the title of a session.
+    pub async fn update_session_title(&self, session_id: SessionId, title: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET name = ?2, updated_at = datetime('now') WHERE id = ?1")
+            .bind(session_id.inner())
+            .bind(title)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        Ok(())
     }
 }

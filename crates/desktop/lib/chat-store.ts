@@ -18,14 +18,10 @@ export interface PendingToolCall {
   status: "streaming" | "running" | "completed";
 }
 
-const toSessionKey = (templateId: number, providerPreferenceId: number | null) =>
-  `${templateId}::${providerPreferenceId ?? "__default__"}`;
-
 const toErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
 export interface ChatSessionState {
-  sessionKey: string;
   sessionId: number;
   templateId: number;
   threadId: string;
@@ -47,8 +43,7 @@ export interface ChatSessionState {
 export interface ChatStore {
   selectedTemplateId: number | null;
   selectedProviderPreferenceId: number | null;
-  selectedModelOverride: string | null;
-  activeSessionKey: string | null;
+  activeSessionId: number | null;
   errorMessage: string | null;
   sessionsByKey: Record<string, ChatSessionState>;
   templates: Awaited<ReturnType<typeof agents.list>>;
@@ -56,20 +51,18 @@ export interface ChatStore {
   _unlisten: UnlistenFn | null;
 
   initialize: () => Promise<void>;
-  activateSession: (templateId: number) => Promise<void>;
-  selectProviderPreference: (providerId: number | null) => Promise<void>;
-  selectModelOverride: (model: string | null) => Promise<void>;
+  activateSession: (sessionId: number, templateId: number, providerId: number | null) => Promise<void>;
+  removeSession: (sessionId: number) => void;
+  selectTemplateId: (templateId: number | null) => void;
   sendMessage: (content: string) => Promise<void>;
-  refreshSnapshot: (sessionKey: string) => Promise<void>;
-  cleanup: () => void;
+  refreshSnapshot: (sessionId: string) => Promise<void>;
   _handleThreadEvent: (envelope: ThreadEventEnvelope) => void;
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   selectedTemplateId: null,
   selectedProviderPreferenceId: null,
-  selectedModelOverride: null,
-  activeSessionKey: null,
+  activeSessionId: null,
   errorMessage: null,
   sessionsByKey: {},
   templates: [],
@@ -97,38 +90,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       const firstTemplate = templateList[0];
-      await get().activateSession(firstTemplate.id);
+      // For the initial session, use null sessionId to create a new one
+      await get().activateSession(0, firstTemplate.id, null);
     } catch (error) {
       set({ errorMessage: toErrorMessage(error) });
     }
   },
 
-  async activateSession(templateId: number) {
+  async activateSession(sessionId: number, templateId: number, providerId: number | null) {
+    const sessionKey = sessionId > 0 ? sessionId.toString() : null;
     const state = get();
-    const sessionKey = toSessionKey(templateId, state.selectedProviderPreferenceId);
 
-    // Reuse existing session if available
-    if (state.sessionsByKey[sessionKey]) {
+    // If sessionId is provided, try to reuse existing session
+    if (sessionKey && state.sessionsByKey[sessionKey]) {
       set({
-        activeSessionKey: sessionKey,
+        activeSessionId: sessionId,
         selectedTemplateId: templateId,
+        selectedProviderPreferenceId: providerId,
         errorMessage: null,
       });
       return;
     }
 
     try {
-      const session = await chat.createChatSession(
-        templateId,
-        state.selectedProviderPreferenceId,
-      );
-      const snapshot = await chat.getThreadSnapshot(
-        session.session_id,
-        session.thread_id,
-      );
+      const session = await chat.createChatSession(templateId, providerId);
+      const snapshot = await chat.getThreadSnapshot(session.session_id, session.thread_id);
 
+      const newSessionKey = session.session_id.toString();
       const newSessionState: ChatSessionState = {
-        sessionKey: session.session_key,
         sessionId: session.session_id,
         templateId: session.template_id,
         threadId: session.thread_id,
@@ -141,12 +130,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       };
 
       set((state) => ({
-        activeSessionKey: sessionKey,
+        activeSessionId: session.session_id,
         selectedTemplateId: templateId,
+        selectedProviderPreferenceId: providerId,
         errorMessage: null,
         sessionsByKey: {
           ...state.sessionsByKey,
-          [sessionKey]: newSessionState,
+          [newSessionKey]: newSessionState,
         },
       }));
     } catch (error) {
@@ -158,30 +148,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async selectProviderPreference(providerId: number | null) {
-    set({ selectedProviderPreferenceId: providerId, errorMessage: null });
-
-    const state = get();
-    if (state.selectedTemplateId) {
-      try {
-        await get().activateSession(state.selectedTemplateId);
-      } catch {
-        // activateSession already populated the visible error state
-      }
-    }
+  removeSession(sessionId: number) {
+    const sessionKey = sessionId.toString();
+    set((state) => {
+      const entries = Object.entries(state.sessionsByKey).filter(([key]) => key !== sessionKey);
+      return {
+        sessionsByKey: Object.fromEntries(entries),
+        activeSessionId: state.activeSessionId === sessionId ? null : state.activeSessionId,
+      };
+    });
   },
 
-  async selectModelOverride(model: string | null) {
-    set({ selectedModelOverride: model, errorMessage: null });
-
-    const state = get();
-    if (state.selectedTemplateId) {
-      try {
-        await get().activateSession(state.selectedTemplateId);
-      } catch {
-        // activateSession already populated the visible error state
-      }
-    }
+  selectTemplateId(templateId: number | null) {
+    set({ selectedTemplateId: templateId, errorMessage: null });
   },
 
   async sendMessage(content: string) {
@@ -189,7 +168,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!trimmedContent) return;
 
     let state = get();
-    if (!state.activeSessionKey) {
+    const activeSessionId = state.activeSessionId;
+    const sessionKey = activeSessionId ? activeSessionId.toString() : null;
+
+    if (!sessionKey || !state.sessionsByKey[sessionKey]) {
       const fallbackTemplateId = state.selectedTemplateId ?? state.templates[0]?.id ?? null;
       if (!fallbackTemplateId) {
         set({ errorMessage: "当前没有可用的聊天会话。" });
@@ -197,20 +179,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       try {
-        await get().activateSession(fallbackTemplateId);
+        await get().activateSession(0, fallbackTemplateId, null);
       } catch {
         return;
       }
 
       state = get();
+      const newSessionKey = state.activeSessionId?.toString() ?? null;
+      if (!newSessionKey || !state.sessionsByKey[newSessionKey]) {
+        set({ errorMessage: "当前会话尚未准备好，请稍后重试。" });
+        return;
+      }
     }
 
-    if (!state.activeSessionKey) {
-      set({ errorMessage: "当前会话尚未准备好，请稍后重试。" });
-      return;
-    }
-
-    const session = state.sessionsByKey[state.activeSessionKey];
+    const currentSessionKey = state.activeSessionId?.toString() ?? "";
+    const session = state.sessionsByKey[currentSessionKey];
     if (!session) {
       set({ errorMessage: "当前会话尚未准备好，请稍后重试。" });
       return;
@@ -220,7 +203,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       errorMessage: null,
       sessionsByKey: {
         ...state.sessionsByKey,
-        [state.activeSessionKey!]: {
+        [currentSessionKey]: {
           ...session,
           status: "running",
           pendingAssistant: { content: "", reasoning: "", toolCalls: [], plan: null },
@@ -237,8 +220,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         errorMessage,
         sessionsByKey: {
           ...store.sessionsByKey,
-          [state.activeSessionKey!]: {
-            ...store.sessionsByKey[state.activeSessionKey!],
+          [currentSessionKey]: {
+            ...store.sessionsByKey[currentSessionKey],
             status: "error",
             pendingAssistant: null,
             error: errorMessage,
@@ -280,14 +263,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           },
         },
       }));
-    }
-  },
-
-  cleanup() {
-    const unlisten = get()._unlisten;
-    if (unlisten) {
-      unlisten();
-      set({ _unlisten: null });
     }
   },
 

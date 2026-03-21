@@ -187,3 +187,26 @@ export const chat = {
       resolvedBy,
     }),
 };
+
+// Sessions (Thread) API
+export interface SessionSummaryPayload {
+  id: number;
+  name: string;
+  thread_count: number;
+  template_id: number | null;
+  provider_id: number | null;
+  updated_at: string;
+}
+
+export const sessions = {
+  list: () => invoke<SessionSummaryPayload[]>("list_sessions"),
+
+  delete: (id: number) =>
+    invoke<void>("delete_session", { id }),
+
+  updateTitle: (id: number, title: string) =>
+    invoke<void>("update_session_title", { id, title }),
+
+  cleanup: (days?: number) =>
+    invoke<number>("cleanup_old_sessions", { days }),
+};

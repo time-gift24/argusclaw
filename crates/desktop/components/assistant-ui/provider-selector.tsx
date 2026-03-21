@@ -15,19 +15,19 @@ import { UnfoldMoreIcon, Tick02Icon } from "@hugeicons/core-free-icons";
 
 export function ProviderSelector() {
   const providers = useChatStore((state) => state.providers);
-  const selectedProviderPreferenceId = useChatStore(
-    (state) => state.selectedProviderPreferenceId,
-  );
-  const selectProviderPreference = useChatStore(
-    (state) => state.selectProviderPreference,
-  );
-  const selectModelOverride = useChatStore(
-    (state) => state.selectModelOverride,
-  );
+  const activeSessionId = useChatStore((state) => state.activeSessionId);
+  const selectedTemplateId = useChatStore((state) => state.selectedTemplateId);
+  const activateSession = useChatStore((state) => state.activateSession);
+  const sessionsByKey = useChatStore((state) => state.sessionsByKey);
+
+  const activeSession = activeSessionId
+    ? sessionsByKey[activeSessionId.toString()]
+    : null;
+  const effectiveProviderId = activeSession?.effectiveProviderId ?? null;
 
   // Find the selected provider
-  const selectedProvider = selectedProviderPreferenceId
-    ? providers.find((p) => p.id === selectedProviderPreferenceId)
+  const selectedProvider = effectiveProviderId
+    ? providers.find((p) => p.id === effectiveProviderId)
     : null;
 
   // Get the effective model name for display
@@ -50,17 +50,16 @@ export function ProviderSelector() {
       return;
     }
 
-    void selectProviderPreference(providerId);
-    void selectModelOverride(null);
+    void activateSession(
+      activeSession?.sessionId ?? 0,
+      selectedTemplateId ?? providers[0]?.id ?? 0,
+      providerId,
+    );
   };
 
   // Check if a specific item is selected
   const isSelected = (providerId: number, model: string) => {
-    // If no preference set, use the default provider
-    const effectiveProviderId = selectedProviderPreferenceId ?? providers.find((p) => p.is_default)?.id;
-    const effectiveProvider = providers.find((provider) => provider.id === effectiveProviderId);
-
-    return effectiveProviderId === providerId && effectiveProvider?.default_model === model;
+    return effectiveProviderId === providerId && selectedProvider?.default_model === model;
   };
 
   return (
