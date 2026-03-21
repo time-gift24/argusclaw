@@ -26,6 +26,7 @@
 pub mod compact;
 pub mod config;
 pub mod error;
+pub mod plan_tool;
 pub mod thread;
 pub mod types;
 

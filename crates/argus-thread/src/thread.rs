@@ -1,6 +1,6 @@
 //! Thread implementation.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
@@ -17,6 +17,7 @@ use argus_turn::{TurnBuilder, TurnOutput};
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
 use super::error::ThreadError;
+use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
 
 /// Default broadcast channel capacity.
@@ -83,6 +84,10 @@ pub struct Thread {
     /// Event broadcaster (internal).
     #[builder(default)]
     event_sender: broadcast::Sender<ThreadEvent>,
+
+    /// Plan state shared with UpdatePlanTool (in-memory).
+    #[builder(default = "Arc::new(RwLock::new(Vec::new()))")]
+    plan: Arc<RwLock<Vec<serde_json::Value>>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -95,6 +100,7 @@ impl std::fmt::Debug for Thread {
             .field("messages", &self.messages.len())
             .field("token_count", &self.token_count)
             .field("turn_count", &self.turn_count)
+            .field("plan_items", &self.plan.read().unwrap().len())
             .field("config", &self.config)
             .finish()
     }
@@ -145,6 +151,9 @@ impl ThreadBuilder {
             token_count: 0,
             turn_count: 0,
             event_sender,
+            plan: self
+                .plan
+                .unwrap_or_else(|| Arc::new(RwLock::new(Vec::new()))),
         })
     }
 }
@@ -194,6 +203,7 @@ impl Thread {
             message_count: self.messages.len(),
             token_count: self.token_count,
             turn_count: self.turn_count,
+            plan_item_count: self.plan.read().unwrap().len(),
         }
     }
 
@@ -222,6 +232,11 @@ impl Thread {
     /// Get turn count.
     pub fn turn_count(&self) -> u32 {
         self.turn_count
+    }
+
+    /// Get the plan state (shared with UpdatePlanTool).
+    pub fn plan(&self) -> &Arc<RwLock<Vec<serde_json::Value>>> {
+        &self.plan
     }
 
     /// Get the LLM provider.
@@ -306,12 +321,15 @@ impl Thread {
         let thread_id = self.id.to_string();
 
         // Thread is responsible for building: collect tools and hooks
-        let tools: Vec<Arc<dyn NamedTool>> = self
+        let mut tools: Vec<Arc<dyn NamedTool>> = self
             .tool_manager
             .list_ids()
             .iter()
             .filter_map(|id| self.tool_manager.get(id))
             .collect();
+
+        // Append UpdatePlanTool with the thread's plan store
+        tools.push(Arc::new(UpdatePlanTool::new(self.plan.clone())));
 
         let hooks: Vec<Arc<dyn HookHandler>> = self
             .hooks

@@ -8,6 +8,7 @@ pub mod http_client;
 pub mod ids;
 pub mod llm;
 pub mod message_override;
+pub mod plan;
 pub mod risk_level;
 pub mod safety;
 pub mod ssrf;
@@ -24,6 +25,7 @@ pub use hooks::{
 };
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
 pub use message_override::MessageOverride;
+pub use plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
 pub use risk_level::RiskLevel;
 pub use token_usage::TokenUsage;
 
