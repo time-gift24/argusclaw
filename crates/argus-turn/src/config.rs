@@ -12,6 +12,8 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use argus_protocol::{AgentRecord, HookRegistry, SafetyConfig, ThreadEvent};
 use argus_tool::ToolManager;
 
+use super::TraceConfig;
+
 /// Turn execution configuration.
 ///
 /// Controls the behavior of a turn execution, including limits on tool calls,
@@ -35,6 +37,9 @@ pub struct TurnConfig {
     /// Safety configuration for tool output sanitization.
     #[builder(default = "SafetyConfig::new()")]
     pub safety_config: SafetyConfig,
+    /// Trace configuration for turn execution logging.
+    #[builder(default, setter(strip_option))]
+    pub trace_config: Option<TraceConfig>,
 }
 
 impl TurnConfig {
@@ -45,6 +50,7 @@ impl TurnConfig {
             tool_timeout_secs: Some(120),
             max_iterations: Some(50),
             safety_config: SafetyConfig::new(),
+            trace_config: None,
         }
     }
 }
@@ -197,6 +203,7 @@ mod tests {
         assert_eq!(config.max_tool_calls, Some(10));
         assert_eq!(config.tool_timeout_secs, Some(120));
         assert_eq!(config.max_iterations, Some(50));
+        assert!(config.trace_config.is_none());
     }
 
     #[test]
@@ -205,6 +212,7 @@ mod tests {
         assert_eq!(config.max_tool_calls, Some(10));
         assert_eq!(config.tool_timeout_secs, Some(120));
         assert_eq!(config.max_iterations, Some(50));
+        assert!(config.trace_config.is_none());
     }
 
     #[test]
