@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use argus_approval::ApprovalPolicy;
 use argus_protocol::{ThreadEvent, ThreadId};
 use argus_repl::mock_provider::ReplMockProvider;
 use argus_thread::{KeepRecentCompactor, ThreadBuilder};
@@ -53,6 +54,12 @@ async fn main() -> anyhow::Result<()> {
     let wing = ArgusWing::init(args.db.as_deref())
         .await
         .expect("ArgusWing::init failed");
+
+    // Apply auto-approve policy (REPL uses safe read-only tools only)
+    wing.approval_manager().update_policy(ApprovalPolicy {
+        auto_approve: true,
+        ..Default::default()
+    });
 
     // Create tool manager with safe tools only (no ShellTool)
     let tool_manager = Arc::new({
