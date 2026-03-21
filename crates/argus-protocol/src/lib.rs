@@ -9,6 +9,7 @@ pub mod ids;
 pub mod llm;
 pub mod message_override;
 pub mod risk_level;
+pub mod safety;
 pub mod ssrf;
 pub mod token_usage;
 pub mod tool;
@@ -67,3 +68,5 @@ pub use ssrf::{
     validate_url,
 };
 pub use tool::{NamedTool, ToolError};
+
+pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
