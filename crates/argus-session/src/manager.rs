@@ -1,9 +1,12 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
-use argus_thread::{CompactorManager, ThreadBuilder, ThreadConfig};
+use argus_thread::{CompactorManager, ThreadBuilder};
+use argus_thread::config::ThreadConfigBuilder;
 use argus_tool::ToolManager;
+use argus_turn::{TraceConfig, TurnConfig};
 use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{broadcast, Mutex};
@@ -19,6 +22,7 @@ pub struct SessionManager {
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
+    trace_dir: PathBuf,
 }
 
 impl SessionManager {
@@ -29,6 +33,7 @@ impl SessionManager {
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
     ) -> Self {
         Self {
             pool,
@@ -37,6 +42,7 @@ impl SessionManager {
             provider_resolver,
             tool_manager,
             compactor_manager,
+            trace_dir,
         }
     }
 
@@ -163,6 +169,13 @@ impl SessionManager {
 
             // Build Thread directly
             let title: Option<String> = thread_row.get("title");
+            let trace_cfg = TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
+            let mut turn_config = TurnConfig::new();
+            turn_config.trace_config = Some(trace_cfg);
+            let config = ThreadConfigBuilder::default()
+                .turn_config(turn_config)
+                .build()
+                .expect("ThreadConfigBuilder should not fail with defaults");
             let thread = match ThreadBuilder::new()
                 .id(thread_id)
                 .session_id(session_id)
@@ -171,7 +184,7 @@ impl SessionManager {
                 .provider(provider)
                 .tool_manager(self.tool_manager.clone())
                 .compactor(compactor)
-                .config(ThreadConfig::default())
+                .config(config)
                 .build()
             {
                 Ok(t) => Arc::new(Mutex::new(t)),
@@ -267,6 +280,13 @@ impl SessionManager {
         let compactor = self.compactor_manager.default_compactor().clone();
 
         // Create Thread directly
+        let trace_cfg = TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
+        let mut turn_config = TurnConfig::new();
+        turn_config.trace_config = Some(trace_cfg);
+        let config = ThreadConfigBuilder::default()
+            .turn_config(turn_config)
+            .build()
+            .expect("ThreadConfigBuilder should not fail with defaults");
         let thread = ThreadBuilder::new()
             .id(thread_id)
             .session_id(session_id)
@@ -274,7 +294,7 @@ impl SessionManager {
             .provider(provider)
             .tool_manager(self.tool_manager.clone())
             .compactor(compactor)
-            .config(ThreadConfig::default())
+            .config(config)
             .build()
             .map_err(|e| ArgusError::ThreadBuildFailed {
                 reason: e.to_string(),

@@ -323,7 +323,7 @@ impl Thread {
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         // Build Turn using TurnBuilder
-        let turn = TurnBuilder::default()
+        let mut turn_builder = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
             .messages(self.messages.clone())
@@ -333,7 +333,13 @@ impl Thread {
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
-            .thread_event_tx(self.event_sender.clone())
+            .thread_event_tx(self.event_sender.clone());
+
+        if let Some(ref tc) = self.config.turn_config.trace_config {
+            turn_builder = turn_builder.trace_config(tc.clone());
+        }
+
+        let turn = turn_builder
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))?;
 

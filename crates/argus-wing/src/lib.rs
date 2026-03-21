@@ -28,7 +28,7 @@ mod resolver;
 
 use std::sync::Arc;
 
-use crate::db::{ensure_parent_dir, resolve_database_target, DatabaseTarget};
+use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::{AccountManager, CredentialStore};
@@ -121,12 +121,15 @@ impl ArgusWing {
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create session manager
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             pool.clone(),
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
             compactor_manager.clone(),
+            trace_dir,
         ));
 
         // Create approval manager
@@ -159,12 +162,15 @@ impl ArgusWing {
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             pool.clone(),
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
             compactor_manager.clone(),
+            trace_dir,
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 

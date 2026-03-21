@@ -52,6 +52,7 @@
 pub mod config;
 pub mod error;
 pub mod execution;
+pub mod trace;
 pub mod turn;
 
 pub use config::{
@@ -60,6 +61,7 @@ pub use config::{
 };
 pub use error::TurnError;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
+pub use trace::{IterationRecord, LlmRequest, LlmResponse, ToolExecution, TraceConfig};
 pub use turn::{Turn, TurnBuilder};
 
 // Re-export hook types from argus-protocol for convenience

@@ -1,5 +1,7 @@
 //! Database utilities for ArgusWing.
 
+use std::path::PathBuf;
+
 use argus_protocol::{ArgusError, Result};
 
 pub(crate) enum DatabaseTarget {
@@ -50,4 +52,20 @@ pub(crate) fn database_path_to_string(target: &DatabaseTarget) -> String {
         DatabaseTarget::Url(url) => url.clone(),
         DatabaseTarget::Path(path) => path.display().to_string(),
     }
+}
+
+/// Returns the default directory for turn trace files.
+///
+/// Order of precedence:
+/// 1. `TRACE_DIR` environment variable
+/// 2. `~/.arguswing/traces/`
+pub(crate) fn default_trace_dir() -> PathBuf {
+    std::env::var("TRACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("~"))
+                .join(".arguswing")
+                .join("traces")
+        })
 }
