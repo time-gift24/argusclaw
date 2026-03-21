@@ -61,6 +61,7 @@ fn main() {
 /// Get all builtin agent TOML definitions as a slice of strings
 pub fn get_builtin_agent_definitions() -> &'static [&'static str] {
     // Relative paths from crates/argus-template/src/ to repository root
+    #[rustfmt::skip]
     const AGENT_DEFINITIONS: &[&str] = &[
 "#,
     );

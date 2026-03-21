@@ -11,6 +11,8 @@ pub struct ThreadInfo {
     pub token_count: u32,
     /// Number of turns completed.
     pub turn_count: u32,
+    /// Number of plan items.
+    pub plan_item_count: usize,
 }
 
 /// Thread state.

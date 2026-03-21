@@ -1,0 +1,285 @@
+//! UpdatePlanTool — LLM-usable tool for managing a per-Thread task plan.
+//!
+//! The tool accepts a full plan snapshot from the LLM, overwrites the Thread's
+//! plan state, and returns the updated plan with metadata.
+
+use std::sync::{Arc, RwLock};
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
+
+use argus_protocol::llm::ToolDefinition;
+use argus_protocol::risk_level::RiskLevel;
+use argus_protocol::{NamedTool, ToolError, UpdatePlanArgs};
+
+/// A tool that lets the LLM update a per-Thread task plan.
+///
+/// The tool operates on an in-memory plan store. Plan state is shared via
+/// `Arc<RwLock<Vec<Value>>>` — the same store is accessible externally
+/// through `Thread.plan()`.
+pub struct UpdatePlanTool {
+    /// Shared plan store (owned by Thread).
+    store: Arc<RwLock<Vec<Value>>>,
+}
+
+impl UpdatePlanTool {
+    /// Create a new UpdatePlanTool backed by the given plan store.
+    #[must_use]
+    pub fn new(store: Arc<RwLock<Vec<Value>>>) -> Self {
+        Self { store }
+    }
+}
+
+impl Default for UpdatePlanTool {
+    fn default() -> Self {
+        Self::new(Arc::new(RwLock::new(Vec::new())))
+    }
+}
+
+#[async_trait]
+impl NamedTool for UpdatePlanTool {
+    fn name(&self) -> &str {
+        "update_plan"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "update_plan".to_string(),
+            description: "Update the task plan for this thread. The LLM sends the complete plan on each call, which fully overwrites the previous state. Use this to track and report progress on multi-step tasks.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "explanation": {
+                        "type": "string",
+                        "description": "Optional explanation for this plan update (logged but not stored)"
+                    },
+                    "plan": {
+                        "type": "array",
+                        "description": "The complete plan snapshot",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "step": {
+                                    "type": "string",
+                                    "description": "Description of the step"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Current status of the step"
+                                }
+                            },
+                            "required": ["step", "status"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["plan"]
+            }),
+        }
+    }
+
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value, ToolError> {
+        // Parse arguments
+        let args: UpdatePlanArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::ExecutionFailed {
+                tool_name: "update_plan".to_string(),
+                reason: format!("Invalid arguments: {}", e),
+            })?;
+
+        // Log explanation if provided
+        if let Some(ref explanation) = args.explanation {
+            tracing::debug!(explanation = %explanation, "update_plan explanation");
+        }
+
+        // Reject empty plan
+        if args.plan.is_empty() {
+            return Err(ToolError::ExecutionFailed {
+                tool_name: "update_plan".to_string(),
+                reason: "Plan cannot be empty".to_string(),
+            });
+        }
+
+        // Serialize plan items to JSON Values for storage
+        let plan_values: Vec<Value> = args
+            .plan
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap())
+            .collect();
+
+        // Update the shared store
+        {
+            let mut store = self.store.write().unwrap();
+            *store = plan_values.clone();
+        }
+
+        // Return updated plan with metadata
+        Ok(json!({
+            "plan": plan_values,
+            "updated": args.plan.len(),
+            "total": args.plan.len()
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn make_tool() -> UpdatePlanTool {
+        UpdatePlanTool::default()
+    }
+
+    #[tokio::test]
+    async fn name() {
+        assert_eq!(make_tool().name(), "update_plan");
+    }
+
+    #[tokio::test]
+    async fn risk_level_is_low() {
+        assert_eq!(make_tool().risk_level(), RiskLevel::Low);
+    }
+
+    #[tokio::test]
+    async fn definition_has_required_fields() {
+        let def = make_tool().definition();
+        assert_eq!(def.name, "update_plan");
+        let params = &def.parameters;
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("plan")
+        );
+        let plan_schema = params["properties"]["plan"].as_object().unwrap();
+        assert!(
+            plan_schema["items"].as_object().unwrap()["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("status")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_single_item() {
+        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let tool = UpdatePlanTool::new(store.clone());
+
+        let args = json!({
+            "plan": [{
+                "step": "Implement feature X",
+                "status": "completed"
+            }]
+        });
+
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["updated"], 1);
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["plan"].as_array().unwrap().len(), 1);
+        assert_eq!(store.read().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_multiple_items() {
+        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let tool = UpdatePlanTool::new(store.clone());
+
+        let args = json!({
+            "plan": [
+                { "step": "Step 1", "status": "completed" },
+                { "step": "Step 2", "status": "in_progress" },
+                { "step": "Step 3", "status": "pending" }
+            ]
+        });
+
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["updated"], 3);
+        assert_eq!(result["total"], 3);
+        assert_eq!(store.read().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn execute_with_explanation() {
+        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let tool = UpdatePlanTool::new(store.clone());
+
+        let args = json!({
+            "explanation": "Finished step 1",
+            "plan": [{ "step": "Step 1", "status": "completed" }]
+        });
+
+        let result = tool.execute(args).await.unwrap();
+        // Explanation should NOT appear in result
+        assert!(!result.as_object().unwrap().contains_key("explanation"));
+        assert_eq!(result["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn execute_empty_plan_rejected() {
+        let tool = make_tool();
+        let args = json!({ "plan": [] });
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            ToolError::ExecutionFailed { reason, .. } => {
+                assert!(reason.to_lowercase().contains("empty"));
+            }
+            _ => panic!("Expected ExecutionFailed"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_invalid_status_rejected() {
+        let tool = make_tool();
+        let args = json!({
+            "plan": [{ "step": "Test", "status": "invalid_status" }]
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_overwrites_previous() {
+        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let tool = UpdatePlanTool::new(store.clone());
+
+        // First update
+        let args1 = json!({
+            "plan": [{ "step": "Step A", "status": "pending" }]
+        });
+        tool.execute(args1).await.unwrap();
+        assert_eq!(store.read().unwrap().len(), 1);
+
+        // Second update (different content)
+        let args2 = json!({
+            "plan": [
+                { "step": "Step A", "status": "completed" },
+                { "step": "Step B", "status": "pending" }
+            ]
+        });
+        tool.execute(args2).await.unwrap();
+        assert_eq!(store.read().unwrap().len(), 2);
+
+        // Full overwrite: both items should be present
+        let items = store.read().unwrap();
+        let steps: Vec<&str> = items.iter().map(|v| v["step"].as_str().unwrap()).collect();
+        assert!(steps.contains(&"Step A"));
+        assert!(steps.contains(&"Step B"));
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_field_rejected() {
+        let tool = make_tool();
+        let args = json!({
+            "plan": [{ "step": "Test", "status": "pending", "extra": "field" }]
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+    }
+}

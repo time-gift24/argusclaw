@@ -1,6 +1,6 @@
 //! Thread implementation.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
@@ -17,6 +17,7 @@ use argus_turn::{TurnBuilder, TurnOutput};
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
 use super::error::ThreadError;
+use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
 
 /// Default broadcast channel capacity.
@@ -83,6 +84,10 @@ pub struct Thread {
     /// Event broadcaster (internal).
     #[builder(default)]
     event_sender: broadcast::Sender<ThreadEvent>,
+
+    /// Plan state shared with UpdatePlanTool (in-memory).
+    #[builder(default = "Arc::new(RwLock::new(Vec::new()))")]
+    plan: Arc<RwLock<Vec<serde_json::Value>>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -95,6 +100,7 @@ impl std::fmt::Debug for Thread {
             .field("messages", &self.messages.len())
             .field("token_count", &self.token_count)
             .field("turn_count", &self.turn_count)
+            .field("plan_items", &self.plan.read().unwrap().len())
             .field("config", &self.config)
             .finish()
     }
@@ -145,6 +151,9 @@ impl ThreadBuilder {
             token_count: 0,
             turn_count: 0,
             event_sender,
+            plan: self
+                .plan
+                .unwrap_or_else(|| Arc::new(RwLock::new(Vec::new()))),
         })
     }
 }
@@ -194,6 +203,7 @@ impl Thread {
             message_count: self.messages.len(),
             token_count: self.token_count,
             turn_count: self.turn_count,
+            plan_item_count: self.plan.read().unwrap().len(),
         }
     }
 
@@ -222,6 +232,11 @@ impl Thread {
     /// Get turn count.
     pub fn turn_count(&self) -> u32 {
         self.turn_count
+    }
+
+    /// Get a read-only snapshot of the current plan state.
+    pub fn plan(&self) -> Vec<serde_json::Value> {
+        self.plan.read().unwrap().clone()
     }
 
     /// Get the LLM provider.
@@ -306,12 +321,15 @@ impl Thread {
         let thread_id = self.id.to_string();
 
         // Thread is responsible for building: collect tools and hooks
-        let tools: Vec<Arc<dyn NamedTool>> = self
+        let mut tools: Vec<Arc<dyn NamedTool>> = self
             .tool_manager
             .list_ids()
             .iter()
             .filter_map(|id| self.tool_manager.get(id))
             .collect();
+
+        // Append UpdatePlanTool with the thread's plan store
+        tools.push(Arc::new(UpdatePlanTool::new(self.plan.clone())));
 
         let hooks: Vec<Arc<dyn HookHandler>> = self
             .hooks
@@ -369,7 +387,47 @@ impl Thread {
 mod tests {
     use super::*;
     use crate::compact::KeepRecentCompactor;
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
     use argus_protocol::{AgentId, ProviderId};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use serde_json::json;
+
+    struct DummyProvider;
+
+    #[async_trait]
+    impl LlmProvider for DummyProvider {
+        fn model_name(&self) -> &str {
+            "dummy"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "dummy".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "dummy".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+    }
 
     fn test_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
@@ -431,5 +489,40 @@ mod tests {
         assert_eq!(Thread::estimate_tokens("test"), 1);
         assert_eq!(Thread::estimate_tokens("test test"), 2);
         assert_eq!(Thread::estimate_tokens(""), 1);
+    }
+
+    #[test]
+    fn plan_returns_read_only_snapshot() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let plan_store = Arc::new(RwLock::new(vec![json!({
+            "step": "Inspect review feedback",
+            "status": "completed"
+        })]));
+
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new(1))
+            .plan(plan_store)
+            .build()
+            .unwrap();
+
+        let mut snapshot = thread.plan();
+        assert_eq!(
+            snapshot,
+            vec![json!({
+                "step": "Inspect review feedback",
+                "status": "completed"
+            })]
+        );
+
+        snapshot.push(json!({
+            "step": "Mutate local copy",
+            "status": "pending"
+        }));
+
+        assert_eq!(thread.plan().len(), 1);
+        assert_eq!(thread.info().plan_item_count, 1);
     }
 }
