@@ -217,6 +217,7 @@ dependencies = [
 name = "argus-repl"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argus-approval",
  "argus-llm",
  "argus-protocol",
@@ -230,6 +231,7 @@ dependencies = [
  "clap",
  "futures-util",
  "rust_decimal",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
