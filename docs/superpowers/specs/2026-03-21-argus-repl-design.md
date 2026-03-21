@@ -16,21 +16,24 @@
 
 ## 3. Project Location
 
-- **Binary**: `crates/argus-test-support/src/bin/argus-repl/main.rs` (new directory)
-- **Workspace**: Listed in `crates/argus-test-support/Cargo.toml` as `[[bin]]`
-- **New dependency**: `argus-wing` must be added to `argus-test-support/Cargo.toml`
+- **Crate**: `crates/argus-repl/` (new standalone binary crate)
+- **Binary entry**: `crates/argus-repl/src/main.rs`
+- **Workspace**: Added to root `Cargo.toml` members
+- **Dependencies**: `argus-wing`, `argus-protocol`, `argus-session`, `argus-thread`, `argus-tool`, `argus-repository`, `argus-approval`, `argus-template`, `argus-llm`
+
+Note: `argus-wing` cannot be added to `argus-test-support` because it would create a circular dependency (`argus-wing` depends on `argus-test-support`). The REPL is therefore a standalone crate.
 
 ## 4. Command-Line Interface
 
 ```bash
 # Default (concise mode, shows structured output only)
-cargo run -p argus-test-support --bin argus-repl
+cargo run -p argus-repl
 
 # Verbose mode (shows detailed events, token stats)
-cargo run -p argus-test-support --bin argus-repl -- --verbose
+cargo run -p argus-repl -- --verbose
 
 # Custom database path
-cargo run -p argus-test-support --bin argus-repl -- --db /tmp/test.db
+cargo run -p argus-repl -- --db /tmp/test.db
 ```
 
 ## 5. Mock Provider
@@ -167,11 +170,13 @@ Single-session mode:
 | `ThreadEvent::Processing { event: LlmStreamEvent::ToolCallDelta { name, .. } }` | `[ToolCall] {name}` | No |
 | `ThreadEvent::Processing { event: LlmStreamEvent::Usage { .. } }` | (ignored) | Yes |
 | `ThreadEvent::Processing { event: LlmStreamEvent::Finished { finish_reason } }` | `[Content] {accumulated_text}` | No |
+| `ThreadEvent::Processing { event: LlmStreamEvent::RetryAttempt { attempt, max_retries, error } }` | `[Retry] {attempt}/{max_retries}: {error}` | Yes |
 | `ThreadEvent::ToolStarted { tool_name, arguments }` | `[ToolStarted] {tool_name}` | Yes |
 | `ThreadEvent::ToolCompleted { tool_name, result }` | `[ToolCompleted] {tool_name}: {truncated}` | No |
 | `ThreadEvent::TurnCompleted { token_usage, .. }` | `[Event: TurnCompleted] tokens={input} input, {output} output` | Yes |
 | `ThreadEvent::TurnFailed { error }` | `[Error] {error}` | No |
 | `ThreadEvent::WaitingForApproval { request }` | `[Approval] {request.tool_name} pending` | No |
+| `ThreadEvent::ApprovalResolved { request_id, decision }` | (ignored) | Yes |
 | `ThreadEvent::Idle { .. }` | (ignored) | - |
 | `ThreadEvent::Compacted { .. }` | (ignored) | Yes |
 
