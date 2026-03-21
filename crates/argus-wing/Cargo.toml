@@ -6,7 +6,6 @@ description = "Unified entry point for ArgusWing application"
 
 [features]
 default = []
-dev = ["argus-llm/dev"]
 
 [dependencies]
 # Async runtime

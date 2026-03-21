@@ -12,9 +12,9 @@ use chrono::Utc;
 
 use argus_protocol::Result;
 use argus_protocol::llm::{
-    ChatMessage, CompletionRequest, FinishReason, LlmError, LlmProvider, LlmProviderId,
-    LlmProviderKind, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent,
-    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
+    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
+    LlmProviderRecord, LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
+    ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
 };
 use futures_util::StreamExt;
@@ -200,48 +200,6 @@ impl ProviderManager {
         };
 
         Ok(run_provider_connection_test(provider_id, model.to_string(), base_url, provider).await)
-    }
-
-    #[cfg(feature = "dev")]
-    pub async fn complete_text(
-        &self,
-        provider_id: Option<&LlmProviderId>,
-        prompt: impl Into<String>,
-    ) -> Result<String> {
-        let provider = match provider_id {
-            Some(id) => self.get_provider(id).await?,
-            None => self.get_default_provider().await?,
-        };
-        let request = CompletionRequest::new(vec![ChatMessage::user(prompt.into())]);
-        let response =
-            provider
-                .complete(request)
-                .await
-                .map_err(|e| argus_protocol::ArgusError::LlmError {
-                    reason: e.to_string(),
-                })?;
-
-        Ok(response.content)
-    }
-
-    #[cfg(feature = "dev")]
-    pub async fn stream_text(
-        &self,
-        provider_id: Option<&LlmProviderId>,
-        prompt: impl Into<String>,
-    ) -> Result<argus_protocol::llm::LlmEventStream> {
-        let provider = match provider_id {
-            Some(id) => self.get_provider(id).await?,
-            None => self.get_default_provider().await?,
-        };
-        let request = CompletionRequest::new(vec![ChatMessage::user(prompt.into())]);
-
-        provider
-            .stream_complete(request)
-            .await
-            .map_err(|e| argus_protocol::ArgusError::LlmError {
-                reason: e.to_string(),
-            })
     }
 
     fn build_provider_with_model(

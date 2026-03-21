@@ -19,9 +19,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 argus-protocol = { path = "../argus-protocol" }
 argus-llm = { path = "../argus-llm" }
 
-[features]
-default = []
-dev = []
-
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
