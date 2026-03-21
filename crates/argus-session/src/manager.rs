@@ -1,11 +1,15 @@
 use std::sync::Arc;
+use std::time::Instant;
 
+use argus_log::{SqliteTurnLogRepository, TurnLog, TurnLogRepository};
+use argus_protocol::TokenUsage;
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
 use argus_thread::{CompactorManager, ThreadBuilder, ThreadConfig};
 use argus_tool::ToolManager;
 use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
+use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::provider_resolver::ProviderResolver;
@@ -19,6 +23,7 @@ pub struct SessionManager {
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
+    turn_log_repository: Arc<dyn TurnLogRepository>,
 }
 
 impl SessionManager {
@@ -31,6 +36,7 @@ impl SessionManager {
         compactor_manager: Arc<CompactorManager>,
     ) -> Self {
         Self {
+            turn_log_repository: Arc::new(SqliteTurnLogRepository::new(pool.clone())),
             pool,
             sessions: DashMap::new(),
             template_manager,
@@ -104,7 +110,7 @@ impl SessionManager {
         // Load threads metadata from DB
         let thread_rows = sqlx::query(
             r#"
-            SELECT id, template_id, provider_id, title, created_at, updated_at
+            SELECT id, template_id, provider_id, title, token_count, turn_count, created_at, updated_at
             FROM threads WHERE session_id = ?
             "#,
         )
@@ -120,6 +126,10 @@ impl SessionManager {
             let thread_id = ThreadId::parse(&thread_id_str).unwrap_or_default();
             let template_id: i64 = thread_row.get("template_id");
             let provider_id_val: i64 = thread_row.get("provider_id");
+            let token_count_i64: i64 = thread_row.get("token_count");
+            let turn_count_i64: i64 = thread_row.get("turn_count");
+            let token_count = u32::try_from(token_count_i64).unwrap_or_default();
+            let turn_count = u32::try_from(turn_count_i64).unwrap_or_default();
 
             // Resolve provider
             let provider_id = ProviderId::new(provider_id_val);
@@ -172,6 +182,8 @@ impl SessionManager {
                 .tool_manager(self.tool_manager.clone())
                 .compactor(compactor)
                 .config(ThreadConfig::default())
+                .token_count(token_count)
+                .turn_count(turn_count)
                 .build()
             {
                 Ok(t) => Arc::new(Mutex::new(t)),
@@ -377,12 +389,55 @@ impl SessionManager {
             .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
         let mut thread = thread.lock().await;
+        let mut receiver = thread.subscribe();
+        let started_at = Instant::now();
+        let history_len_before = thread.history().len();
+        let model_name = thread.provider().active_model_name();
         thread
             .send_message(message, None)
             .await
             .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
-            })
+            })?;
+
+        let turn_count = thread.turn_count();
+        let token_count = thread.token_count();
+        let new_messages = thread
+            .history()
+            .get(history_len_before..)
+            .unwrap_or_default()
+            .to_vec();
+        let turn_usage = Self::extract_turn_usage(&mut receiver, thread_id, turn_count)?;
+        drop(thread);
+
+        self.update_thread_stats(thread_id, token_count, turn_count)
+            .await?;
+
+        let turn_data =
+            serde_json::to_string(&new_messages).map_err(|e| ArgusError::TurnLogError {
+                reason: format!("failed to serialize turn_data: {}", e),
+            })?;
+
+        let latency_ms = i64::try_from(started_at.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let turn_log = TurnLog {
+            thread_id: *thread_id,
+            turn_seq: i64::from(turn_count),
+            input_tokens: i64::from(turn_usage.input_tokens),
+            output_tokens: i64::from(turn_usage.output_tokens),
+            model: model_name,
+            latency_ms,
+            turn_data,
+            created_at: chrono::Utc::now(),
+        };
+
+        self.turn_log_repository
+            .append(turn_log)
+            .await
+            .map_err(|e| ArgusError::TurnLogError {
+                reason: e.to_string(),
+            })?;
+
+        Ok(())
     }
 
     /// Subscribe to thread events.
@@ -395,5 +450,63 @@ impl SessionManager {
         let thread = session.get_thread(thread_id)?;
         let thread = thread.lock().await;
         Some(thread.subscribe())
+    }
+
+    fn extract_turn_usage(
+        receiver: &mut broadcast::Receiver<ThreadEvent>,
+        thread_id: &ThreadId,
+        turn_count: u32,
+    ) -> Result<TokenUsage> {
+        let expected_thread_id = thread_id.to_string();
+        loop {
+            match receiver.try_recv() {
+                Ok(ThreadEvent::TurnCompleted {
+                    thread_id,
+                    turn_number,
+                    token_usage,
+                }) if thread_id == expected_thread_id && turn_number == turn_count => {
+                    return Ok(token_usage);
+                }
+                Ok(_) => continue,
+                Err(TryRecvError::Lagged(skipped)) => {
+                    return Err(ArgusError::TurnLogError {
+                        reason: format!("missed {skipped} thread event(s) before TurnCompleted"),
+                    });
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => {
+                    return Err(ArgusError::TurnLogError {
+                        reason: format!(
+                            "missing TurnCompleted event for thread {} turn {}",
+                            expected_thread_id, turn_count
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    async fn update_thread_stats(
+        &self,
+        thread_id: &ThreadId,
+        token_count: u32,
+        turn_count: u32,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE threads
+            SET token_count = ?, turn_count = ?, updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(i64::from(token_count))
+        .bind(i64::from(turn_count))
+        .bind(thread_id.inner().to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::TurnLogError {
+            reason: format!("failed to update thread stats: {}", e),
+        })?;
+
+        Ok(())
     }
 }

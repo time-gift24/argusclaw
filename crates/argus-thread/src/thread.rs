@@ -142,8 +142,8 @@ impl ThreadBuilder {
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
             hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
-            token_count: 0,
-            turn_count: 0,
+            token_count: self.token_count.unwrap_or_default(),
+            turn_count: self.turn_count.unwrap_or_default(),
             event_sender,
         })
     }
