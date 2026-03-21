@@ -13,6 +13,7 @@ argus-template = { path = "../argus-template" }
 argus-approval = { path = "../argus-approval" }
 argus-repository = { path = "../argus-repository" }
 argus-llm = { path = "../argus-llm" }
+async-trait = "0.1"
 
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }

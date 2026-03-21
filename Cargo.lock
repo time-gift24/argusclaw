@@ -226,6 +226,7 @@ dependencies = [
  "argus-thread",
  "argus-tool",
  "argus-wing",
+ "async-trait",
  "clap",
  "futures-util",
  "rust_decimal",
