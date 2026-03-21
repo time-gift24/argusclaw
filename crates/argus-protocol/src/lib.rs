@@ -25,7 +25,7 @@ pub use hooks::{
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
 pub use message_override::MessageOverride;
 pub use risk_level::RiskLevel;
-pub use token_usage::TokenUsage;
+pub use token_usage::{estimate_message_tokens, estimate_tokens, tiktoken, TokenUsage, TiktokenTokenizer, Tokenizer, TokenizerError};
 
 pub use llm::{
     ChatMessage,

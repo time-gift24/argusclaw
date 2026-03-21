@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
+use argus_protocol::estimate_message_tokens;
 use async_trait::async_trait;
 
 use super::error::CompactError;
@@ -43,10 +44,11 @@ impl<'a> CompactContext<'a> {
 
     /// Recalculate token count from messages.
     pub fn recalculate_token_count(&mut self) {
+        use argus_protocol::estimate_message_tokens;
         *self.token_count = self
             .messages
             .iter()
-            .map(|m| estimate_tokens(&m.content))
+            .map(|m| estimate_message_tokens(m) as u32)
             .sum();
     }
 
@@ -71,11 +73,6 @@ pub trait Compactor: Send + Sync {
 
     /// Name of the compactor strategy.
     fn name(&self) -> &'static str;
-}
-
-/// Estimate token count for a string (simple heuristic).
-pub fn estimate_tokens(content: &str) -> u32 {
-    (content.len() / 4).max(1) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +223,7 @@ impl Compactor for KeepTokensCompactor {
             if msg.role == Role::System {
                 continue;
             }
-            let msg_tokens = estimate_tokens(&msg.content);
+            let msg_tokens = estimate_message_tokens(msg) as u32;
             if current_tokens + msg_tokens > target_tokens as u32 {
                 break;
             }
