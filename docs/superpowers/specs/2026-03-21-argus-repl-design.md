@@ -119,7 +119,7 @@ Single-session mode:
 [Event: LLM call] model=mock
 [Reasoning] 模型正在思考...
 [Content] 收到。这是第 1 轮对话。
-[Event: TurnCompleted] tokens=42 input, 38 output
+[Event: TurnCompleted] tokens=42 input_tokens, 38 output_tokens
 >
 ```
 
@@ -173,10 +173,10 @@ Single-session mode:
 | `ThreadEvent::Processing { event: LlmStreamEvent::RetryAttempt { attempt, max_retries, error } }` | `[Retry] {attempt}/{max_retries}: {error}` | Yes |
 | `ThreadEvent::ToolStarted { tool_name, arguments }` | `[ToolStarted] {tool_name}` | Yes |
 | `ThreadEvent::ToolCompleted { tool_name, result }` | `[ToolCompleted] {tool_name}: {truncated}` | No |
-| `ThreadEvent::TurnCompleted { token_usage, .. }` | `[Event: TurnCompleted] tokens={input} input, {output} output` | Yes |
+| `ThreadEvent::TurnCompleted { token_usage, .. }` | `[Event: TurnCompleted] tokens={input_tokens} input, {output_tokens} output` | Yes |
 | `ThreadEvent::TurnFailed { error }` | `[Error] {error}` | No |
 | `ThreadEvent::WaitingForApproval { request }` | `[Approval] {request.tool_name} pending` | No |
-| `ThreadEvent::ApprovalResolved { request_id, decision }` | (ignored) | Yes |
+| `ThreadEvent::ApprovalResolved { response, .. }` | (ignored) | Yes |
 | `ThreadEvent::Idle { .. }` | (ignored) | - |
 | `ThreadEvent::Compacted { .. }` | (ignored) | Yes |
 
