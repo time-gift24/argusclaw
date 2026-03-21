@@ -134,8 +134,11 @@ impl TraceWriter {
         Ok(())
     }
 
-    /// Finalize the trace file.
-    pub fn finish(mut self, token_usage: &argus_protocol::TokenUsage) -> std::io::Result<()> {
+    /// Finalize the trace as a success with token usage.
+    pub fn finish_success(
+        mut self,
+        token_usage: &argus_protocol::TokenUsage,
+    ) -> std::io::Result<()> {
         let trace = TraceFile {
             version: "1.0".to_string(),
             thread_id: self.thread_id,
@@ -151,6 +154,33 @@ impl TraceWriter {
                 },
             }),
         };
+
+        serde_json::to_writer(&mut self.file, &trace)?;
+        self.file.flush()?;
+        Ok(())
+    }
+
+    /// Finalize the trace as a failure (no final output).
+    #[allow(dead_code)]
+    pub fn finish_failure(mut self, error: &str) -> std::io::Result<()> {
+        let thread_id = self.thread_id.clone();
+        let turn_number = self.turn_number;
+
+        let trace = TraceFile {
+            version: "1.0".to_string(),
+            thread_id: self.thread_id,
+            turn_number: self.turn_number,
+            start_time: self.start_time,
+            end_time: Some(Utc::now()),
+            iterations: self.iterations,
+            final_output: None,
+        };
+
+        // Write the trace file with error context in stderr
+        eprintln!(
+            "[TRACE ERROR] thread_id={} turn={} error={}",
+            thread_id, turn_number, error
+        );
 
         serde_json::to_writer(&mut self.file, &trace)?;
         self.file.flush()?;

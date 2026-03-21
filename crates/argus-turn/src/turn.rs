@@ -331,19 +331,27 @@ impl Turn {
             "Turn execution completed"
         );
 
-        // Finalize trace if enabled
+        // Finalize trace - handles both success and failure cases
         if let Some(writer) = trace_writer {
-            let token_usage = result
-                .as_ref()
-                .map(|o| o.token_usage.clone())
-                .unwrap_or_default();
-            if let Err(e) = writer.finish(&token_usage) {
-                tracing::warn!(
-                    thread_id = %self.thread_id,
-                    turn_number = %self.turn_number,
-                    error = %e,
-                    "Failed to finalize trace"
-                );
+            match &result {
+                Ok(output) => {
+                    if let Err(e) = writer.finish_success(&output.token_usage) {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            error = %e,
+                            "Failed to finalize trace on success"
+                        );
+                    }
+                }
+                Err(error) => {
+                    if let Err(e) = writer.finish_failure(&error.to_string()) {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            error = %e,
+                            "Failed to finalize trace on failure"
+                        );
+                    }
+                }
             }
         }
 
