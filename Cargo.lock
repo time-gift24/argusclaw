@@ -324,6 +324,7 @@ dependencies = [
  "argus-test-support",
  "argus-tool",
  "async-trait",
+ "chrono",
  "clap",
  "derive_builder",
  "futures-util",

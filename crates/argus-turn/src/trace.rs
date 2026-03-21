@@ -2,10 +2,10 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::time::Instant;
-
-use serde::Serialize;
 use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 /// Configuration for trace recording.
 #[derive(Debug, Clone)]
@@ -94,8 +94,8 @@ pub struct TraceFile {
     pub version: String,
     pub thread_id: String,
     pub turn_number: u32,
-    pub start_time: String,
-    pub end_time: Option<String>,
+    pub start_time: DateTime<Utc>,
+    pub end_time: Option<DateTime<Utc>>,
     pub iterations: Vec<IterationRecord>,
     pub final_output: Option<FinalOutput>,
 }
@@ -105,7 +105,7 @@ pub struct TraceWriter {
     file: BufWriter<File>,
     thread_id: String,
     turn_number: u32,
-    start_time: Instant,
+    start_time: DateTime<Utc>,
     iterations: Vec<IterationRecord>,
 }
 
@@ -123,7 +123,7 @@ impl TraceWriter {
             file: writer,
             thread_id: thread_id.to_string(),
             turn_number,
-            start_time: Instant::now(),
+            start_time: Utc::now(),
             iterations: Vec::new(),
         })
     }
@@ -140,8 +140,8 @@ impl TraceWriter {
             version: "1.0".to_string(),
             thread_id: self.thread_id,
             turn_number: self.turn_number,
-            start_time: format!("{:?}", self.start_time.elapsed()),
-            end_time: None,
+            start_time: self.start_time,
+            end_time: Some(Utc::now()),
             iterations: self.iterations,
             final_output: Some(FinalOutput {
                 token_usage: TokenUsageRecord {
