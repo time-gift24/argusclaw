@@ -22,6 +22,7 @@ use argus_protocol::{
     ThreadEvent, TokenUsage, ToolHookContext, sanitize_tool_output,
 };
 
+use super::trace::{TraceConfig, TraceWriter};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
 /// Turn identifier generator (simple counter for now).
@@ -225,6 +226,15 @@ pub struct Turn {
     /// Event forwarder task handle (cleaned up on drop).
     #[builder(default)]
     _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// Trace configuration.
+    #[builder(default, setter(strip_option))]
+    trace_config: Option<TraceConfig>,
+
+    /// Trace writer (created at execute start if enabled).
+    #[builder(default, setter(strip_option))]
+    #[allow(dead_code)]
+    trace_writer: Option<TraceWriter>,
 }
 
 impl TurnBuilder {
@@ -283,6 +293,25 @@ impl Turn {
             self.turn_number,
         ));
 
+        // Create trace writer if configured
+        #[allow(unused_variables)]
+        let trace_writer = match self.trace_config.as_ref() {
+            Some(config) if config.enabled => {
+                match TraceWriter::new(&self.thread_id, self.turn_number, config) {
+                    Ok(writer) => Some(writer),
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            error = %e,
+                            "Failed to create trace writer, continuing without tracing"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
@@ -292,7 +321,8 @@ impl Turn {
         );
 
         // Execute main loop
-        let result = self.execute_loop().await;
+        let mut trace_writer = trace_writer;
+        let result = self.execute_loop(&mut trace_writer).await;
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -300,6 +330,30 @@ impl Turn {
             result = ?result.as_ref().map(|_| "ok"),
             "Turn execution completed"
         );
+
+        // Finalize trace - handles both success and failure cases
+        if let Some(writer) = trace_writer {
+            match &result {
+                Ok(output) => {
+                    if let Err(e) = writer.finish_success(&output.token_usage) {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            error = %e,
+                            "Failed to finalize trace on success"
+                        );
+                    }
+                }
+                Err(error) => {
+                    if let Err(e) = writer.finish_failure(&error.to_string()) {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            error = %e,
+                            "Failed to finalize trace on failure"
+                        );
+                    }
+                }
+            }
+        }
 
         // Send completion event
         match &result {
@@ -476,7 +530,10 @@ impl Turn {
     ///
     /// This is where the core execution logic lives.
     #[allow(dead_code)]
-    async fn execute_loop(&mut self) -> Result<TurnOutput, TurnError> {
+    async fn execute_loop(
+        &mut self,
+        trace_writer: &mut Option<TraceWriter>,
+    ) -> Result<TurnOutput, TurnError> {
         let mut messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
@@ -552,6 +609,23 @@ impl Turn {
             }
 
             // Call the LLM (streaming mode is always enabled in Turn)
+
+            // Snapshot request for tracing
+            let request_snapshot = crate::trace::LlmRequest {
+                messages: messages
+                    .iter()
+                    .filter_map(|m| serde_json::to_value(m).ok())
+                    .collect(),
+                tools: tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::to_value(t)
+                            .ok()
+                            .unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect(),
+            };
+
             tracing::debug!(
                 thread_id = %self.thread_id,
                 turn_number = %self.turn_number,
@@ -567,6 +641,18 @@ impl Turn {
                 iteration = %iteration,
                 "LLM call completed"
             );
+
+            // Clone for tracing before processing consumes it
+            let trace_response = argus_protocol::llm::ToolCompletionResponse {
+                content: response.content.clone(),
+                reasoning_content: response.reasoning_content.clone(),
+                tool_calls: response.tool_calls.clone(),
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                finish_reason: response.finish_reason,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
+            };
 
             // Process response
             match self.process_finish_reason(response, &mut messages, &mut token_usage)? {
@@ -589,6 +675,28 @@ impl Turn {
                         .fire_hooks(HookEvent::TurnEnd, &HookContext::ToolEvent(ctx))
                         .await;
 
+                    // Record iteration with empty tools
+                    if let Some(writer) = trace_writer {
+                        let iteration_record = crate::trace::IterationRecord {
+                            iteration,
+                            llm_request: request_snapshot,
+                            llm_response: crate::trace::LlmResponse {
+                                content: trace_response.content,
+                                reasoning_content: trace_response.reasoning_content,
+                                tool_calls: trace_response
+                                    .tool_calls
+                                    .iter()
+                                    .filter_map(|tc| serde_json::to_value(tc).ok())
+                                    .collect(),
+                                finish_reason: format!("{:?}", trace_response.finish_reason),
+                                input_tokens: trace_response.input_tokens,
+                                output_tokens: trace_response.output_tokens,
+                            },
+                            tools: vec![],
+                        };
+                        let _ = writer.write_iteration(iteration_record);
+                    }
+
                     return Ok(output);
                 }
                 NextAction::ContinueWithTools {
@@ -608,6 +716,19 @@ impl Turn {
                     let tool_results = self
                         .execute_tools_parallel(tool_calls, tool_timeout_secs)
                         .await;
+
+                    // Collect tool execution info for tracing before consuming in the loop
+                    let tool_executions: Vec<_> = tool_results
+                        .iter()
+                        .map(|r| crate::trace::ToolExecution {
+                            id: r.tool_call_id.clone(),
+                            name: r.name.clone(),
+                            arguments: serde_json::Value::Null,
+                            result: r.content.clone(),
+                            duration_ms: 0,
+                            error: None,
+                        })
+                        .collect();
 
                     tracing::debug!(
                         thread_id = %self.thread_id,
@@ -651,6 +772,28 @@ impl Turn {
                             result.name,
                             sanitized_content,
                         ));
+                    }
+
+                    // Record iteration with tools
+                    if let Some(writer) = trace_writer {
+                        let iteration_record = crate::trace::IterationRecord {
+                            iteration,
+                            llm_request: request_snapshot,
+                            llm_response: crate::trace::LlmResponse {
+                                content: trace_response.content,
+                                reasoning_content: trace_response.reasoning_content,
+                                tool_calls: trace_response
+                                    .tool_calls
+                                    .iter()
+                                    .filter_map(|tc| serde_json::to_value(tc).ok())
+                                    .collect(),
+                                finish_reason: format!("{:?}", trace_response.finish_reason),
+                                input_tokens: trace_response.input_tokens,
+                                output_tokens: trace_response.output_tokens,
+                            },
+                            tools: tool_executions,
+                        };
+                        let _ = writer.write_iteration(iteration_record);
                     }
 
                     // Continue the loop with updated messages

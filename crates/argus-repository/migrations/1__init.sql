@@ -1,3 +1,10 @@
+-- Consolidation of all migrations into a single file
+-- This file combines all previous migrations in dependency order
+
+-- ============================================================
+-- 1. BASE SCHEMA (from 20260317080035_init.sql)
+-- ============================================================
+
 -- LLM Providers (INTEGER 自增 ID)
 CREATE TABLE IF NOT EXISTS llm_providers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,4 +138,105 @@ CREATE TABLE IF NOT EXISTS users (
     is_logged_in BOOLEAN NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================
+-- 2. THINKING CONFIG (from 20260319160000_add_thinking_config.sql)
+-- ============================================================
+
+-- Add thinking_config column to agents table
+ALTER TABLE agents ADD COLUMN thinking_config TEXT;
+
+-- Set default value for existing records: disabled mode
+UPDATE agents
+SET thinking_config = '{"type":"disabled","clear_thinking":false}'
+WHERE thinking_config IS NULL;
+
+-- ============================================================
+-- 3. UNIQUE AGENT NAME (from 20260320000000_add_agents_display_name_unique.sql)
+-- ============================================================
+
+-- Handle existing duplicates: keep the newest (highest id), delete older ones
+DELETE FROM agents
+WHERE id NOT IN (
+    SELECT MAX(id) FROM agents GROUP BY display_name
+);
+
+-- Create unique index (SQLite best practice, allows rollback)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_display_name_unique
+ON agents(display_name);
+
+-- ============================================================
+-- 4. ACCOUNTS & CREDENTIALS (from 20260320010000_add_accounts_and_credentials.sql)
+-- ============================================================
+
+-- Create accounts table (single-user)
+CREATE TABLE IF NOT EXISTS accounts (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    username    TEXT NOT NULL,
+    password    BLOB NOT NULL,
+    nonce       BLOB NOT NULL,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create credentials table
+CREATE TABLE IF NOT EXISTS credentials (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    username    BLOB NOT NULL,
+    password    BLOB NOT NULL,
+    nonce       BLOB NOT NULL,
+    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================
+-- 5. SESSIONS (from 20260317142753_add_sessions.sql)
+-- ============================================================
+
+-- Create sessions table
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Index for listing sessions
+CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC);
+
+-- Create default "Legacy" session for existing threads
+INSERT INTO sessions (id, name, created_at, updated_at)
+VALUES (1, 'Legacy', datetime('now'), datetime('now'));
+
+-- Add session_id and template_id to threads (nullable initially)
+ALTER TABLE threads ADD COLUMN session_id INTEGER REFERENCES sessions(id);
+ALTER TABLE threads ADD COLUMN template_id INTEGER REFERENCES agents(id);
+
+-- Update existing threads to belong to Legacy session and default template
+UPDATE threads SET session_id = 1 WHERE session_id IS NULL;
+UPDATE threads SET template_id = (SELECT id FROM agents ORDER BY id LIMIT 1) WHERE template_id IS NULL;
+
+-- Add indexes for new columns
+CREATE INDEX IF NOT EXISTS idx_threads_session_id ON threads(session_id);
+
+-- ============================================================
+-- 6. DEFAULT PROVIDER (from 20260320020000_add_default_provider.sql)
+-- ============================================================
+
+-- Insert a default provider with placeholder URL for user to configure
+-- The API key is empty (will need to be set by user)
+-- Includes a placeholder model name for initial testing
+INSERT INTO llm_providers (kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, extra_headers, is_default)
+VALUES (
+    'openai-compatible',
+    'My LLM Provider',
+    'https://placeholder.example.com/v1',
+    '["gpt-4o-mini"]',
+    'gpt-4o-mini',
+    CAST(X'' AS BLOB),  -- empty encrypted api key
+    CAST(X'' AS BLOB),   -- empty nonce
+    '{}',
+    1
 );

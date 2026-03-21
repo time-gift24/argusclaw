@@ -214,6 +214,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-repl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-approval",
+ "argus-llm",
+ "argus-protocol",
+ "argus-repository",
+ "argus-session",
+ "argus-template",
+ "argus-thread",
+ "argus-tool",
+ "argus-wing",
+ "async-trait",
+ "clap",
+ "futures-util",
+ "rust_decimal",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "argus-repository"
 version = "0.1.0"
 dependencies = [
@@ -324,12 +348,14 @@ dependencies = [
  "argus-test-support",
  "argus-tool",
  "async-trait",
+ "chrono",
  "clap",
  "derive_builder",
  "futures-util",
  "rust_decimal",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.2",
