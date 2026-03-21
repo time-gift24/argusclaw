@@ -1404,6 +1404,8 @@ dependencies = [
 name = "desktop"
 version = "0.1.0"
 dependencies = [
+ "argus-auth",
+ "argus-llm",
  "argus-protocol",
  "argus-tool",
  "argus-wing",

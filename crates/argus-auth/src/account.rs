@@ -6,8 +6,10 @@ use sqlx::SqlitePool;
 use subtle::ConstantTimeEq;
 
 use argus_crypto::Cipher;
+use argus_protocol::SecretString;
 
 use super::error::AuthError;
+use super::token::{SimpleTokenSource, TokenSource};
 
 #[derive(Debug, Clone)]
 pub struct UserInfo {
@@ -100,5 +102,52 @@ impl AccountManager {
             .await?;
 
         Ok(row.map(|(username,)| UserInfo { username }))
+    }
+
+    /// Login with token verification.
+    ///
+    /// 1. Verify stored password
+    /// 2. Fetch token via TokenSource
+    ///
+    /// Returns true if both password and token fetch succeed.
+    pub async fn login_verify(
+        &self,
+        username: &str,
+        password: &str,
+        token_source: &SimpleTokenSource,
+    ) -> Result<bool, AuthError> {
+        // Verify stored password
+        let row: Option<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT username, password, nonce FROM accounts WHERE id = 1",
+        )
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        let Some((stored_username, ciphertext, nonce)) = row else {
+            return Ok(false);
+        };
+
+        if stored_username != username {
+            return Ok(false);
+        }
+
+        let decrypted: SecretString = self
+            .cipher
+            .decrypt(&nonce, &ciphertext)
+            .map_err(|e| AuthError::DecryptionFailed {
+                reason: e.to_string(),
+            })?;
+        if decrypted.expose_secret() != password {
+            return Ok(false);
+        }
+
+        // Fetch token (verifies credentials against auth server)
+        let _token = token_source
+            .fetch_token(username, password)
+            .map_err(|e: AuthError| AuthError::TokenFetchFailed {
+                reason: e.to_string(),
+            })?;
+
+        Ok(true)
     }
 }
