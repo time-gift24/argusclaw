@@ -1,5 +1,9 @@
 //! Turn execution trace - iteration-level audit logging.
 
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
+use std::time::Instant;
+
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -94,4 +98,62 @@ pub struct TraceFile {
     pub end_time: Option<String>,
     pub iterations: Vec<IterationRecord>,
     pub final_output: Option<FinalOutput>,
+}
+
+/// Writer for trace files.
+pub struct TraceWriter {
+    file: BufWriter<File>,
+    thread_id: String,
+    turn_number: u32,
+    start_time: Instant,
+    iterations: Vec<IterationRecord>,
+}
+
+impl TraceWriter {
+    /// Create a new TraceWriter for the given thread and turn.
+    pub fn new(thread_id: &str, turn_number: u32, config: &TraceConfig) -> std::io::Result<Self> {
+        let dir = config.trace_dir.join(thread_id);
+        fs::create_dir_all(&dir)?;
+
+        let file_path = dir.join(format!("{}.json", turn_number));
+        let file = File::create(file_path)?;
+        let writer = BufWriter::new(file);
+
+        Ok(Self {
+            file: writer,
+            thread_id: thread_id.to_string(),
+            turn_number,
+            start_time: Instant::now(),
+            iterations: Vec::new(),
+        })
+    }
+
+    /// Write an iteration record.
+    pub fn write_iteration(&mut self, iteration: IterationRecord) -> std::io::Result<()> {
+        self.iterations.push(iteration);
+        Ok(())
+    }
+
+    /// Finalize the trace file.
+    pub fn finish(mut self, token_usage: &argus_protocol::TokenUsage) -> std::io::Result<()> {
+        let trace = TraceFile {
+            version: "1.0".to_string(),
+            thread_id: self.thread_id,
+            turn_number: self.turn_number,
+            start_time: format!("{:?}", self.start_time.elapsed()),
+            end_time: None,
+            iterations: self.iterations,
+            final_output: Some(FinalOutput {
+                token_usage: TokenUsageRecord {
+                    input_tokens: token_usage.input_tokens,
+                    output_tokens: token_usage.output_tokens,
+                    total_tokens: token_usage.total_tokens,
+                },
+            }),
+        };
+
+        serde_json::to_writer(&mut self.file, &trace)?;
+        self.file.flush()?;
+        Ok(())
+    }
 }
