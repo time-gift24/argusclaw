@@ -4,12 +4,12 @@ import { readFileSync } from "node:fs";
 
 const storeSource = readFileSync(new URL("../lib/chat-store.ts", import.meta.url), "utf8");
 
-test("chat store keeps sessions keyed by template and provider preference", () => {
+test("chat store keeps sessions keyed by sessionId", () => {
   assert.match(storeSource, /errorMessage:\s*string \| null/);
-  assert.match(storeSource, /activeSessionKey:\s*string \| null/);
+  assert.match(storeSource, /activeSessionId:\s*number \| null/);
   assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
-  assert.match(storeSource, /selectedProviderPreferenceId:\s*number \| null/);
-  assert.match(storeSource, /refreshSnapshot:\s*\(sessionKey: string\)/);
+  assert.match(storeSource, /selectedTemplateId:\s*number \| null/);
+  assert.match(storeSource, /refreshSnapshot:\s*\(sessionId: string\)/);
   assert.match(storeSource, /listen.*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
   assert.match(storeSource, /case "content_delta"/);
@@ -28,7 +28,7 @@ test("chat store keeps sessions keyed by template and provider preference", () =
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {
   assert.match(
     storeSource,
-    /pendingAssistant:\s*\{\s*content:\s*string;\s*reasoning:\s*string\s*\}\s*\|\s*null/,
+    /pendingAssistant:\s*\{\s*content:\s*string;\s*reasoning:\s*string/,
   );
   assert.match(
     storeSource,

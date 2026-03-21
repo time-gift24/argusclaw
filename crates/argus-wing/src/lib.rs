@@ -98,9 +98,11 @@ impl ArgusWing {
         }?;
         migrate(&pool).await?;
 
-        // Create LLM provider repository and manager
-        let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        // Create tool manager first (needed for session manager)
+        let tool_manager = Arc::new(ToolManager::new());
+
+        // Create compactor manager
+        let compactor_manager = Arc::new(CompactorManager::with_defaults());
 
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
@@ -109,11 +111,9 @@ impl ArgusWing {
         // Seed builtin agents from agents/ directory
         template_manager.seed_builtin_agents().await?;
 
-        // Create tool manager
-        let tool_manager = Arc::new(ToolManager::new());
-
-        // Create compactor manager
-        let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        // Create LLM provider repository and manager
+        let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
 
         // Create provider resolver wrapper
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
@@ -129,6 +129,15 @@ impl ArgusWing {
             compactor_manager.clone(),
             trace_dir,
         ));
+
+        // Cleanup old sessions after session manager is available
+        let count = session_manager
+            .cleanup_old_sessions(14)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: format!("Failed to cleanup old sessions: {}", e),
+            })?;
+        tracing::info!(deleted = count, "Cleaned up {} old sessions", count);
 
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
@@ -400,6 +409,16 @@ impl ArgusWing {
     /// Delete a session.
     pub async fn delete_session(&self, session_id: SessionId) -> Result<()> {
         self.session_manager.delete(session_id).await
+    }
+
+    /// Delete sessions older than the specified number of days.
+    pub async fn cleanup_old_sessions(&self, days: u32) -> Result<u64> {
+        self.session_manager.cleanup_old_sessions(days).await
+    }
+
+    /// Update the title of a session.
+    pub async fn update_session_title(&self, session_id: SessionId, title: &str) -> Result<()> {
+        self.session_manager.update_session_title(session_id, title).await
     }
 
     // =========================================================================
