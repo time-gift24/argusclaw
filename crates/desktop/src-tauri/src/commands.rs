@@ -394,6 +394,66 @@ pub fn resolve_approval(
 }
 
 // ============================================================================
+// Session Management Commands
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionSummaryPayload {
+    pub id: i64,
+    pub name: String,
+    pub thread_count: i64,
+    pub template_id: Option<i64>,
+    pub provider_id: Option<i64>,
+    pub updated_at: String,
+}
+
+#[tauri::command]
+pub async fn list_sessions(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<SessionSummaryPayload>, String> {
+    let sessions = wing.list_sessions().await.map_err(|e| e.to_string())?;
+    Ok(sessions
+        .into_iter()
+        .map(|s| SessionSummaryPayload {
+            id: s.id.inner(),
+            name: s.name,
+            thread_count: s.thread_count,
+            template_id: s.template_id,
+            provider_id: s.provider_id,
+            updated_at: s.updated_at.to_rfc3339(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn delete_session(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<(), String> {
+    wing.delete_session(SessionId::new(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_session_title(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+    title: String,
+) -> Result<(), String> {
+    wing.update_session_title(SessionId::new(id), &title)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cleanup_old_sessions(
+    wing: State<'_, Arc<ArgusWing>>,
+    days: Option<u32>,
+) -> Result<u64, String> {
+    wing.cleanup_old_sessions(days.unwrap_or(14))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ============================================================================
 // Account Commands
 // ============================================================================
 
