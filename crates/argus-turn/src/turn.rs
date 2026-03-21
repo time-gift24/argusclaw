@@ -22,6 +22,7 @@ use argus_protocol::{
     ThreadEvent, TokenUsage, ToolHookContext, sanitize_tool_output,
 };
 
+use super::trace::{TraceConfig, TraceWriter};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
 /// Turn identifier generator (simple counter for now).
@@ -225,6 +226,15 @@ pub struct Turn {
     /// Event forwarder task handle (cleaned up on drop).
     #[builder(default)]
     _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
+
+    /// Trace configuration.
+    #[builder(default, setter(strip_option))]
+    trace_config: Option<TraceConfig>,
+
+    /// Trace writer (created at execute start if enabled).
+    #[builder(default, setter(strip_option))]
+    #[allow(dead_code)]
+    trace_writer: Option<TraceWriter>,
 }
 
 impl TurnBuilder {
@@ -282,6 +292,25 @@ impl Turn {
             self.thread_id.clone(),
             self.turn_number,
         ));
+
+        // Create trace writer if configured
+        #[allow(unused_variables)]
+        let trace_writer = match self.trace_config.as_ref() {
+            Some(config) if config.enabled => {
+                match TraceWriter::new(&self.thread_id, self.turn_number, config) {
+                    Ok(writer) => Some(writer),
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            error = %e,
+                            "Failed to create trace writer, continuing without tracing"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
 
         tracing::info!(
             thread_id = %self.thread_id,
