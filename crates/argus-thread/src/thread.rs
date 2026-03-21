@@ -234,9 +234,9 @@ impl Thread {
         self.turn_count
     }
 
-    /// Get the plan state (shared with UpdatePlanTool).
-    pub fn plan(&self) -> &Arc<RwLock<Vec<serde_json::Value>>> {
-        &self.plan
+    /// Get a read-only snapshot of the current plan state.
+    pub fn plan(&self) -> Vec<serde_json::Value> {
+        self.plan.read().unwrap().clone()
     }
 
     /// Get the LLM provider.
@@ -387,7 +387,47 @@ impl Thread {
 mod tests {
     use super::*;
     use crate::compact::KeepRecentCompactor;
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
     use argus_protocol::{AgentId, ProviderId};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use serde_json::json;
+
+    struct DummyProvider;
+
+    #[async_trait]
+    impl LlmProvider for DummyProvider {
+        fn model_name(&self) -> &str {
+            "dummy"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "dummy".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "dummy".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+    }
 
     fn test_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
@@ -449,5 +489,40 @@ mod tests {
         assert_eq!(Thread::estimate_tokens("test"), 1);
         assert_eq!(Thread::estimate_tokens("test test"), 2);
         assert_eq!(Thread::estimate_tokens(""), 1);
+    }
+
+    #[test]
+    fn plan_returns_read_only_snapshot() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let plan_store = Arc::new(RwLock::new(vec![json!({
+            "step": "Inspect review feedback",
+            "status": "completed"
+        })]));
+
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new(1))
+            .plan(plan_store)
+            .build()
+            .unwrap();
+
+        let mut snapshot = thread.plan();
+        assert_eq!(
+            snapshot,
+            vec![json!({
+                "step": "Inspect review feedback",
+                "status": "completed"
+            })]
+        );
+
+        snapshot.push(json!({
+            "step": "Mutate local copy",
+            "status": "pending"
+        }));
+
+        assert_eq!(thread.plan().len(), 1);
+        assert_eq!(thread.info().plan_item_count, 1);
     }
 }
