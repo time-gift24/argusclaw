@@ -22,6 +22,7 @@ use argus_protocol::{
     ThreadEvent, TokenUsage, ToolHookContext, sanitize_tool_output,
 };
 
+use super::plan::{PlanOutcome, Planner, PlannerContext};
 use super::trace::{TraceConfig, TraceWriter};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
@@ -566,6 +567,47 @@ impl Turn {
             // Prepare tools from self.tools
             let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
 
+            // Plan generation: at iteration 0, if plan_enabled, generate and execute a plan
+            if self.config.plan_enabled && iteration == 0 {
+                let planner = Planner::new(&*self.provider);
+                let ctx = PlannerContext {
+                    messages: &messages,
+                    available_tools: tools.clone(),
+                    job_description: None,
+                };
+                match planner.plan(&ctx).await {
+                    Ok(plan) => {
+                        tracing::debug!(
+                            plan_goal = %plan.goal,
+                            action_count = plan.actions.len(),
+                            confidence = plan.confidence,
+                            "Plan generated, executing plan"
+                        );
+                        match self.execute_plan(&plan, &mut messages).await? {
+                            PlanOutcome::Completed => {
+                                return Ok(TurnOutput {
+                                    messages,
+                                    token_usage,
+                                });
+                            }
+                            PlanOutcome::NeedsMoreWork | PlanOutcome::Interrupted => {
+                                // Continue to normal execute_loop below
+                                tracing::debug!(
+                                    "Plan execution did not complete, continuing with normal loop"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Plan generation failed, falling back to normal execution"
+                        );
+                        // Continue to normal execute_loop below
+                    }
+                }
+            }
+
             // Fire BeforeCallLLM hook (can modify messages/tools or block)
             let ctx = BeforeCallLLMContext {
                 messages: messages.clone(),
@@ -990,6 +1032,138 @@ impl Turn {
             .collect();
 
         join_all(futures).await
+    }
+
+    /// Maximum delay between checking for user interrupt signals during plan execution.
+    const INTERRUPT_CHECK_INTERVAL_MS: u64 = 100;
+
+    /// Execute a generated action plan step-by-step.
+    ///
+    /// Returns `PlanOutcome` indicating whether the plan completed successfully,
+    /// needs more work, or was interrupted by the user.
+    async fn execute_plan(
+        &mut self,
+        plan: &crate::plan::ActionPlan,
+        messages: &mut Vec<ChatMessage>,
+    ) -> Result<crate::plan::PlanOutcome, TurnError> {
+        use super::plan::{PlanOutcome, Planner};
+
+        tracing::info!(
+            plan_goal = %plan.goal,
+            action_count = plan.actions.len(),
+            confidence = plan.confidence,
+            "Executing action plan"
+        );
+
+        let mut user_interrupt_rx = self.config.user_interrupt_rx.take();
+        let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
+
+        for (i, action) in plan.actions.iter().enumerate() {
+            // Check for user interrupt before each action
+            if let Some(ref mut rx) = user_interrupt_rx {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    Self::INTERRUPT_CHECK_INTERVAL_MS,
+                ))
+                .await;
+
+                if let Ok(user_message) = rx.try_recv() {
+                    tracing::info!(
+                        action_index = i,
+                        "Plan execution interrupted by user message: {}",
+                        user_message
+                    );
+                    messages.push(ChatMessage::user(user_message));
+                    return Ok(PlanOutcome::Interrupted);
+                }
+            }
+
+            tracing::debug!(
+                action_index = i,
+                tool_name = %action.tool_name,
+                reasoning = %action.reasoning,
+                "Executing planned action"
+            );
+
+            // Check if the tool exists
+            let tool_exists = self.tools.iter().any(|t| t.name() == action.tool_name);
+            if !tool_exists {
+                tracing::warn!(
+                    action_index = i,
+                    tool_name = %action.tool_name,
+                    "Tool in plan not found, skipping action"
+                );
+                let tool_call_id = format!("plan_{}", i);
+                messages.push(ChatMessage::assistant_with_tool_calls(
+                    Some(format!(
+                        "[Plan step {}] Calling tool: {}",
+                        i, action.tool_name
+                    )),
+                    vec![argus_protocol::llm::ToolCall {
+                        id: tool_call_id.clone(),
+                        name: action.tool_name.clone(),
+                        arguments: action.parameters.clone(),
+                    }],
+                ));
+                messages.push(ChatMessage::tool_result(
+                    tool_call_id,
+                    &action.tool_name,
+                    format!(
+                        "Error: Tool '{}' is not available in the current tool set.",
+                        action.tool_name
+                    ),
+                ));
+                continue;
+            }
+
+            let tool_call = argus_protocol::llm::ToolCall {
+                id: format!("plan_{}", i),
+                name: action.tool_name.clone(),
+                arguments: action.parameters.clone(),
+            };
+
+            messages.push(ChatMessage::assistant_with_tool_calls(
+                Some(format!(
+                    "[Plan step {}] Calling tool: {} — {}",
+                    i, action.tool_name, action.reasoning
+                )),
+                vec![tool_call.clone()],
+            ));
+
+            let result = self
+                .execute_single_tool(tool_call.clone(), tool_timeout_secs)
+                .await;
+
+            // Detect error from content: errors are encoded as {"error": "..."}
+            let is_error = result.content.starts_with("{\"error\":");
+
+            messages.push(ChatMessage::tool_result(
+                result.tool_call_id,
+                &result.name,
+                result.content.clone(),
+            ));
+
+            if is_error {
+                tracing::warn!(
+                    action_index = i,
+                    tool_name = %result.name,
+                    error = %result.content,
+                    "Planned action failed, falling back to normal loop"
+                );
+                return Ok(PlanOutcome::NeedsMoreWork);
+            }
+        }
+
+        // All actions executed — ask LLM if job is complete
+        let planner = Planner::new(&*self.provider);
+        let is_complete = planner.is_complete(messages).await?;
+
+        if is_complete {
+            tracing::info!("Plan executed successfully, job is complete");
+            Ok(PlanOutcome::Completed)
+        } else {
+            tracing::info!("Plan executed but job needs more work, falling back to normal loop");
+            Ok(PlanOutcome::NeedsMoreWork)
+        }
     }
 
     /// Executes a single tool call with hooks and timeout.

@@ -52,6 +52,7 @@
 pub mod config;
 pub mod error;
 pub mod execution;
+pub mod plan;
 pub mod trace;
 pub mod turn;
 
@@ -61,6 +62,7 @@ pub use config::{
 };
 pub use error::TurnError;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
+pub use plan::{ActionPlan, PlanOutcome, PlannedAction, Planner, PlannerContext};
 pub use trace::{IterationRecord, LlmRequest, LlmResponse, ToolExecution, TraceConfig};
 pub use turn::{Turn, TurnBuilder};
 

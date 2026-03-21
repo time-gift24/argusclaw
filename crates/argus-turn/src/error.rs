@@ -46,6 +46,14 @@ pub enum TurnError {
     /// Turn builder failed (missing required field).
     #[error("Turn build failed: {0}")]
     BuildFailed(String),
+
+    /// Plan generation failed.
+    #[error("Plan generation failed: {0}")]
+    PlanGenerationFailed(String),
+
+    /// Failed to parse plan from LLM response.
+    #[error("Plan parse failed: {0}")]
+    PlanParseFailed(String),
 }
 
 // Implement From<UninitializedFieldError> for derive_builder compatibility
@@ -127,5 +135,21 @@ mod tests {
         let err = TurnError::TimeoutExceeded;
         let msg = err.to_string();
         assert!(msg.contains("timeout"));
+    }
+
+    #[test]
+    fn test_plan_generation_failed_display() {
+        let err = TurnError::PlanGenerationFailed("LLM error".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("Plan generation failed"));
+        assert!(msg.contains("LLM error"));
+    }
+
+    #[test]
+    fn test_plan_parse_failed_display() {
+        let err = TurnError::PlanParseFailed("invalid json".to_string());
+        let msg = err.to_string();
+        assert!(msg.contains("Plan parse failed"));
+        assert!(msg.contains("invalid json"));
     }
 }

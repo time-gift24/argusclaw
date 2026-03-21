@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
 use argus_protocol::{AgentRecord, HookRegistry, SafetyConfig, ThreadEvent};
@@ -18,28 +18,104 @@ use super::TraceConfig;
 ///
 /// Controls the behavior of a turn execution, including limits on tool calls,
 /// timeouts, and iteration counts.
-#[derive(Debug, Clone, Builder)]
+#[derive(Debug)]
 pub struct TurnConfig {
     /// Maximum tool calls per LLM response.
-    ///
-    /// When set, limits the number of tool calls executed from a single LLM response.
-    /// If the LLM requests more tools than this limit, only the first N tools are executed,
-    /// forcing the LLM to proceed step-by-step in subsequent iterations.
-    /// Set to `None` or `Some(0)` to allow unlimited parallel tool calls.
-    #[builder(default = Some(10))]
     pub max_tool_calls: Option<u32>,
     /// Maximum duration for a single tool execution (seconds).
-    #[builder(default = Some(120))]
     pub tool_timeout_secs: Option<u64>,
     /// Maximum number of loop iterations (LLM -> Tool -> LLM cycles).
-    #[builder(default = Some(50))]
     pub max_iterations: Option<u32>,
     /// Safety configuration for tool output sanitization.
-    #[builder(default = "SafetyConfig::new()")]
     pub safety_config: SafetyConfig,
     /// Trace configuration for turn execution logging.
-    #[builder(default, setter(strip_option))]
     pub trace_config: Option<TraceConfig>,
+    /// Enable plan generation at the start of each Turn.
+    pub plan_enabled: bool,
+    /// Channel to receive user interrupt signals during plan execution.
+    pub user_interrupt_rx: Option<mpsc::Receiver<String>>,
+}
+
+/// Builder for TurnConfig.
+#[derive(Debug, Default)]
+pub struct TurnConfigBuilder {
+    max_tool_calls: Option<Option<u32>>,
+    tool_timeout_secs: Option<Option<u64>>,
+    max_iterations: Option<Option<u32>>,
+    safety_config: Option<SafetyConfig>,
+    trace_config: Option<Option<TraceConfig>>,
+    plan_enabled: Option<bool>,
+    user_interrupt_rx: Option<mpsc::Receiver<String>>,
+}
+
+impl TurnConfigBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn max_tool_calls(&mut self, val: Option<u32>) -> &mut Self {
+        self.max_tool_calls = Some(val);
+        self
+    }
+
+    pub fn tool_timeout_secs(&mut self, val: Option<u64>) -> &mut Self {
+        self.tool_timeout_secs = Some(val);
+        self
+    }
+
+    pub fn max_iterations(&mut self, val: Option<u32>) -> &mut Self {
+        self.max_iterations = Some(val);
+        self
+    }
+
+    pub fn safety_config(&mut self, val: SafetyConfig) -> &mut Self {
+        self.safety_config = Some(val);
+        self
+    }
+
+    pub fn trace_config(&mut self, val: Option<TraceConfig>) -> &mut Self {
+        self.trace_config = Some(val);
+        self
+    }
+
+    pub fn plan_enabled(&mut self, val: bool) -> &mut Self {
+        self.plan_enabled = Some(val);
+        self
+    }
+
+    pub fn user_interrupt_rx(&mut self, val: Option<mpsc::Receiver<String>>) -> &mut Self {
+        self.user_interrupt_rx = val;
+        self
+    }
+
+    pub fn build(&mut self) -> TurnConfig {
+        TurnConfig {
+            max_tool_calls: self.max_tool_calls.take().unwrap_or(Some(10)),
+            tool_timeout_secs: self.tool_timeout_secs.take().unwrap_or(Some(120)),
+            max_iterations: self.max_iterations.take().unwrap_or(Some(50)),
+            safety_config: self.safety_config.take().unwrap_or_default(),
+            trace_config: self.trace_config.take().flatten(),
+            plan_enabled: self.plan_enabled.take().unwrap_or(false),
+            user_interrupt_rx: self.user_interrupt_rx.take(),
+        }
+    }
+}
+
+impl Clone for TurnConfig {
+    fn clone(&self) -> Self {
+        // Note: user_interrupt_rx cannot be cloned (mpsc::Receiver is not Clone).
+        // We use `take()` semantics: the original config's receiver is consumed,
+        // so only one Turn can own it. Clone creates a new None.
+        Self {
+            max_tool_calls: self.max_tool_calls,
+            tool_timeout_secs: self.tool_timeout_secs,
+            max_iterations: self.max_iterations,
+            safety_config: self.safety_config.clone(),
+            trace_config: self.trace_config.clone(),
+            plan_enabled: self.plan_enabled,
+            user_interrupt_rx: None, // Receiver consumed, cannot clone
+        }
+    }
 }
 
 impl TurnConfig {
@@ -51,6 +127,8 @@ impl TurnConfig {
             max_iterations: Some(50),
             safety_config: SafetyConfig::new(),
             trace_config: None,
+            plan_enabled: false,
+            user_interrupt_rx: None,
         }
     }
 }
@@ -204,6 +282,8 @@ mod tests {
         assert_eq!(config.tool_timeout_secs, Some(120));
         assert_eq!(config.max_iterations, Some(50));
         assert!(config.trace_config.is_none());
+        assert!(!config.plan_enabled);
+        assert!(config.user_interrupt_rx.is_none());
     }
 
     #[test]
@@ -213,6 +293,8 @@ mod tests {
         assert_eq!(config.tool_timeout_secs, Some(120));
         assert_eq!(config.max_iterations, Some(50));
         assert!(config.trace_config.is_none());
+        assert!(!config.plan_enabled);
+        assert!(config.user_interrupt_rx.is_none());
     }
 
     #[test]
@@ -221,8 +303,7 @@ mod tests {
             .max_tool_calls(Some(5))
             .tool_timeout_secs(Some(60))
             .max_iterations(Some(20))
-            .build()
-            .unwrap();
+            .build();
         assert_eq!(config.max_tool_calls, Some(5));
         assert_eq!(config.tool_timeout_secs, Some(60));
         assert_eq!(config.max_iterations, Some(20));
@@ -230,13 +311,17 @@ mod tests {
 
     #[test]
     fn test_turn_config_builder_partial() {
-        let config = TurnConfigBuilder::default()
-            .max_tool_calls(Some(3))
-            .build()
-            .unwrap();
+        let config = TurnConfigBuilder::default().max_tool_calls(Some(3)).build();
         assert_eq!(config.max_tool_calls, Some(3));
         assert_eq!(config.tool_timeout_secs, Some(120)); // default
         assert_eq!(config.max_iterations, Some(50)); // default
+        assert!(!config.plan_enabled); // default
+    }
+
+    #[test]
+    fn test_turn_config_builder_plan_enabled() {
+        let config = TurnConfigBuilder::default().plan_enabled(true).build();
+        assert!(config.plan_enabled);
     }
 
     #[test]
