@@ -4,7 +4,7 @@ use std::sync::Arc;
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
-use argus_thread::{CompactorManager, ThreadBuilder};
+use argus_thread::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_tool::ToolManager;
 use argus_turn::{TraceConfig, TurnConfig};
 use dashmap::DashMap;
@@ -280,6 +280,9 @@ impl SessionManager {
         // Get compactor
         let compactor = self.compactor_manager.default_compactor().clone();
 
+        // Create plan store with persistence
+        let plan_store = FilePlanStore::new(self.trace_dir.clone(), &thread_id.inner().to_string());
+
         // Create Thread directly
         let trace_cfg = TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
         let mut turn_config = TurnConfig::new();
@@ -295,6 +298,7 @@ impl SessionManager {
             .provider(provider)
             .tool_manager(self.tool_manager.clone())
             .compactor(compactor)
+            .plan_store(plan_store)
             .config(config)
             .build()
             .map_err(|e| ArgusError::ThreadBuildFailed {

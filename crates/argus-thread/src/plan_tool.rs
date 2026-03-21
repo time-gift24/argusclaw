@@ -3,36 +3,37 @@
 //! The tool accepts a full plan snapshot from the LLM, overwrites the Thread's
 //! plan state, and returns the updated plan with metadata.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_value};
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, UpdatePlanArgs};
 
+use super::plan_store::FilePlanStore;
+
 /// A tool that lets the LLM update a per-Thread task plan.
 ///
-/// The tool operates on an in-memory plan store. Plan state is shared via
-/// `Arc<RwLock<Vec<Value>>>` — the same store is accessible externally
-/// through `Thread.plan()`.
+/// The tool operates through FilePlanStore, which handles both in-memory storage
+/// and file persistence for plan data.
 pub struct UpdatePlanTool {
-    /// Shared plan store (owned by Thread).
-    store: Arc<RwLock<Vec<Value>>>,
+    /// FilePlanStore (shared with Thread).
+    store: Arc<FilePlanStore>,
 }
 
 impl UpdatePlanTool {
-    /// Create a new UpdatePlanTool backed by the given plan store.
+    /// Create a new UpdatePlanTool backed by the given FilePlanStore.
     #[must_use]
-    pub fn new(store: Arc<RwLock<Vec<Value>>>) -> Self {
+    pub fn new(store: Arc<FilePlanStore>) -> Self {
         Self { store }
     }
 }
 
 impl Default for UpdatePlanTool {
     fn default() -> Self {
-        Self::new(Arc::new(RwLock::new(Vec::new())))
+        Self::new(Arc::new(FilePlanStore::default()))
     }
 }
 
@@ -104,24 +105,17 @@ impl NamedTool for UpdatePlanTool {
             });
         }
 
-        // Serialize plan items to JSON Values for storage
-        let plan_values: Vec<Value> = args
-            .plan
-            .iter()
-            .map(|item| serde_json::to_value(item).unwrap())
-            .collect();
+        // Serialize plan items for the result
+        let plan_values: Vec<Value> = args.plan.iter().map(to_value).map(Result::unwrap).collect();
 
-        // Update the shared store
-        {
-            let mut store = self.store.write().unwrap();
-            *store = plan_values.clone();
-        }
+        // Update store (persists to file)
+        self.store.write_from_items(args.plan);
 
         // Return updated plan with metadata
         Ok(json!({
             "plan": plan_values,
-            "updated": args.plan.len(),
-            "total": args.plan.len()
+            "updated": plan_values.len(),
+            "total": plan_values.len()
         }))
     }
 }
@@ -167,7 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_single_item() {
-        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let store = Arc::new(FilePlanStore::default());
         let tool = UpdatePlanTool::new(store.clone());
 
         let args = json!({
@@ -181,12 +175,12 @@ mod tests {
         assert_eq!(result["updated"], 1);
         assert_eq!(result["total"], 1);
         assert_eq!(result["plan"].as_array().unwrap().len(), 1);
-        assert_eq!(store.read().unwrap().len(), 1);
+        assert_eq!(store.store().read().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn execute_multiple_items() {
-        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let store = Arc::new(FilePlanStore::default());
         let tool = UpdatePlanTool::new(store.clone());
 
         let args = json!({
@@ -200,12 +194,12 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["updated"], 3);
         assert_eq!(result["total"], 3);
-        assert_eq!(store.read().unwrap().len(), 3);
+        assert_eq!(store.store().read().unwrap().len(), 3);
     }
 
     #[tokio::test]
     async fn execute_with_explanation() {
-        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let store = Arc::new(FilePlanStore::default());
         let tool = UpdatePlanTool::new(store.clone());
 
         let args = json!({
@@ -246,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_overwrites_previous() {
-        let store: Arc<RwLock<Vec<Value>>> = Arc::new(RwLock::new(Vec::new()));
+        let store = Arc::new(FilePlanStore::default());
         let tool = UpdatePlanTool::new(store.clone());
 
         // First update
@@ -254,7 +248,7 @@ mod tests {
             "plan": [{ "step": "Step A", "status": "pending" }]
         });
         tool.execute(args1).await.unwrap();
-        assert_eq!(store.read().unwrap().len(), 1);
+        assert_eq!(store.store().read().unwrap().len(), 1);
 
         // Second update (different content)
         let args2 = json!({
@@ -264,10 +258,11 @@ mod tests {
             ]
         });
         tool.execute(args2).await.unwrap();
-        assert_eq!(store.read().unwrap().len(), 2);
+        assert_eq!(store.store().read().unwrap().len(), 2);
 
         // Full overwrite: both items should be present
-        let items = store.read().unwrap();
+        let store_ref = store.store();
+        let items = store_ref.read().unwrap();
         let steps: Vec<&str> = items.iter().map(|v| v["step"].as_str().unwrap()).collect();
         assert!(steps.contains(&"Step A"));
         assert!(steps.contains(&"Step B"));

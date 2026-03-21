@@ -7,6 +7,7 @@ import type {
   ThreadEventEnvelope,
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
+import type { PlanItem } from "@/lib/types/plan";
 
 export interface PendingToolCall {
   tool_call_id: string;
@@ -40,6 +41,7 @@ export interface ChatSessionState {
     requested_at: string;
     timeout_secs: number;
   } | null;
+  plan: PlanItem[] | null;
   error: string | null;
 }
 
@@ -136,6 +138,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
+        plan: null,
         error: null,
       };
 
@@ -436,15 +439,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             is_error: payload.is_error,
             status: "completed",
           };
+          const updates: Partial<ChatSessionState> = {
+            pendingAssistant: {
+              ...session.pendingAssistant,
+              toolCalls,
+            },
+          };
+          if (payload.tool_name === "update_plan" && !payload.is_error && payload.result) {
+            const result = payload.result as { plan?: PlanItem[] };
+            updates.plan = Array.isArray(result.plan) ? result.plan : null;
+          }
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
                 ...session,
-                pendingAssistant: {
-                  ...session.pendingAssistant,
-                  toolCalls,
-                },
+                ...updates,
               },
             },
           };

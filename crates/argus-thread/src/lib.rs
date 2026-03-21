@@ -26,6 +26,7 @@
 pub mod compact;
 pub mod config;
 pub mod error;
+pub mod plan_store;
 pub mod plan_tool;
 pub mod thread;
 pub mod types;
@@ -37,6 +38,7 @@ pub use compact::{
 };
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
+pub use plan_store::FilePlanStore;
 pub use thread::{Thread, ThreadBuilder};
 pub use types::{ThreadInfo, ThreadState};
 

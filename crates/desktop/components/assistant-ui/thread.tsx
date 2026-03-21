@@ -9,6 +9,8 @@ import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
+import { PlanPanel } from "@/components/chat/plan-panel";
+import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -39,6 +41,8 @@ import {
 import type { FC } from "react";
 
 export const Thread: FC = () => {
+  const session = useActiveChatSession();
+
   return (
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background"
@@ -48,6 +52,8 @@ export const Thread: FC = () => {
       }}
     >
       <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-32">
+        {session?.plan && <PlanPanel plan={session.plan} />}
+
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
