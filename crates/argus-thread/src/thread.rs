@@ -1,6 +1,6 @@
 //! Thread implementation.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
@@ -17,6 +17,7 @@ use argus_turn::{TurnBuilder, TurnOutput};
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
 use super::error::ThreadError;
+use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
 
@@ -85,9 +86,9 @@ pub struct Thread {
     #[builder(default)]
     event_sender: broadcast::Sender<ThreadEvent>,
 
-    /// Plan state shared with UpdatePlanTool (in-memory).
-    #[builder(default = "Arc::new(RwLock::new(Vec::new()))")]
-    plan: Arc<RwLock<Vec<serde_json::Value>>>,
+    /// File-backed plan store with persistence.
+    #[builder(default, setter(name = "plan_store"))]
+    plan_store: FilePlanStore,
 }
 
 impl std::fmt::Debug for Thread {
@@ -100,7 +101,7 @@ impl std::fmt::Debug for Thread {
             .field("messages", &self.messages.len())
             .field("token_count", &self.token_count)
             .field("turn_count", &self.turn_count)
-            .field("plan_items", &self.plan.read().unwrap().len())
+            .field("plan_items", &self.plan_store.store().read().unwrap().len())
             .field("config", &self.config)
             .finish()
     }
@@ -151,9 +152,7 @@ impl ThreadBuilder {
             token_count: 0,
             turn_count: 0,
             event_sender,
-            plan: self
-                .plan
-                .unwrap_or_else(|| Arc::new(RwLock::new(Vec::new()))),
+            plan_store: self.plan_store.unwrap_or_default(),
         })
     }
 }
@@ -203,7 +202,7 @@ impl Thread {
             message_count: self.messages.len(),
             token_count: self.token_count,
             turn_count: self.turn_count,
-            plan_item_count: self.plan.read().unwrap().len(),
+            plan_item_count: self.plan_store.store().read().unwrap().len(),
         }
     }
 
@@ -236,7 +235,7 @@ impl Thread {
 
     /// Get a read-only snapshot of the current plan state.
     pub fn plan(&self) -> Vec<serde_json::Value> {
-        self.plan.read().unwrap().clone()
+        self.plan_store.store().read().unwrap().clone()
     }
 
     /// Get the LLM provider.
@@ -329,7 +328,9 @@ impl Thread {
             .collect();
 
         // Append UpdatePlanTool with the thread's plan store
-        tools.push(Arc::new(UpdatePlanTool::new(self.plan.clone())));
+        tools.push(Arc::new(UpdatePlanTool::new(Arc::new(
+            self.plan_store.clone(),
+        ))));
 
         let hooks: Vec<Arc<dyn HookHandler>> = self
             .hooks
@@ -494,17 +495,33 @@ mod tests {
     #[test]
     fn plan_returns_read_only_snapshot() {
         let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
-        let plan_store = Arc::new(RwLock::new(vec![json!({
-            "step": "Inspect review feedback",
-            "status": "completed"
-        })]));
+
+        // Create a temp dir and pre-populate plan.json at {temp_dir}/{thread_id}/plan.json
+        let temp_dir = std::env::temp_dir()
+            .join("argus-thread-test-plan")
+            .join("thread-1");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(
+            temp_dir.join("plan.json"),
+            serde_json::to_string_pretty(&vec![json!({
+                "step": "Inspect review feedback",
+                "status": "completed"
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+
+        let plan_store = FilePlanStore::new(
+            std::env::temp_dir().join("argus-thread-test-plan"),
+            "thread-1",
+        );
 
         let thread = ThreadBuilder::new()
             .provider(Arc::new(DummyProvider))
             .compactor(compactor)
             .agent_record(test_agent_record())
             .session_id(SessionId::new(1))
-            .plan(plan_store)
+            .plan_store(plan_store)
             .build()
             .unwrap();
 

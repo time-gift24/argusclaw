@@ -251,6 +251,7 @@ pub struct ThreadSnapshotPayload {
     pub messages: Vec<ChatMessagePayload>,
     pub turn_count: u32,
     pub token_count: u32,
+    pub plan_item_count: usize,
 }
 
 #[tauri::command]
@@ -368,6 +369,7 @@ pub async fn get_thread_snapshot(
             .collect(),
         turn_count: thread.turn_count(),
         token_count: thread.token_count(),
+        plan_item_count: thread.info().plan_item_count,
     })
 }
 

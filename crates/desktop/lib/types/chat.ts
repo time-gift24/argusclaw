@@ -36,6 +36,7 @@ export interface ThreadSnapshotPayload {
   messages: ChatMessagePayload[];
   turn_count: number;
   token_count: number;
+  plan_item_count: number;
 }
 
 export interface ChatSessionPayload {
