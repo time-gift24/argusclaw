@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
-use argus_thread::{CompactorManager, ThreadBuilder};
 use argus_thread::config::ThreadConfigBuilder;
+use argus_thread::{CompactorManager, ThreadBuilder};
 use argus_tool::ToolManager;
 use argus_turn::{TraceConfig, TurnConfig};
 use dashmap::DashMap;
@@ -169,7 +169,8 @@ impl SessionManager {
 
             // Build Thread directly
             let title: Option<String> = thread_row.get("title");
-            let trace_cfg = TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
+            let trace_cfg =
+                TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
             let mut turn_config = TurnConfig::new();
             turn_config.trace_config = Some(trace_cfg);
             let config = ThreadConfigBuilder::default()

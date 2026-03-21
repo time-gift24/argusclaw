@@ -34,8 +34,6 @@ use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::{AccountManager, CredentialStore};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_llm::ProviderManager;
-#[cfg(feature = "dev")]
-use argus_protocol::LlmProvider;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
@@ -289,17 +287,6 @@ impl ArgusWing {
         self.provider_manager.get_default_provider_record().await
     }
 
-    /// Import multiple provider records.
-    #[cfg(feature = "dev")]
-    pub async fn import_providers(&self, records: Vec<LlmProviderRecord>) -> Result<()> {
-        self.provider_manager
-            .import_providers(records)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })
-    }
-
     // =========================================================================
     // Template CRUD API
     // =========================================================================
@@ -488,51 +475,6 @@ impl ArgusWing {
         self.approval_manager
             .resolve(request_id, decision, resolved_by)
             .map_err(|e| ArgusError::ApprovalError {
-                reason: e.to_string(),
-            })
-    }
-
-    // =========================================================================
-    // Dev-Only Methods
-    // =========================================================================
-
-    #[cfg(feature = "dev")]
-    /// Complete text with an LLM provider (dev only).
-    pub async fn complete_text(
-        &self,
-        provider_id: Option<&LlmProviderId>,
-        prompt: impl Into<String>,
-    ) -> Result<String> {
-        self.provider_manager
-            .complete_text(provider_id, prompt)
-            .await
-            .map_err(|e| ArgusError::LlmError {
-                reason: e.to_string(),
-            })
-    }
-
-    #[cfg(feature = "dev")]
-    /// Stream text from an LLM provider (dev only).
-    pub async fn stream_text(
-        &self,
-        provider_id: Option<&LlmProviderId>,
-        prompt: impl Into<String>,
-    ) -> Result<argus_protocol::llm::LlmEventStream> {
-        self.provider_manager
-            .stream_text(provider_id, prompt)
-            .await
-            .map_err(|e| ArgusError::LlmError {
-                reason: e.to_string(),
-            })
-    }
-
-    #[cfg(feature = "dev")]
-    /// Get an LLM provider by ID (dev only).
-    pub async fn get_provider(&self, id: &LlmProviderId) -> Result<Arc<dyn LlmProvider>> {
-        self.provider_manager
-            .get_provider(id)
-            .await
-            .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
             })
     }
