@@ -93,7 +93,7 @@ impl McpClientRuntime {
         };
 
         let client_details = rust_mcp_sdk::schema::InitializeRequestParams {
-            protocol_version: rust_mcp_sdk::schema::LATEST_PROTOCOL_VERSION.to_string(),
+            protocol_version: rust_mcp_sdk::schema::ProtocolVersion::V2024_11_05.to_string(),
             capabilities: ClientCapabilities::default(),
             client_info: Implementation {
                 name: "argus-tool".to_string(),

@@ -201,6 +201,13 @@ export interface McpServerConfig {
   enabled: boolean;
 }
 
+// MCP Server Status
+export type McpServerStatus =
+  | { status: "disconnected" }
+  | { status: "connecting" }
+  | { status: "connected"; tools: string[]; connected_at: string }
+  | { status: "failed"; error: string; failed_at: string };
+
 export const mcpServers = {
   list: () => invoke<McpServerConfig[]>("list_mcp_servers"),
 
@@ -210,4 +217,10 @@ export const mcpServers = {
     invoke<number>("upsert_mcp_server", { config }),
 
   delete: (id: number) => invoke<boolean>("delete_mcp_server", { id }),
+
+  getStatuses: () =>
+    invoke<Record<number, McpServerStatus>>("list_mcp_server_statuses"),
+
+  testServer: (id: number) =>
+    invoke<McpServerStatus>("test_mcp_server", { id }),
 };

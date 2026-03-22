@@ -13,7 +13,8 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { mcpServers, type McpServerConfig } from "@/lib/tauri";
+import { mcpServers, type McpServerConfig, type McpServerStatus } from "@/lib/tauri";
+import { STATUS_COLORS, STATUS_LABELS } from "@/lib/mcp-status";
 import { DeleteConfirmDialog } from "@/components/settings";
 
 export default function McpServersPage() {
@@ -22,6 +23,21 @@ export default function McpServersPage() {
   const [loading, setLoading] = React.useState(true);
   const [deleteId, setDeleteId] = React.useState<number | null>(null);
   const [deleteLoading, setDeleteLoading] = React.useState(false);
+  const [statuses, setStatuses] = React.useState<Record<number, McpServerStatus>>({});
+
+  React.useEffect(() => {
+    async function loadStatuses() {
+      try {
+        const s = await mcpServers.getStatuses();
+        setStatuses(s);
+      } catch (e) {
+        console.error("Failed to load MCP statuses", e);
+      }
+    }
+    loadStatuses();
+    const interval = setInterval(loadStatuses, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const loadServers = React.useCallback(async () => {
     try {
@@ -49,6 +65,16 @@ export default function McpServersPage() {
       setDeleteLoading(false);
     }
   };
+
+  async function handleTest(id: number) {
+    setStatuses((prev) => ({ ...prev, [id]: { status: "connecting" as const, tools: [], error: undefined } }));
+    try {
+      const status = await mcpServers.testServer(id);
+      setStatuses((prev) => ({ ...prev, [id]: status }));
+    } catch (e) {
+      console.error("Test failed", e);
+    }
+  }
 
   if (loading) {
     return (
@@ -119,6 +145,51 @@ export default function McpServersPage() {
                     <span className="font-mono text-xs">{server.command}</span>
                   </div>
                 )}
+
+                {/* Connection Status */}
+                {(() => {
+                  const s = statuses[server.id];
+                  if (!s) return null;
+                  return (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[s.status]}`}>
+                          {STATUS_LABELS[s.status]}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={s.status === "connecting"}
+                          onClick={() => void handleTest(server.id)}
+                        >
+                          {s.status === "connecting" ? "测试中..." : "测试"}
+                        </Button>
+                      </div>
+
+                      {s.status === "failed" && (
+                        <p className="text-xs text-red-600">{s.error}</p>
+                      )}
+
+                      {s.status === "connected" && s.tools.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {s.tools.slice(0, 10).map((tool) => (
+                            <span
+                              key={tool}
+                              className="bg-muted text-muted-foreground text-xs px-2 py-0.5 rounded-full"
+                            >
+                              {tool}
+                            </span>
+                          ))}
+                          {s.tools.length > 10 && (
+                            <span className="text-xs text-muted-foreground px-1 py-0.5">
+                              +{s.tools.length - 10} 更多
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </CardContent>
               <CardFooter className="flex gap-2">
                 <Button
