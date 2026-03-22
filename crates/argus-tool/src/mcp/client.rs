@@ -25,7 +25,7 @@ use rust_mcp_sdk::{
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-const MCP_CONNECTION_TEST_TIMEOUT_SECS: u64 = 2;
+const MCP_CONNECTION_TEST_TIMEOUT_SECS: u64 = 10;
 
 /// Connection test result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -600,7 +600,7 @@ mod tests {
 
         let pool = McpClientPool::new();
         let result =
-            tokio::time::timeout(Duration::from_secs(3), pool.test_connection(&config)).await;
+            tokio::time::timeout(Duration::from_secs(12), pool.test_connection(&config)).await;
 
         assert!(
             result.is_ok(),

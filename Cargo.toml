@@ -9,3 +9,6 @@ url = "2"
 dashmap = "5"
 uuid = { version = "1", features = ["serde", "v4"] }
 rust-mcp-sdk = "0.9"
+
+[patch.crates-io]
+rust-mcp-transport = { path = "third_party/rust-mcp-transport" }
