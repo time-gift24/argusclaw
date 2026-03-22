@@ -19,12 +19,20 @@ use rust_mcp_sdk::schema::{
     LATEST_PROTOCOL_VERSION,
 };
 use rust_mcp_sdk::{
-    ClientSseTransport, ClientSseTransportOptions, McpClient, StdioTransport, TransportOptions,
+    ClientSseTransport, ClientSseTransportOptions, McpClient, RequestOptions, StdioTransport,
+    StreamableTransportOptions, TransportOptions,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 const MCP_CONNECTION_TEST_TIMEOUT_SECS: u64 = 2;
+
+fn uses_sse_endpoint(url: &str) -> bool {
+    let normalized = url.to_ascii_lowercase();
+    normalized.ends_with("/sse")
+        || normalized.contains("/sse?")
+        || normalized.contains("transport=sse")
+}
 
 /// Connection test result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,66 +82,66 @@ impl McpClientWrapper {
             meta: None,
         };
 
-        // Create handler (using default implementation)
-        let handler = EmptyClientHandler {};
-        let handler_boxed = handler.to_mcp_client_handler();
-
         // Create and start the client runtime based on transport type
-        let runtime: Arc<rust_mcp_sdk::mcp_client::ClientRuntime> =
-            match config.server_type {
-                ServerType::Stdio => {
-                    let command =
-                        config
-                            .command
-                            .as_ref()
-                            .ok_or_else(|| McpClientError::InvalidConfig {
-                                server: server_name.clone(),
-                                reason: "Stdio transport requires command".to_string(),
-                            })?;
-
-                    // Parse command into program and args
-                    let parts: Vec<&str> = command.split_whitespace().collect();
-                    if parts.is_empty() {
-                        return Err(McpClientError::InvalidConfig {
-                            server: server_name.clone(),
-                            reason: "Command is empty".to_string(),
-                        });
-                    }
-
-                    let program = parts[0];
-                    let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-
-                    let transport = StdioTransport::create_with_server_launch(
-                        program,
-                        args,
-                        None,
-                        TransportOptions::default(),
-                    )
-                    .map_err(|e| McpClientError::TransportError {
-                        server: server_name.clone(),
-                        reason: e.to_string(),
-                    })?;
-
-                    let options = McpClientOptions {
-                        client_details,
-                        transport,
-                        handler: handler_boxed,
-                        task_store: None,
-                        server_task_store: None,
-                        message_observer: None,
-                    };
-
-                    client_runtime::create_client(options)
-                }
-                ServerType::Http => {
-                    let url = config
-                        .url
+        let runtime: Arc<rust_mcp_sdk::mcp_client::ClientRuntime> = match config.server_type {
+            ServerType::Stdio => {
+                let handler = EmptyClientHandler {};
+                let handler_boxed = handler.to_mcp_client_handler();
+                let command =
+                    config
+                        .command
                         .as_ref()
                         .ok_or_else(|| McpClientError::InvalidConfig {
                             server: server_name.clone(),
-                            reason: "SSE transport requires url".to_string(),
+                            reason: "Stdio transport requires command".to_string(),
                         })?;
 
+                // Parse command into program and args
+                let parts: Vec<&str> = command.split_whitespace().collect();
+                if parts.is_empty() {
+                    return Err(McpClientError::InvalidConfig {
+                        server: server_name.clone(),
+                        reason: "Command is empty".to_string(),
+                    });
+                }
+
+                let program = parts[0];
+                let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+                let transport = StdioTransport::create_with_server_launch(
+                    program,
+                    args,
+                    None,
+                    TransportOptions::default(),
+                )
+                .map_err(|e| McpClientError::TransportError {
+                    server: server_name.clone(),
+                    reason: e.to_string(),
+                })?;
+
+                let options = McpClientOptions {
+                    client_details,
+                    transport,
+                    handler: handler_boxed,
+                    task_store: None,
+                    server_task_store: None,
+                    message_observer: None,
+                };
+
+                client_runtime::create_client(options)
+            }
+            ServerType::Http => {
+                let url = config
+                    .url
+                    .as_ref()
+                    .ok_or_else(|| McpClientError::InvalidConfig {
+                        server: server_name.clone(),
+                        reason: "HTTP transport requires url".to_string(),
+                    })?;
+
+                if uses_sse_endpoint(url) {
+                    let handler = EmptyClientHandler {};
+                    let handler_boxed = handler.to_mcp_client_handler();
                     let transport_options = ClientSseTransportOptions {
                         custom_headers: config.headers.clone(),
                         ..ClientSseTransportOptions::default()
@@ -154,8 +162,26 @@ impl McpClientWrapper {
                     };
 
                     client_runtime::create_client(options)
+                } else {
+                    let streamable_options = StreamableTransportOptions {
+                        mcp_url: url.clone(),
+                        request_options: RequestOptions {
+                            custom_headers: config.headers.clone(),
+                            ..RequestOptions::default()
+                        },
+                    };
+
+                    client_runtime::with_transport_options(
+                        client_details,
+                        streamable_options,
+                        EmptyClientHandler {},
+                        None,
+                        None,
+                        None,
+                    )
                 }
-            };
+            }
+        };
 
         // Start the runtime
         runtime
@@ -357,7 +383,7 @@ impl McpClientPool {
                 return ConnectionTestResult {
                     success: false,
                     tool_count: 0,
-                    error_message: Some("SSE transport requires url".to_string()),
+                    error_message: Some("HTTP transport requires url".to_string()),
                 };
             }
             _ => {}
@@ -546,6 +572,33 @@ mod tests {
         assert!(result.is_err());
         let message = result.err().unwrap().to_string();
         assert!(message.contains("Invalid header name"));
+    }
+
+    #[tokio::test]
+    async fn streamable_http_transport_validates_custom_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("Invalid Header".to_string(), "value".to_string());
+
+        let config = McpServerConfig::new(
+            1,
+            "test".to_string(),
+            "Test MCP".to_string(),
+            ServerType::Http,
+        )
+        .with_url("https://example.com/mcp".to_string())
+        .with_headers(headers);
+
+        let result = McpClientWrapper::new(&config).await;
+        assert!(result.is_err());
+        let message = result.err().unwrap().to_string();
+        assert!(message.contains("Invalid header name"));
+    }
+
+    #[test]
+    fn detects_sse_endpoint_from_url() {
+        assert!(uses_sse_endpoint("https://example.com/sse"));
+        assert!(uses_sse_endpoint("https://example.com/mcp?transport=sse"));
+        assert!(!uses_sse_endpoint("https://example.com/mcp"));
     }
 
     #[tokio::test]
