@@ -7,7 +7,8 @@ use argus_protocol::{
     LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
     SecretString, SessionId, ThreadId,
 };
-use argus_wing::ArgusWing;
+use argus_tool::mcp::ConnectionTestResult;
+use argus_wing::{ArgusWing, McpServerRecord};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
@@ -542,6 +543,111 @@ pub async fn update_credential(
 pub async fn delete_credential(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
     wing.credential_store()
         .delete(id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// MCP Server Commands
+// ============================================================================
+
+/// Payload for MCP server used in frontend.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpServerPayload {
+    pub id: i64,
+    pub name: String,
+    pub display_name: String,
+    pub server_type: String,
+    pub command: Option<String>,
+    pub url: Option<String>,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+    pub args: Option<Vec<String>>,
+    pub enabled: bool,
+}
+
+impl From<McpServerRecord> for McpServerPayload {
+    fn from(record: McpServerRecord) -> Self {
+        Self {
+            id: record.id.into_inner(),
+            name: record.name,
+            display_name: record.display_name,
+            server_type: record.server_type.to_string(),
+            command: record.command,
+            url: record.url,
+            headers: record.headers,
+            args: record.args,
+            enabled: record.enabled,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn list_mcp_servers(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<McpServerPayload>, String> {
+    wing.list_mcp_servers()
+        .await
+        .map(|servers| servers.into_iter().map(McpServerPayload::from).collect())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<Option<McpServerPayload>, String> {
+    use argus_wing::McpServerId;
+    wing.get_mcp_server(McpServerId::new(id))
+        .await
+        .map(|opt| opt.map(McpServerPayload::from))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn upsert_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    payload: McpServerPayload,
+) -> Result<i64, String> {
+    use argus_wing::McpServerId;
+    use argus_wing::ServerType;
+
+    let server_type: ServerType = payload.server_type.parse().map_err(|e: String| e)?;
+
+    let record = McpServerRecord {
+        id: McpServerId::new(payload.id),
+        name: payload.name,
+        display_name: payload.display_name,
+        server_type,
+        command: payload.command,
+        url: payload.url,
+        headers: payload.headers,
+        args: payload.args,
+        auth_token_ciphertext: None,
+        auth_token_nonce: None,
+        enabled: payload.enabled,
+    };
+
+    wing.upsert_mcp_server(record)
+        .await
+        .map(|id| id.into_inner())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_mcp_server(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
+    use argus_wing::McpServerId;
+    wing.delete_mcp_server(McpServerId::new(id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn test_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<ConnectionTestResult, String> {
+    use argus_wing::McpServerId;
+    wing.test_mcp_server(McpServerId::new(id))
         .await
         .map_err(|e| e.to_string())
 }

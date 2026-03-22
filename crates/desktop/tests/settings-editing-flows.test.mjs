@@ -22,6 +22,16 @@ const deleteDialogPath = new URL(
   "../components/settings/delete-confirm-dialog.tsx",
   import.meta.url,
 );
+const mcpPagePath = new URL("../app/settings/mcp/page.tsx", import.meta.url);
+const mcpFormDialogPath = new URL(
+  "../components/settings/mcp-server-form-dialog.tsx",
+  import.meta.url,
+);
+const mcpCardPath = new URL(
+  "../components/settings/mcp-server-card.tsx",
+  import.meta.url,
+);
+const tauriBindingPath = new URL("../lib/tauri.ts", import.meta.url);
 
 test("settings exposes a dedicated new-agent route that renders create mode", () => {
   assert.equal(existsSync(newAgentPagePath), true);
@@ -124,4 +134,22 @@ test("delete confirmation dialog keeps the modal open and surfaces backend error
   assert.match(deleteDialogSource, /await onConfirm\(\)/);
   assert.match(deleteDialogSource, /setErrorMessage\(message\)/);
   assert.match(deleteDialogSource, /<p className="text-sm text-destructive">\{errorMessage\}<\/p>/);
+});
+
+test("mcp editing flow fetches full payload and keeps server_type values aligned with backend", () => {
+  const mcpPageSource = readFileSync(mcpPagePath, "utf8");
+  const mcpFormDialogSource = readFileSync(mcpFormDialogPath, "utf8");
+  const mcpCardSource = readFileSync(mcpCardPath, "utf8");
+  const tauriBindingSource = readFileSync(tauriBindingPath, "utf8");
+
+  assert.match(tauriBindingSource, /export type ServerType = "stdio" \| "http"/);
+  assert.match(
+    tauriBindingSource,
+    /invoke<McpServerPayload \| null>\("get_mcp_server", \{ id \}\)/,
+  );
+  assert.match(mcpPageSource, /setEditingServer\(server\)/);
+  assert.match(mcpFormDialogSource, /server_type: "stdio"/);
+  assert.match(mcpFormDialogSource, /<SelectItem value="stdio">/);
+  assert.match(mcpFormDialogSource, /<SelectItem value="http">/);
+  assert.match(mcpCardSource, /server\.server_type === "stdio"/);
 });

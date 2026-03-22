@@ -16,12 +16,14 @@ pub use argus_protocol::{NamedTool, ToolError};
 pub mod glob;
 pub mod grep;
 pub mod http;
+pub mod mcp;
 pub mod read;
 pub mod shell;
 
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::HttpTool;
+pub use mcp::{ConnectionTestResult, McpClientPool, McpTool};
 pub use read::ReadTool;
 pub use shell::ShellTool;
 

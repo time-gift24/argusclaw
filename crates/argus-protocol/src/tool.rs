@@ -21,6 +21,16 @@ pub enum ToolError {
     /// Request blocked by security policy (e.g., SSRF protection).
     #[error("HTTP request to '{url}' blocked: {reason}")]
     SecurityBlocked { url: String, reason: String },
+
+    /// MCP tool error with server and tool context.
+    #[error("MCP tool error [{server}/{tool}]: {context}")]
+    McpToolError {
+        server: String,
+        tool: String,
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 /// Trait for defining tools that can be used by agents and LLMs.

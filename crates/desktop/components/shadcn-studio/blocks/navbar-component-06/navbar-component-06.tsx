@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo } from 'react'
-import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft } from 'lucide-react'
+import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft, Plug } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
@@ -103,6 +103,8 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
             items.push({ label: agentName })
           }
         }
+      } else if (pathname.startsWith("/settings/mcp")) {
+        items.push({ label: "MCP 服务器", href: "/settings/mcp" })
       }
     }
 
@@ -181,6 +183,12 @@ const Navbar = ({
                   <Link href='/settings/providers' className='flex items-center gap-2 w-full'>
                     <Cloud className='h-4 w-4' />
                     <span>LLMProvider 配置</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem>
+                  <Link href='/settings/mcp' className='flex items-center gap-2 w-full'>
+                    <Plug className='h-4 w-4' />
+                    <span>MCP 服务器</span>
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>

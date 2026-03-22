@@ -7,6 +7,7 @@ pub mod hooks;
 pub mod http_client;
 pub mod ids;
 pub mod llm;
+pub mod mcp;
 pub mod message_override;
 pub mod plan;
 pub mod risk_level;
@@ -70,5 +71,7 @@ pub use ssrf::{
     validate_url,
 };
 pub use tool::{NamedTool, ToolError};
+
+pub use mcp::{McpServerConfig, McpServerConfigJson, ServerType};
 
 pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};

@@ -9,10 +9,11 @@ async-trait = "0.1"
 dashmap = "6"
 glob = "0.3"
 regex = "1"
+rust-mcp-sdk = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["process", "fs", "time"] }
+tokio = { version = "1", features = ["process", "fs", "time", "sync"] }
 tracing = "0.1"
 reqwest = { workspace = true }
 once_cell = { workspace = true }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use argus_wing::ArgusWing;
 use subscription::ThreadSubscriptions;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -16,11 +18,19 @@ pub fn run() {
         .with(filter)
         .init();
 
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    let wing = rt.block_on(ArgusWing::init(None)).expect("初始化失败");
+    let runtime = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let wing = runtime.block_on(ArgusWing::init(None)).expect("初始化失败");
 
     // Register default tools
     wing.register_default_tools();
+
+    let wing_for_mcp = Arc::clone(&wing);
+    runtime.spawn(async move {
+        if let Err(e) = wing_for_mcp.register_mcp_tools().await {
+            tracing::warn!("MCP tools registration failed: {}", e);
+        }
+    });
+    let _runtime = runtime;
 
     let subscriptions = ThreadSubscriptions::new();
 
@@ -44,6 +54,12 @@ pub fn run() {
             commands::get_thread_snapshot,
             commands::resolve_approval,
             commands::list_tools,
+            // MCP server commands
+            commands::list_mcp_servers,
+            commands::get_mcp_server,
+            commands::upsert_mcp_server,
+            commands::delete_mcp_server,
+            commands::test_mcp_server,
             // Account commands
             commands::get_current_user,
             commands::has_any_user,

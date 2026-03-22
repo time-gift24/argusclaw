@@ -7,6 +7,7 @@ import { CircleHelp, Save } from "lucide-react"
 import { agents, providers, tools, type AgentRecord, type LlmProviderSummary, type ToolInfo } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
@@ -343,6 +344,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               <h2 className="text-sm font-medium">可用工具</h2>
               <span className="text-xs text-muted-foreground">
                 {formData.tool_names.length} / {toolList.length}
+                {toolList.some((t) => isMcpTool(t.name)) && (
+                  <span className="ml-1 text-purple-600">
+                    ({toolList.filter((t) => isMcpTool(t.name)).length} MCP)
+                  </span>
+                )}
               </span>
             </div>
             <div className="p-3">
@@ -385,12 +391,19 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                           onClick={(e) => e.stopPropagation()}
                         />
                         <div className="flex-1 min-w-0">
-                          <Label
-                            htmlFor={`tool-${tool.name}`}
-                            className="text-sm font-medium cursor-pointer block truncate"
-                          >
-                            {tool.name}
-                          </Label>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <Label
+                              htmlFor={`tool-${tool.name}`}
+                              className="text-sm font-medium cursor-pointer block truncate"
+                            >
+                              {tool.name}
+                            </Label>
+                            {isMcpTool(tool.name) && (
+                              <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 border-purple-300 text-purple-600">
+                                MCP
+                              </Badge>
+                            )}
+                          </div>
                           <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
                             {tool.description}
                           </p>
@@ -446,6 +459,25 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       </div>
     </div>
   )
+}
+
+// Helper function to detect if a tool is an MCP tool
+function isMcpTool(toolName: string): boolean {
+  return toolName.startsWith("mcp_")
+}
+
+// Helper function to parse MCP tool name into server and tool names
+function parseMcpToolName(toolName: string): { serverName: string; toolName: string } | null {
+  if (!isMcpTool(toolName)) return null
+  // Format: mcp_{server_name}_{tool_name}
+  // The server name is between mcp_ and the last underscore
+  const withoutPrefix = toolName.slice(4) // Remove "mcp_"
+  const lastUnderscoreIndex = withoutPrefix.lastIndexOf("_")
+  if (lastUnderscoreIndex === -1) return null
+  return {
+    serverName: withoutPrefix.slice(0, lastUnderscoreIndex),
+    toolName: withoutPrefix.slice(lastUnderscoreIndex + 1),
+  }
 }
 
 // Helper function

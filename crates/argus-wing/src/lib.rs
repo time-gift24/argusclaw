@@ -42,12 +42,16 @@ use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
-use argus_tool::ToolManager;
+use argus_tool::{mcp::McpClientPool, ToolManager};
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
 pub use init::init_tracing;
 pub use resolver::ProviderManagerResolver;
+
+// Re-export types for desktop
+pub use argus_protocol::mcp::ServerType;
+pub use argus_repository::{McpServerId, McpServerRecord};
 
 /// Default agent display name for the ArgusWing template.
 const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
@@ -69,6 +73,8 @@ pub struct ArgusWing {
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
+    mcp_server_repository: Arc<ArgusSqlite>,
+    mcp_client_pool: Arc<McpClientPool>,
     pub account_manager: Arc<AccountManager>,
     pub credential_store: Arc<CredentialStore>,
 }
@@ -133,6 +139,10 @@ impl ArgusWing {
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        // Create MCP server repository and client pool
+        let mcp_server_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let mcp_client_pool = Arc::new(McpClientPool::new());
+
         // Create auth components
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
@@ -146,6 +156,8 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            mcp_server_repository,
+            mcp_client_pool,
             account_manager,
             credential_store,
         }))
@@ -172,6 +184,10 @@ impl ArgusWing {
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        // Create MCP server repository and client pool
+        let mcp_server_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let mcp_client_pool = Arc::new(McpClientPool::new());
+
         // Create auth components
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
@@ -185,6 +201,8 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            mcp_server_repository,
+            mcp_client_pool,
             account_manager,
             credential_store,
         })
@@ -477,6 +495,141 @@ impl ArgusWing {
             .map_err(|e| ArgusError::ApprovalError {
                 reason: e.to_string(),
             })
+    }
+
+    // =========================================================================
+    // MCP Server API
+    // =========================================================================
+
+    /// List all MCP servers.
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServerRecord>> {
+        use argus_repository::McpServerRepository;
+        self.mcp_server_repository
+            .list()
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Get an MCP server by ID.
+    pub async fn get_mcp_server(&self, id: McpServerId) -> Result<Option<McpServerRecord>> {
+        use argus_repository::McpServerRepository;
+        self.mcp_server_repository
+            .get(id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Upsert an MCP server record.
+    pub async fn upsert_mcp_server(&self, record: McpServerRecord) -> Result<McpServerId> {
+        use argus_repository::McpServerRepository;
+
+        // Check if server exists
+        let existing = self
+            .mcp_server_repository
+            .get(record.id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        if existing.is_some() {
+            self.mcp_server_repository
+                .update(&record)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+            Ok(record.id)
+        } else {
+            self.mcp_server_repository
+                .create(&record)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })
+        }
+    }
+
+    /// Delete an MCP server by ID.
+    pub async fn delete_mcp_server(&self, id: McpServerId) -> Result<bool> {
+        use argus_repository::McpServerRepository;
+        self.mcp_server_repository
+            .delete(id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Test connection to an MCP server.
+    pub async fn test_mcp_server(
+        &self,
+        id: McpServerId,
+    ) -> Result<argus_tool::mcp::ConnectionTestResult> {
+        use argus_repository::McpServerRepository;
+
+        let record =
+            self.mcp_server_repository
+                .get(id)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+
+        let record = record.ok_or_else(|| ArgusError::DatabaseError {
+            reason: format!("MCP server {} not found", id.into_inner()),
+        })?;
+
+        // Convert to McpServerConfig
+        let config = record.into_config();
+
+        Ok(self.mcp_client_pool.test_connection(&config).await)
+    }
+
+    /// Register MCP tools from all enabled servers.
+    /// This loads enabled MCP servers from the database, connects to each, discovers tools,
+    /// and registers them to the tool manager.
+    pub async fn register_mcp_tools(&self) -> Result<usize> {
+        use argus_repository::McpServerRepository;
+
+        let enabled_servers = self
+            .mcp_server_repository
+            .list_enabled()
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        let mut total_tools = 0;
+
+        for record in enabled_servers {
+            let server_name = record.name.clone();
+            let config = record.into_config();
+            match self
+                .mcp_client_pool
+                .register_server_tools(&config, &self.tool_manager)
+                .await
+            {
+                Ok(count) => {
+                    total_tools += count;
+                }
+                Err(e) => {
+                    // Log the error but continue with other servers
+                    // This implements the "allow single connection failure" requirement
+                    tracing::warn!(
+                        "Failed to register MCP server '{}': {}. Continuing with other servers...",
+                        server_name,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(total_tools)
     }
 
     // =========================================================================

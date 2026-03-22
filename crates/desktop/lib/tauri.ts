@@ -187,3 +187,47 @@ export const chat = {
       resolvedBy,
     }),
 };
+
+// MCP Server types
+export type ServerType = "stdio" | "http";
+
+export interface McpServerSummary {
+  id: number;
+  name: string;
+  display_name: string;
+  server_type: ServerType;
+  enabled: boolean;
+}
+
+export interface McpServerPayload {
+  id: number;
+  name: string;
+  display_name: string;
+  server_type: ServerType;
+  command?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  args?: string[];
+  enabled: boolean;
+}
+
+export interface ConnectionTestResult {
+  success: boolean;
+  tool_count: number;
+  error_message?: string;
+}
+
+// MCP Server API
+export const mcpServers = {
+  list: () => invoke<McpServerSummary[]>("list_mcp_servers"),
+
+  get: (id: number) => invoke<McpServerPayload | null>("get_mcp_server", { id }),
+
+  upsert: (record: McpServerPayload) =>
+    invoke<number>("upsert_mcp_server", { payload: record }),
+
+  delete: (id: number) => invoke<boolean>("delete_mcp_server", { id }),
+
+  testConnection: (id: number) =>
+    invoke<ConnectionTestResult>("test_mcp_server", { id }),
+};
