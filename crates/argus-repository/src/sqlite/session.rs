@@ -68,7 +68,7 @@ impl SessionRepository for ArgusSqlite {
     }
 
     async fn delete_session(&self, id: &SessionId) -> DbResult<bool> {
-        let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
+        let result = sqlx::query("DELETE FROM sessions WHERE id = ?1")
             .bind(id.inner())
             .execute(&self.pool)
             .await
@@ -103,7 +103,7 @@ impl SessionRepository for ArgusSqlite {
 impl ArgusSqlite {
     fn map_session_record(&self, row: sqlx::sqlite::SqliteRow) -> DbResult<SessionRecord> {
         Ok(SessionRecord {
-            id: SessionId::new(Self::get_column(&row, "id")?),
+            id: SessionId::new(Self::get_column::<i64>(&row, "id")?),
             name: Self::get_column(&row, "name")?,
             created_at: Self::get_column(&row, "created_at")?,
             updated_at: Self::get_column(&row, "updated_at")?,
@@ -114,8 +114,6 @@ impl ArgusSqlite {
         &self,
         row: sqlx::sqlite::SqliteRow,
     ) -> DbResult<SessionSummaryRecord> {
-        use argus_protocol::SessionId;
-
         Ok(SessionSummaryRecord {
             id: SessionId::new(Self::get_column::<i64>(&row, "id")?),
             name: Self::get_column(&row, "name")?,
