@@ -56,6 +56,9 @@ pub struct McpServerConfig {
     /// HTTP headers for HTTP transport (e.g., Authorization).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
+    /// Whether to use legacy SSE transport for HTTP servers.
+    #[serde(default)]
+    pub use_sse: bool,
     /// Command to execute for Stdio transport (e.g., "npx").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -77,6 +80,7 @@ impl McpServerConfig {
             server_type,
             url: None,
             headers: None,
+            use_sse: false,
             command: None,
             args: None,
             enabled: true,
@@ -94,6 +98,13 @@ impl McpServerConfig {
     #[allow(deprecated)]
     pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.headers = Some(headers);
+        self
+    }
+
+    /// Set whether HTTP transport should use SSE mode.
+    #[allow(deprecated)]
+    pub fn with_use_sse(mut self, use_sse: bool) -> Self {
+        self.use_sse = use_sse;
         self
     }
 
@@ -130,6 +141,8 @@ pub struct McpServerConfigJson {
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub use_sse: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +159,7 @@ impl From<McpServerConfig> for McpServerConfigJson {
             server_type: config.server_type,
             url: config.url,
             headers: config.headers,
+            use_sse: config.use_sse,
             command: config.command,
             args: config.args,
             enabled: config.enabled,

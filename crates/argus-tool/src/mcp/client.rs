@@ -27,13 +27,6 @@ use tracing::{debug, info};
 
 const MCP_CONNECTION_TEST_TIMEOUT_SECS: u64 = 2;
 
-fn uses_sse_endpoint(url: &str) -> bool {
-    let normalized = url.to_ascii_lowercase();
-    normalized.ends_with("/sse")
-        || normalized.contains("/sse?")
-        || normalized.contains("transport=sse")
-}
-
 /// Connection test result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionTestResult {
@@ -139,7 +132,7 @@ impl McpClientWrapper {
                         reason: "HTTP transport requires url".to_string(),
                     })?;
 
-                if uses_sse_endpoint(url) {
+                if config.use_sse {
                     let handler = EmptyClientHandler {};
                     let handler_boxed = handler.to_mcp_client_handler();
                     let transport_options = ClientSseTransportOptions {
@@ -566,6 +559,7 @@ mod tests {
             ServerType::Http,
         )
         .with_url("https://example.com/sse".to_string())
+        .with_use_sse(true)
         .with_headers(headers);
 
         let result = McpClientWrapper::new(&config).await;
@@ -592,13 +586,6 @@ mod tests {
         assert!(result.is_err());
         let message = result.err().unwrap().to_string();
         assert!(message.contains("Invalid header name"));
-    }
-
-    #[test]
-    fn detects_sse_endpoint_from_url() {
-        assert!(uses_sse_endpoint("https://example.com/sse"));
-        assert!(uses_sse_endpoint("https://example.com/mcp?transport=sse"));
-        assert!(!uses_sse_endpoint("https://example.com/mcp"));
     }
 
     #[tokio::test]

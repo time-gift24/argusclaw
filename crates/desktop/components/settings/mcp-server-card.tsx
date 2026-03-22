@@ -63,7 +63,11 @@ export function McpServerCard({
         <div className="flex justify-between">
           <span className="text-muted-foreground">传输方式:</span>
           <Badge variant="secondary" className="text-xs">
-            {server.server_type === "stdio" ? "标准 I/O" : "HTTP"}
+            {server.server_type === "stdio"
+              ? "标准 I/O"
+              : server.use_sse
+                ? "HTTP (SSE)"
+                : "HTTP"}
           </Badge>
         </div>
         {hasResult && (

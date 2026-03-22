@@ -143,12 +143,16 @@ test("mcp editing flow fetches full payload and keeps server_type values aligned
   const tauriBindingSource = readFileSync(tauriBindingPath, "utf8");
 
   assert.match(tauriBindingSource, /export type ServerType = "stdio" \| "http"/);
+  assert.match(tauriBindingSource, /use_sse: boolean;/);
   assert.match(
     tauriBindingSource,
     /invoke<McpServerPayload \| null>\("get_mcp_server", \{ id \}\)/,
   );
   assert.match(mcpPageSource, /setEditingServer\(server\)/);
   assert.match(mcpFormDialogSource, /server_type: "stdio"/);
+  assert.match(mcpFormDialogSource, /use_sse: false/);
+  assert.match(mcpFormDialogSource, /id="use_sse"/);
+  assert.match(mcpFormDialogSource, /使用 SSE/);
   assert.match(mcpFormDialogSource, /<SelectItem value="stdio">/);
   assert.match(mcpFormDialogSource, /<SelectItem value="http">/);
   assert.match(mcpCardSource, /server\.server_type === "stdio"/);

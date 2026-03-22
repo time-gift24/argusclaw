@@ -196,6 +196,7 @@ export interface McpServerSummary {
   name: string;
   display_name: string;
   server_type: ServerType;
+  use_sse: boolean;
   enabled: boolean;
 }
 
@@ -207,6 +208,7 @@ export interface McpServerPayload {
   command?: string;
   url?: string;
   headers?: Record<string, string>;
+  use_sse: boolean;
   args?: string[];
   enabled: boolean;
 }

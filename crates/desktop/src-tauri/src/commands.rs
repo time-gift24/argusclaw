@@ -561,6 +561,8 @@ pub struct McpServerPayload {
     pub command: Option<String>,
     pub url: Option<String>,
     pub headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub use_sse: bool,
     pub args: Option<Vec<String>>,
     pub enabled: bool,
 }
@@ -575,6 +577,7 @@ impl From<McpServerRecord> for McpServerPayload {
             command: record.command,
             url: record.url,
             headers: record.headers,
+            use_sse: record.use_sse,
             args: record.args,
             enabled: record.enabled,
         }
@@ -621,6 +624,7 @@ pub async fn upsert_mcp_server(
         command: payload.command,
         url: payload.url,
         headers: payload.headers,
+        use_sse: payload.use_sse,
         args: payload.args,
         auth_token_ciphertext: None,
         auth_token_nonce: None,

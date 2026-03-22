@@ -45,6 +45,7 @@ function createDefaultFormData(): McpServerPayload {
     command: "",
     url: "",
     headers: {},
+    use_sse: false,
     args: [],
     enabled: true,
   };
@@ -98,6 +99,7 @@ export function McpServerFormDialog({
       setFormData({
         ...server,
         server_type: normalizeServerType(server.server_type),
+        use_sse: Boolean(server.use_sse),
       });
     } else {
       setFormData(createDefaultFormData());
@@ -287,6 +289,23 @@ export function McpServerFormDialog({
           )}
           {formData.server_type === "http" && (
             <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="use_sse"
+                  checked={formData.use_sse}
+                  onChange={(e) =>
+                    setFormData({ ...formData, use_sse: e.target.checked })
+                  }
+                  className="h-4 w-4 rounded border-input"
+                />
+                <Label htmlFor="use_sse" className="cursor-pointer">
+                  使用 SSE
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                默认使用普通 HTTP（Streamable HTTP），仅在服务端只支持 SSE 时开启。
+              </p>
               <div className="flex items-center justify-between">
                 <Label>HTTP Headers</Label>
                 <Button type="button" variant="ghost" size="sm" onClick={handleAddHeader}>
