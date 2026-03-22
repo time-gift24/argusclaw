@@ -21,7 +21,7 @@ export function PlanPanel({ plan }: PlanPanelProps) {
   const total = plan.length;
 
   return (
-    <div className="mx-auto mb-3 w-full max-w-(--thread-max-width) rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
+    <div className="mb-2 w-full rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
       {/* Header */}
       <div
         className="flex cursor-pointer items-center gap-2 select-none"

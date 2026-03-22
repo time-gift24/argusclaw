@@ -268,7 +268,7 @@ function ToolFallbackError({
   );
 }
 
-const ToolFallbackImpl: ToolCallMessagePartComponent = ({
+export const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
   argsText,
   result,
