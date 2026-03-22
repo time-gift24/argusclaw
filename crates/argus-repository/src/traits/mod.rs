@@ -2,11 +2,13 @@
 
 mod agent;
 mod job;
+mod mcp_server;
 mod thread;
 mod workflow;
 
 pub use agent::AgentRepository;
 pub use job::JobRepository;
+pub use mcp_server::McpServerRepository;
 pub use thread::ThreadRepository;
 pub use workflow::WorkflowRepository;
 

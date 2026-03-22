@@ -144,4 +144,3 @@ pub struct McpCapabilityInfo {
     /// List of prompt names available from this server.
     pub prompts: Vec<String>,
 }
-
