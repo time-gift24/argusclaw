@@ -38,7 +38,7 @@ use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
-use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
+use argus_repository::{connect, connect_path, migrate, ArgusSqlite, SessionRepository};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
@@ -121,8 +121,10 @@ impl ArgusWing {
         // Create session manager
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
+        let repository: Arc<dyn SessionRepository> = Arc::new(ArgusSqlite::new(pool.clone()));
         let session_manager = Arc::new(SessionManager::new(
             pool.clone(),
+            repository,
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
@@ -171,14 +173,25 @@ impl ArgusWing {
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
+        let repository: Arc<dyn SessionRepository> = Arc::new(ArgusSqlite::new(pool.clone()));
         let session_manager = Arc::new(SessionManager::new(
             pool.clone(),
+            repository,
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
             compactor_manager.clone(),
             trace_dir,
         ));
+
+        // Cleanup old sessions after session manager is available (run in background)
+        let cleanup_manager = session_manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cleanup_manager.cleanup_old_sessions(14).await {
+                tracing::warn!("Failed to cleanup old sessions: {}", e);
+            }
+        });
+
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
         // Create auth components

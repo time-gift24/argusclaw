@@ -235,6 +235,7 @@ name = "argus-session"
 version = "0.1.0"
 dependencies = [
  "argus-protocol",
+ "argus-repository",
  "argus-template",
  "argus-thread",
  "argus-tool",

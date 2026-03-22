@@ -52,11 +52,13 @@ impl SessionManager {
 
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let records = self.repository.list_sessions().await.map_err(|e| {
-            ArgusError::DatabaseError {
-                reason: e.to_string(),
-            }
-        })?;
+        let records =
+            self.repository
+                .list_sessions()
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
 
         let sessions = records
             .into_iter()
@@ -212,21 +214,23 @@ impl SessionManager {
 
     /// Create a new session.
     pub async fn create(&self, name: String) -> Result<SessionId> {
-        self.repository.create_session(&name).await.map_err(|e| {
-            ArgusError::DatabaseError {
+        self.repository
+            .create_session(&name)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
-            }
-        })
+            })
     }
 
     /// Delete a session and all its threads.
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         // Delete from DB (threads will be cascade deleted)
-        self.repository.delete_session(&session_id).await.map_err(|e| {
-            ArgusError::DatabaseError {
+        self.repository
+            .delete_session(&session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
@@ -415,19 +419,21 @@ impl SessionManager {
     /// A session is considered stale if all its threads (or itself if it has no threads)
     /// have not been updated within the cutoff period.
     pub async fn cleanup_old_sessions(&self, days: u32) -> Result<u64> {
-        self.repository.cleanup_old_sessions(days).await.map_err(|e| {
-            ArgusError::DatabaseError {
+        self.repository
+            .cleanup_old_sessions(days)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
-            }
-        })
+            })
     }
 
     /// Update the title of a session.
     pub async fn update_session_title(&self, session_id: SessionId, title: &str) -> Result<()> {
-        self.repository.update_session(&session_id, title).await.map_err(|e| {
-            ArgusError::DatabaseError {
+        self.repository
+            .update_session(&session_id, title)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
-            }
-        })
+            })
     }
 }
