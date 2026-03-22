@@ -13,6 +13,7 @@ import { useToast } from "@/components/ui/toast";
 
 interface McpServerEditorProps {
   serverId?: number;
+  rightPanel?: React.ReactNode;
 }
 
 function createDefaultFormData(): Omit<McpServerConfig, "id"> {
@@ -28,7 +29,7 @@ function createDefaultFormData(): Omit<McpServerConfig, "id"> {
   };
 }
 
-export function McpServerEditor({ serverId }: McpServerEditorProps) {
+export function McpServerEditor({ serverId, rightPanel }: McpServerEditorProps) {
   const router = useRouter();
   const { addToast } = useToast();
   const isEditing = !!serverId;
@@ -323,36 +324,38 @@ export function McpServerEditor({ serverId }: McpServerEditorProps) {
           </div>
         </div>
 
-        {/* Right: Info */}
+        {/* Right: Info or Status Panel */}
         <div className="space-y-4">
-          <div className="rounded-lg border bg-muted/30 p-4">
-            <h3 className="text-sm font-medium mb-2">服务器类型说明</h3>
-            {formData.server_type === "stdio" ? (
-              <div className="text-xs text-muted-foreground space-y-2">
-                <p>
-                  <strong>STDIO</strong> 类型的服务器通过标准输入/输出与客户端通信。
-                </p>
-                <p>
-                  适用于本地运行的 MCP 服务器，如官方 CLI 工具或自定义服务。
-                </p>
-                <p className="font-mono bg-muted p-2 rounded mt-2">
-                  npx @anthropic/mcp-server AnthropicClaude
-                </p>
-              </div>
-            ) : (
-              <div className="text-xs text-muted-foreground space-y-2">
-                <p>
-                  <strong>HTTP</strong> 类型的服务器通过 HTTP API 与客户端通信。
-                </p>
-                <p>
-                  适用于远程运行的 MCP 服务器，需要提供完整的 URL 地址。
-                </p>
-                <p className="font-mono bg-muted p-2 rounded mt-2">
-                  https://api.example.com/mcp
-                </p>
-              </div>
-            )}
-          </div>
+          {rightPanel ?? (
+            <div className="rounded-lg border bg-muted/30 p-4">
+              <h3 className="text-sm font-medium mb-2">服务器类型说明</h3>
+              {formData.server_type === "stdio" ? (
+                <div className="text-xs text-muted-foreground space-y-2">
+                  <p>
+                    <strong>STDIO</strong> 类型的服务器通过标准输入/输出与客户端通信。
+                  </p>
+                  <p>
+                    适用于本地运行的 MCP 服务器，如官方 CLI 工具或自定义服务。
+                  </p>
+                  <p className="font-mono bg-muted p-2 rounded mt-2">
+                    npx @anthropic/mcp-server AnthropicClaude
+                  </p>
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground space-y-2">
+                  <p>
+                    <strong>HTTP</strong> 类型的服务器通过 HTTP API 与客户端通信。
+                  </p>
+                  <p>
+                    适用于远程运行的 MCP 服务器，需要提供完整的 URL 地址。
+                  </p>
+                  <p className="font-mono bg-muted p-2 rounded mt-2">
+                    https://api.example.com/mcp
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

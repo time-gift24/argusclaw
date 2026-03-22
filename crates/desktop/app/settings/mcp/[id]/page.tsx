@@ -1,4 +1,4 @@
-import { McpServerEditor } from "@/components/settings";
+import { McpServerEditor, McpStatusPanel } from "@/components/settings";
 
 export default async function EditMcpServerPage({
   params,
@@ -6,5 +6,10 @@ export default async function EditMcpServerPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  return <McpServerEditor serverId={parseInt(id)} />;
+  return (
+    <McpServerEditor
+      serverId={parseInt(id)}
+      rightPanel={<McpStatusPanel serverId={parseInt(id)} />}
+    />
+  );
 }
