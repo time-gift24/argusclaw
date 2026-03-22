@@ -2,11 +2,13 @@
 
 mod agent;
 mod job;
+mod session;
 mod thread;
 mod workflow;
 
 pub use agent::AgentRepository;
 pub use job::JobRepository;
+pub use session::{SessionRepository, SessionSummaryRecord};
 pub use thread::ThreadRepository;
 pub use workflow::WorkflowRepository;
 
