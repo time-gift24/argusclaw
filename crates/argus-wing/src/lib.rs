@@ -35,8 +35,8 @@ use argus_auth::{AccountManager, CredentialStore};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
+    AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, McpServerConfig,
+    ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
@@ -69,6 +69,7 @@ pub struct ArgusWing {
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
+    mcp_repository: Arc<ArgusSqlite>,
     pub account_manager: Arc<AccountManager>,
     pub credential_store: Arc<CredentialStore>,
 }
@@ -100,7 +101,7 @@ impl ArgusWing {
 
         // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        let provider_manager = Arc::new(ProviderManager::new(llm_repository.clone()));
 
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
@@ -146,6 +147,7 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            mcp_repository: llm_repository.clone(),
             account_manager,
             credential_store,
         }))
@@ -155,7 +157,7 @@ impl ArgusWing {
     #[must_use]
     pub fn with_pool(pool: SqlitePool) -> Arc<Self> {
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        let provider_manager = Arc::new(ProviderManager::new(llm_repository.clone()));
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
@@ -185,6 +187,7 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            mcp_repository: llm_repository.clone(),
             account_manager,
             credential_store,
         })
@@ -229,6 +232,12 @@ impl ArgusWing {
     #[must_use]
     pub fn credential_store(&self) -> &Arc<CredentialStore> {
         &self.credential_store
+    }
+
+    /// Get a reference to the MCP server repository.
+    #[must_use]
+    pub fn mcp_repository(&self) -> &Arc<ArgusSqlite> {
+        &self.mcp_repository
     }
 
     // =========================================================================
@@ -495,6 +504,86 @@ impl ArgusWing {
                 parameters: def.parameters,
             })
             .collect()
+    }
+
+    // =========================================================================
+    // MCP Server API
+    // =========================================================================
+
+    /// List all MCP server configurations.
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServerConfig>> {
+        use argus_repository::traits::McpServerRepository;
+        self.mcp_repository
+            .list()
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Get an MCP server configuration by ID.
+    pub async fn get_mcp_server(&self, id: i64) -> Result<Option<McpServerConfig>> {
+        use argus_repository::traits::McpServerRepository;
+        self.mcp_repository
+            .get(id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Create or update an MCP server configuration.
+    /// Returns the ID of the created/updated server.
+    pub async fn upsert_mcp_server(&self, config: &McpServerConfig) -> Result<i64> {
+        use argus_repository::traits::McpServerRepository;
+
+        // If config has a non-zero ID, use it directly after upsert
+        let target_id = if config.id != 0 {
+            config.id
+        } else {
+            // For new records, we need to get the ID after insert
+            // First, do the upsert
+            self.mcp_repository
+                .upsert(config)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+
+            // Then get by name to retrieve the generated ID
+            let stored = self
+                .mcp_repository
+                .get_by_name(&config.name)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+            return stored
+                .map(|s| s.id)
+                .ok_or_else(|| ArgusError::DatabaseError {
+                    reason: "Failed to retrieve inserted MCP server".to_string(),
+                });
+        };
+
+        self.mcp_repository
+            .upsert(config)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        Ok(target_id)
+    }
+
+    /// Delete an MCP server by ID.
+    pub async fn delete_mcp_server(&self, id: i64) -> Result<bool> {
+        use argus_repository::traits::McpServerRepository;
+        self.mcp_repository
+            .delete(id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 }
 

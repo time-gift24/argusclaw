@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use argus_protocol::{
     AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
-    LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
-    SecretString, SessionId, ThreadId,
+    LlmProviderRecordJson, McpServerConfig, ProviderId, ProviderSecretStatus, ProviderTestResult,
+    Role, SecretString, SessionId, ThreadId,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -544,6 +544,40 @@ pub async fn delete_credential(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Resu
         .delete(id)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// MCP Server Commands
+// ============================================================================
+
+#[tauri::command]
+pub async fn list_mcp_servers(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<McpServerConfig>, String> {
+    wing.list_mcp_servers().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<Option<McpServerConfig>, String> {
+    wing.get_mcp_server(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn upsert_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    config: McpServerConfig,
+) -> Result<i64, String> {
+    wing.upsert_mcp_server(&config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_mcp_server(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
+    wing.delete_mcp_server(id).await.map_err(|e| e.to_string())
 }
 
 // ============================================================================
