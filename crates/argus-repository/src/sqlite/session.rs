@@ -124,3 +124,6 @@ impl ArgusSqlite {
         })
     }
 }
+
+#[cfg(test)]
+mod session_tests;

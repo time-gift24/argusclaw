@@ -20,4 +20,5 @@ argus-protocol = { path = "../argus-protocol" }
 argus-llm = { path = "../argus-llm" }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
