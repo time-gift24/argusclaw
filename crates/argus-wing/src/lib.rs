@@ -418,7 +418,9 @@ impl ArgusWing {
 
     /// Update the title of a session.
     pub async fn update_session_title(&self, session_id: SessionId, title: &str) -> Result<()> {
-        self.session_manager.update_session_title(session_id, title).await
+        self.session_manager
+            .update_session_title(session_id, title)
+            .await
     }
 
     // =========================================================================
