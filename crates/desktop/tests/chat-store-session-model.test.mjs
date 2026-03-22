@@ -28,7 +28,7 @@ test("chat store keeps sessions keyed by template and provider preference", () =
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {
   assert.match(
     storeSource,
-    /pendingAssistant:\s*\{\s*content:\s*string;\s*reasoning:\s*string\s*\}\s*\|\s*null/,
+    /pendingAssistant:\s*\{\s*content:\s*string;\s*reasoning:\s*string;\s*toolCalls:\s*PendingToolCall\[\];\s*plan:\s*PlanItem\[\]\s*\|\s*null\s*\}\s*\|\s*null/,
   );
   assert.match(
     storeSource,
@@ -50,5 +50,16 @@ test("chat store waits for idle before refreshing the persisted snapshot", () =>
     storeSource,
     /case "idle":[\s\S]*?refreshSnapshot\(sessionKey\)/,
     "idle should trigger the final snapshot refresh",
+  );
+});
+
+test("failed update_plan completions clear any optimistic pending plan", () => {
+  assert.match(
+    storeSource,
+    /case "tool_started":[\s\S]*?payload\.tool_name === "update_plan"[\s\S]*?plan:\s*args\.plan/,
+  );
+  assert.match(
+    storeSource,
+    /case "tool_completed":[\s\S]*?payload\.tool_name === "update_plan"[\s\S]*?plan:\s*payload\.is_error\s*\?\s*null\s*:/,
   );
 });

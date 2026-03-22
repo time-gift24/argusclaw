@@ -1,7 +1,7 @@
 import { useExternalStoreRuntime } from "@assistant-ui/react";
 
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
-import { PendingToolCall, useChatStore } from "@/lib/chat-store";
+import { useChatStore } from "@/lib/chat-store";
 import type { ChatMessagePayload } from "@/lib/types/chat";
 
 type JsonValue =
@@ -97,18 +97,6 @@ const toReadonlyJsonObject = (value: unknown): JsonObject | undefined => {
 const stringifyValue = (value: unknown) =>
   typeof value === "string" ? value : JSON.stringify(value ?? {}, null, 2);
 
-function pendingToolCallToPart(tc: PendingToolCall): AssistantUiMessagePart {
-  return {
-    type: "tool-call",
-    toolCallId: tc.tool_call_id,
-    toolName: tc.tool_name,
-    args: undefined,
-    argsText: tc.arguments_text,
-    result: tc.result,
-    isError: tc.is_error,
-  };
-}
-
 const parseMessageContent = (content: string): unknown => {
   const trimmed = content.trim();
   if (!trimmed) return content;
@@ -128,16 +116,16 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
   if (msg.role === "assistant") {
     const content: AssistantUiMessagePart[] = [];
 
+    if (msg.content.trim().length > 0) {
+      content.push({ type: "text", text: msg.content });
+    }
+
     if ((msg.reasoning_content ?? "").trim().length > 0) {
       content.push({
         type: "reasoning",
         text: msg.reasoning_content ?? "",
         parentId: `assistant-reasoning-${index}`,
       });
-    }
-
-    if (msg.content.trim().length > 0) {
-      content.push({ type: "text", text: msg.content });
     }
 
     for (const toolCall of msg.tool_calls ?? []) {
@@ -232,6 +220,10 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
   if (session.pendingAssistant) {
     const pendingContent: AssistantUiMessagePart[] = [];
 
+    if (session.pendingAssistant.content) {
+      pendingContent.push({ type: "text", text: session.pendingAssistant.content });
+    }
+
     if (session.pendingAssistant.reasoning.trim().length > 0) {
       pendingContent.push({
         type: "reasoning",
@@ -240,13 +232,6 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
       });
     }
 
-    if (session.pendingAssistant.content) {
-      pendingContent.push({ type: "text", text: session.pendingAssistant.content });
-    }
-
-    for (const tc of session.pendingAssistant.toolCalls) {
-      pendingContent.push(pendingToolCallToPart(tc));
-    }
 
     messages.push({
       id: `pending-${session.threadId}`,

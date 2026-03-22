@@ -32,7 +32,7 @@ export interface ChatSessionState {
   effectiveProviderId: number | null;
   status: "idle" | "running" | "error";
   messages: ThreadSnapshotPayload["messages"];
-  pendingAssistant: { content: string; reasoning: string; toolCalls: PendingToolCall[] } | null;
+  pendingAssistant: { content: string; reasoning: string; toolCalls: PendingToolCall[]; plan: PlanItem[] | null } | null;
   pendingApprovalRequest: {
     id: string;
     tool_name: string;
@@ -41,7 +41,6 @@ export interface ChatSessionState {
     requested_at: string;
     timeout_secs: number;
   } | null;
-  plan: PlanItem[] | null;
   error: string | null;
 }
 
@@ -138,7 +137,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
-        plan: null,
         error: null,
       };
 
@@ -225,7 +223,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         [state.activeSessionKey!]: {
           ...session,
           status: "running",
-          pendingAssistant: { content: "", reasoning: "", toolCalls: [] },
+          pendingAssistant: { content: "", reasoning: "", toolCalls: [], plan: null },
           error: null,
         },
       },
@@ -407,15 +405,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               status: "running",
             });
           }
+          const updates: Partial<ChatSessionState> = {
+            pendingAssistant: {
+              ...session.pendingAssistant,
+              toolCalls,
+            },
+          };
+          if (payload.tool_name === "update_plan" && payload.arguments) {
+            const args = payload.arguments as { plan?: PlanItem[] };
+            if (Array.isArray(args.plan)) {
+              updates.pendingAssistant = {
+                ...updates.pendingAssistant!,
+                plan: args.plan,
+              };
+            }
+          }
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
                 ...session,
-                pendingAssistant: {
-                  ...session.pendingAssistant,
-                  toolCalls,
-                },
+                ...updates,
               },
             },
           };
@@ -445,9 +455,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               toolCalls,
             },
           };
-          if (payload.tool_name === "update_plan" && !payload.is_error && payload.result) {
-            const result = payload.result as { plan?: PlanItem[] };
-            updates.plan = Array.isArray(result.plan) ? result.plan : null;
+          if (payload.tool_name === "update_plan") {
+            const result = payload.result as { plan?: PlanItem[] } | null;
+            updates.pendingAssistant = {
+              ...updates.pendingAssistant!,
+              plan: payload.is_error ? null : Array.isArray(result?.plan) ? result.plan : null,
+            };
           }
           return {
             sessionsByKey: {
