@@ -187,3 +187,27 @@ export const chat = {
       resolvedBy,
     }),
 };
+
+// MCP Server API
+export interface McpServerConfig {
+  id: number;
+  name: string;
+  display_name: string;
+  server_type: "http" | "stdio";
+  url?: string;
+  headers?: Record<string, string>;
+  command?: string;
+  args?: string[];
+  enabled: boolean;
+}
+
+export const mcpServers = {
+  list: () => invoke<McpServerConfig[]>("list_mcp_servers"),
+
+  get: (id: number) => invoke<McpServerConfig | null>("get_mcp_server", { id }),
+
+  upsert: (config: McpServerConfig) =>
+    invoke<number>("upsert_mcp_server", { config }),
+
+  delete: (id: number) => invoke<boolean>("delete_mcp_server", { id }),
+};

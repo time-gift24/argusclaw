@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo } from 'react'
-import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft } from 'lucide-react'
+import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft, Server } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
@@ -27,7 +27,7 @@ import { LoginDialog } from '@/components/auth/login-dialog'
 import NotificationDropdown from '@/components/shadcn-studio/blocks/dropdown-notification'
 import ProfileDropdown from '@/components/shadcn-studio/blocks/dropdown-profile'
 import { useAuthStore } from '@/components/auth/use-auth-store'
-import { agents, providers } from '@/lib/tauri'
+import { agents, providers, mcpServers } from '@/lib/tauri'
 
 interface BreadcrumbItem {
   label: string
@@ -44,25 +44,32 @@ type NavigationItem = {
 function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
   const [agentNames, setAgentNames] = useState<Record<string, string>>({})
   const [providerNames, setProviderNames] = useState<Record<string, string>>({})
+  const [mcpServerNames, setMcpServerNames] = useState<Record<string, string>>({})
 
   // Load agent and provider names for breadcrumb display
   useEffect(() => {
     const loadNames = async () => {
       try {
-        const [agentList, providerList] = await Promise.all([
+        const [agentList, providerList, mcpServerList] = await Promise.all([
           agents.list(),
           providers.list(),
+          mcpServers.list(),
         ])
         const agentNameMap: Record<string, string> = {}
         const providerNameMap: Record<string, string> = {}
+        const mcpServerNameMap: Record<string, string> = {}
         for (const agent of agentList) {
           agentNameMap[agent.id] = agent.display_name
         }
         for (const provider of providerList) {
           providerNameMap[provider.id] = provider.display_name
         }
+        for (const server of mcpServerList) {
+          mcpServerNameMap[server.id] = server.display_name
+        }
         setAgentNames(agentNameMap)
         setProviderNames(providerNameMap)
+        setMcpServerNames(mcpServerNameMap)
       } catch (error) {
         console.error("Failed to load names:", error)
       }
@@ -103,11 +110,24 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
             items.push({ label: agentName })
           }
         }
+      } else if (pathname.startsWith("/settings/mcp")) {
+        items.push({ label: "MCP 服务器", href: "/settings/mcp" })
+
+        if (pathname === "/settings/mcp/new") {
+          items.push({ label: "新建" })
+        } else {
+          const match = pathname.match(/^\/settings\/mcp\/([^/]+)$/)
+          if (match) {
+            const serverId = match[1]
+            const serverName = mcpServerNames[serverId] || serverId
+            items.push({ label: serverName })
+          }
+        }
       }
     }
 
     return items
-  }, [pathname, agentNames, providerNames])
+  }, [pathname, agentNames, providerNames, mcpServerNames])
 }
 
 const Navbar = ({
@@ -181,6 +201,12 @@ const Navbar = ({
                   <Link href='/settings/providers' className='flex items-center gap-2 w-full'>
                     <Cloud className='h-4 w-4' />
                     <span>LLMProvider 配置</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem>
+                  <Link href='/settings/mcp' className='flex items-center gap-2 w-full'>
+                    <Server className='h-4 w-4' />
+                    <span>MCP 服务器</span>
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>
