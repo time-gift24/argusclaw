@@ -580,6 +580,23 @@ pub async fn delete_mcp_server(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Resu
     wing.delete_mcp_server(id).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn list_mcp_server_statuses(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<std::collections::HashMap<i64, argus_protocol::mcp::McpServerStatus>, String> {
+    Ok(wing.list_mcp_connection_states().await)
+}
+
+#[tauri::command]
+pub async fn test_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<argus_protocol::mcp::McpServerStatus, String> {
+    wing.test_mcp_connection(id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

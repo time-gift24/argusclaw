@@ -26,6 +26,7 @@ mod db;
 mod init;
 mod resolver;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
@@ -36,7 +37,8 @@ use argus_crypto::{Cipher, FileKeySource};
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, McpServerConfig,
-    ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
+    McpServerStatus, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
+    ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
@@ -44,7 +46,7 @@ use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
 use argus_tool::ToolManager;
 use sqlx::SqlitePool;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 pub use init::init_tracing;
 pub use resolver::ProviderManagerResolver;
@@ -70,6 +72,7 @@ pub struct ArgusWing {
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
     mcp_repository: Arc<ArgusSqlite>,
+    mcp_connection_states: Arc<RwLock<HashMap<i64, McpServerStatus>>>,
     pub account_manager: Arc<AccountManager>,
     pub credential_store: Arc<CredentialStore>,
 }
@@ -139,7 +142,9 @@ impl ArgusWing {
         let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
         let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher));
 
-        Ok(Arc::new(Self {
+        let mcp_connection_states = Arc::new(RwLock::new(HashMap::new()));
+
+        let wing_clone = Arc::new(Self {
             pool,
             provider_manager,
             template_manager,
@@ -148,9 +153,15 @@ impl ArgusWing {
             tool_manager,
             compactor_manager,
             mcp_repository: llm_repository.clone(),
+            mcp_connection_states,
             account_manager,
             credential_store,
-        }))
+        });
+
+        // Start background MCP connection monitor
+        wing_clone.start_mcp_connection_monitor();
+
+        Ok(wing_clone)
     }
 
     /// Create a new ArgusWing with a pre-configured database pool.
@@ -179,6 +190,8 @@ impl ArgusWing {
         let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
         let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher));
 
+        let mcp_connection_states = Arc::new(RwLock::new(HashMap::new()));
+
         Arc::new(Self {
             pool,
             provider_manager,
@@ -188,6 +201,7 @@ impl ArgusWing {
             tool_manager,
             compactor_manager,
             mcp_repository: llm_repository.clone(),
+            mcp_connection_states,
             account_manager,
             credential_store,
         })
@@ -584,6 +598,95 @@ impl ArgusWing {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })
+    }
+
+    /// Get all cached MCP server connection statuses.
+    pub async fn list_mcp_connection_states(&self) -> HashMap<i64, McpServerStatus> {
+        self.mcp_connection_states.read().await.clone()
+    }
+
+    /// Test connection to an MCP server and return its status.
+    pub async fn test_mcp_connection(&self, server_id: i64) -> Result<McpServerStatus> {
+        use argus_repository::traits::McpServerRepository;
+        use argus_tool::mcp::McpClientRuntime;
+
+        let config = self
+            .mcp_repository
+            .get(server_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or_else(|| ArgusError::DatabaseError {
+                reason: format!("MCP server {} not found", server_id),
+            })?;
+
+        if !config.enabled {
+            return Ok(McpServerStatus::Disconnected);
+        }
+
+        // Set status to Connecting
+        {
+            let mut states = self.mcp_connection_states.write().await;
+            states.insert(server_id, McpServerStatus::Connecting);
+        }
+
+        // Attempt connection
+        let result: Result<McpServerStatus> = match McpClientRuntime::new(&config).await {
+            Ok(client) => match client.list_tools().await {
+                Ok(tools) => {
+                    let tool_names: Vec<String> = tools.into_iter().map(|t| t.name).collect();
+                    Ok(McpServerStatus::Connected {
+                        tools: tool_names,
+                        connected_at: chrono::Utc::now(),
+                    })
+                }
+                Err(e) => Ok(McpServerStatus::Failed {
+                    error: e.to_string(),
+                    failed_at: chrono::Utc::now(),
+                }),
+            },
+            Err(e) => Ok(McpServerStatus::Failed {
+                error: e.to_string(),
+                failed_at: chrono::Utc::now(),
+            }),
+        };
+
+        // Cache the result
+        {
+            let mut states = self.mcp_connection_states.write().await;
+            if let Ok(status) = &result {
+                states.insert(server_id, status.clone());
+            }
+        }
+
+        result
+    }
+
+    /// Start the background MCP connection monitor.
+    pub fn start_mcp_connection_monitor(self: &Arc<Self>) {
+        let wing = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let servers = match wing.list_mcp_servers().await {
+                    Ok(servers) => servers,
+                    Err(e) => {
+                        tracing::warn!("MCP monitor: failed to list servers: {}", e);
+                        continue;
+                    }
+                };
+                for server in servers {
+                    if !server.enabled {
+                        continue;
+                    }
+                    if let Err(e) = wing.test_mcp_connection(server.id).await {
+                        tracing::warn!("MCP monitor: failed to test server {}: {}", server.id, e);
+                    }
+                }
+            }
+        });
     }
 }
 
