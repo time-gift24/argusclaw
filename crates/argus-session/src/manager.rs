@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
+use argus_repository::SessionRepository;
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
 use argus_thread::{CompactorManager, FilePlanStore, ThreadBuilder};
@@ -17,6 +18,7 @@ use crate::session::{Session, SessionSummary, ThreadSummary};
 /// Manages sessions and their threads.
 pub struct SessionManager {
     pool: SqlitePool,
+    repository: Arc<dyn SessionRepository>,
     sessions: DashMap<SessionId, Arc<Session>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
@@ -29,6 +31,7 @@ impl SessionManager {
     /// Create a new SessionManager.
     pub fn new(
         pool: SqlitePool,
+        repository: Arc<dyn SessionRepository>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
@@ -37,6 +40,7 @@ impl SessionManager {
     ) -> Self {
         Self {
             pool,
+            repository,
             sessions: DashMap::new(),
             template_manager,
             provider_resolver,
@@ -48,37 +52,25 @@ impl SessionManager {
 
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT s.id, s.name, s.updated_at, COUNT(t.id) as thread_count,
-                   (SELECT t2.template_id FROM threads t2 WHERE t2.session_id = s.id LIMIT 1) as template_id,
-                   (SELECT t3.provider_id FROM threads t3 WHERE t3.session_id = s.id LIMIT 1) as provider_id
-            FROM sessions s
-            LEFT JOIN threads t ON t.session_id = s.id
-            GROUP BY s.id
-            ORDER BY s.updated_at DESC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
+        let records = self.repository.list_sessions().await.map_err(|e| {
+            ArgusError::DatabaseError {
+                reason: e.to_string(),
+            }
         })?;
 
-        let sessions = rows
+        let sessions = records
             .into_iter()
-            .map(|row| {
-                let updated_at_str: String = row.get("updated_at");
-                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+            .map(|record| {
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&record.updated_at)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 SessionSummary {
-                    id: SessionId::new(row.get("id")),
-                    name: row.get("name"),
-                    thread_count: row.get("thread_count"),
-                    template_id: row.get("template_id"),
-                    provider_id: row.get("provider_id"),
+                    id: record.id,
+                    name: record.name,
+                    thread_count: record.thread_count as i64,
+                    template_id: record.template_id.map(|v| v as i64),
+                    provider_id: record.provider_id.map(|v| v as i64),
                     updated_at,
                 }
             })
@@ -220,28 +212,21 @@ impl SessionManager {
 
     /// Create a new session.
     pub async fn create(&self, name: String) -> Result<SessionId> {
-        let result = sqlx::query(
-            "INSERT INTO sessions (name, created_at, updated_at) VALUES (?, datetime('now'), datetime('now'))",
-        )
-        .bind(&name)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
-
-        let id = result.last_insert_rowid() as i64;
-        Ok(SessionId::new(id))
+        self.repository.create_session(&name).await.map_err(|e| {
+            ArgusError::DatabaseError {
+                reason: e.to_string(),
+            }
+        })
     }
 
     /// Delete a session and all its threads.
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         // Delete from DB (threads will be cascade deleted)
-        sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(session_id.inner())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
+        self.repository.delete_session(&session_id).await.map_err(|e| {
+            ArgusError::DatabaseError {
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
@@ -430,36 +415,19 @@ impl SessionManager {
     /// A session is considered stale if all its threads (or itself if it has no threads)
     /// have not been updated within the cutoff period.
     pub async fn cleanup_old_sessions(&self, days: u32) -> Result<u64> {
-        let result = sqlx::query(
-            r#"
-            DELETE FROM sessions WHERE id IN (
-                SELECT s.id FROM sessions s
-                WHERE COALESCE(
-                    (SELECT MAX(t.updated_at) FROM threads t WHERE t.session_id = s.id),
-                    s.updated_at
-                ) < datetime('now', '-' || ?1 || ' days')
-            )
-            "#,
-        )
-        .bind(days as i64)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
-        Ok(result.rows_affected())
+        self.repository.cleanup_old_sessions(days).await.map_err(|e| {
+            ArgusError::DatabaseError {
+                reason: e.to_string(),
+            }
+        })
     }
 
     /// Update the title of a session.
     pub async fn update_session_title(&self, session_id: SessionId, title: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET name = ?2, updated_at = datetime('now') WHERE id = ?1")
-            .bind(session_id.inner())
-            .bind(title)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
+        self.repository.update_session(&session_id, title).await.map_err(|e| {
+            ArgusError::DatabaseError {
                 reason: e.to_string(),
-            })?;
-        Ok(())
+            }
+        })
     }
 }

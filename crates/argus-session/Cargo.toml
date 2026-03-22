@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
+argus-repository = { path = "../argus-repository" }
 argus-template = { path = "../argus-template" }
 argus-thread = { path = "../argus-thread" }
 argus-tool = { path = "../argus-tool" }
