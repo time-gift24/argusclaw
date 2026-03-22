@@ -16,6 +16,7 @@ export interface PendingToolCall {
   result?: unknown;
   is_error: boolean;
   status: "streaming" | "running" | "completed";
+  startedAt?: number;
 }
 
 const toSessionKey = (templateId: number, providerPreferenceId: number | null) =>
@@ -403,6 +404,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               arguments_text: JSON.stringify(payload.arguments ?? {}, null, 2),
               is_error: false,
               status: "running",
+              startedAt: Date.now(),
             });
           }
           const updates: Partial<ChatSessionState> = {
@@ -442,10 +444,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           );
           if (existingIndex < 0) return {};
           const toolCalls = [...session.pendingAssistant.toolCalls];
+          const startedAt = toolCalls[existingIndex]?.startedAt;
+          const durationSec = startedAt ? (Date.now() - startedAt) / 1000 : null;
           toolCalls[existingIndex] = {
             ...toolCalls[existingIndex],
             tool_name: payload.tool_name,
-            result: payload.result,
+            result: { value: payload.result, durationSec },
             is_error: payload.is_error,
             status: "completed",
           };

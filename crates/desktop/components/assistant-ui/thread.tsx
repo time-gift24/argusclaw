@@ -3,14 +3,15 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
-import { ToolFallbackImpl } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { ToolExecutionIndicator } from "@/components/assistant-ui/tool-execution-indicator";
+import { Reasoning } from "@/components/assistant-ui/reasoning";
+import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
+import { PlanPanelWrapper } from "@/components/chat/plan-panel-wrapper";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
-import { PlanPanel } from "@/components/chat/plan-panel";
-import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -20,7 +21,6 @@ import {
   BranchPickerPrimitive,
   ComposerPrimitive,
   ErrorPrimitive,
-  MessagePartPrimitive,
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
@@ -29,7 +29,6 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CheckIcon,
-  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -39,7 +38,6 @@ import {
   RefreshCwIcon,
 } from "lucide-react";
 import type { FC } from "react";
-import { useEffect, useRef } from "react";
 
 export const Thread: FC = () => {
   return (
@@ -50,7 +48,7 @@ export const Thread: FC = () => {
         ["--composer-max-width" as string]: "44rem",
       }}
     >
-      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-32">
+      <ThreadPrimitive.Viewport autoScroll turnAnchor="top" className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-32">
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
@@ -72,11 +70,15 @@ export const Thread: FC = () => {
         </div>
       </ThreadPrimitive.Viewport>
 
+      {/* Register tool indicators globally */}
+      <ToolExecutionIndicator />
+
       {/* Fixed bottom composer */}
       <div className="fixed bottom-0 left-0 right-0 z-50 bg-background">
         <div className="mx-auto flex w-full max-w-(--composer-max-width) flex-col gap-2 px-4 pb-4 pt-2">
           <ChatStatusBanner />
           <ApprovalPrompt />
+          <PlanPanelWrapper />
           <Composer />
         </div>
       </div>
@@ -176,8 +178,6 @@ const MessageError: FC = () => {
 };
 
 const AssistantMessage: FC = () => {
-  const session = useActiveChatSession();
-
   return (
     <MessagePrimitive.Root
       className="aui-assistant-message-root fade-in slide-in-from-bottom-1 relative mx-auto w-full max-w-(--thread-max-width) animate-in py-3 duration-150"
@@ -187,49 +187,10 @@ const AssistantMessage: FC = () => {
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
-            Reasoning: ReasoningBlock,
+            Reasoning,
+            tools: { Fallback: ToolFallback },
           }}
         />
-        <AuiIf
-          condition={(s) =>
-            s.message.isLast &&
-            (s.message.status?.type === "running" ||
-              s.message.status?.type === "requires-action")
-          }
-        >
-          <>
-            {session?.pendingAssistant?.plan &&
-            session.pendingAssistant.plan.length > 0 ? (
-              <PlanPanel plan={session.pendingAssistant.plan} />
-            ) : null}
-            {session?.pendingAssistant?.toolCalls.map((tc) => {
-              const ManualToolFallback = ToolFallbackImpl as (props: {
-                toolName: string;
-                argsText: string;
-                result: unknown;
-                status:
-                  | { type: "complete" }
-                  | { type: "running" }
-                  | { type: "incomplete"; reason: "cancelled" };
-              }) => React.ReactElement;
-              return (
-                <ManualToolFallback
-                  key={tc.tool_call_id}
-                  toolName={tc.tool_name}
-                  argsText={tc.arguments_text}
-                  result={tc.result}
-                  status={
-                    tc.status === "completed"
-                      ? { type: "complete" }
-                      : tc.status === "running"
-                        ? { type: "running" }
-                        : { type: "incomplete", reason: "cancelled" }
-                  }
-                />
-              );
-            })}
-          </>
-        </AuiIf>
         <MessageError />
       </div>
 
@@ -282,62 +243,6 @@ const AssistantActionBar: FC = () => {
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
     </ActionBarPrimitive.Root>
-  );
-};
-
-const ReasoningBlock: FC = () => {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const isAtBottomRef = useRef(true);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const handleScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
-      isAtBottomRef.current = atBottom;
-    };
-
-    el.addEventListener("scroll", handleScroll, { passive: true });
-    return () => el.removeEventListener("scroll", handleScroll);
-  }, []);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && isAtBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-  });
-
-  return (
-    <div className="aui-reasoning-block mb-2 text-sm">
-      <details className="group w-full" open>
-        <summary className="flex w-full cursor-pointer list-none items-center gap-2 rounded-md px-1 py-1 text-muted-foreground transition-colors hover:bg-muted/30 [&::-webkit-details-marker]:hidden">
-          <MessagePartPrimitive.InProgress>
-            <>
-              <span className="relative flex size-2 items-center justify-center">
-                <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/40 opacity-75"></span>
-                <span className="relative inline-flex size-2 rounded-full bg-primary/60"></span>
-              </span>
-              <span className="opacity-70">思考中...</span>
-            </>
-          </MessagePartPrimitive.InProgress>
-          <AuiIf condition={(s) => s.part.status.type !== "running"}>
-            <>
-              <span className="size-2 rounded-full bg-primary/40"></span>
-              <span className="opacity-70">思考完成</span>
-            </>
-          </AuiIf>
-          <ChevronDownIcon className="ml-auto size-4 shrink-0 opacity-50 transition-transform duration-200 group-open:rotate-180" />
-        </summary>
-        <div
-          ref={scrollRef}
-          className="max-h-[150px] overflow-y-auto px-1 py-1 text-muted-foreground"
-        >
-          <MarkdownText />
-        </div>
-      </details>
-    </div>
   );
 };
 

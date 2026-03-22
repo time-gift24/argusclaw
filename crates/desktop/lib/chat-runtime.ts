@@ -1,4 +1,5 @@
 import { useExternalStoreRuntime } from "@assistant-ui/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { useChatStore } from "@/lib/chat-store";
@@ -32,6 +33,14 @@ type AssistantUiMessagePart =
       readonly argsText: string;
       readonly result?: unknown;
       readonly isError?: boolean;
+      readonly status?: {
+        readonly type: "running";
+      } | {
+        readonly type: "complete";
+      } | {
+        readonly type: "incomplete";
+        readonly reason: "cancelled" | "length" | "error" | "other";
+      };
     };
 
 type AssistantUiMessage = {
@@ -167,7 +176,10 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
   };
 }
 
-function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSession>): AssistantUiMessage[] {
+function buildAssistantUiMessages(
+  session: ReturnType<typeof useActiveChatSession>,
+  localPendingMessages: readonly AssistantUiMessage[] = [],
+): AssistantUiMessage[] {
   if (!session) return [];
 
   const messages: AssistantUiMessage[] = [];
@@ -232,6 +244,26 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
       });
     }
 
+    // Add tool calls from pending assistant
+    for (const toolCall of session.pendingAssistant.toolCalls ?? []) {
+      const toolStatus =
+        toolCall.status === "running"
+          ? { type: "running" as const }
+          : toolCall.status === "completed"
+            ? { type: "complete" as const }
+            : { type: "incomplete" as const, reason: "error" as const };
+
+      pendingContent.push({
+        type: "tool-call" as const,
+        toolCallId: toolCall.tool_call_id,
+        toolName: toolCall.tool_name,
+        args: undefined,
+        argsText: toolCall.arguments_text,
+        result: toolCall.result,
+        isError: toolCall.is_error,
+        status: toolStatus,
+      });
+    }
 
     messages.push({
       id: `pending-${session.threadId}`,
@@ -243,6 +275,22 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
         : { type: "running" },
       metadata: createEmptyAssistantMetadata(),
     });
+
+    // Insert local pending messages BEFORE the pending assistant (user message comes first chronologically)
+    if (localPendingMessages.length > 0) {
+      // Insert right before the pending assistant message
+      const pendingAssistantIndex = messages.findIndex(
+        (msg) => msg.id === `pending-${session.threadId}`,
+      );
+      if (pendingAssistantIndex > 0) {
+        messages.splice(pendingAssistantIndex, 0, ...localPendingMessages);
+      } else {
+        messages.push(...localPendingMessages);
+      }
+    }
+  } else if (localPendingMessages.length > 0) {
+    // No pending assistant, just append
+    messages.push(...localPendingMessages);
   }
 
   return messages;
@@ -273,13 +321,63 @@ function extractUserText(
 export function useChatRuntime(): ReturnType<typeof useExternalStoreRuntime<AssistantUiMessage>> {
   const sendMessage = useChatStore((state) => state.sendMessage);
   const session = useActiveChatSession();
+  const [localPendingMessages, setLocalPendingMessages] = useState<readonly AssistantUiMessage[]>([]);
+  const pendingIdsRef = useRef<Set<string>>(new Set());
+  const prevPendingAssistantRef = useRef(session?.pendingAssistant);
+
+  const messages = useMemo(
+    () => buildAssistantUiMessages(session, localPendingMessages),
+    [session?.messages, session?.pendingAssistant, session?.pendingApprovalRequest, localPendingMessages],
+  );
+
+  // Clear pending messages when a new turn STARTS (pendingAssistant goes from null to having content)
+  // This prevents scroll reset when turn completes
+  useEffect(() => {
+    const prev = prevPendingAssistantRef.current;
+    const current = session?.pendingAssistant;
+
+    // New turn started: prev was null/falsy and current is truthy
+    if (!prev && current) {
+      setLocalPendingMessages([]);
+      pendingIdsRef.current.clear();
+    }
+
+    prevPendingAssistantRef.current = current ?? undefined;
+  }, [session?.pendingAssistant]);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleSend = useCallback(async (message: any) => {
+      const text = extractUserText(message.content);
+      const tempId = `pending-user-${Date.now()}`;
+
+      // Immediately add the message optimistically
+      const pendingMsg: AssistantUiMessage = {
+        id: tempId,
+        role: "user",
+        content: text,
+        createdAt: new Date(),
+        attachments: [],
+        metadata: { custom: { pending: true } },
+      };
+
+      pendingIdsRef.current.add(tempId);
+      setLocalPendingMessages((prev) => [...prev, pendingMsg]);
+
+      // Send to backend (don't await for instant display)
+      sendMessage(text).catch((err) => {
+        // On error, remove the pending message
+        console.error("Failed to send message:", err);
+        setLocalPendingMessages((prev) => prev.filter((msg) => msg.id !== tempId));
+        pendingIdsRef.current.delete(tempId);
+      });
+    },
+    [sendMessage],
+  );
 
   return useExternalStoreRuntime<AssistantUiMessage>({
     isRunning: session?.status === "running",
-    messages: buildAssistantUiMessages(session),
+    messages,
     convertMessage: (message) => message,
-    onNew: async (message) => {
-      await sendMessage(extractUserText(message.content));
-    },
+    onNew: handleSend,
   });
 }
