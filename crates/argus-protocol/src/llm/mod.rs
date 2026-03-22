@@ -381,6 +381,9 @@ pub struct CompletionResponse {
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     /// Zero when caching is not supported or no new prefix was cached.
     pub cache_creation_input_tokens: u32,
+    /// Reasoning tokens (for models like o1, o3, GLM with thinking).
+    /// These tokens don't count against the context window.
+    pub reasoning_tokens: u32,
 }
 
 /// A delta emitted while streaming a completion.
@@ -537,6 +540,9 @@ pub struct ToolCompletionResponse {
     pub cache_read_input_tokens: u32,
     /// Tokens written to the provider's server-side prompt cache (Anthropic).
     pub cache_creation_input_tokens: u32,
+    /// Reasoning tokens (for models like o1, o3, GLM with thinking).
+    /// These tokens don't count against the context window.
+    pub reasoning_tokens: u32,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -818,6 +824,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning_tokens: 0,
                 })
             }
 
@@ -834,6 +841,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning_tokens: 0,
                 })
             }
 

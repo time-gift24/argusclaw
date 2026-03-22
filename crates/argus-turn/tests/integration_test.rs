@@ -101,6 +101,7 @@ impl LlmProvider for MockProvider {
             finish_reason: FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
         })
     }
 
@@ -124,6 +125,7 @@ impl LlmProvider for MockProvider {
             finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
         })
     }
 }
@@ -248,6 +250,7 @@ impl LlmProvider for FlakyProvider {
             finish_reason: FinishReason::Stop,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
         })
     }
 

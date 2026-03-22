@@ -36,6 +36,7 @@ async fn test_trace_writer_success() {
         input_tokens: 10,
         output_tokens: 5,
         total_tokens: 15,
+        reasoning_tokens: 0,
     };
     writer.finish_success(&token_usage).unwrap();
 
@@ -119,6 +120,7 @@ async fn test_trace_writer_with_tool_execution() {
         input_tokens: 100,
         output_tokens: 50,
         total_tokens: 150,
+        reasoning_tokens: 0,
     };
     writer.finish_success(&token_usage).unwrap();
 

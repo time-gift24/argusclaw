@@ -85,6 +85,7 @@ pub struct FinalOutput {
 pub struct TokenUsageRecord {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    pub reasoning_tokens: u32,
     pub total_tokens: u32,
 }
 
@@ -150,6 +151,7 @@ impl TraceWriter {
                 token_usage: TokenUsageRecord {
                     input_tokens: token_usage.input_tokens,
                     output_tokens: token_usage.output_tokens,
+                    reasoning_tokens: token_usage.reasoning_tokens,
                     total_tokens: token_usage.total_tokens,
                 },
             }),

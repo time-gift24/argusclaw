@@ -144,6 +144,7 @@ impl StreamingAccumulator {
             finish_reason: self.finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
         }
     }
 }
@@ -652,6 +653,7 @@ impl Turn {
                 finish_reason: response.finish_reason,
                 cache_read_input_tokens: response.cache_read_input_tokens,
                 cache_creation_input_tokens: response.cache_creation_input_tokens,
+                reasoning_tokens: response.reasoning_tokens,
             };
 
             // Process response
@@ -872,6 +874,7 @@ impl Turn {
             tool_calls: response_tool_calls,
             input_tokens,
             output_tokens,
+            reasoning_tokens,
             finish_reason,
             ..
         } = response;
@@ -879,7 +882,8 @@ impl Turn {
         // Track token usage
         token_usage.input_tokens += input_tokens;
         token_usage.output_tokens += output_tokens;
-        token_usage.total_tokens += input_tokens + output_tokens;
+        token_usage.reasoning_tokens += reasoning_tokens;
+        token_usage.total_tokens += input_tokens + output_tokens + reasoning_tokens;
 
         match finish_reason {
             FinishReason::Stop => {

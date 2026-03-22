@@ -261,6 +261,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             finish_reason: parse_finish_reason(choice.finish_reason.as_deref()),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: usage.reasoning_tokens,
         })
     }
 
@@ -306,6 +307,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             finish_reason: parse_finish_reason(choice.finish_reason.as_deref()),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: usage.reasoning_tokens,
         })
     }
 
@@ -574,6 +576,8 @@ struct Usage {
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    #[serde(default)]
+    reasoning_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]

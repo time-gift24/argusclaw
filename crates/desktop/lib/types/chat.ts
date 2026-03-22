@@ -66,7 +66,7 @@ export type ThreadEventPayload =
       result: unknown;
       is_error: boolean;
     }
-  | { type: "turn_completed"; input_tokens: number; output_tokens: number; total_tokens: number }
+  | { type: "turn_completed"; input_tokens: number; output_tokens: number; total_tokens: number; reasoning_tokens?: number }
   | { type: "turn_failed"; error: string }
   | { type: "idle" }
   | { type: "compacted"; new_token_count: number }
