@@ -7,6 +7,7 @@ pub mod hooks;
 pub mod http_client;
 pub mod ids;
 pub mod llm;
+pub mod mcp;
 pub mod message_override;
 pub mod plan;
 pub mod risk_level;
@@ -24,6 +25,7 @@ pub use hooks::{
     HookRegistry, ToolHookContext,
 };
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
+pub use mcp::{McpServerConfig, McpServerStatus, ServerType};
 pub use message_override::MessageOverride;
 pub use plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
 pub use risk_level::RiskLevel;
@@ -72,3 +74,4 @@ pub use ssrf::{
 pub use tool::{NamedTool, ToolError};
 
 pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
+
