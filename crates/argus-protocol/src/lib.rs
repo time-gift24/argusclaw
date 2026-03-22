@@ -15,7 +15,7 @@ pub mod ssrf;
 pub mod token_usage;
 pub mod tool;
 
-pub use agent::AgentRecord;
+pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};
 pub use events::ThreadEvent;

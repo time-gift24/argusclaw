@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::error::DbError;
-use crate::types::{JobId, JobRecord, WorkflowStatus};
+use crate::types::{JobId, JobRecord, JobResult, WorkflowStatus};
 use argus_protocol::ThreadId;
 
 /// Repository trait for job persistence.
@@ -23,6 +23,9 @@ pub trait JobRepository: Send + Sync {
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> Result<(), DbError>;
+
+    /// Update the result of a job.
+    async fn update_result(&self, id: &JobId, result: &JobResult) -> Result<(), DbError>;
 
     /// Associate a thread with a job.
     async fn update_thread_id(&self, id: &JobId, thread_id: &ThreadId) -> Result<(), DbError>;

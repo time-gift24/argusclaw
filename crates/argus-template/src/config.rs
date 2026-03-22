@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use argus_protocol::llm::ThinkingConfig;
+use argus_protocol::{llm::ThinkingConfig, AgentType};
 
 /// Builtin agent definition from TOML file
 #[derive(Debug, Deserialize)]
@@ -32,6 +32,8 @@ impl TomlAgentDef {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             thinking_config: self.thinking_config.clone(),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         }
     }
 }

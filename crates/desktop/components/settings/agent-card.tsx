@@ -19,6 +19,8 @@ export interface AgentRecord {
   max_tokens?: number
   temperature?: number
   thinking_config?: ThinkingConfig
+  parent_agent_id?: number
+  agent_type?: "standard" | "subagent"
 }
 
 export interface ThinkingConfig {

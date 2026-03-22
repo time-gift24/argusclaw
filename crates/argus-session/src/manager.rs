@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use argus_job::JobManager;
 use argus_protocol::{AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
@@ -23,6 +24,8 @@ pub struct SessionManager {
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
     trace_dir: PathBuf,
+    #[allow(dead_code)]
+    job_manager: Arc<JobManager>,
 }
 
 impl SessionManager {
@@ -34,7 +37,12 @@ impl SessionManager {
         tool_manager: Arc<ToolManager>,
         compactor_manager: Arc<CompactorManager>,
         trace_dir: PathBuf,
+        job_manager: Arc<JobManager>,
     ) -> Self {
+        // Register the dispatch_job tool
+        let dispatch_tool = job_manager.clone().create_dispatch_tool();
+        tool_manager.register(Arc::new(dispatch_tool));
+
         Self {
             pool,
             sessions: DashMap::new(),
@@ -43,6 +51,7 @@ impl SessionManager {
             tool_manager,
             compactor_manager,
             trace_dir,
+            job_manager,
         }
     }
 

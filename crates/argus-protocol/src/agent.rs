@@ -12,6 +12,17 @@ use crate::AgentId;
 use crate::ids::ProviderId;
 use crate::llm::ThinkingConfig;
 
+/// The type of agent, determining its capabilities.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentType {
+    /// Standard agent - can dispatch jobs and create subagents.
+    #[default]
+    Standard,
+    /// Subagent - cannot dispatch jobs (prevents infinite recursion).
+    Subagent,
+}
+
 /// Full agent record/template configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentRecord {
@@ -36,6 +47,12 @@ pub struct AgentRecord {
     /// Thinking configuration for reasoning mode
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<ThinkingConfig>,
+    /// Parent agent ID (for subagents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
+    /// Agent type determining its capabilities.
+    #[serde(default)]
+    pub agent_type: AgentType,
 }
 
 impl Default for AgentRecord {
@@ -51,6 +68,8 @@ impl Default for AgentRecord {
             max_tokens: None,
             temperature: None,
             thinking_config: None,
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         }
     }
 }
@@ -70,6 +89,8 @@ impl AgentRecord {
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         }
     }
 }

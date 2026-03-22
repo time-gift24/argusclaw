@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::error::DbError;
 use crate::traits::AgentRepository;
 use crate::types::{AgentId, AgentRecord};
-use argus_protocol::ProviderId;
+use argus_protocol::{AgentType, ProviderId};
 
 use super::{ArgusSqlite, DbResult};
 
@@ -28,10 +28,15 @@ impl AgentRepository for ArgusSqlite {
                 reason: format!("failed to serialize thinking_config: {e}"),
             })?;
 
+        let agent_type_str = match record.agent_type {
+            AgentType::Standard => "standard",
+            AgentType::Subagent => "subagent",
+        };
+
         if record.id.into_inner() == 0 {
             sqlx::query(
-                "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(&record.display_name)
             .bind(&record.description)
@@ -42,13 +47,15 @@ impl AgentRepository for ArgusSqlite {
             .bind(record.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
             .bind(&thinking_config_json)
+            .bind(record.parent_agent_id.as_ref().map(|id| id.into_inner()))
+            .bind(agent_type_str)
             .execute(&self.pool)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
         } else {
             sqlx::query(
-                "INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                      display_name = excluded.display_name,
                      description = excluded.description,
@@ -59,6 +66,8 @@ impl AgentRepository for ArgusSqlite {
                      max_tokens = excluded.max_tokens,
                      temperature = excluded.temperature,
                      thinking_config = excluded.thinking_config,
+                     parent_agent_id = excluded.parent_agent_id,
+                     agent_type = excluded.agent_type,
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(record.id.into_inner())
@@ -71,6 +80,8 @@ impl AgentRepository for ArgusSqlite {
             .bind(record.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
             .bind(&thinking_config_json)
+            .bind(record.parent_agent_id.as_ref().map(|id| id.into_inner()))
+            .bind(agent_type_str)
             .execute(&self.pool)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
@@ -81,7 +92,7 @@ impl AgentRepository for ArgusSqlite {
 
     async fn get(&self, id: &AgentId) -> DbResult<Option<AgentRecord>> {
         let row = sqlx::query(
-            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
+            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
              FROM agents WHERE id = ?1",
         )
         .bind(id.into_inner())
@@ -94,7 +105,7 @@ impl AgentRepository for ArgusSqlite {
 
     async fn find_by_display_name(&self, display_name: &str) -> DbResult<Option<AgentRecord>> {
         let row = sqlx::query(
-            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
+            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
              FROM agents WHERE display_name = ?1 LIMIT 1",
         )
         .bind(display_name)
@@ -107,9 +118,22 @@ impl AgentRepository for ArgusSqlite {
 
     async fn list(&self) -> DbResult<Vec<AgentRecord>> {
         let rows = sqlx::query(
-            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
+            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
              FROM agents ORDER BY display_name ASC",
         )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        rows.into_iter().map(|r| self.map_agent_record(r)).collect()
+    }
+
+    async fn list_by_parent_id(&self, parent_id: &AgentId) -> DbResult<Vec<AgentRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+             FROM agents WHERE parent_agent_id = ?1 ORDER BY display_name ASC",
+        )
+        .bind(parent_id.into_inner())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
@@ -152,6 +176,16 @@ impl ArgusSqlite {
                     reason: format!("failed to parse thinking_config: {e}"),
                 })?;
 
+        // Parse parent_agent_id
+        let parent_agent_id: Option<i64> = Self::get_column(&row, "parent_agent_id")?;
+
+        // Parse agent_type
+        let agent_type_str: String = Self::get_column(&row, "agent_type")?;
+        let agent_type = match agent_type_str.as_str() {
+            "subagent" => AgentType::Subagent,
+            _ => AgentType::Standard,
+        };
+
         Ok(AgentRecord {
             id: AgentId::new(Self::get_column(&row, "id")?),
             display_name: Self::get_column(&row, "display_name")?,
@@ -163,6 +197,8 @@ impl ArgusSqlite {
             max_tokens: Self::get_column::<Option<i64>>(&row, "max_tokens")?.map(|t| t as u32),
             temperature,
             thinking_config,
+            parent_agent_id: parent_agent_id.map(AgentId::new),
+            agent_type,
         })
     }
 }

@@ -1,4 +1,4 @@
-use argus_protocol::{AgentId, AgentRecord, ArgusError, ProviderId, Result};
+use argus_protocol::{AgentId, AgentRecord, AgentType, ArgusError, ProviderId, Result};
 use sqlx::SqlitePool;
 
 /// Manager for agent templates.
@@ -461,6 +461,58 @@ impl TemplateManager {
 
         Ok(())
     }
+
+    /// List all subagents of a given parent agent.
+    pub async fn list_subagents(&self, parent_id: AgentId) -> Result<Vec<AgentRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+            FROM agents WHERE parent_agent_id = ? ORDER BY id ASC
+            "#,
+        )
+        .bind(parent_id.inner())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        rows.into_iter()
+            .map(|row| self.map_agent_record(row))
+            .collect()
+    }
+
+    /// Add a subagent to a parent agent (set child's parent_agent_id).
+    pub async fn add_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE agents SET parent_agent_id = ?, agent_type = 'subagent', updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(parent_id.inner())
+        .bind(child_id.inner())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        Ok(())
+    }
+
+    /// Remove a subagent from its parent (clear child's parent_agent_id).
+    pub async fn remove_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE agents SET parent_agent_id = NULL, agent_type = 'standard', updated_at = datetime('now')
+            WHERE id = ? AND parent_agent_id = ?
+            "#,
+        )
+        .bind(child_id.inner())
+        .bind(parent_id.inner())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        Ok(())
+    }
 }
 
 impl TemplateManager {
@@ -503,6 +555,25 @@ impl TemplateManager {
             })?
             .and_then(|s| serde_json::from_str(&s).ok());
 
+        // Get parent_agent_id
+        let parent_agent_id: Option<AgentId> = row
+            .try_get::<Option<i64>, _>("parent_agent_id")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .map(AgentId::new);
+
+        // Get agent_type
+        let agent_type_str: String =
+            row.try_get("agent_type")
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+        let agent_type = match agent_type_str.as_str() {
+            "subagent" => AgentType::Subagent,
+            _ => AgentType::Standard,
+        };
+
         Ok(AgentRecord {
             id: AgentId::new(row.try_get("id").map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
@@ -532,6 +603,8 @@ impl TemplateManager {
             max_tokens,
             temperature,
             thinking_config,
+            parent_agent_id,
+            agent_type,
         })
     }
 }

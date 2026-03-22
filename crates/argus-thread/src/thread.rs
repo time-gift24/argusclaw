@@ -397,7 +397,7 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use argus_protocol::{AgentId, ProviderId};
+    use argus_protocol::{AgentId, AgentType, ProviderId};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use serde_json::json;
@@ -447,6 +447,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: None,
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         })
     }
 
