@@ -241,7 +241,7 @@ export default function AgentsPage() {
               <label className="text-sm font-medium">选择子智能体</label>
               <Select
                 value={addSubagentChildId?.toString() ?? ""}
-                onValueChange={(value) => setAddSubagentChildId(parseInt(value, 10))}
+                onValueChange={(value) => setAddSubagentChildId(value ? parseInt(value, 10) : null)}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="选择智能体" />
