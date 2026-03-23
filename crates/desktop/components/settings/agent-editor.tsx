@@ -76,6 +76,10 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     () => providerList.find((provider) => provider.id === formData.provider_id) ?? null,
     [formData.provider_id, providerList],
   )
+  const excludedAgentIds = React.useMemo(
+    () => getExcludedAgentIds(agentId, parentAgentList),
+    [agentId, parentAgentList],
+  )
 
   const canSave = Boolean(
     formData.display_name.trim() &&
@@ -214,16 +218,13 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                   className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <option value="">无（独立智能体）</option>
-                  {(() => {
-                    const excluded = getExcludedAgentIds(agentId, parentAgentList)
-                    return parentAgentList
-                      .filter((a) => !excluded.has(a.id))
-                      .map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.display_name} (v{a.version})
-                        </option>
-                      ))
-                  })()}
+                  {parentAgentList
+                    .filter((a) => !excludedAgentIds.has(a.id))
+                    .map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.display_name} (v{a.version})
+                      </option>
+                    ))}
                 </select>
               </div>
             </div>
