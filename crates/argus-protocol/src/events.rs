@@ -92,4 +92,15 @@ pub enum ThreadEvent {
         /// The approval response.
         response: ApprovalResponse,
     },
+    /// A dispatched job completed (success, failure, or stuck).
+    JobCompleted {
+        /// Job ID.
+        job_id: String,
+        /// Job status: "completed", "failed", or "stuck".
+        status: String,
+        /// Optional session ID.
+        session_id: Option<String>,
+        /// Optional result message.
+        message: Option<String>,
+    },
 }

@@ -43,6 +43,10 @@ impl SessionManager {
         let dispatch_tool = job_manager.clone().create_dispatch_tool();
         tool_manager.register(Arc::new(dispatch_tool));
 
+        // Register the get_job_result tool for polling job status
+        let get_result_tool = job_manager.clone().create_get_result_tool();
+        tool_manager.register(Arc::new(get_result_tool));
+
         Self {
             pool,
             sessions: DashMap::new(),
@@ -52,6 +56,13 @@ impl SessionManager {
             compactor_manager,
             trace_dir,
             job_manager,
+        }
+    }
+
+    /// Broadcast a ThreadEvent to all active sessions.
+    pub fn broadcast_event(&self, event: ThreadEvent) {
+        for session in self.sessions.iter() {
+            session.value().broadcast(event.clone());
         }
     }
 

@@ -213,6 +213,11 @@ impl Thread {
         self.event_sender.subscribe()
     }
 
+    /// Broadcast a ThreadEvent to this thread's subscribers.
+    pub fn broadcast_to_self(&self, event: ThreadEvent) {
+        let _ = self.event_sender.send(event);
+    }
+
     /// Get current state.
     pub fn state(&self) -> ThreadState {
         ThreadState::Idle

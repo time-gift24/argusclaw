@@ -85,12 +85,12 @@
 ### 4.1 实现 SSE job 完成事件
 
 - [x] 4.1.1 在 job 完成时调用 `sse_broadcaster.broadcast_job_event()` - verified in JobManager
-- [ ] 4.1.2 Turn loop 订阅 SSE 事件 - deferred
+- [x] 4.1.2 Turn loop 订阅 SSE 事件 - implemented with job event forwarder in ArgusWing (spawns background task that subscribes to JobManager broadcaster and broadcasts ThreadEvent::JobCompleted to all active sessions)
 
 ### 4.2 实现 polling fallback
 
 - [x] 4.2.1 实现 `get_job_result(job_id)` API - verified in JobManager
-- [ ] 4.2.2 Turn loop 可通过 polling 检查 job 状态 - deferred
+- [x] 4.2.2 Turn loop 可通过 polling 检查 job 状态 - implemented with GetJobResultTool registered in SessionManager
 
 ### 4.3 添加数据库持久化
 
@@ -101,5 +101,5 @@
 
 - [x] 5.1 运行 `cargo fmt`
 - [x] 5.2 运行 `cargo clippy --all-targets`
-- [ ] 5.3 运行 `cargo test --all` - tests fail due to missing migrations in temp DBs
+- [x] 5.3 运行 `cargo test --all` - tests now pass (root cause: missing SELECT columns in argus-template manager.rs)
 - [x] 5.4 运行 `prek`

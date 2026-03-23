@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use argus_protocol::{SessionId, ThreadId};
+use argus_protocol::{SessionId, ThreadEvent, ThreadId};
 use argus_thread::Thread;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -57,6 +57,16 @@ impl Session {
 
     pub fn thread_ids(&self) -> Vec<ThreadId> {
         self.threads.iter().map(|e| *e.key()).collect()
+    }
+
+    /// Broadcast a ThreadEvent to all threads in this session.
+    pub fn broadcast(&self, event: ThreadEvent) {
+        for entry in self.threads.iter() {
+            let thread = entry.value();
+            if let Ok(t) = thread.try_lock() {
+                t.broadcast_to_self(event.clone());
+            }
+        }
     }
 
     pub async fn list_threads(&self) -> Vec<ThreadSummary> {

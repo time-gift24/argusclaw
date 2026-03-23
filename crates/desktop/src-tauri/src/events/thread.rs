@@ -137,6 +137,21 @@ impl ThreadEventEnvelope {
                     response: serde_json::to_value(&response).unwrap_or_default(),
                 },
             }),
+            ThreadEvent::JobCompleted {
+                job_id,
+                status,
+                session_id,
+                message,
+            } => Some(Self {
+                session_id: session_id.unwrap_or_default(),
+                thread_id: String::new(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobCompleted {
+                    job_id,
+                    status,
+                    message,
+                },
+            }),
         }
     }
 }
@@ -194,6 +209,11 @@ pub enum ThreadEventPayload {
     },
     ApprovalResolved {
         response: serde_json::Value,
+    },
+    JobCompleted {
+        job_id: String,
+        status: String,
+        message: Option<String>,
     },
 }
 
