@@ -6,8 +6,10 @@ import { AgentEditor } from "@/components/settings"
 
 function NewAgentContent() {
   const searchParams = useSearchParams()
-  const parentId = searchParams.get("parent")
-  return <AgentEditor parentId={parentId ? parseInt(parentId) : undefined} />
+  const rawParentId = searchParams.get("parent")
+  const parsed = rawParentId ? parseInt(rawParentId, 10) : undefined
+  const parentId = Number.isFinite(parsed) ? parsed : undefined
+  return <AgentEditor parentId={parentId} />
 }
 
 export default function NewAgentPage() {
