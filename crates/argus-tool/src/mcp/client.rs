@@ -40,6 +40,8 @@ pub enum McpClientError {
 pub struct McpClientRuntime {
     client: Arc<Mutex<Client<HttpTransport>>>,
     server_name: String,
+    debug_url: String,
+    debug_headers: Vec<(String, String)>,
 }
 
 impl McpClientRuntime {
@@ -47,7 +49,7 @@ impl McpClientRuntime {
     pub async fn new(config: &McpServerConfig) -> Result<Self, McpClientError> {
         let server_name = config.name.clone();
 
-        let client = match config.server_type {
+        let (client, debug_url, debug_headers) = match config.server_type {
             ServerType::Http => {
                 let url = config
                     .url
@@ -68,6 +70,8 @@ impl McpClientRuntime {
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
             server_name,
+            debug_url,
+            debug_headers,
         })
     }
 
@@ -75,26 +79,22 @@ impl McpClientRuntime {
     fn create_http_client(
         url: &str,
         headers: Option<&std::collections::HashMap<String, String>>,
-    ) -> Result<Client<HttpTransport>, McpClientError> {
+    ) -> Result<(Client<HttpTransport>, String, Vec<(String, String)>), McpClientError> {
         use url::Url;
 
         let base_url = Url::parse(url).map_err(|e| McpClientError::CreationFailed {
             reason: format!("Invalid URL: {}", e),
         })?;
 
-        let headers = headers
-            .map(|h| {
-                h.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect::<Vec<_>>()
-            })
+        let debug_headers: Vec<(String, String)> = headers
+            .map(|h| h.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
 
         let http_config = HttpConfig {
             base_url,
             sse_endpoint: None,
             timeout: Duration::from_secs(60),
-            headers,
+            headers: debug_headers.clone(),
             enable_pooling: true,
             max_idle_per_host: 5,
         };
@@ -108,7 +108,7 @@ impl McpClientRuntime {
 
         let client = Client::with_info(transport, client_info);
 
-        Ok(client)
+        Ok((client, url.to_string(), debug_headers))
     }
 
     /// Get the server name.
@@ -119,6 +119,7 @@ impl McpClientRuntime {
     /// List all tools available from the MCP server.
     pub async fn list_tools(&self) -> Result<Vec<ToolDefinition>, McpClientError> {
         let mut client = self.client.lock().await;
+        self.debug_http_init().await?;
         self.ensure_initialized(&mut client).await?;
 
         let result =
@@ -140,6 +141,49 @@ impl McpClientRuntime {
             .collect();
 
         Ok(tools)
+    }
+
+    /// Debug: send raw initialize request via reqwest and log the response.
+    async fn debug_http_init(&self) -> Result<(), McpClientError> {
+        use reqwest::Client;
+        use serde_json::json;
+
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "argus-tool",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        });
+
+        let mut req = Client::new()
+            .post(&self.debug_url)
+            .header("Content-Type", "application/json")
+            .json(&req_body);
+
+        for (k, v) in &self.debug_headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        let resp = req.send().await.map_err(|e| McpClientError::CreationFailed {
+            reason: format!("HTTP request failed: {}", e),
+        })?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::debug!(
+            "MCP debug raw HTTP response: status={} body={}",
+            status,
+            body
+        );
+
+        Ok(())
     }
 
     /// Call a tool on the MCP server with the given arguments.
@@ -164,12 +208,14 @@ impl McpClientRuntime {
         &self,
         client: &mut Client<HttpTransport>,
     ) -> Result<(), McpClientError> {
-        client
-            .initialize(ClientCapabilities::default())
-            .await
-            .map_err(|e| McpClientError::CreationFailed {
-                reason: format!("MCP initialization failed: {}", e),
-            })?;
+        tracing::debug!("MCP: starting initialization");
+        let init_future = client.initialize(ClientCapabilities::default());
+        tracing::debug!("MCP: got future, awaiting...");
+        let init_result = init_future.await;
+        tracing::debug!("MCP: initialization result: {:?}", init_result);
+        init_result.map_err(|e| McpClientError::CreationFailed {
+            reason: format!("MCP initialization failed: {}", e),
+        })?;
         Ok(())
     }
 }
