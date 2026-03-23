@@ -65,23 +65,42 @@ interface AgentEditorProps {
 - 新增 `parentId?: number` prop
 - 新增 `parentAgentList` state（用于下拉选项）
 - "基本信息"区块底部增加"父智能体"下拉框（Select），选项为"无"（空值，表示独立智能体）加上其他可用作父智能体的候选（过滤条件：`!agent.parent_agent_id && agent.agent_type !== "subagent"`，并排除自身）
-- **循环层级校验**：编辑已有 subagent 时，父智能体下拉框需排除自身和自身的所有 subagent（递归），防止循环引用。可参考 `page.tsx` 中的 `subagents.filter(s => s.parent_agent_id === agent.id)` 模式递归遍历
-- 标题根据 `parentId` prop 动态显示："新建智能体" vs "新建子智能体"
+- **循环层级校验**：编辑已有 subagent 时，父智能体下拉框需排除自身和自身的所有 subagent（递归），防止循环引用。具体算法：
+  1. 从当前编辑的 agent 开始，递归收集所有 `parent_agent_id === 当前agent.id` 的 subagent ID
+  2. 对每个 subagent 递归执行同样逻辑
+  3. 最终得到一个"不可选" ID 集合，将这些从父智能体下拉框中排除
+- 标题动态显示：
+  - `parentId` prop 传入时：显示"新建子智能体"
+  - 编辑模式（`agentId` 存在）且 `formData.parent_agent_id` 非空：显示"编辑子智能体"
+  - 其他情况：显示"编辑智能体"（已有逻辑）或"新建智能体"（已有逻辑）
 - 初始化时：如果 `parentId` 存在，在数据加载完成后（`agents.get()` 返回 agent 后），将 `parent_agent_id` 设为 `parentId`
 - **agent_type 自动推断**：`agents.upsert()` 提交时，后端根据 `parent_agent_id` 是否存在自动设置 `agent_type`（有则为 `'subagent'`，否则 `'standard'`），前端无需显式设置
 - 父智能体下拉框加载时显示 disabled 状态，数据加载完成后渲染选项
 
 ### /settings/agents/new 页面
 
+将 `/settings/agents/new` 页面改为 client component，用 `Suspense` 包裹以支持 `useSearchParams()`：
+
 ```tsx
-// 从 server component 改为 client component
+import { Suspense } from "react"
 "use client"
-export default function NewAgentPage() {
+
+function NewAgentContent() {
   const searchParams = useSearchParams()
   const parentId = searchParams.get("parent")
   return <AgentEditor parentId={parentId ? parseInt(parentId) : undefined} />
 }
+
+export default function NewAgentPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-64">加载中...</div>}>
+      <NewAgentContent />
+    </Suspense>
+  )
+}
 ```
+
+**注意**：`useSearchParams()` 在 Next.js 中需要 Suspense boundary 包裹，否则会触发 build warning 并影响部分预渲染（Partial Prerendering）。面包屑"设置 / 智能体 / 新建"不受 `?parent=` 参数影响，保持不变。
 
 ### /settings/agents/[id] 页面
 
