@@ -328,7 +328,10 @@ impl Thread {
 
         // Thread is responsible for building: collect tools and hooks
         // Filter tools by agent_record.tool_names; empty means no tools
-        let enabled_tool_names = agent_record.tool_names.iter().collect::<std::collections::HashSet<_>>();
+        let enabled_tool_names = agent_record
+            .tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
         let mut tools: Vec<Arc<dyn NamedTool>> = self
             .tool_manager
             .list_ids()

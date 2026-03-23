@@ -93,7 +93,11 @@ impl TemplateManager {
                 reason: format!("failed to serialize thinking_config: {}", e),
             })?;
 
-        let agent_type = if template.parent_agent_id.is_some() { "subagent" } else { "standard" };
+        let agent_type = if template.parent_agent_id.is_some() {
+            "subagent"
+        } else {
+            "standard"
+        };
 
         if template.id.inner() == 0 {
             sqlx::query(
@@ -194,7 +198,11 @@ impl TemplateManager {
                 reason: format!("failed to serialize thinking_config: {}", e),
             })?;
 
-        let agent_type = if record.parent_agent_id.is_some() { "subagent" } else { "standard" };
+        let agent_type = if record.parent_agent_id.is_some() {
+            "subagent"
+        } else {
+            "standard"
+        };
 
         // Insert with ON CONFLICT(display_name) DO UPDATE
         sqlx::query(

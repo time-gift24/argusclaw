@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use argus_protocol::{tool::ToolError, NamedTool, RiskLevel, ToolDefinition};
+use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError};
 use async_trait::async_trait;
 
 use crate::job_manager::JobManager;
