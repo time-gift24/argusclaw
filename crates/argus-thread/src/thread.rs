@@ -320,11 +320,14 @@ impl Thread {
         let thread_id = self.id.to_string();
 
         // Thread is responsible for building: collect tools and hooks
+        // Filter tools by agent_record.tool_names; empty means no tools
+        let enabled_tool_names = agent_record.tool_names.iter().collect::<std::collections::HashSet<_>>();
         let mut tools: Vec<Arc<dyn NamedTool>> = self
             .tool_manager
             .list_ids()
             .iter()
-            .filter_map(|id| self.tool_manager.get(id))
+            .filter(|name| enabled_tool_names.contains(name))
+            .filter_map(|name| self.tool_manager.get(name))
             .collect();
 
         // Append UpdatePlanTool with the thread's plan store
