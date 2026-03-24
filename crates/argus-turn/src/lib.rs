@@ -53,6 +53,7 @@ pub mod config;
 pub mod error;
 pub mod execution;
 pub mod trace;
+pub mod tool_context;
 pub mod turn;
 
 pub use config::{

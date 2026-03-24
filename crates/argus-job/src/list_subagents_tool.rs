@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError, AgentId};
-use async_trait::async_trait;
+use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError};
 use argus_template::TemplateManager;
+use async_trait::async_trait;
 
 /// Tool for listing subagents of the current agent.
 #[derive(Clone)]
@@ -37,13 +37,7 @@ impl NamedTool for ListSubagentsTool {
             description: "List all subagents that belong to this agent. Returns the agent_id, display_name, and description of each subagent.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "agent_id": {
-                        "type": "number",
-                        "description": "The agent ID of the parent agent whose subagents to list"
-                    }
-                },
-                "required": ["agent_id"]
+                "properties": {}
             }),
         }
     }
@@ -52,14 +46,11 @@ impl NamedTool for ListSubagentsTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        let agent_id = input
-            .get("agent_id")
-            .and_then(|v| v.as_i64())
-            .map(AgentId::new)
+    async fn execute(&self, _input: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        let agent_id = argus_turn::tool_context::current_agent_id()
             .ok_or_else(|| ToolError::ExecutionFailed {
                 tool_name: self.name().to_string(),
-                reason: "missing required parameter: agent_id".to_string(),
+                reason: "current agent_id not available".to_string(),
             })?;
 
         tracing::debug!("list_subagents called for agent {:?}", agent_id);
