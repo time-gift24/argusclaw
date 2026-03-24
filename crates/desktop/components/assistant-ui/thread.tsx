@@ -62,6 +62,7 @@ export const Thread: FC = () => {
             AssistantMessage,
           }}
         />
+        <PendingAssistantArtifacts />
 
         <div className="pointer-events-none sticky bottom-24 z-40 mx-auto mt-4 flex w-fit">
           <ThreadPrimitive.ScrollToBottom asChild>
@@ -175,8 +176,51 @@ const MessageError: FC = () => {
   );
 };
 
-const AssistantMessage: FC = () => {
+const toManualToolStatus = (status: "streaming" | "running" | "completed") =>
+  status === "completed"
+    ? ({ type: "complete" } as const)
+    : status === "running"
+      ? ({ type: "running" } as const)
+      : ({ type: "incomplete", reason: "cancelled" } as const);
+
+const PendingAssistantArtifacts: FC = () => {
   const session = useActiveChatSession();
+  const pendingAssistant = session?.pendingAssistant;
+
+  if (!pendingAssistant) return null;
+
+  const hasPlan = !!pendingAssistant.plan && pendingAssistant.plan.length > 0;
+  const hasToolCalls = pendingAssistant.toolCalls.length > 0;
+
+  if (!hasPlan && !hasToolCalls) return null;
+
+  const ManualToolFallback = ToolFallbackImpl as (props: {
+    toolName: string;
+    argsText: string;
+    result: unknown;
+    status:
+      | { type: "complete" }
+      | { type: "running" }
+      | { type: "incomplete"; reason: "cancelled" };
+  }) => React.ReactElement;
+
+  return (
+    <div className="mx-auto w-full max-w-(--thread-max-width) px-2 pb-2">
+      {hasPlan ? <PlanPanel plan={pendingAssistant.plan!} /> : null}
+      {pendingAssistant.toolCalls.map((tc) => (
+        <ManualToolFallback
+          key={tc.tool_call_id}
+          toolName={tc.tool_name}
+          argsText={tc.arguments_text}
+          result={tc.result}
+          status={toManualToolStatus(tc.status)}
+        />
+      ))}
+    </div>
+  );
+};
+
+const AssistantMessage: FC = () => {
 
   return (
     <MessagePrimitive.Root
@@ -190,46 +234,6 @@ const AssistantMessage: FC = () => {
             Reasoning: ReasoningBlock,
           }}
         />
-        <AuiIf
-          condition={(s) =>
-            s.message.isLast &&
-            (s.message.status?.type === "running" ||
-              s.message.status?.type === "requires-action")
-          }
-        >
-          <>
-            {session?.pendingAssistant?.plan &&
-            session.pendingAssistant.plan.length > 0 ? (
-              <PlanPanel plan={session.pendingAssistant.plan} />
-            ) : null}
-            {session?.pendingAssistant?.toolCalls.map((tc) => {
-              const ManualToolFallback = ToolFallbackImpl as (props: {
-                toolName: string;
-                argsText: string;
-                result: unknown;
-                status:
-                  | { type: "complete" }
-                  | { type: "running" }
-                  | { type: "incomplete"; reason: "cancelled" };
-              }) => React.ReactElement;
-              return (
-                <ManualToolFallback
-                  key={tc.tool_call_id}
-                  toolName={tc.tool_name}
-                  argsText={tc.arguments_text}
-                  result={tc.result}
-                  status={
-                    tc.status === "completed"
-                      ? { type: "complete" }
-                      : tc.status === "running"
-                        ? { type: "running" }
-                        : { type: "incomplete", reason: "cancelled" }
-                  }
-                />
-              );
-            })}
-          </>
-        </AuiIf>
         <MessageError />
       </div>
 
