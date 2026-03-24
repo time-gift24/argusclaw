@@ -47,6 +47,10 @@ impl SessionManager {
         let get_result_tool = job_manager.clone().create_get_result_tool();
         tool_manager.register(Arc::new(get_result_tool));
 
+        // Register the list_subagents tool for querying subagents
+        let list_subagents_tool = job_manager.clone().create_list_subagents_tool();
+        tool_manager.register(Arc::new(list_subagents_tool));
+
         Self {
             pool,
             sessions: DashMap::new(),

@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
 use crate::get_job_result_tool::GetJobResultTool;
+use crate::list_subagents_tool::ListSubagentsTool;
 use crate::sse_broadcaster::SseBroadcaster;
 use crate::types::{JobDispatchArgs, JobDispatchResult, JobResult};
 
@@ -154,6 +155,11 @@ impl JobManager {
     /// Create a GetJobResultTool for this manager.
     pub fn create_get_result_tool(self: Arc<Self>) -> GetJobResultTool {
         GetJobResultTool::new(self)
+    }
+
+    /// Create a ListSubagentsTool for this manager.
+    pub fn create_list_subagents_tool(self: Arc<Self>) -> ListSubagentsTool {
+        ListSubagentsTool::new(Arc::clone(&self.template_manager))
     }
 
     fn spawn_background_execution(&self, job_id: String, args: JobDispatchArgs) {
