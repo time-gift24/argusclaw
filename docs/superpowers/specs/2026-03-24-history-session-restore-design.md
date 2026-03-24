@@ -78,7 +78,7 @@
 | `list_threads` | `session_id: i64` | `Vec<ThreadSummary>` | **需新增 Tauri command** |
 | `rename_session` | `session_id: i64, name: String` | `()` | **需新增（完整实现）** |
 | `delete_session` | `session_id: i64` | `()` | **需新增 Tauri command** |
-| `delete_thread` | `thread_id: String` | `()` | **需新增 Tauri command**（后端已有 `SessionManager::delete_thread`）|
+| `delete_thread` | `session_id: i64, thread_id: String` | `()` | **需新增 Tauri command**（后端已有 `SessionManager::delete_thread(session_id, thread_id)`，需同时传 session_id）|
 | `get_thread_snapshot` | `session_id, thread_id` | 完整快照 | 已有 |
 | `get_provider` | `provider_id: i64` | Provider 或 None | 已有 |
 
@@ -180,14 +180,17 @@ interface HistorySessionState {
 
 ### 后端改动
 
-1. **`crates/argus-session/src/session.rs`**：`ThreadSummary` 新增 `provider_id: Option<i64>` 字段
-2. **`crates/argus-session/src/manager.rs`**：新增 `rename_session(session_id, new_name)` 方法（SQL UPDATE）
+1. **`crates/argus-session/src/session.rs`**：`ThreadSummary` 新增 `provider_id: Option<i64>` 字段，类型映射自 `Option<ProviderId>`
+2. **`crates/argus-session/src/manager.rs`**：
+   - `SessionManager::list_threads()` 的 SQL 查询需增加 `provider_id` 列：`SELECT id, provider_id, title, token_count, turn_count, updated_at FROM threads WHERE session_id = ?`
+   - `Session::list_threads()` 内存路径需从 `t.agent_record().provider_id` 提取并映射为 `Option<i64>`
+   - 新增 `rename_session(session_id, new_name)` 方法（SQL UPDATE `sessions SET name = ?, updated_at = ? WHERE id = ?`）
 3. **`crates/argus-wing/src/lib.rs`**：`ArgusWing` facade 新增 `rename_session` 代理方法
 4. **`crates/desktop/src-tauri/src/commands.rs`**：新增以下 Tauri command：
    - `list_sessions` → 调用 `SessionManager::list_sessions()`
    - `list_threads` → 调用 `SessionManager::list_threads(session_id)`
    - `delete_session` → 调用 `ArgusWing::delete_session(session_id)`
-   - `delete_thread` → 调用 `ArgusWing::delete_thread(thread_id)`
+   - `delete_thread` → 调用 `ArgusWing::delete_thread(session_id, thread_id)`（需同时传 session_id）
    - `rename_session` → 调用 `ArgusWing::rename_session(session_id, name)`
 
 ### 前端改动
@@ -225,7 +228,7 @@ interface HistorySessionState {
 | `delete_session` 失败 | toast `"删除会话失败: ${error}"` |
 | `delete_thread` 失败 | toast `"删除线程失败: ${error}"` |
 | `get_thread_snapshot` 失败 | toast `"加载历史消息失败: ${error}"` |
-| Provider 不存在 | toast "该会话使用的 Provider 已不存在，请选择一个新的" |
+| Provider 不存在 | toast "该会话使用的 Provider 已不存在，请选择一个新的"（前端业务校验，无后端错误） |
 | 并发删除（已删除的会话/线程） | 静默忽略（列表自动刷新），无需 toast |
 
 ---
