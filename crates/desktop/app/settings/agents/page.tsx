@@ -3,13 +3,19 @@
 import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Plus } from "lucide-react"
+import { Plus, ChevronDown } from "lucide-react"
 import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 import {
   AgentCard,
   DeleteConfirmDialog,
 } from "@/components/settings"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 
 export default function AgentsPage() {
   const router = useRouter()
@@ -109,12 +115,35 @@ export default function AgentsPage() {
             </button>
           )}
         </div>
-        <Link href="/settings/agents/new">
-          <Button size="sm">
-            <Plus className="h-4 w-4 mr-1" />
-            新建智能体
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link href="/settings/agents/new">
+            <Button size="sm">
+              <Plus className="h-4 w-4 mr-1" />
+              新建智能体
+            </Button>
+          </Link>
+          {parentAgents.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger render={
+                <Button size="sm" variant="outline">
+                  <Plus className="h-4 w-4 mr-1" />
+                  新建子智能体
+                  <ChevronDown className="h-3 w-3 ml-1" />
+                </Button>
+              } />
+              <DropdownMenuContent align="end">
+                {parentAgents.map((agent) => (
+                  <DropdownMenuItem
+                    key={agent.id}
+                    onClick={() => router.push(`/settings/agents/new?parent=${agent.id}`)}
+                  >
+                    {agent.display_name}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
       </div>
 
       {agentList.length === 0 ? (
