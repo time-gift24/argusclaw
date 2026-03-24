@@ -63,7 +63,10 @@ export interface ChatStore {
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
-  refreshSnapshot: (sessionKey: string) => Promise<void>;
+  refreshSnapshot: (
+    sessionKey: string,
+    options?: { preserveError?: boolean },
+  ) => Promise<void>;
   cleanup: () => void;
   _handleThreadEvent: (envelope: ThreadEventEnvelope) => void;
 }
@@ -253,21 +256,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async refreshSnapshot(sessionKey: string) {
+  async refreshSnapshot(sessionKey: string, options?: { preserveError?: boolean }) {
     const session = get().sessionsByKey[sessionKey];
     if (!session) return;
 
     try {
       const snapshot = await chat.getThreadSnapshot(session.sessionId, session.threadId);
       set((state) => ({
-        errorMessage: null,
+        errorMessage: options?.preserveError ? state.errorMessage : null,
         sessionsByKey: {
           ...state.sessionsByKey,
           [sessionKey]: {
             ...state.sessionsByKey[sessionKey],
             messages: snapshot.messages,
             pendingAssistant: null,
-            status: "idle",
+            status: options?.preserveError ? "error" : "idle",
+            error: options?.preserveError ? state.sessionsByKey[sessionKey].error : null,
             tokenCount: snapshot.token_count,
           },
         },
@@ -501,11 +505,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...store.sessionsByKey[sessionKey],
               status: "error",
+              pendingAssistant: null,
               error: payload.error,
             },
           },
         }));
-        void get().refreshSnapshot(sessionKey);
+        void get().refreshSnapshot(sessionKey, { preserveError: true });
         break;
 
       case "waiting_for_approval":

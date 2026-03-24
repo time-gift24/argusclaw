@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,6 +19,100 @@ use argus_protocol::llm::{
 };
 
 use crate::retry::{RetryConfig, RetryProvider};
+
+const DEFAULT_RAW_STREAM_TAIL_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone)]
+struct RawStreamCapture {
+    limit: usize,
+    buffer: Vec<u8>,
+}
+
+impl RawStreamCapture {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() > self.limit {
+            let excess = self.buffer.len() - self.limit;
+            self.buffer.drain(..excess);
+        }
+    }
+
+    fn preview(&self) -> String {
+        String::from_utf8_lossy(&self.buffer).into_owned()
+    }
+
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+fn log_stream_transport_error(
+    stage: &str,
+    err: &impl std::fmt::Display,
+    raw_stream_capture: &Arc<Mutex<RawStreamCapture>>,
+) {
+    let capture = raw_stream_capture
+        .lock()
+        .expect("raw stream capture mutex poisoned");
+    let raw_stream_tail = capture.preview();
+
+    tracing::error!(
+        stage,
+        error = %err,
+        raw_stream_tail_bytes = capture.len(),
+        raw_stream_tail = %raw_stream_tail,
+        "stream transport failed; dumping recent raw response bytes"
+    );
+}
+
+fn build_sse_event_stream<S, B>(
+    stage: &'static str,
+    byte_stream: S,
+) -> impl futures_util::Stream<Item = Result<LlmStreamEvent, LlmError>>
+where
+    S: futures_util::Stream<Item = Result<B, reqwest::Error>> + Send + 'static,
+    B: AsRef<[u8]>,
+{
+    let raw_stream_capture = Arc::new(Mutex::new(RawStreamCapture::new(
+        DEFAULT_RAW_STREAM_TAIL_BYTES,
+    )));
+    let capture_for_bytes = raw_stream_capture.clone();
+    let capture_for_events = raw_stream_capture.clone();
+
+    byte_stream
+        .map(move |chunk| {
+            if let Ok(ref bytes) = chunk {
+                capture_for_bytes
+                    .lock()
+                    .expect("raw stream capture mutex poisoned")
+                    .push(bytes.as_ref());
+            }
+            chunk
+        })
+        .eventsource()
+        .map(move |event| match event {
+            Ok(event) => parse_stream_frame(&event.data),
+            Err(err) => {
+                log_stream_transport_error(stage, &err, &capture_for_events);
+                vec![Err(LlmError::RequestFailed {
+                    provider: "openai-compatible".to_string(),
+                    reason: err.to_string(),
+                })]
+            }
+        })
+        .flat_map(futures_util::stream::iter)
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleConfig {
@@ -315,17 +410,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     ) -> Result<LlmEventStream, LlmError> {
         let body = ChatCompletionsRequest::from_completion_request(&self.model, request, true);
         let response = self.send_chat_request(&body).await?;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .map(|event| match event {
-                Ok(event) => parse_stream_frame(&event.data),
-                Err(err) => vec![Err(LlmError::RequestFailed {
-                    provider: "openai-compatible".to_string(),
-                    reason: err.to_string(),
-                })],
-            })
-            .flat_map(futures_util::stream::iter);
+        let stream = build_sse_event_stream("stream_complete", response.bytes_stream());
 
         Ok(Box::pin(stream))
     }
@@ -336,17 +421,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     ) -> Result<LlmEventStream, LlmError> {
         let body = ChatCompletionsRequest::from_tool_completion_request(&self.model, request, true);
         let response = self.send_chat_request(&body).await?;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .map(|event| match event {
-                Ok(event) => parse_stream_frame(&event.data),
-                Err(err) => vec![Err(LlmError::RequestFailed {
-                    provider: "openai-compatible".to_string(),
-                    reason: err.to_string(),
-                })],
-            })
-            .flat_map(futures_util::stream::iter);
+        let stream = build_sse_event_stream("stream_complete_with_tools", response.bytes_stream());
 
         Ok(Box::pin(stream))
     }
@@ -618,6 +693,11 @@ fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
     let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
         Ok(chunk) => chunk,
         Err(e) => {
+            tracing::error!(
+                error = %e,
+                raw_sse_frame = %data,
+                "failed to parse SSE frame as JSON"
+            );
             return vec![Err(LlmError::InvalidResponse {
                 provider: "openai-compatible".to_string(),
                 reason: format!("invalid SSE frame: {e}"),
@@ -925,6 +1005,15 @@ mod tests {
             create_openai_compatible_provider(config).expect("factory should build provider");
 
         assert_eq!(provider.model_name(), "model");
+    }
+
+    #[test]
+    fn raw_stream_capture_keeps_only_tail_bytes() {
+        let mut capture = RawStreamCapture::new(8);
+        capture.push(b"hello");
+        capture.push(b"-world");
+
+        assert_eq!(capture.preview(), "lo-world");
     }
 
     #[test]
