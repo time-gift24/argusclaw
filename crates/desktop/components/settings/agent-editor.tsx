@@ -117,7 +117,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     try {
       const savedId = await agents.upsert(formData)
       addToast("success", isEditing ? "智能体已更新" : "智能体已创建")
-      router.push(`/settings/agents/${savedId}`)
+      router.push(`/settings/agents/edit?id=${savedId}`)
     } catch (error) {
       console.error("Failed to save agent:", error)
       addToast("error", "保存失败，请重试")

@@ -125,7 +125,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
           onOpenChange(false);
           resetForm();
           showToast('账号创建成功！请填写 LLM Provider 配置并测试连接。', 'success');
-          router.push('/settings/providers/1');
+          router.push('/settings/providers/edit?id=1');
         } else {
           const nextError = getSetupErrorMessage(result.error);
           setError(nextError);
@@ -152,7 +152,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
           onOpenChange(false);
           resetForm();
           showToast('登录成功！', 'success');
-          router.push('/settings/providers/1');
+          router.push('/settings/providers/edit?id=1');
         } else {
           setError(getLoginErrorMessage(result.error));
         }

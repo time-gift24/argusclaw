@@ -6,6 +6,22 @@ const newAgentPagePath = new URL(
   "../app/settings/agents/new/page.tsx",
   import.meta.url,
 );
+const editAgentPagePath = new URL(
+  "../app/settings/agents/edit/page.tsx",
+  import.meta.url,
+);
+const legacyAgentPagePath = new URL(
+  "../app/settings/agents/[id]/page.tsx",
+  import.meta.url,
+);
+const editProviderPagePath = new URL(
+  "../app/settings/providers/edit/page.tsx",
+  import.meta.url,
+);
+const legacyProviderPagePath = new URL(
+  "../app/settings/providers/[id]/page.tsx",
+  import.meta.url,
+);
 const agentEditorPath = new URL(
   "../components/settings/agent-editor.tsx",
   import.meta.url,
@@ -22,6 +38,18 @@ const deleteDialogPath = new URL(
   "../components/settings/delete-confirm-dialog.tsx",
   import.meta.url,
 );
+const agentsPagePath = new URL(
+  "../app/settings/agents/page.tsx",
+  import.meta.url,
+);
+const providerCardPath = new URL(
+  "../components/settings/provider-card.tsx",
+  import.meta.url,
+);
+const loginDialogPath = new URL(
+  "../components/auth/login-dialog.tsx",
+  import.meta.url,
+);
 
 test("settings exposes a dedicated new-agent route that renders create mode", () => {
   assert.equal(existsSync(newAgentPagePath), true);
@@ -30,6 +58,21 @@ test("settings exposes a dedicated new-agent route that renders create mode", ()
 
   assert.match(newAgentPageSource, /<AgentEditor\s*\/>/);
   assert.doesNotMatch(newAgentPageSource, /agentId=/);
+});
+
+test("settings uses static edit pages instead of dynamic detail routes for export builds", () => {
+  assert.equal(existsSync(editAgentPagePath), true);
+  assert.equal(existsSync(editProviderPagePath), true);
+  assert.equal(existsSync(legacyAgentPagePath), false);
+  assert.equal(existsSync(legacyProviderPagePath), false);
+
+  const editAgentPageSource = readFileSync(editAgentPagePath, "utf8");
+  const editProviderPageSource = readFileSync(editProviderPagePath, "utf8");
+
+  assert.match(editAgentPageSource, /useSearchParams/);
+  assert.match(editAgentPageSource, /<AgentEditor agentId=\{agentId\} \/>/);
+  assert.match(editProviderPageSource, /useSearchParams/);
+  assert.match(editProviderPageSource, /<ProviderEditor providerId=\{providerId\} \/>/);
 });
 
 test("agent editor treats provider as optional when deciding whether the form can save", () => {
@@ -54,15 +97,21 @@ test("agent editor treats provider as optional when deciding whether the form ca
     /<Button size="sm" onClick=\{handleSave\} disabled=\{saving \|\| !canSave\}>/,
   );
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(formData\)/);
-  assert.match(agentEditorSource, /router\.push\(`\/settings\/agents\/\$\{savedId\}`\)/);
+  assert.match(agentEditorSource, /router\.push\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
   assert.doesNotMatch(providerSelectBlock, /required/);
 });
 
 test("provider editing flow uses dedicated routes while keeping dialog open state controllable", () => {
   const providersPageSource = readFileSync(providersPagePath, "utf8");
   const providerDialogSource = readFileSync(providerDialogPath, "utf8");
+  const providerCardSource = readFileSync(providerCardPath, "utf8");
+  const loginDialogSource = readFileSync(loginDialogPath, "utf8");
+  const agentsPageSource = readFileSync(agentsPagePath, "utf8");
 
   assert.match(providersPageSource, /router\.push\("\/settings\/providers\/new"\)/);
+  assert.match(providerCardSource, /router\.push\(`\/settings\/providers\/edit\?id=\$\{provider\.id\}`\)/);
+  assert.match(loginDialogSource, /router\.push\('\/settings\/providers\/edit\?id=1'\)/);
+  assert.match(agentsPageSource, /router\.push\(`\/settings\/agents\/edit\?id=\$\{id\}`\)/);
   assert.match(providerDialogSource, /open\?: boolean/);
   assert.match(
     providerDialogSource,

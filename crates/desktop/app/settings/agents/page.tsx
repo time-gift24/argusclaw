@@ -39,7 +39,7 @@ export default function AgentsPage() {
   }, [loadData])
 
   const handleEdit = (id: number) => {
-    router.push(`/settings/agents/${id}`)
+    router.push(`/settings/agents/edit?id=${id}`)
   }
 
   const handleDelete = async () => {

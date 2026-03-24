@@ -44,6 +44,10 @@ type NavigationItem = {
 function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
   const [agentNames, setAgentNames] = useState<Record<string, string>>({})
   const [providerNames, setProviderNames] = useState<Record<string, string>>({})
+  const [editIds, setEditIds] = useState<{ agentId: string | null; providerId: string | null }>({
+    agentId: null,
+    providerId: null,
+  })
 
   // Load agent and provider names for breadcrumb display
   useEffect(() => {
@@ -70,6 +74,18 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
     loadNames()
   }, [])
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return
+    }
+
+    const params = new URLSearchParams(window.location.search)
+    setEditIds({
+      agentId: pathname === "/settings/agents/edit" ? params.get("id") : null,
+      providerId: pathname === "/settings/providers/edit" ? params.get("id") : null,
+    })
+  }, [pathname])
+
   return useMemo(() => {
     const items: BreadcrumbItem[] = []
 
@@ -82,6 +98,12 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
 
         if (pathname === "/settings/providers/new") {
           items.push({ label: "新建" })
+        } else if (pathname === "/settings/providers/edit") {
+          const providerId = editIds.providerId
+          if (providerId) {
+            const providerName = providerNames[providerId] || providerId
+            items.push({ label: providerName })
+          }
         } else {
           const match = pathname.match(/^\/settings\/providers\/([^/]+)$/)
           if (match) {
@@ -95,6 +117,12 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
 
         if (pathname === "/settings/agents/new") {
           items.push({ label: "新建" })
+        } else if (pathname === "/settings/agents/edit") {
+          const agentId = editIds.agentId
+          if (agentId) {
+            const agentName = agentNames[agentId] || agentId
+            items.push({ label: agentName })
+          }
         } else {
           const match = pathname.match(/^\/settings\/agents\/([^/]+)$/)
           if (match) {
@@ -107,7 +135,7 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
     }
 
     return items
-  }, [pathname, agentNames, providerNames])
+  }, [pathname, editIds, agentNames, providerNames])
 }
 
 const Navbar = ({

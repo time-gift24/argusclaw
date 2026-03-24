@@ -154,7 +154,7 @@ export function ProviderCard({
           <Activity className="h-3 w-3 mr-1" />
           测试连接
         </Button>
-        <Button size="sm" variant="outline" onClick={() => router.push(`/settings/providers/${provider.id}`)}>
+        <Button size="sm" variant="outline" onClick={() => router.push(`/settings/providers/edit?id=${provider.id}`)}>
           <Pencil className="h-3 w-3 mr-1" />
           Edit
         </Button>
