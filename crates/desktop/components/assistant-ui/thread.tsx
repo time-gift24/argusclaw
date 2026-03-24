@@ -5,12 +5,16 @@ import {
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { ToolFallbackImpl } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { TokenRing } from "@/components/token-ring";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
+import { useChatStore } from "@/lib/chat-store";
+import type { ChatStore } from "@/lib/chat-store";
+import { providers } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -151,17 +155,44 @@ const Composer: FC = () => {
 };
 
 const ComposerAction: FC = () => {
+  const session = useActiveChatSession();
+
+  // Fetch context window when session has provider and contextWindow is not yet populated
+  useEffect(() => {
+    if (!session?.effectiveProviderId || session.contextWindow !== null) return;
+    providers.getContextWindow(session.effectiveProviderId).then((cw) => {
+      useChatStore.setState((s: ChatStore) => ({
+        sessionsByKey: {
+          ...s.sessionsByKey,
+          [s.activeSessionKey!]: {
+            ...s.sessionsByKey[s.activeSessionKey!],
+            contextWindow: cw,
+          },
+        },
+      }));
+    });
+  }, [session?.effectiveProviderId, session?.contextWindow]);
+
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
       <div className="flex items-center gap-2">
         <AgentSelector />
         <ProviderSelector />
       </div>
-      <ComposerPrimitive.Send asChild>
-        <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
-          <ArrowUpIcon className="aui-composer-send-icon size-4" />
-        </TooltipIconButton>
-      </ComposerPrimitive.Send>
+      <div className="flex items-center gap-2">
+        {session && session.tokenCount > 0 && session.contextWindow && (
+          <TokenRing
+            modelContextWindow={session.contextWindow}
+            tokenCount={session.tokenCount}
+            className="size-8"
+          />
+        )}
+        <ComposerPrimitive.Send asChild>
+          <TooltipIconButton tooltip="Send message" side="bottom" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full" aria-label="Send message">
+            <ArrowUpIcon className="aui-composer-send-icon size-4" />
+          </TooltipIconButton>
+        </ComposerPrimitive.Send>
+      </div>
     </div>
   );
 };

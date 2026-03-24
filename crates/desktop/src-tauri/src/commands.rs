@@ -546,6 +546,18 @@ pub async fn delete_credential(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Resu
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn get_provider_context_window(
+    wing: State<'_, Arc<ArgusWing>>,
+    provider_id: i64,
+) -> Result<u32, String> {
+    let id = LlmProviderId::new(provider_id);
+    match wing.get_provider(id).await {
+        Ok(provider) => Ok(provider.context_window()),
+        Err(_) => Ok(128_000), // provider not found or build failed, use default
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

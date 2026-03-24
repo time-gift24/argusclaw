@@ -107,6 +107,9 @@ export const providers = {
 
   testInput: (record: ProviderInput, model: string) =>
     invoke<ProviderTestResult>("test_provider_input", { record, model }),
+
+  getContextWindow: (providerId: number) =>
+    invoke<number>("get_provider_context_window", { providerId }),
 };
 
 // Agent API

@@ -56,6 +56,7 @@ pub fn run() {
             commands::add_credential,
             commands::update_credential,
             commands::delete_credential,
+            commands::get_provider_context_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

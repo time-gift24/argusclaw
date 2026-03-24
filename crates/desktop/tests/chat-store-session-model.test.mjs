@@ -9,7 +9,7 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /activeSessionKey:\s*string \| null/);
   assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
   assert.match(storeSource, /selectedProviderPreferenceId:\s*number \| null/);
-  assert.match(storeSource, /refreshSnapshot:\s*\(sessionKey: string\)/);
+  assert.match(storeSource, /refreshSnapshot:\s*\([\s\S]*sessionKey:\s*string/);
   assert.match(storeSource, /listen.*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
   assert.match(storeSource, /case "content_delta"/);
@@ -61,5 +61,31 @@ test("failed update_plan completions clear any optimistic pending plan", () => {
   assert.match(
     storeSource,
     /case "tool_completed":[\s\S]*?payload\.tool_name === "update_plan"[\s\S]*?plan:\s*payload\.is_error\s*\?\s*null\s*:/,
+  );
+});
+
+test("turn_failed refresh preserves the frontend error state", () => {
+  assert.match(
+    storeSource,
+    /refreshSnapshot:\s*\([\s\S]*sessionKey:\s*string,[\s\S]*options\?\s*:\s*\{\s*preserveError\?\s*:\s*boolean\s*\}/,
+  );
+  assert.match(
+    storeSource,
+    /case "turn_failed":[\s\S]*?refreshSnapshot\(sessionKey,\s*\{\s*preserveError:\s*true\s*\}\)/,
+  );
+  assert.match(
+    storeSource,
+    /errorMessage:\s*options\?\.preserveError\s*\?\s*state\.errorMessage\s*:\s*null/,
+  );
+  assert.match(
+    storeSource,
+    /status:\s*options\?\.preserveError\s*\?\s*"error"\s*:\s*"idle"/,
+  );
+});
+
+test("turn_failed clears any pending assistant state before snapshot refresh", () => {
+  assert.match(
+    storeSource,
+    /case "turn_failed":[\s\S]*?status:\s*"error"[\s\S]*?pendingAssistant:\s*null[\s\S]*?refreshSnapshot\(sessionKey,\s*\{\s*preserveError:\s*true\s*\}\)/,
   );
 });

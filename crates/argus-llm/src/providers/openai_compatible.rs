@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
 };
@@ -18,6 +20,213 @@ use argus_protocol::llm::{
 };
 
 use crate::retry::{RetryConfig, RetryProvider};
+
+const DEFAULT_RAW_STREAM_TAIL_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone)]
+struct RawStreamCapture {
+    limit: usize,
+    buffer: Vec<u8>,
+}
+
+impl RawStreamCapture {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        self.buffer.extend_from_slice(bytes);
+        if self.buffer.len() > self.limit {
+            let excess = self.buffer.len() - self.limit;
+            self.buffer.drain(..excess);
+        }
+    }
+
+    fn preview(&self) -> String {
+        String::from_utf8_lossy(&self.buffer).into_owned()
+    }
+
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+}
+
+fn log_stream_transport_error(
+    stage: &str,
+    err: &impl std::fmt::Display,
+    raw_stream_capture: &Arc<Mutex<RawStreamCapture>>,
+) {
+    let capture = raw_stream_capture
+        .lock()
+        .expect("raw stream capture mutex poisoned");
+    let raw_stream_tail = capture.preview();
+
+    tracing::error!(
+        stage,
+        error = %err,
+        raw_stream_tail_bytes = capture.len(),
+        raw_stream_tail = %raw_stream_tail,
+        "stream transport failed; dumping recent raw response bytes"
+    );
+}
+
+fn build_sse_event_stream<S, B>(
+    stage: &'static str,
+    byte_stream: S,
+) -> impl futures_util::Stream<Item = Result<LlmStreamEvent, LlmError>>
+where
+    S: futures_util::Stream<Item = Result<B, reqwest::Error>> + Send + 'static,
+    B: AsRef<[u8]>,
+{
+    SseEventStream::new(
+        stage,
+        Box::pin(byte_stream.map(|chunk| chunk.map(|bytes| bytes.as_ref().to_vec()))),
+    )
+}
+
+#[derive(Debug, Default)]
+struct SseFrameDecoder {
+    buffer: Vec<u8>,
+}
+
+impl SseFrameDecoder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Vec<Result<LlmStreamEvent, LlmError>> {
+        self.buffer.extend_from_slice(bytes);
+
+        let mut events = Vec::new();
+        while let Some((frame_end, separator_len)) = find_sse_frame_boundary(&self.buffer) {
+            let frame = self.buffer[..frame_end].to_vec();
+            self.buffer.drain(..frame_end + separator_len);
+
+            if let Some(data) = extract_sse_data(&frame) {
+                events.extend(parse_stream_frame(&data));
+            }
+        }
+
+        events
+    }
+}
+
+struct SseEventStream {
+    stage: &'static str,
+    inner_stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> + Send>>,
+    decoder: SseFrameDecoder,
+    pending_events: VecDeque<Result<LlmStreamEvent, LlmError>>,
+    raw_stream_capture: Arc<Mutex<RawStreamCapture>>,
+    done: bool,
+}
+
+impl SseEventStream {
+    fn new(
+        stage: &'static str,
+        inner_stream: Pin<Box<dyn Stream<Item = Result<Vec<u8>, reqwest::Error>> + Send>>,
+    ) -> Self {
+        Self {
+            stage,
+            inner_stream,
+            decoder: SseFrameDecoder::new(),
+            pending_events: VecDeque::new(),
+            raw_stream_capture: Arc::new(Mutex::new(RawStreamCapture::new(
+                DEFAULT_RAW_STREAM_TAIL_BYTES,
+            ))),
+            done: false,
+        }
+    }
+}
+
+impl Stream for SseEventStream {
+    type Item = Result<LlmStreamEvent, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(event) = self.pending_events.pop_front() {
+                return Poll::Ready(Some(event));
+            }
+
+            if self.done {
+                return Poll::Ready(None);
+            }
+
+            match self.inner_stream.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    self.done = true;
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(Ok(bytes))) => {
+                    self.raw_stream_capture
+                        .lock()
+                        .expect("raw stream capture mutex poisoned")
+                        .push(&bytes);
+                    let parsed_events = self.decoder.push(&bytes);
+                    self.pending_events.extend(parsed_events);
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    log_stream_transport_error(self.stage, &err, &self.raw_stream_capture);
+                    self.done = true;
+                    return Poll::Ready(Some(Err(LlmError::RequestFailed {
+                        provider: "openai-compatible".to_string(),
+                        reason: err.to_string(),
+                    })));
+                }
+            }
+        }
+    }
+}
+
+fn find_sse_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let mut index = 0usize;
+    while index + 1 < buffer.len() {
+        if buffer[index] == b'\n' && buffer[index + 1] == b'\n' {
+            return Some((index, 2));
+        }
+
+        if index + 3 < buffer.len()
+            && buffer[index] == b'\r'
+            && buffer[index + 1] == b'\n'
+            && buffer[index + 2] == b'\r'
+            && buffer[index + 3] == b'\n'
+        {
+            return Some((index, 4));
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+fn extract_sse_data(frame: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(frame);
+    let mut data_lines = Vec::new();
+
+    for raw_line in text.lines() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+
+        if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        } else if line == "data" {
+            data_lines.push(String::new());
+        }
+    }
+
+    if data_lines.is_empty() {
+        None
+    } else {
+        Some(data_lines.join("\n"))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleConfig {
@@ -315,17 +524,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     ) -> Result<LlmEventStream, LlmError> {
         let body = ChatCompletionsRequest::from_completion_request(&self.model, request, true);
         let response = self.send_chat_request(&body).await?;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .map(|event| match event {
-                Ok(event) => parse_stream_frame(&event.data),
-                Err(err) => vec![Err(LlmError::RequestFailed {
-                    provider: "openai-compatible".to_string(),
-                    reason: err.to_string(),
-                })],
-            })
-            .flat_map(futures_util::stream::iter);
+        let stream = build_sse_event_stream("stream_complete", response.bytes_stream());
 
         Ok(Box::pin(stream))
     }
@@ -336,17 +535,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
     ) -> Result<LlmEventStream, LlmError> {
         let body = ChatCompletionsRequest::from_tool_completion_request(&self.model, request, true);
         let response = self.send_chat_request(&body).await?;
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .map(|event| match event {
-                Ok(event) => parse_stream_frame(&event.data),
-                Err(err) => vec![Err(LlmError::RequestFailed {
-                    provider: "openai-compatible".to_string(),
-                    reason: err.to_string(),
-                })],
-            })
-            .flat_map(futures_util::stream::iter);
+        let stream = build_sse_event_stream("stream_complete_with_tools", response.bytes_stream());
 
         Ok(Box::pin(stream))
     }
@@ -618,6 +807,11 @@ fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
     let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
         Ok(chunk) => chunk,
         Err(e) => {
+            tracing::error!(
+                error = %e,
+                raw_sse_frame = %data,
+                "failed to parse SSE frame as JSON"
+            );
             return vec![Err(LlmError::InvalidResponse {
                 provider: "openai-compatible".to_string(),
                 reason: format!("invalid SSE frame: {e}"),
@@ -925,6 +1119,36 @@ mod tests {
             create_openai_compatible_provider(config).expect("factory should build provider");
 
         assert_eq!(provider.model_name(), "model");
+    }
+
+    #[test]
+    fn raw_stream_capture_keeps_only_tail_bytes() {
+        let mut capture = RawStreamCapture::new(8);
+        capture.push(b"hello");
+        capture.push(b"-world");
+
+        assert_eq!(capture.preview(), "lo-world");
+    }
+
+    #[test]
+    fn sse_decoder_reassembles_split_frames() {
+        let mut decoder = SseFrameDecoder::new();
+        let first = decoder.push(&b"data: {\"choices\":"[..]);
+        let second =
+            decoder.push(&b"[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"[..]);
+
+        assert!(first.is_empty());
+        let events = second
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("split SSE frame should parse");
+
+        assert_eq!(
+            events,
+            vec![LlmStreamEvent::ContentDelta {
+                delta: "hi".to_string(),
+            }]
+        );
     }
 
     #[test]

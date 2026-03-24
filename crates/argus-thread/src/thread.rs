@@ -264,7 +264,9 @@ impl Thread {
 
     fn apply_turn_output(&mut self, output: TurnOutput) {
         self.messages = output.messages;
-        self.recalculate_token_count();
+        // Use the authoritative token count from LLMProvider's response,
+        // rather than re-estimating via content length / 4.
+        self.token_count = output.token_usage.total_tokens;
         self.updated_at = Utc::now();
     }
 
