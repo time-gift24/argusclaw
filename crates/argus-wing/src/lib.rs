@@ -35,7 +35,7 @@ use argus_auth::{AccountManager, CredentialStore};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProviderId, LlmProviderRecord, ProviderId,
+    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
@@ -285,6 +285,11 @@ impl ArgusWing {
     /// Get the default provider record.
     pub async fn get_default_provider_record(&self) -> Result<LlmProviderRecord> {
         self.provider_manager.get_default_provider_record().await
+    }
+
+    /// Get a provider instance by ID (for calling methods like context_window).
+    pub async fn get_provider(&self, id: LlmProviderId) -> Result<Arc<dyn LlmProvider>> {
+        self.provider_manager.get_provider(&id).await
     }
 
     // =========================================================================
