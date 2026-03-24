@@ -10,10 +10,12 @@ export const TokenRing: FC<{
     ? Math.min((tokenCount / modelContextWindow) * 100, 100)
     : 0;
 
-  const radius = 12;
-  const strokeWidth = 2.5;
+  const radius = 11;
+  const strokeWidth = 3;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (percentage / 100) * circumference;
+
+  const color = percentage > 80 ? "text-destructive" : percentage > 60 ? "text-amber-500" : "text-emerald-500";
 
   return (
     <Tooltip>
@@ -33,7 +35,7 @@ export const TokenRing: FC<{
               fill="none"
               stroke="currentColor"
               strokeWidth={strokeWidth}
-              className="text-muted opacity-20"
+              className="text-muted opacity-40"
             />
             {/* Progress arc */}
             <circle
@@ -46,7 +48,7 @@ export const TokenRing: FC<{
               strokeLinecap="round"
               strokeDasharray={circumference}
               strokeDashoffset={strokeDashoffset}
-              className={percentage > 80 ? "text-destructive" : "text-primary"}
+              className={color}
             />
           </svg>
         </div>
