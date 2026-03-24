@@ -1,4 +1,4 @@
-use argus_protocol::{AgentId, AgentRecord, ArgusError, ProviderId, Result};
+use argus_protocol::{AgentId, AgentRecord, AgentType, ArgusError, ProviderId, Result};
 use sqlx::SqlitePool;
 
 /// Manager for agent templates.
@@ -93,11 +93,17 @@ impl TemplateManager {
                 reason: format!("failed to serialize thinking_config: {}", e),
             })?;
 
+        let agent_type = if template.parent_agent_id.is_some() {
+            "subagent"
+        } else {
+            "standard"
+        };
+
         if template.id.inner() == 0 {
             sqlx::query(
                 r#"
-                INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(display_name) DO UPDATE SET
                     description = excluded.description,
                     version = excluded.version,
@@ -107,6 +113,8 @@ impl TemplateManager {
                     max_tokens = excluded.max_tokens,
                     temperature = excluded.temperature,
                     thinking_config = excluded.thinking_config,
+                    parent_agent_id = excluded.parent_agent_id,
+                    agent_type = excluded.agent_type,
                     updated_at = datetime('now')
                 "#,
             )
@@ -119,6 +127,8 @@ impl TemplateManager {
             .bind(template.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
             .bind(&thinking_config_json)
+            .bind(template.parent_agent_id.map(|id| id.inner()))
+            .bind(agent_type)
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -135,8 +145,8 @@ impl TemplateManager {
         } else {
             sqlx::query(
                 r#"
-                INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(id) DO UPDATE SET
                     display_name = excluded.display_name,
                     description = excluded.description,
@@ -147,6 +157,8 @@ impl TemplateManager {
                     max_tokens = excluded.max_tokens,
                     temperature = excluded.temperature,
                     thinking_config = excluded.thinking_config,
+                    parent_agent_id = excluded.parent_agent_id,
+                    agent_type = excluded.agent_type,
                     updated_at = datetime('now')
                 "#,
             )
@@ -160,6 +172,8 @@ impl TemplateManager {
             .bind(template.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
             .bind(&thinking_config_json)
+            .bind(template.parent_agent_id.map(|id| id.inner()))
+            .bind(agent_type)
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -184,10 +198,16 @@ impl TemplateManager {
                 reason: format!("failed to serialize thinking_config: {}", e),
             })?;
 
+        let agent_type = if record.parent_agent_id.is_some() {
+            "subagent"
+        } else {
+            "standard"
+        };
+
         // Insert with ON CONFLICT(display_name) DO UPDATE
         sqlx::query(
-            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(display_name) DO UPDATE SET
                  description = excluded.description,
                  version = excluded.version,
@@ -197,6 +217,8 @@ impl TemplateManager {
                  max_tokens = excluded.max_tokens,
                  temperature = excluded.temperature,
                  thinking_config = excluded.thinking_config,
+                 parent_agent_id = excluded.parent_agent_id,
+                 agent_type = excluded.agent_type,
                  updated_at = CURRENT_TIMESTAMP",
         )
         .bind(&record.display_name)
@@ -208,6 +230,8 @@ impl TemplateManager {
         .bind(record.max_tokens.map(|t| t as i64))
         .bind(temperature_int)
         .bind(&thinking_config_json)
+        .bind(record.parent_agent_id.map(|id| id.inner()))
+        .bind(agent_type)
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {
@@ -355,7 +379,7 @@ impl TemplateManager {
     pub async fn get(&self, id: AgentId) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents WHERE id = ?
             "#,
         )
@@ -374,7 +398,7 @@ impl TemplateManager {
     pub async fn list(&self) -> Result<Vec<AgentRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents ORDER BY id ASC
             "#,
         )
@@ -391,7 +415,7 @@ impl TemplateManager {
     pub async fn find_by_display_name(&self, display_name: &str) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents WHERE display_name = ?
             "#,
         )
@@ -461,6 +485,58 @@ impl TemplateManager {
 
         Ok(())
     }
+
+    /// List all subagents of a given parent agent.
+    pub async fn list_subagents(&self, parent_id: AgentId) -> Result<Vec<AgentRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+            FROM agents WHERE parent_agent_id = ? ORDER BY id ASC
+            "#,
+        )
+        .bind(parent_id.inner())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        rows.into_iter()
+            .map(|row| self.map_agent_record(row))
+            .collect()
+    }
+
+    /// Add a subagent to a parent agent (set child's parent_agent_id).
+    pub async fn add_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE agents SET parent_agent_id = ?, agent_type = 'subagent', updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(parent_id.inner())
+        .bind(child_id.inner())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        Ok(())
+    }
+
+    /// Remove a subagent from its parent (clear child's parent_agent_id).
+    pub async fn remove_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE agents SET parent_agent_id = NULL, agent_type = 'standard', updated_at = datetime('now')
+            WHERE id = ? AND parent_agent_id = ?
+            "#,
+        )
+        .bind(child_id.inner())
+        .bind(parent_id.inner())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+
+        Ok(())
+    }
 }
 
 impl TemplateManager {
@@ -503,6 +579,25 @@ impl TemplateManager {
             })?
             .and_then(|s| serde_json::from_str(&s).ok());
 
+        // Get parent_agent_id
+        let parent_agent_id: Option<AgentId> = row
+            .try_get::<Option<i64>, _>("parent_agent_id")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .map(AgentId::new);
+
+        // Get agent_type
+        let agent_type_str: String =
+            row.try_get("agent_type")
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
+        let agent_type = match agent_type_str.as_str() {
+            "subagent" => AgentType::Subagent,
+            _ => AgentType::Standard,
+        };
+
         Ok(AgentRecord {
             id: AgentId::new(row.try_get("id").map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
@@ -532,6 +627,8 @@ impl TemplateManager {
             max_tokens,
             temperature,
             thinking_config,
+            parent_agent_id,
+            agent_type,
         })
     }
 }

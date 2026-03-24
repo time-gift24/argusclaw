@@ -15,7 +15,7 @@ pub mod ssrf;
 pub mod token_usage;
 pub mod tool;
 
-pub use agent::AgentRecord;
+pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};
 pub use events::ThreadEvent;
@@ -70,5 +70,8 @@ pub use ssrf::{
     validate_url,
 };
 pub use tool::{NamedTool, ToolError};
+
+pub mod provider_resolver;
+pub use provider_resolver::ProviderResolver;
 
 pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};

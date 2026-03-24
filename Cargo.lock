@@ -169,6 +169,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-job"
+version = "0.1.0"
+dependencies = [
+ "argus-llm",
+ "argus-protocol",
+ "argus-template",
+ "argus-tool",
+ "argus-turn",
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "argus-llm"
 version = "0.1.0"
 dependencies = [
@@ -233,6 +254,8 @@ dependencies = [
 name = "argus-session"
 version = "0.1.0"
 dependencies = [
+ "argus-job",
+ "argus-llm",
  "argus-protocol",
  "argus-template",
  "argus-thread",
@@ -345,6 +368,7 @@ dependencies = [
  "argus-approval",
  "argus-auth",
  "argus-crypto",
+ "argus-job",
  "argus-llm",
  "argus-protocol",
  "argus-repository",

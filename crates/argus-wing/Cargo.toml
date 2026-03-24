@@ -42,6 +42,7 @@ argus-thread = { path = "../argus-thread" }
 argus-repository = { path = "../argus-repository" }
 argus-auth = { path = "../argus-auth" }
 argus-crypto = { path = "../argus-crypto" }
+argus-job = { path = "../argus-job" }
 
 [dev-dependencies]
 tempfile = "3"

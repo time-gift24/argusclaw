@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use argus_llm::ProviderManager;
+use argus_protocol::ProviderResolver;
 use argus_protocol::{LlmProvider, LlmProviderId, ProviderId, Result};
-use argus_session::ProviderResolver;
 
 /// Wrapper that implements ProviderResolver for ProviderManager.
 ///

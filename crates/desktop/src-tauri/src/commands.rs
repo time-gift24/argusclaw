@@ -173,6 +173,38 @@ pub async fn delete_agent_template(wing: State<'_, Arc<ArgusWing>>, id: i64) -> 
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn list_subagents(
+    wing: State<'_, Arc<ArgusWing>>,
+    parent_id: i64,
+) -> Result<Vec<AgentRecord>, String> {
+    wing.list_subagents(AgentId::new(parent_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn add_subagent(
+    wing: State<'_, Arc<ArgusWing>>,
+    parent_id: i64,
+    child_id: i64,
+) -> Result<(), String> {
+    wing.add_subagent(AgentId::new(parent_id), AgentId::new(child_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn remove_subagent(
+    wing: State<'_, Arc<ArgusWing>>,
+    parent_id: i64,
+    child_id: i64,
+) -> Result<(), String> {
+    wing.remove_subagent(AgentId::new(parent_id), AgentId::new(child_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ============================================================================
 // Tool Commands
 // ============================================================================

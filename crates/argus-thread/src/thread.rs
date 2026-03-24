@@ -213,6 +213,11 @@ impl Thread {
         self.event_sender.subscribe()
     }
 
+    /// Broadcast a ThreadEvent to this thread's subscribers.
+    pub fn broadcast_to_self(&self, event: ThreadEvent) {
+        let _ = self.event_sender.send(event);
+    }
+
     /// Get current state.
     pub fn state(&self) -> ThreadState {
         ThreadState::Idle
@@ -323,7 +328,10 @@ impl Thread {
 
         // Thread is responsible for building: collect tools and hooks
         // Filter tools by agent_record.tool_names; empty means no tools
-        let enabled_tool_names = agent_record.tool_names.iter().collect::<std::collections::HashSet<_>>();
+        let enabled_tool_names = agent_record
+            .tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
         let mut tools: Vec<Arc<dyn NamedTool>> = self
             .tool_manager
             .list_ids()
@@ -397,7 +405,7 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use argus_protocol::{AgentId, ProviderId};
+    use argus_protocol::{AgentId, AgentType, ProviderId};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use serde_json::json;
@@ -447,6 +455,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: None,
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         })
     }
 

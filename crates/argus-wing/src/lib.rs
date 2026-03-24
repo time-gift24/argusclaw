@@ -33,6 +33,7 @@ use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, D
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::{AccountManager, CredentialStore};
 use argus_crypto::{Cipher, FileKeySource};
+use argus_job::{JobManager, SseBroadcaster};
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
@@ -69,6 +70,11 @@ pub struct ArgusWing {
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
     compactor_manager: Arc<CompactorManager>,
+    #[allow(dead_code)]
+    job_manager: Arc<JobManager>,
+    /// Job broadcaster for subscribing to job events.
+    #[allow(dead_code)]
+    job_broadcaster: Arc<SseBroadcaster>,
     pub account_manager: Arc<AccountManager>,
     pub credential_store: Arc<CredentialStore>,
 }
@@ -115,8 +121,17 @@ impl ArgusWing {
         // Create compactor manager
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
 
-        // Create provider resolver wrapper
+        // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+
+        // Create job manager with all dependencies
+        let job_manager = Arc::new(JobManager::new(
+            pool.clone(),
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
+        ));
+        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
 
         // Create session manager
         let trace_dir = default_trace_dir();
@@ -128,7 +143,35 @@ impl ArgusWing {
             tool_manager.clone(),
             compactor_manager.clone(),
             trace_dir,
+            job_manager.clone(),
         ));
+
+        // Spawn job event forwarder: subscribes to job events and broadcasts as ThreadEvents
+        let session_manager_for_fwd = session_manager.clone();
+        let job_broadcaster_for_fwd = job_broadcaster.clone();
+        tokio::spawn(async move {
+            let mut job_rx = job_broadcaster_for_fwd.subscribe();
+            loop {
+                match job_rx.recv().await {
+                    Ok(event) => {
+                        let thread_event = ThreadEvent::JobCompleted {
+                            job_id: event.job_id,
+                            status: event.status,
+                            session_id: event.session_id,
+                            message: event.message,
+                        };
+                        session_manager_for_fwd.broadcast_event(thread_event);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        tracing::debug!("job event subscriber lagged, skipping");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("job broadcaster closed, stopping forwarder");
+                        break;
+                    }
+                }
+            }
+        });
 
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
@@ -146,6 +189,8 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            job_manager,
+            job_broadcaster,
             account_manager,
             credential_store,
         }))
@@ -159,7 +204,17 @@ impl ArgusWing {
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+
+        // Create job manager with all dependencies
+        let job_manager = Arc::new(JobManager::new(
+            pool.clone(),
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
+        ));
+        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
@@ -169,6 +224,7 @@ impl ArgusWing {
             tool_manager.clone(),
             compactor_manager.clone(),
             trace_dir,
+            job_manager.clone(),
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
@@ -185,6 +241,8 @@ impl ArgusWing {
             approval_manager,
             tool_manager,
             compactor_manager,
+            job_manager,
+            job_broadcaster,
             account_manager,
             credential_store,
         })
@@ -314,6 +372,25 @@ impl ArgusWing {
     /// Delete a template by ID.
     pub async fn delete_template(&self, id: AgentId) -> Result<()> {
         self.template_manager.delete(id).await
+    }
+
+    /// List all subagents of a given parent agent.
+    pub async fn list_subagents(&self, parent_id: AgentId) -> Result<Vec<AgentRecord>> {
+        self.template_manager.list_subagents(parent_id).await
+    }
+
+    /// Add a subagent to a parent agent (set child's parent_agent_id).
+    pub async fn add_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
+        self.template_manager
+            .add_subagent(parent_id, child_id)
+            .await
+    }
+
+    /// Remove a subagent from its parent (clear child's parent_agent_id).
+    pub async fn remove_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
+        self.template_manager
+            .remove_subagent(parent_id, child_id)
+            .await
     }
 
     /// Get the default agent template.
@@ -518,7 +595,7 @@ pub struct ToolInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argus_protocol::ThinkingConfig;
+    use argus_protocol::{AgentType, ThinkingConfig};
 
     #[tokio::test]
     async fn init_creates_argus_wing_with_default_database() {
@@ -559,6 +636,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         };
         wing.upsert_template(default_template)
             .await
@@ -597,6 +676,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         };
 
         let template_id = wing
@@ -697,6 +778,8 @@ mod tests {
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -776,6 +859,8 @@ mod tests {
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
         };
         wing.upsert_template(default_template)
             .await

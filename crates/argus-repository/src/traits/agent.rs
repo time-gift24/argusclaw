@@ -23,6 +23,9 @@ pub trait AgentRepository: Send + Sync {
     /// List all agents.
     async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;
 
+    /// List agents by parent agent ID (subagents of a given parent).
+    async fn list_by_parent_id(&self, parent_id: &AgentId) -> Result<Vec<AgentRecord>, DbError>;
+
     /// Delete an agent.
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;
 }

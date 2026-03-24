@@ -5,7 +5,19 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::{AgentId, WorkflowId, WorkflowStatus};
-use argus_protocol::ThreadId;
+use argus_protocol::{ThreadId, TokenUsage};
+
+/// Result of a completed job (persisted in database).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobResult {
+    /// Whether the job succeeded.
+    pub success: bool,
+    /// Output or error message.
+    pub message: String,
+    /// Token usage if available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenUsage>,
+}
 
 /// The kind of job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +74,10 @@ pub struct JobRecord {
     pub scheduled_at: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// Parent job ID (for subagent-dispatched jobs).
+    pub parent_job_id: Option<WorkflowId>,
+    /// Job execution result (set when job completes).
+    pub result: Option<JobResult>,
 }
 
 #[cfg(test)]
@@ -84,6 +100,8 @@ impl JobRecord {
             scheduled_at: None,
             started_at: None,
             finished_at: None,
+            parent_job_id: None,
+            result: None,
         }
     }
 }

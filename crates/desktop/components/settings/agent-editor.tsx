@@ -16,6 +16,7 @@ import { useToast } from "@/components/ui/toast"
 
 interface AgentEditorProps {
   agentId?: number
+  parentId?: number
 }
 
 function getPreferredProviderId(providersData: LlmProviderSummary[]): number | null {
@@ -41,7 +42,7 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
   }
 }
 
-export function AgentEditor({ agentId }: AgentEditorProps) {
+export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const router = useRouter()
   const { addToast } = useToast()
   const isEditing = agentId !== undefined
@@ -50,6 +51,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [toolList, setToolList] = React.useState<ToolInfo[]>([])
+  const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -74,6 +76,10 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     () => providerList.find((provider) => provider.id === formData.provider_id) ?? null,
     [formData.provider_id, providerList],
   )
+  const excludedAgentIds = React.useMemo(
+    () => getExcludedAgentIds(agentId, parentAgentList),
+    [agentId, parentAgentList],
+  )
 
   const canSave = Boolean(
     formData.display_name.trim() &&
@@ -90,13 +96,22 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         const toolsData = await tools.list()
         setToolList(toolsData)
 
+        const allAgents = await agents.list()
+        const candidates = allAgents.filter(
+          (a) => !a.parent_agent_id && a.agent_type !== "subagent" && a.id !== agentId
+        )
+        setParentAgentList(candidates)
+
+        const preferredProviderId = getPreferredProviderId(providersData)
         if (agentId !== undefined) {
           const agent = await agents.get(agentId)
           if (agent) {
             setFormData(agent)
           }
+        } else if (parentId !== undefined) {
+          // 新建模式，parentId 由 URL 传入，预填 parent_agent_id
+          setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
         } else {
-          const preferredProviderId = getPreferredProviderId(providersData)
           setFormData(createDefaultFormData(preferredProviderId))
         }
       } catch (error) {
@@ -106,7 +121,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agentId, parentId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
     if (!canSave) {
@@ -139,7 +154,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-base font-semibold">
-          {isEditing ? "编辑智能体" : "新建智能体"}
+          {parentId !== undefined ? "新建子智能体" : isEditing && formData.parent_agent_id ? "编辑子智能体" : isEditing ? "编辑智能体" : "新建智能体"}
         </h1>
         <Button size="sm" onClick={handleSave} disabled={saving || !canSave}>
           <Save className="h-4 w-4 mr-1" />
@@ -187,6 +202,30 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                     placeholder="简短描述"
                   />
                 </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="parent_agent_id" className="text-xs">父智能体</Label>
+                <select
+                  id="parent_agent_id"
+                  value={formData.parent_agent_id?.toString() ?? ""}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      parent_agent_id: e.target.value ? parseInt(e.target.value) : undefined,
+                    })
+                  }
+                  disabled={loading}
+                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="">无（独立智能体）</option>
+                  {parentAgentList
+                    .filter((a) => !excludedAgentIds.has(a.id))
+                    .map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.display_name} (v{a.version})
+                      </option>
+                    ))}
+                </select>
               </div>
             </div>
           </div>
@@ -451,4 +490,21 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
 // Helper function
 function cn(...classes: (string | boolean | undefined)[]) {
   return classes.filter(Boolean).join(" ")
+}
+
+function getExcludedAgentIds(agentId: number | undefined, allAgents: AgentRecord[]): Set<number> {
+  if (agentId === undefined) return new Set()
+  const excluded = new Set<number>()
+  const queue = [agentId]
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    const children = allAgents.filter((a) => a.parent_agent_id === current)
+    for (const child of children) {
+      if (!excluded.has(child.id)) {
+        excluded.add(child.id)
+        queue.push(child.id)
+      }
+    }
+  }
+  return excluded
 }

@@ -23,6 +23,7 @@ use argus_protocol::{
 };
 
 use super::trace::{TraceConfig, TraceWriter};
+use super::tool_context::{set_current_agent_id, clear_current_agent_id};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
 /// Turn identifier generator (simple counter for now).
@@ -1074,32 +1075,37 @@ impl Turn {
 
         // Execute the tool with timeout
         let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
-        let execute_future = async {
-            if let Some(tool) = tool {
-                tracing::debug!(
-                    thread_id = %self.thread_id,
-                    turn_number = %self.turn_number,
-                    tool_call_id = %tool_call_id,
-                    tool_name = %tool_name,
-                    "Executing tool"
-                );
-                tool.execute(tool_input.clone()).await
-            } else {
-                tracing::error!(
-                    thread_id = %self.thread_id,
-                    turn_number = %self.turn_number,
-                    tool_call_id = %tool_call_id,
-                    tool_name = %tool_name,
-                    available_tools = ?self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
-                    "Tool not found in registry"
-                );
-                Err(argus_protocol::tool::ToolError::NotFound {
-                    id: tool_name.clone(),
-                })
-            }
+        set_current_agent_id(self.agent_record.id);
+        let execute_result = {
+            let execute_future = async {
+                if let Some(tool) = tool {
+                    tracing::debug!(
+                        thread_id = %self.thread_id,
+                        turn_number = %self.turn_number,
+                        tool_call_id = %tool_call_id,
+                        tool_name = %tool_name,
+                        "Executing tool"
+                    );
+                    tool.execute(tool_input.clone()).await
+                } else {
+                    tracing::error!(
+                        thread_id = %self.thread_id,
+                        turn_number = %self.turn_number,
+                        tool_call_id = %tool_call_id,
+                        tool_name = %tool_name,
+                        available_tools = ?self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+                        "Tool not found in registry"
+                    );
+                    Err(argus_protocol::tool::ToolError::NotFound {
+                        id: tool_name.clone(),
+                    })
+                }
+            };
+            timeout(timeout_duration, execute_future).await
         };
+        clear_current_agent_id();
 
-        let result = match timeout(timeout_duration, execute_future).await {
+        let result = match execute_result {
             Ok(Ok(value)) => {
                 tracing::info!(
                     thread_id = %self.thread_id,

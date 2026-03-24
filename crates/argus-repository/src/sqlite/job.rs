@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::error::DbError;
 use crate::traits::JobRepository;
-use crate::types::{AgentId, JobId, JobRecord, JobType, WorkflowStatus};
+use crate::types::{AgentId, JobId, JobRecord, JobResult, JobType, WorkflowId, WorkflowStatus};
 use argus_protocol::ThreadId;
 
 use super::{ArgusSqlite, DbResult};
@@ -21,8 +21,8 @@ impl JobRepository for ArgusSqlite {
         .unwrap_or_else(|_| "[]".to_string());
 
         sqlx::query(
-            "INSERT INTO jobs (id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO jobs (id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         )
         .bind(job.id.to_string())
         .bind(job.job_type.as_str())
@@ -38,6 +38,7 @@ impl JobRepository for ArgusSqlite {
         .bind(&job.scheduled_at)
         .bind(&job.started_at)
         .bind(&job.finished_at)
+        .bind(job.parent_job_id.as_ref().map(|id| id.to_string()))
         .execute(&self.pool)
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
@@ -47,7 +48,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn get(&self, id: &JobId) -> DbResult<Option<JobRecord>> {
         let row = sqlx::query(
-            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at
+            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
              FROM jobs WHERE id = ?1",
         )
         .bind(id.to_string())
@@ -86,6 +87,23 @@ impl JobRepository for ArgusSqlite {
         Ok(())
     }
 
+    async fn update_result(&self, id: &JobId, result: &JobResult) -> DbResult<()> {
+        let result_json = serde_json::to_string(result).map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        sqlx::query("UPDATE jobs SET result = ?1, updated_at = datetime('now') WHERE id = ?2")
+            .bind(&result_json)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        Ok(())
+    }
+
     async fn update_thread_id(&self, id: &JobId, thread_id: &ThreadId) -> DbResult<()> {
         sqlx::query("UPDATE jobs SET thread_id = ?1, updated_at = datetime('now') WHERE id = ?2")
             .bind(thread_id.to_string())
@@ -101,7 +119,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn find_ready_jobs(&self, limit: usize) -> DbResult<Vec<JobRecord>> {
         let rows = sqlx::query(
-            "SELECT j.id, j.job_type, j.name, j.status, j.agent_id, j.context, j.prompt, j.thread_id, j.group_id, j.depends_on, j.cron_expr, j.scheduled_at, j.started_at, j.finished_at
+            "SELECT j.id, j.job_type, j.name, j.status, j.agent_id, j.context, j.prompt, j.thread_id, j.group_id, j.depends_on, j.cron_expr, j.scheduled_at, j.started_at, j.finished_at, j.parent_job_id, j.result
              FROM jobs j
              WHERE j.status = 'pending' AND j.job_type != 'cron'
                AND NOT EXISTS (
@@ -121,7 +139,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn find_due_cron_jobs(&self, now: &str) -> DbResult<Vec<JobRecord>> {
         let rows = sqlx::query(
-            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at
+            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
              FROM jobs
              WHERE job_type = 'cron' AND scheduled_at IS NOT NULL AND scheduled_at <= ?1
              ORDER BY scheduled_at ASC",
@@ -151,7 +169,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn list_by_group(&self, group_id: &str) -> DbResult<Vec<JobRecord>> {
         let rows = sqlx::query(
-            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at
+            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
              FROM jobs WHERE group_id = ?1 ORDER BY created_at ASC",
         )
         .bind(group_id)
@@ -183,6 +201,10 @@ impl ArgusSqlite {
                 .unwrap_or_default();
         let thread_id: Option<ThreadId> = Self::get_column::<Option<String>>(&row, "thread_id")?
             .and_then(|s| ThreadId::parse(&s).ok());
+        let parent_job_id: Option<WorkflowId> =
+            Self::get_column::<Option<String>>(&row, "parent_job_id")?.map(|s| WorkflowId::new(&s));
+        let result: Option<JobResult> = Self::get_column::<Option<String>>(&row, "result")?
+            .and_then(|s| serde_json::from_str(&s).ok());
 
         Ok(JobRecord {
             id: JobId::new(&Self::get_column::<String>(&row, "id")?),
@@ -201,6 +223,8 @@ impl ArgusSqlite {
             scheduled_at: Self::get_column(&row, "scheduled_at")?,
             started_at: Self::get_column(&row, "started_at")?,
             finished_at: Self::get_column(&row, "finished_at")?,
+            parent_job_id,
+            result,
         })
     }
 }
