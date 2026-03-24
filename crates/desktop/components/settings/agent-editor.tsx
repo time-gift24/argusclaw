@@ -214,7 +214,8 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                       parent_agent_id: e.target.value ? parseInt(e.target.value) : undefined,
                     })
                   }
-                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
+                  disabled={loading}
+                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <option value="">无（独立智能体）</option>
                   {parentAgentList

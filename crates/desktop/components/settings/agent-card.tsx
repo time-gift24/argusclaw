@@ -84,10 +84,15 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
           <div className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-muted-foreground" />
             <CardTitle className="text-base">{agent.display_name}</CardTitle>
+            {agent.agent_type === "subagent" && (
+              <Badge variant="secondary" className="text-xs">子智能体</Badge>
+            )}
           </div>
-          <Badge variant="outline" className="text-xs">
-            v{agent.version}
-          </Badge>
+          {agent.agent_type !== "subagent" && (
+            <Badge variant="outline" className="text-xs">
+              v{agent.version}
+            </Badge>
+          )}
         </div>
         <CardDescription className="text-xs">{agent.id}</CardDescription>
       </CardHeader>
