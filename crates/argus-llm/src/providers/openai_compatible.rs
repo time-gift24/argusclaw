@@ -116,6 +116,17 @@ impl SseFrameDecoder {
 
         events
     }
+
+    fn finish(&mut self) -> Vec<Result<LlmStreamEvent, LlmError>> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+
+        let frame = std::mem::take(&mut self.buffer);
+        extract_sse_data(&frame)
+            .map(|data| parse_stream_frame(&data))
+            .unwrap_or_default()
+    }
 }
 
 struct SseEventStream {
@@ -161,8 +172,10 @@ impl Stream for SseEventStream {
             match self.inner_stream.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => {
+                    let parsed_events = self.decoder.finish();
+                    self.pending_events.extend(parsed_events);
                     self.done = true;
-                    return Poll::Ready(None);
+                    continue;
                 }
                 Poll::Ready(Some(Ok(bytes))) => {
                     self.raw_stream_capture
@@ -187,18 +200,14 @@ impl Stream for SseEventStream {
 
 fn find_sse_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     let mut index = 0usize;
-    while index + 1 < buffer.len() {
-        if buffer[index] == b'\n' && buffer[index + 1] == b'\n' {
-            return Some((index, 2));
-        }
-
-        if index + 3 < buffer.len()
-            && buffer[index] == b'\r'
-            && buffer[index + 1] == b'\n'
-            && buffer[index + 2] == b'\r'
-            && buffer[index + 3] == b'\n'
-        {
-            return Some((index, 4));
+    while index < buffer.len() {
+        if let Some(first_len) = line_ending_len_at(buffer, index) {
+            let next_index = index + first_len;
+            if let Some(second_len) = line_ending_len_at(buffer, next_index) {
+                return Some((index, first_len + second_len));
+            }
+            index = next_index;
+            continue;
         }
 
         index += 1;
@@ -207,18 +216,34 @@ fn find_sse_frame_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+fn line_ending_len_at(buffer: &[u8], index: usize) -> Option<usize> {
+    match buffer.get(index) {
+        Some(b'\n') => Some(1),
+        Some(b'\r') if buffer.get(index + 1) == Some(&b'\n') => Some(2),
+        Some(b'\r') => Some(1),
+        _ => None,
+    }
+}
+
 fn extract_sse_data(frame: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(frame);
     let mut data_lines = Vec::new();
-
-    for raw_line in text.lines() {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-
+    let mut index = 0usize;
+    while index <= frame.len() {
+        let (line_end, separator_len) = match next_line_break(frame, index) {
+            Some((line_end, separator_len)) => (line_end, separator_len),
+            None => (frame.len(), 0),
+        };
+        let line = String::from_utf8_lossy(&frame[index..line_end]);
         if let Some(rest) = line.strip_prefix("data:") {
             data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
         } else if line == "data" {
             data_lines.push(String::new());
         }
+
+        if separator_len == 0 {
+            break;
+        }
+        index = line_end + separator_len;
     }
 
     if data_lines.is_empty() {
@@ -226,6 +251,18 @@ fn extract_sse_data(frame: &[u8]) -> Option<String> {
     } else {
         Some(data_lines.join("\n"))
     }
+}
+
+fn next_line_break(buffer: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut index = start;
+    while index < buffer.len() {
+        if let Some(separator_len) = line_ending_len_at(buffer, index) {
+            return Some((index, separator_len));
+        }
+        index += 1;
+    }
+
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -922,6 +959,7 @@ fn classify_http_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream;
 
     #[test]
     fn chat_completions_request_serializes_thinking() {
@@ -1147,6 +1185,45 @@ mod tests {
             events,
             vec![LlmStreamEvent::ContentDelta {
                 delta: "hi".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn sse_decoder_supports_carriage_return_frame_separator() {
+        let mut decoder = SseFrameDecoder::new();
+        let events =
+            decoder.push(&b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\r\r"[..]);
+
+        let events = events
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("CR-separated SSE frame should parse");
+
+        assert_eq!(
+            events,
+            vec![LlmStreamEvent::ContentDelta {
+                delta: "hi".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_event_stream_flushes_unterminated_final_frame() {
+        let stream = stream::iter(vec![Ok::<Vec<u8>, reqwest::Error>(
+            br#"data: {"choices":[{"delta":{"content":"tail"},"finish_reason":null}]}"#.to_vec(),
+        )]);
+        let events = SseEventStream::new("test", Box::pin(stream))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("unterminated final SSE frame should still parse");
+
+        assert_eq!(
+            events,
+            vec![LlmStreamEvent::ContentDelta {
+                delta: "tail".to_string(),
             }]
         );
     }
