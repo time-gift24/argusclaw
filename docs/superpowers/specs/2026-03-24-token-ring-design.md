@@ -11,23 +11,27 @@
 | `token_count` | Rust `ThreadSnapshotPayload` | 通过 Tauri IPC 拉取，持久化到 session state |
 | `context_window` | Rust `LlmProvider.context_window()` | 新增 Tauri 命令 `get_provider_context_window` |
 
+## 已知限制
+
+- **`Compacted` 事件是死事件**：Rust `Thread` 的 compactor 在 `send_message` 内部运行，但从未 emit `ThreadEvent::Compacted`。因此前端无法感知上下文压缩，环在压缩后不会更新至压缩后的估算值。这超出本 spec 范围，需单独处理。
+- **token_count 估算不精确**：发送消息后（turn 执行前）和压缩后，`token_count` 使用 `estimate_tokens()`（`len/4`）重算，与 LLM 返回的精确值不一致。环的显示会有跳变（例：准确值 40k → 估算 60k → 压缩后估算 35k → turn 完成后准确值 45k）。这是当前架构的固有 trade-off，不在本 spec 范围内修复。
+
 ## 实现方案
 
 ### 1. Rust 层 — 新增 Tauri 命令
 
 **文件**: `crates/desktop/src-tauri/src/commands.rs`
 
-新增命令，获取指定 provider 和模型的上下文窗口大小：
+新增命令，通过 `provider_id` 获取其 `LlmProvider.context_window()`：
 
 ```rust
 #[tauri::command]
 async fn get_provider_context_window(
-    provider_id: i32,
-    model: String,
+    provider_id: i64,
 ) -> Result<u32, String>
 ```
 
-内部调用 `LlmProvider.context_window()`，provider 不存在或模型查询失败时返回默认 `128000`。
+`LlmProvider::context_window()` 不接受 model 参数，统一返回 provider 的上下文窗口大小。provider 不存在时返回默认 `128000`。
 
 ### 2. Frontend — 持久化 token_count
 
@@ -43,9 +47,9 @@ interface ChatSessionState {
 }
 ```
 
-`setSession` / `addSession` 时同时设置 `tokenCount`，初始为空闲时设为 0。
+`newSessionState`（`addSession` / `activateSession` 对应处）新增 `tokenCount: 0`。
 
-在 `fetchThreadSnapshot` 返回后更新 `tokenCount`：
+在 `fetchThreadSnapshot` 返回后更新 `tokenCount`（在现有更新 `messages` 的逻辑旁）：
 
 ```typescript
 store.setState((s) => ({
@@ -67,8 +71,7 @@ store.setState((s) => ({
 
 ```typescript
 export async function getProviderContextWindow(
-  providerId: number,
-  model: string
+  providerId: number
 ): Promise<number>
 ```
 
@@ -92,18 +95,17 @@ export async function getProviderContextWindow(
 
 样式：`size-8`（32px），与 send 按钮视觉对齐。
 
-**依赖**: 确保 `@/components/assistant-ui/context-display` 存在（已由 assistant-ui 包提供，参见 [Context Display](https://www.assistant-ui.com/docs/ui/context-display)）。
+**依赖**: `@/components/assistant-ui/context-display`（assistant-ui 包自带，参见 [Context Display](https://www.assistant-ui.com/docs/ui/context-display)）。
 
 ### 5. TurnCompleted 事件更新 token_count
 
 **文件**: `crates/desktop/src-tauri/src/events/thread.rs`
 
-`TurnCompleted` 事件已包含 `token_usage`。前端在处理 `TurnCompleted` 事件时，更新 session state 的 `tokenCount`：
+`TurnCompleted` 事件已包含 `token_usage`。现有 `chat-store.ts` 中 `case "turn_completed":` 为 no-op（直接 `break`），需替换为更新逻辑：
 
 ```typescript
-// chat-store.ts 中的事件处理
-case "TurnCompleted": {
-  const { token_usage } = payload as ThreadEventPayload["TurnCompleted"];
+case "turn_completed": {
+  const { token_usage } = payload as ThreadEventPayload["turn_completed"];
   store.setState((s) => ({
     sessionsByKey: {
       ...s.sessionsByKey,
@@ -116,16 +118,18 @@ case "TurnCompleted": {
 }
 ```
 
+**注意**: `Idle` 事件触发 `refreshSnapshot` 时，`snapshot.token_count` 已是 `apply_turn_output` 后的准确值，与上述 `TurnCompleted` 逻辑一致，无需额外处理。
+
 ## 文件变更清单
 
 | 文件 | 改动 |
 |------|------|
-| `crates/desktop/src-tauri/src/commands.rs` | 新增 `get_provider_context_window` 命令 |
+| `crates/desktop/src-tauri/src/commands.rs` | 新增 `get_provider_context_window` 命令（参数为 `provider_id: i64`） |
 | `crates/desktop/src-tauri/src/lib.rs` | 注册新命令 |
 | `crates/desktop/lib/tauri.ts` | 新增 `getProviderContextWindow` 封装 |
-| `crates/desktop/lib/chat-store.ts` | `ChatSessionState` 新增 `tokenCount`、`contextWindow`；事件处理更新 tokenCount |
+| `crates/desktop/lib/chat-store.ts` | `ChatSessionState` 新增 `tokenCount`、`contextWindow`；`newSessionState` 初始化 `tokenCount: 0`；`fetchThreadSnapshot` 后更新 `tokenCount`；`turn_completed` 事件处理更新 `tokenCount` |
 | `crates/desktop/components/assistant-ui/thread.tsx` | `ComposerAction` 新增 `<ContextDisplay.Ring>` |
-| `crates/desktop/components/assistant-ui/context-display.tsx` | 可能需要确认存在（assistant-ui 包自带） |
+| `crates/desktop/components/assistant-ui/context-display.tsx` | 确认存在（assistant-ui 包自带） |
 
 ## 设计原则
 
