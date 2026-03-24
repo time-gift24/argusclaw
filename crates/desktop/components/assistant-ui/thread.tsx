@@ -12,6 +12,9 @@ import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
+import { useChatStore } from "@/lib/chat-store";
+import type { ChatStore } from "@/lib/chat-store";
+import { providers } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -152,6 +155,22 @@ const Composer: FC = () => {
 
 const ComposerAction: FC = () => {
   const session = useActiveChatSession();
+
+  // Fetch context window when session has provider and contextWindow is not yet populated
+  useEffect(() => {
+    if (!session?.effectiveProviderId || session.contextWindow !== null) return;
+    providers.getContextWindow(session.effectiveProviderId).then((cw) => {
+      useChatStore.setState((s: ChatStore) => ({
+        sessionsByKey: {
+          ...s.sessionsByKey,
+          [s.activeSessionKey!]: {
+            ...s.sessionsByKey[s.activeSessionKey!],
+            contextWindow: cw,
+          },
+        },
+      }));
+    });
+  }, [session?.effectiveProviderId, session?.contextWindow]);
 
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
