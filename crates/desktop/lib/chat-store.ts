@@ -482,17 +482,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case "turn_completed":
-        if (payload.type === "turn_completed") {
-          set((state) => ({
-            sessionsByKey: {
-              ...state.sessionsByKey,
-              [sessionKey]: {
-                ...state.sessionsByKey[sessionKey],
-                tokenCount: payload.total_tokens,
-              },
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              tokenCount: payload.total_tokens,
             },
-          }));
-        }
+          },
+        }));
         break;
 
       case "turn_failed":
