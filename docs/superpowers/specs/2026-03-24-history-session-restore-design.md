@@ -1,7 +1,7 @@
 # 历史会话恢复功能设计
 
 **日期**: 2026-03-24
-**状态**: 设计中
+**状态**: 审核中
 **负责人**: @claude
 
 ## 概述
@@ -20,6 +20,7 @@
 - 点击线程行加载历史消息到聊天区
 - 恢复时优先使用原 provider，不存在则提示用户选择
 - 支持重命名和删除会话/线程
+- **线程重命名不在本版本范围内**（如需可在后续迭代中添加 `rename_thread` API）
 
 ---
 
@@ -73,11 +74,11 @@
 
 | 命令 | 输入 | 输出 | 状态 |
 |------|------|------|------|
-| `list_sessions` | - | `Vec<SessionSummary>` | 已有 |
-| `list_threads` | `session_id: i64` | `Vec<ThreadSummary>` | 已有 |
-| `rename_session` | `session_id: i64, name: String` | `()` | **需新增** |
-| `delete_session` | `session_id: i64` | `()` | 已有 |
-| `delete_thread` | `thread_id: String` | `()` | **需新增** |
+| `list_sessions` | - | `Vec<SessionSummary>` | **需新增 Tauri command** |
+| `list_threads` | `session_id: i64` | `Vec<ThreadSummary>` | **需新增 Tauri command** |
+| `rename_session` | `session_id: i64, name: String` | `()` | **需新增（完整实现）** |
+| `delete_session` | `session_id: i64` | `()` | **需新增 Tauri command** |
+| `delete_thread` | `thread_id: String` | `()` | **需新增 Tauri command**（后端已有 `SessionManager::delete_thread`）|
 | `get_thread_snapshot` | `session_id, thread_id` | 完整快照 | 已有 |
 | `get_provider` | `provider_id: i64` | Provider 或 None | 已有 |
 
@@ -92,11 +93,14 @@ pub struct SessionSummary {
 }
 ```
 
-#### ThreadSummary（已有）
+#### ThreadSummary（需修改）
+
+`provider_id` 字段需新增到 `ThreadSummary` 中，用于恢复时检查 provider 是否仍然有效。
 
 ```rust
 pub struct ThreadSummary {
-    pub id: ThreadId,        // UUID
+    pub id: ThreadId,              // UUID
+    pub provider_id: Option<i64>,   // ★ 新增：恢复时需检查此 provider 是否仍存在
     pub title: Option<String>,
     pub turn_count: i64,
     pub token_count: i64,
@@ -106,17 +110,27 @@ pub struct ThreadSummary {
 
 ### 前端（chat-store.ts）
 
+**与现有 `sessionsByKey` 的共存策略**：
+
+现有 `chat-store.ts` 使用 `sessionKey = "templateId::providerPreferenceId"` 管理活跃聊天会话。历史会话功能引入新的状态结构 `historySessions`，两个数据域完全独立：
+
+- **`sessionsByKey`**：活跃会话（当前对话中），按模板+provider 索引
+- **`historySessions`**：历史会话浏览（只读列表），按 `session_id` 索引
+
+恢复历史线程时，将历史数据加载到 `sessionsByKey` 中，同时更新 `historySessions` 中的统计信息（线程数等）。
+
 新增状态：
 
 ```typescript
-interface SessionStore {
+interface HistorySessionState {
   // 历史会话列表
   sessions: SessionSummary[];
-  expandedSessions: Set<number>;   // session id 集合
+  expandedSessions: Set<number>;   // 已展开的 session id 集合
   threads: Map<number, ThreadSummary[]>;  // sessionId -> threads
 
   // 加载状态
   historyLoading: boolean;
+  threadsLoading: Set<number>;  // 正在加载线程的 session id
 
   // 操作方法
   loadSessions(): Promise<void>;
@@ -166,9 +180,15 @@ interface SessionStore {
 
 ### 后端改动
 
-1. **`crates/desktop/src-tauri/src/commands.rs`**：新增 `rename_session` 和 `delete_thread` 命令
-2. **`crates/argus-session/src/manager.rs`**：确认/实现 `rename_session` 和 `delete_thread` 方法
-3. **`crates/argus-repository`**：确认 `delete_thread` 在 `ThreadRepository` trait 中存在
+1. **`crates/argus-session/src/session.rs`**：`ThreadSummary` 新增 `provider_id: Option<i64>` 字段
+2. **`crates/argus-session/src/manager.rs`**：新增 `rename_session(session_id, new_name)` 方法（SQL UPDATE）
+3. **`crates/argus-wing/src/lib.rs`**：`ArgusWing` facade 新增 `rename_session` 代理方法
+4. **`crates/desktop/src-tauri/src/commands.rs`**：新增以下 Tauri command：
+   - `list_sessions` → 调用 `SessionManager::list_sessions()`
+   - `list_threads` → 调用 `SessionManager::list_threads(session_id)`
+   - `delete_session` → 调用 `ArgusWing::delete_session(session_id)`
+   - `delete_thread` → 调用 `ArgusWing::delete_thread(thread_id)`
+   - `rename_session` → 调用 `ArgusWing::rename_session(session_id, name)`
 
 ### 前端改动
 
@@ -177,27 +197,36 @@ interface SessionStore {
 3. **`crates/desktop/lib/tauri.ts`**：新增 Tauri command wrapper
 4. **`crates/desktop/app/`**：新增历史页面路由或整合到现有侧边栏
 
-### Provider 恢复检查
+### Provider 恢复检查 & 线程加载流程
 
 在 `loadThread()` 流程中：
 
 1. 获取 `ThreadSummary`（含 `provider_id`）
-2. 调用 `get_provider(provider_id)`
-3. 若返回 null → toast 提示"Provider 不存在，请选择新的"
-4. 若返回有效 → 调用 `get_thread_snapshot` 并加载消息
+2. 调用 `get_provider(provider_id)` 检查是否存在
+3. **若 provider 不存在** → toast 提示"该会话使用的 Provider 已不存在，请选择一个新的"，并触发 provider 选择器高亮
+4. **若 provider 存在** → 继续步骤 5
+5. 调用 `get_thread_snapshot(session_id, thread_id)` 获取完整消息历史
+6. 启动该线程的事件转发订阅（参考 `create_chat_session` 中 `ThreadSubscriptions::start` 的模式），确保恢复后实时事件能推送到前端
+7. 将消息数据加载到 `sessionsByKey`，设置当前活跃会话上下文
+
+> 恢复后的线程被视为"活跃会话"，用户可以继续发送新消息、接收实时事件流。
 
 ---
 
 ## 错误处理
 
+所有 toast 消息应**包含底层错误详情**，而非静态字符串：
+
 | 场景 | 处理 |
 |------|------|
-| `list_sessions` 失败 | toast "加载历史会话失败" |
-| `rename_session` 失败 | toast "重命名失败" |
-| `delete_session` 失败 | toast "删除会话失败" |
-| `delete_thread` 失败 | toast "删除线程失败" |
-| `get_thread_snapshot` 失败 | toast "加载历史消息失败" |
+| `list_sessions` 失败 | toast `"加载历史会话失败: ${error}"` |
+| `list_threads` 失败 | toast `"加载线程列表失败: ${error}"` |
+| `rename_session` 失败 | toast `"重命名失败: ${error}"` |
+| `delete_session` 失败 | toast `"删除会话失败: ${error}"` |
+| `delete_thread` 失败 | toast `"删除线程失败: ${error}"` |
+| `get_thread_snapshot` 失败 | toast `"加载历史消息失败: ${error}"` |
 | Provider 不存在 | toast "该会话使用的 Provider 已不存在，请选择一个新的" |
+| 并发删除（已删除的会话/线程） | 静默忽略（列表自动刷新），无需 toast |
 
 ---
 
@@ -207,8 +236,11 @@ interface SessionStore {
 2. **展开/折叠**：快速连续点击、展开多个
 3. **恢复历史线程**：消息数 1 / 100 / 1000 条
 4. **重命名**：空名称 / 正常名称 / 超长名称
-5. **删除**：取消确认、确认删除
-6. **Provider 不存在场景**：模拟 provider 已删除的情况
+5. **删除**：取消确认、确认删除、确认后验证数据完整性（列表刷新、计数更新）
+6. **Provider 不存在场景**：模拟 provider 已删除，验证 toast 和 provider 选择器高亮
+7. **并发安全**：同时打开多个标签页，一方删除会话/线程，另一方列表自动同步
+8. **事件转发订阅**：恢复历史线程后，发送新消息验证实时事件流正常接收
+9. **数据一致性**：删除线程后验证会话的 `thread_count` 正确递减
 
 ---
 
@@ -216,12 +248,14 @@ interface SessionStore {
 
 | 模块 | 任务 | 优先级 |
 |------|------|--------|
-| 后端 | 确认/实现 `rename_session` | P1 |
-| 后端 | 确认/实现 `delete_thread` | P1 |
+| 后端 | 完整实现 `rename_session`（DB UPDATE + facade + Tauri command） | P1 |
+| 后端 | 新增 Tauri command：`list_sessions`、`list_threads`、`delete_session` | P1 |
+| 后端 | 新增 Tauri command：`delete_thread`（后端已有） | P1 |
+| 后端 | `ThreadSummary` 新增 `provider_id` 字段 | P1 |
 | 前端 | Tauri command wrappers | P1 |
-| 前端 | chat-store 状态管理 | P1 |
+| 前端 | chat-store 状态管理（含与 `sessionsByKey` 共存设计） | P1 |
 | 前端 | SessionList / SessionItem 组件 | P1 |
 | 前端 | ThreadItem 组件 | P1 |
 | 前端 | 右键菜单（重命名/删除对话框） | P2 |
-| 前端 | Provider 恢复检查逻辑 | P1 |
+| 前端 | Provider 恢复检查逻辑 + 事件转发订阅 | P1 |
 | 前端 | 空状态 / 加载状态 UI | P2 |
