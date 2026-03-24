@@ -5,6 +5,7 @@ import { agents, chat, providers } from "@/lib/tauri";
 import type {
   ApprovalRequestPayload,
   ThreadEventEnvelope,
+  ThreadEventPayload,
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
 import type { PlanItem } from "@/lib/types/plan";
@@ -42,6 +43,8 @@ export interface ChatSessionState {
     timeout_secs: number;
   } | null;
   error: string | null;
+  tokenCount: number;
+  contextWindow: number | null;
 }
 
 export interface ChatStore {
@@ -138,6 +141,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingAssistant: null,
         pendingApprovalRequest: null,
         error: null,
+        tokenCount: 0,
+        contextWindow: null,
       };
 
       set((state) => ({
@@ -263,6 +268,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: snapshot.messages,
             pendingAssistant: null,
             status: "idle",
+            tokenCount: snapshot.token_count,
           },
         },
       }));
@@ -476,6 +482,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
 
       case "turn_completed":
+        if (payload.type === "turn_completed") {
+          set((state) => ({
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...state.sessionsByKey[sessionKey],
+                tokenCount: payload.total_tokens,
+              },
+            },
+          }));
+        }
         break;
 
       case "turn_failed":
