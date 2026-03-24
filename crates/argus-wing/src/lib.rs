@@ -121,12 +121,17 @@ impl ArgusWing {
         // Create compactor manager
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
 
-        // Create job manager
-        let job_manager = Arc::new(JobManager::new());
-        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
-
-        // Create provider resolver wrapper
+        // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+
+        // Create job manager with all dependencies
+        let job_manager = Arc::new(JobManager::new(
+            pool.clone(),
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
+        ));
+        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
 
         // Create session manager
         let trace_dir = default_trace_dir();
@@ -199,9 +204,17 @@ impl ArgusWing {
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
-        let job_manager = Arc::new(JobManager::new());
-        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
+        // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
+
+        // Create job manager with all dependencies
+        let job_manager = Arc::new(JobManager::new(
+            pool.clone(),
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
+        ));
+        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(

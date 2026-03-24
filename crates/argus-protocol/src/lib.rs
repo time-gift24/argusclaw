@@ -71,4 +71,7 @@ pub use ssrf::{
 };
 pub use tool::{NamedTool, ToolError};
 
+pub mod provider_resolver;
+pub use provider_resolver::ProviderResolver;
+
 pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};

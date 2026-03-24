@@ -12,8 +12,8 @@ use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::provider_resolver::ProviderResolver;
 use crate::session::{Session, SessionSummary, ThreadSummary};
+use argus_protocol::ProviderResolver;
 
 /// Manages sessions and their threads.
 pub struct SessionManager {

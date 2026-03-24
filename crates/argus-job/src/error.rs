@@ -28,4 +28,8 @@ pub enum JobError {
     /// Internal error.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Turn execution failed.
+    #[error("turn execution failed: {0}")]
+    TurnResult(String),
 }
