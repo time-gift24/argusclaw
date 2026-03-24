@@ -337,7 +337,8 @@ pub fn create_openai_compatible_provider(
 }
 
 pub struct OpenAiCompatibleProvider {
-    client: reqwest::Client,
+    request_client: reqwest::Client,
+    stream_client: reqwest::Client,
     base_url: String,
     model: String,
 }
@@ -368,17 +369,13 @@ impl OpenAiCompatibleProvider {
             headers.insert(header_name, header_value);
         }
 
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(config.timeout)
-            .build()
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "openai-compatible".to_string(),
-                reason: format!("failed to build HTTP client: {e}"),
-            })?;
+        let request_client = build_http_client(&headers, Some(config.timeout), None, None)?;
+        let stream_client =
+            build_http_client(&headers, None, Some(config.timeout), Some(config.timeout))?;
 
         Ok(Self {
-            client,
+            request_client,
+            stream_client,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             model: config.model,
         })
@@ -409,7 +406,12 @@ impl OpenAiCompatibleProvider {
     }
 
     fn build_chat_request(&self, body: &ChatCompletionsRequest) -> reqwest::RequestBuilder {
-        let mut request = self.client.post(self.endpoint()).json(body);
+        let client = if body.stream {
+            &self.stream_client
+        } else {
+            &self.request_client
+        };
+        let mut request = client.post(self.endpoint()).json(body);
         if body.stream {
             request = request
                 .header(ACCEPT, "text/event-stream")
@@ -418,6 +420,30 @@ impl OpenAiCompatibleProvider {
 
         request
     }
+}
+
+fn build_http_client(
+    headers: &HeaderMap,
+    timeout: Option<Duration>,
+    read_timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+) -> Result<reqwest::Client, LlmError> {
+    let mut builder = reqwest::Client::builder().default_headers(headers.clone());
+
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    if let Some(read_timeout) = read_timeout {
+        builder = builder.read_timeout(read_timeout);
+    }
+    if let Some(connect_timeout) = connect_timeout {
+        builder = builder.connect_timeout(connect_timeout);
+    }
+
+    builder.build().map_err(|e| LlmError::RequestFailed {
+        provider: "openai-compatible".to_string(),
+        reason: format!("failed to build HTTP client: {e}"),
+    })
 }
 
 fn model_supports_thinking(model: &str) -> bool {
@@ -847,12 +873,9 @@ fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
             tracing::error!(
                 error = %e,
                 raw_sse_frame = %data,
-                "failed to parse SSE frame as JSON"
+                "failed to parse SSE frame as JSON; skipping malformed frame"
             );
-            return vec![Err(LlmError::InvalidResponse {
-                provider: "openai-compatible".to_string(),
-                reason: format!("invalid SSE frame: {e}"),
-            })];
+            return Vec::new();
         }
     };
 
@@ -1208,6 +1231,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sse_decoder_skips_malformed_frame_and_continues() {
+        let mut decoder = SseFrameDecoder::new();
+        let events = decoder.push(
+            &b"data: {\"choices\":[{\"delta\":{\"content\":\"ok-1\"},\"finish_reason\":null}]}\n\n\
+data: {\"choices\":[{\"delta\":invalid-json}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"ok-2\"},\"finish_reason\":null}]}\n\n"[..],
+        );
+
+        let events = events
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("malformed frame should be skipped without failing the stream");
+
+        assert_eq!(
+            events,
+            vec![
+                LlmStreamEvent::ContentDelta {
+                    delta: "ok-1".to_string(),
+                },
+                LlmStreamEvent::ContentDelta {
+                    delta: "ok-2".to_string(),
+                },
+            ]
+        );
+    }
     #[tokio::test]
     async fn sse_event_stream_flushes_unterminated_final_frame() {
         let stream = stream::iter(vec![Ok::<Vec<u8>, reqwest::Error>(

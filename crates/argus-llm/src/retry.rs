@@ -10,6 +10,7 @@
 //! - Adapted retryability classification to ArgusClaw's reduced `LlmError` surface.
 //! - Extends retry setup to `stream_complete` and `stream_complete_with_tools`.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -68,21 +69,149 @@ pub struct RetryProvider {
     config: RetryConfig,
 }
 
+type StreamRestartFuture = Pin<Box<dyn Future<Output = Result<LlmEventStream, LlmError>> + Send>>;
+type StreamRestartFn = Box<dyn FnMut() -> StreamRestartFuture + Send>;
+
 struct RetryEventStream {
-    retry_events: Vec<LlmStreamEvent>,
-    inner_stream: LlmEventStream,
+    pending_events: VecDeque<LlmStreamEvent>,
+    inner_stream: Option<LlmEventStream>,
+    restart_stream: StreamRestartFn,
+    restart_delay: Option<Pin<Box<tokio::time::Sleep>>>,
+    restart_future: Option<StreamRestartFuture>,
+    max_retries: u32,
+    retries_used: u32,
+    emitted_substantive_event: bool,
+    provider_name: String,
+    stream_label: &'static str,
+}
+
+impl RetryEventStream {
+    fn new(
+        retry_events: Vec<LlmStreamEvent>,
+        inner_stream: LlmEventStream,
+        restart_stream: StreamRestartFn,
+        max_retries: u32,
+        retries_used: u32,
+        provider_name: String,
+        stream_label: &'static str,
+    ) -> Self {
+        Self {
+            pending_events: retry_events.into(),
+            inner_stream: Some(inner_stream),
+            restart_stream,
+            restart_delay: None,
+            restart_future: None,
+            max_retries,
+            retries_used,
+            emitted_substantive_event: false,
+            provider_name,
+            stream_label,
+        }
+    }
+
+    fn should_retry_stream_error(&self, err: &LlmError) -> bool {
+        !self.emitted_substantive_event && self.retries_used < self.max_retries && is_retryable(err)
+    }
+
+    fn queue_stream_retry(&mut self, err: &LlmError) {
+        let attempt = self.retries_used + 1;
+        self.retries_used += 1;
+
+        self.pending_events.push_back(LlmStreamEvent::RetryAttempt {
+            attempt,
+            max_retries: self.max_retries,
+            error: err.to_string(),
+        });
+
+        let delay = match err {
+            LlmError::RateLimited {
+                retry_after: Some(duration),
+                ..
+            } => *duration,
+            _ => retry_backoff_delay(attempt - 1),
+        };
+
+        tracing::warn!(
+            provider = %self.provider_name,
+            attempt,
+            max_retries = self.max_retries,
+            delay_ms = delay.as_millis() as u64,
+            error = %err,
+            "Retrying after transient early stream error{}",
+            self.stream_label
+        );
+
+        self.inner_stream = None;
+        self.restart_future = None;
+        self.restart_delay = Some(Box::pin(tokio::time::sleep(delay)));
+    }
+}
+
+fn is_substantive_stream_event(event: &LlmStreamEvent) -> bool {
+    !matches!(event, LlmStreamEvent::RetryAttempt { .. })
 }
 
 impl Stream for RetryEventStream {
     type Item = Result<LlmStreamEvent, LlmError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Yield retry events first
-        if !self.retry_events.is_empty() {
-            return Poll::Ready(Some(Ok(self.retry_events.remove(0))));
+        loop {
+            if let Some(event) = self.pending_events.pop_front() {
+                return Poll::Ready(Some(Ok(event)));
+            }
+
+            if let Some(delay) = self.restart_delay.as_mut() {
+                match delay.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(()) => {
+                        self.restart_delay = None;
+                        self.restart_future = Some((self.restart_stream)());
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(future) = self.restart_future.as_mut() {
+                match future.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(stream)) => {
+                        self.restart_future = None;
+                        self.inner_stream = Some(stream);
+                        continue;
+                    }
+                    Poll::Ready(Err(err)) => {
+                        self.restart_future = None;
+                        if self.should_retry_stream_error(&err) {
+                            self.queue_stream_retry(&err);
+                            continue;
+                        }
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
+            }
+
+            let Some(inner_stream) = self.inner_stream.as_mut() else {
+                return Poll::Ready(None);
+            };
+
+            match inner_stream.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(event))) => {
+                    if is_substantive_stream_event(&event) {
+                        self.emitted_substantive_event = true;
+                    }
+                    return Poll::Ready(Some(Ok(event)));
+                }
+                Poll::Ready(Some(Err(err))) => {
+                    if self.should_retry_stream_error(&err) {
+                        self.queue_stream_retry(&err);
+                        continue;
+                    }
+                    return Poll::Ready(Some(Err(err)));
+                }
+                Poll::Ready(None) => return Poll::Ready(None),
+            }
         }
-        // Then forward inner stream
-        Pin::new(&mut self.inner_stream).poll_next(cx)
     }
 }
 
@@ -198,11 +327,12 @@ impl LlmProvider for RetryProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
-        let inner = &self.inner;
+        let inner = self.inner.clone();
         let result = self
             .retry_loop(
                 || {
                     let req = request.clone();
+                    let inner = inner.clone();
                     async move { inner.stream_complete(req).await }
                 },
                 " (stream)",
@@ -210,10 +340,25 @@ impl LlmProvider for RetryProvider {
             .await;
 
         match result {
-            Ok((stream, retry_events)) => Ok(Box::pin(RetryEventStream {
-                retry_events,
-                inner_stream: stream,
-            })),
+            Ok((stream, retry_events)) => {
+                let setup_retry_count = retry_events.len() as u32;
+                let restart_inner = self.inner.clone();
+                let restart_request = request.clone();
+
+                Ok(Box::pin(RetryEventStream::new(
+                    retry_events,
+                    stream,
+                    Box::new(move || {
+                        let inner = restart_inner.clone();
+                        let request = restart_request.clone();
+                        Box::pin(async move { inner.stream_complete(request).await })
+                    }),
+                    self.config.max_retries,
+                    setup_retry_count,
+                    self.inner.active_model_name(),
+                    " (stream)",
+                )))
+            }
             Err((err, retry_events)) => {
                 // Even on failure, return retry events in the stream before the error
                 use futures_util::{StreamExt, stream};
@@ -230,11 +375,12 @@ impl LlmProvider for RetryProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
-        let inner = &self.inner;
+        let inner = self.inner.clone();
         let result = self
             .retry_loop(
                 || {
                     let req = request.clone();
+                    let inner = inner.clone();
                     async move { inner.stream_complete_with_tools(req).await }
                 },
                 " (stream tools)",
@@ -242,10 +388,25 @@ impl LlmProvider for RetryProvider {
             .await;
 
         match result {
-            Ok((stream, retry_events)) => Ok(Box::pin(RetryEventStream {
-                retry_events,
-                inner_stream: stream,
-            })),
+            Ok((stream, retry_events)) => {
+                let setup_retry_count = retry_events.len() as u32;
+                let restart_inner = self.inner.clone();
+                let restart_request = request.clone();
+
+                Ok(Box::pin(RetryEventStream::new(
+                    retry_events,
+                    stream,
+                    Box::new(move || {
+                        let inner = restart_inner.clone();
+                        let request = restart_request.clone();
+                        Box::pin(async move { inner.stream_complete_with_tools(request).await })
+                    }),
+                    self.config.max_retries,
+                    setup_retry_count,
+                    self.inner.active_model_name(),
+                    " (stream tools)",
+                )))
+            }
             Err((err, retry_events)) => {
                 // Even on failure, return retry events in the stream before the error
                 use futures_util::{StreamExt, stream};
@@ -297,7 +458,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use futures_util::Stream;
+    use futures_util::{Stream, StreamExt, stream};
 
     use super::*;
     use argus_protocol::llm::{FinishReason, LlmStreamEvent};
@@ -406,6 +567,100 @@ mod tests {
 
     struct NonRetryableProvider {
         calls: AtomicUsize,
+    }
+
+    struct RecoverableStreamProvider {
+        calls: AtomicUsize,
+        fail_before_first_event: AtomicUsize,
+        fail_after_first_event: bool,
+    }
+
+    impl RecoverableStreamProvider {
+        fn fail_before_first_event(times: usize) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_before_first_event: AtomicUsize::new(times),
+                fail_after_first_event: false,
+            }
+        }
+
+        fn fail_after_first_event() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_before_first_event: AtomicUsize::new(0),
+                fail_after_first_event: true,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecoverableStreamProvider {
+        fn model_name(&self) -> &str {
+            "recoverable-stream"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!()
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!()
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<LlmEventStream, LlmError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+
+            if self
+                .fail_before_first_event
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(Box::pin(stream::iter(vec![Err(LlmError::RequestFailed {
+                    provider: "recoverable-stream".to_string(),
+                    reason: "connection reset".to_string(),
+                })])));
+            }
+
+            if self.fail_after_first_event {
+                return Ok(Box::pin(stream::iter(vec![
+                    Ok(LlmStreamEvent::ContentDelta {
+                        delta: "partial".to_string(),
+                    }),
+                    Err(LlmError::RequestFailed {
+                        provider: "recoverable-stream".to_string(),
+                        reason: "connection reset".to_string(),
+                    }),
+                ])));
+            }
+
+            Ok(Box::pin(stream::iter(vec![
+                Ok(LlmStreamEvent::ContentDelta {
+                    delta: "ok".to_string(),
+                }),
+                Ok(LlmStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ])))
+        }
     }
 
     #[async_trait]
@@ -542,6 +797,68 @@ mod tests {
         } else {
             panic!("expected RetryAttempt event");
         }
+    }
+
+    #[tokio::test]
+    async fn retry_provider_retries_stream_errors_before_first_event() {
+        let inner = Arc::new(RecoverableStreamProvider::fail_before_first_event(1));
+        let provider = RetryProvider::new(inner.clone(), RetryConfig { max_retries: 3 });
+
+        let events = provider
+            .stream_complete(CompletionRequest::new(vec![]))
+            .await
+            .expect("stream should recover")
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            inner.calls(),
+            2,
+            "should reconnect once after early stream failure"
+        );
+        assert_eq!(events.len(), 3, "retry event + content + finish");
+        assert!(matches!(
+            &events[0],
+            Ok(LlmStreamEvent::RetryAttempt { attempt: 1, .. })
+        ));
+        assert!(matches!(
+            &events[1],
+            Ok(LlmStreamEvent::ContentDelta { delta }) if delta == "ok"
+        ));
+        assert!(matches!(
+            &events[2],
+            Ok(LlmStreamEvent::Finished {
+                finish_reason: FinishReason::Stop
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_provider_does_not_retry_stream_errors_after_output_started() {
+        let inner = Arc::new(RecoverableStreamProvider::fail_after_first_event());
+        let provider = RetryProvider::new(inner.clone(), RetryConfig { max_retries: 3 });
+
+        let events = provider
+            .stream_complete(CompletionRequest::new(vec![]))
+            .await
+            .expect("stream should start")
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            inner.calls(),
+            1,
+            "should not reconnect after content started"
+        );
+        assert!(matches!(
+            &events[0],
+            Ok(LlmStreamEvent::ContentDelta { delta }) if delta == "partial"
+        ));
+        assert!(matches!(
+            &events[1],
+            Err(LlmError::RequestFailed { provider, reason })
+                if provider == "recoverable-stream" && reason == "connection reset"
+        ));
     }
 
     #[test]
