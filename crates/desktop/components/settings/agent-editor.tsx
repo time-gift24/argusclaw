@@ -3,7 +3,19 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
-import { CircleHelp, Save } from "lucide-react"
+import { HugeiconsIcon } from "@hugeicons/react"
+import {
+  SaveIcon,
+  InformationCircleIcon,
+  Tick02Icon,
+  Add01Icon,
+  Cancel01Icon,
+  Settings02Icon,
+  BrainIcon,
+  UserIcon,
+  CodeIcon,
+  ArrowDown02Icon,
+} from "@hugeicons/core-free-icons"
 import { agents, providers, tools, type AgentRecord, type LlmProviderSummary, type ToolInfo } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
@@ -11,8 +23,30 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
+  Field,
+  FieldGroup,
+  FieldDescription,
+  FieldTitle,
+} from "@/components/ui/field"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useToast } from "@/components/ui/toast"
+import { Badge } from "@/components/ui/badge"
 
 interface AgentEditorProps {
   agentId?: number
@@ -150,15 +184,29 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   }
 
   return (
-    <div className="w-full space-y-4">
+    <div className="w-full space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-base font-semibold">
-          {parentId !== undefined ? "新建子智能体" : isEditing && formData.parent_agent_id ? "编辑子智能体" : isEditing ? "编辑智能体" : "新建智能体"}
-        </h1>
+        <div>
+          <h1 className="text-base font-semibold">
+            {parentId !== undefined ? "新建子智能体" : isEditing && formData.parent_agent_id ? "编辑子智能体" : isEditing ? "编辑智能体" : "新建智能体"}
+          </h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            {isEditing ? `ID: ${agentId}` : "创建新的智能体配置"}
+          </p>
+        </div>
         <Button size="sm" onClick={handleSave} disabled={saving || !canSave}>
-          <Save className="h-4 w-4 mr-1" />
-          {saving ? "保存中..." : "保存"}
+          {saving ? (
+            <>
+              <HugeiconsIcon icon={ArrowDown02Icon} strokeWidth={2} className="size-3.5 animate-spin" />
+              保存中...
+            </>
+          ) : (
+            <>
+              <HugeiconsIcon icon={SaveIcon} strokeWidth={2} className="size-3.5" />
+              保存
+            </>
+          )}
         </Button>
       </div>
 
@@ -167,144 +215,217 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         {/* Left Sidebar - Config */}
         <div className="col-span-2 space-y-4">
           {/* Basic Info */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">基本信息</h2>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="display_name" className="text-xs">名称</Label>
-                <Input
-                  id="display_name"
-                  value={formData.display_name}
-                  onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                  placeholder="我的智能体"
-                  required
-                />
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center gap-2">
+                <HugeiconsIcon icon={UserIcon} strokeWidth={2} className="size-4 text-muted-foreground" />
+                <CardTitle>基本信息</CardTitle>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="version" className="text-xs">版本</Label>
+              <CardDescription>设置智能体的基本属性</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <FieldGroup className="gap-4">
+                <Field>
+                  <FieldTitle>
+                    名称 <span className="text-destructive">*</span>
+                  </FieldTitle>
                   <Input
-                    id="version"
-                    value={formData.version}
-                    onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                    placeholder="1.0.0"
+                    id="display_name"
+                    value={formData.display_name}
+                    onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+                    placeholder="我的智能体"
                     required
                   />
+                </Field>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Field>
+                    <FieldTitle>版本</FieldTitle>
+                    <Input
+                      id="version"
+                      value={formData.version}
+                      onChange={(e) => setFormData({ ...formData, version: e.target.value })}
+                      placeholder="1.0.0"
+                    />
+                  </Field>
+                  <Field>
+                    <FieldTitle>描述</FieldTitle>
+                    <Input
+                      id="description"
+                      value={formData.description}
+                      onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                      placeholder="简短描述"
+                    />
+                  </Field>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="description" className="text-xs">描述</Label>
-                  <Input
-                    id="description"
-                    value={formData.description}
-                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                    placeholder="简短描述"
-                  />
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="parent_agent_id" className="text-xs">父智能体</Label>
-                <select
-                  id="parent_agent_id"
-                  value={formData.parent_agent_id?.toString() ?? ""}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      parent_agent_id: e.target.value ? parseInt(e.target.value) : undefined,
-                    })
-                  }
-                  disabled={loading}
-                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <option value="">无（独立智能体）</option>
-                  {parentAgentList
-                    .filter((a) => !excludedAgentIds.has(a.id))
-                    .map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.display_name} (v{a.version})
-                      </option>
-                    ))}
-                </select>
-              </div>
-            </div>
-          </div>
+
+                <Field>
+                  <FieldTitle>父智能体</FieldTitle>
+                  <Select
+                    value={formData.parent_agent_id?.toString() ?? ""}
+                    onValueChange={(value) =>
+                      setFormData({
+                        ...formData,
+                        parent_agent_id: value ? parseInt(value) : undefined,
+                      })
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="无（独立智能体）" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">无（独立智能体）</SelectItem>
+                      {parentAgentList
+                        .filter((a) => !excludedAgentIds.has(a.id))
+                        .map((a) => (
+                          <SelectItem key={a.id} value={a.id.toString()}>
+                            {a.display_name} (v{a.version})
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </FieldGroup>
+            </CardContent>
+          </Card>
 
           {/* LLM Config */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">模型配置</h2>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="provider_id" className="text-xs">LLM 提供者</Label>
-                <select
-                  id="provider_id"
-                  value={formData.provider_id ?? ""}
-                  onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
-                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
-                >
-                  <option value="">不指定提供者</option>
-                  {providerList.map((p) => (
-                    <option
-                      key={p.id}
-                      value={p.id}
-                      disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
-                    >
-                      {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写)" : ""}
-                    </option>
-                  ))}
-                </select>
-                {selectedProvider?.secret_status === "requires_reentry" && (
-                  <p className="text-xs text-amber-600 mt-1">当前 Provider 的密钥需要重新填写</p>
-                )}
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center gap-2">
+                <HugeiconsIcon icon={Settings02Icon} strokeWidth={2} className="size-4 text-muted-foreground" />
+                <CardTitle>模型配置</CardTitle>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="max_tokens" className="text-xs">最大 Token</Label>
-                  <Input
-                    id="max_tokens"
-                    type="number"
-                    value={formData.max_tokens || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        max_tokens: e.target.value ? parseInt(e.target.value) : undefined,
-                      })
+              <CardDescription>配置 LLM 提供者和参数</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <FieldGroup className="gap-4">
+                <Field>
+                  <FieldTitle>LLM 提供者</FieldTitle>
+                  <Select
+                    value={formData.provider_id?.toString() ?? ""}
+                    onValueChange={(value) =>
+                      setFormData({ ...formData, provider_id: value ? parseInt(value) : null })
                     }
-                    placeholder="4096"
-                  />
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="不指定提供者" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">不指定提供者</SelectItem>
+                      {providerList.map((p) => (
+                        <SelectItem
+                          key={p.id}
+                          value={p.id.toString()}
+                          disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span>{p.display_name}</span>
+                            {p.is_default && (
+                              <Badge variant="secondary" className="text-[10px] px-1 py-0">默认</Badge>
+                            )}
+                            {p.secret_status === "requires_reentry" && (
+                              <Badge variant="outline" className="text-[10px] px-1 py-0 border-amber-300 text-amber-700">
+                                需重新填写
+                              </Badge>
+                            )}
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedProvider?.secret_status === "requires_reentry" && (
+                    <FieldDescription className="text-amber-600">
+                      当前 Provider 的密钥需要重新填写
+                    </FieldDescription>
+                  )}
+                </Field>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Field>
+                    <FieldTitle>
+                      <div className="flex items-center gap-1">
+                        最大 Token
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={(
+                              <button
+                                type="button"
+                                className="inline-flex size-3.5 items-center justify-center rounded-sm text-muted-foreground"
+                              >
+                                <HugeiconsIcon icon={InformationCircleIcon} strokeWidth={2} className="size-3" />
+                              </button>
+                            )}
+                          />
+                          <TooltipContent side="top">模型单次 turn 允许返回的最大 token</TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </FieldTitle>
+                    <Input
+                      id="max_tokens"
+                      type="number"
+                      value={formData.max_tokens || ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          max_tokens: e.target.value ? parseInt(e.target.value) : undefined,
+                        })
+                      }
+                      placeholder="4096"
+                    />
+                  </Field>
+                  <Field>
+                    <FieldTitle>
+                      <div className="flex items-center gap-1">
+                        Temperature
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={(
+                              <button
+                                type="button"
+                                className="inline-flex size-3.5 items-center justify-center rounded-sm text-muted-foreground"
+                              >
+                                <HugeiconsIcon icon={InformationCircleIcon} strokeWidth={2} className="size-3" />
+                              </button>
+                            )}
+                          />
+                          <TooltipContent side="top">控制输出的随机性，0-2 之间</TooltipContent>
+                        </Tooltip>
+                      </div>
+                    </FieldTitle>
+                    <Input
+                      id="temperature"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="2"
+                      value={formData.temperature ?? ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          temperature: e.target.value ? parseFloat(e.target.value) : undefined,
+                        })
+                      }
+                      placeholder="0.7"
+                    />
+                  </Field>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="temperature" className="text-xs">Temperature</Label>
-                  <Input
-                    id="temperature"
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    max="2"
-                    value={formData.temperature ?? ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        temperature: e.target.value ? parseFloat(e.target.value) : undefined,
-                      })
-                    }
-                    placeholder="0.7"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
+              </FieldGroup>
+            </CardContent>
+          </Card>
 
           {/* Advanced */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">高级配置</h2>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center gap-2">
+                <HugeiconsIcon icon={BrainIcon} strokeWidth={2} className="size-4 text-muted-foreground" />
+                <CardTitle>高级配置</CardTitle>
+              </div>
+              <CardDescription>思考模式等高级选项</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <FieldGroup className="gap-3">
+                <Field orientation="horizontal">
                   <Checkbox
                     id="thinking_enabled"
                     checked={formData.thinking_config?.type === "enabled"}
@@ -317,29 +438,28 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                       }))
                     }}
                   />
-                  <Label htmlFor="thinking_enabled" className="text-sm cursor-pointer">
-                    启用思考模式
-                  </Label>
-                </div>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={(
-                      <button
-                        type="button"
-                        className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        <CircleHelp className="size-3.5" />
-                      </button>
-                    )}
-                  />
-                  <TooltipContent side="right">
-                    启用后，模型将输出思考过程
-                  </TooltipContent>
-                </Tooltip>
-              </div>
-              {formData.thinking_config?.type === "enabled" && (
-                <div className="flex items-center justify-between ml-6">
-                  <div className="flex items-center gap-2">
+                  <FieldContent>
+                    <FieldTitle className="cursor-pointer">启用思考模式</FieldTitle>
+                  </FieldContent>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={(
+                        <button
+                          type="button"
+                          className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground"
+                        >
+                          <HugeiconsIcon icon={InformationCircleIcon} strokeWidth={2} className="size-3.5" />
+                        </button>
+                      )}
+                    />
+                    <TooltipContent side="right">
+                      启用后，模型将输出思考过程
+                    </TooltipContent>
+                  </Tooltip>
+                </Field>
+
+                {formData.thinking_config?.type === "enabled" && (
+                  <Field orientation="horizontal" className="ml-5">
                     <Checkbox
                       id="clear_thinking"
                       checked={formData.thinking_config?.clear_thinking ?? false}
@@ -352,41 +472,49 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                         }))
                       }}
                     />
-                    <Label htmlFor="clear_thinking" className="text-sm cursor-pointer text-muted-foreground">
-                      清除历史思考
-                    </Label>
-                  </div>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={(
-                        <button
-                          type="button"
-                          className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          <CircleHelp className="size-3" />
-                        </button>
-                      )}
-                    />
-                    <TooltipContent side="right">
-                      启用后，模型不会在后续对话中看到之前的思考内容
-                    </TooltipContent>
-                  </Tooltip>
-                </div>
-              )}
-            </div>
-          </div>
+                    <FieldContent>
+                      <FieldTitle className="cursor-pointer text-muted-foreground">清除历史思考</FieldTitle>
+                    </FieldContent>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={(
+                          <button
+                            type="button"
+                            className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground"
+                          >
+                            <HugeiconsIcon icon={InformationCircleIcon} strokeWidth={2} className="size-3.5" />
+                          </button>
+                        )}
+                      />
+                      <TooltipContent side="right">
+                        启用后，模型不会在后续对话中看到之前的思考内容
+                      </TooltipContent>
+                    </Tooltip>
+                  </Field>
+                )}
+              </FieldGroup>
+            </CardContent>
+          </Card>
 
           {/* Tools */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="text-sm font-medium">可用工具</h2>
-              <span className="text-xs text-muted-foreground">
-                {formData.tool_names.length} / {toolList.length}
-              </span>
-            </div>
-            <div className="p-3">
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <HugeiconsIcon icon={Settings02Icon} strokeWidth={2} className="size-4 text-muted-foreground" />
+                  <CardTitle>可用工具</CardTitle>
+                </div>
+                <Badge variant="secondary" className="text-[10px]">
+                  {formData.tool_names.length} / {toolList.length}
+                </Badge>
+              </div>
+              <CardDescription>选择智能体可以使用的工具</CardDescription>
+            </CardHeader>
+            <CardContent>
               {toolList.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">暂无可用工具</p>
+                <div className="text-sm text-muted-foreground text-center py-6">
+                  暂无可用工具
+                </div>
               ) : (
                 <div className="grid grid-cols-2 gap-2 max-h-[240px] overflow-y-auto pr-1">
                   {[...new Map(toolList.map((tool) => [tool.name, tool])).values()].map((tool) => (
@@ -426,11 +554,11 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                         <div className="flex-1 min-w-0">
                           <Label
                             htmlFor={`tool-${tool.name}`}
-                            className="text-sm font-medium cursor-pointer block truncate"
+                            className="text-xs font-medium cursor-pointer block truncate"
                           >
                             {tool.name}
                           </Label>
-                          <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
+                          <p className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">
                             {tool.description}
                           </p>
                         </div>
@@ -439,48 +567,58 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                   ))}
                 </div>
               )}
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
 
         {/* Right Main - System Prompt */}
         <div className="col-span-3">
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm h-full">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="text-sm font-medium">系统提示词</h2>
-              <span className="text-xs text-muted-foreground">
-                {formData.system_prompt.length} 字符
-              </span>
-            </div>
-            <div className="p-4 space-y-4">
-              <textarea
-                id="system_prompt"
-                value={formData.system_prompt}
-                onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
-                placeholder="你是一个有帮助的助手...&#10;&#10;在这里定义智能体的角色、能力和行为规范。"
-                className="flex min-h-[300px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 resize-none font-mono"
-                required
-              />
-              <div className="border rounded-lg overflow-hidden">
-                <div className="px-3 py-2 bg-muted/50 border-b text-xs font-medium text-muted-foreground">
-                  实时预览
+          <Card className="h-full">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <HugeiconsIcon icon={CodeIcon} strokeWidth={2} className="size-4 text-muted-foreground" />
+                  <CardTitle>系统提示词</CardTitle>
                 </div>
-                <div className="min-h-[300px] max-h-[400px] overflow-y-auto p-4">
-                  {formData.system_prompt ? (
-                    <MessageProvider message={previewMessage} index={0} isLast>
-                      <div className="wrap-break-word text-foreground leading-relaxed [&_.aui-md-h3]:text-sm">
-                        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+                <Badge variant="outline" className="text-[10px] font-mono">
+                  {formData.system_prompt.length} 字符
+                </Badge>
+              </div>
+              <CardDescription>定义智能体的角色、能力和行为规范</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                <Textarea
+                  id="system_prompt"
+                  value={formData.system_prompt}
+                  onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
+                  placeholder="你是一个有帮助的助手...&#10;&#10;在这里定义智能体的角色、能力和行为规范。"
+                  className="min-h-[280px] font-mono text-sm"
+                  required
+                />
+
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="px-3 py-2 bg-muted/50 border-b flex items-center gap-2">
+                    <HugeiconsIcon icon={Tick02Icon} strokeWidth={2} className="size-3.5 text-muted-foreground" />
+                    <span className="text-xs font-medium text-muted-foreground">实时预览</span>
+                  </div>
+                  <div className="min-h-[280px] max-h-[360px] overflow-y-auto p-4">
+                    {formData.system_prompt ? (
+                      <MessageProvider message={previewMessage} index={0} isLast>
+                        <div className="wrap-break-word text-foreground leading-relaxed [&_.aui-md-h3]:text-sm">
+                          <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+                        </div>
+                      </MessageProvider>
+                    ) : (
+                      <div className="text-muted-foreground text-sm text-center py-12">
+                        输入系统提示词后，这里将显示渲染效果
                       </div>
-                    </MessageProvider>
-                  ) : (
-                    <div className="text-muted-foreground text-sm text-center py-12">
-                      输入系统提示词后，这里将显示渲染效果
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
+            </CardContent>
+          </Card>
         </div>
       </div>
     </div>
@@ -490,6 +628,17 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
 // Helper function
 function cn(...classes: (string | boolean | undefined)[]) {
   return classes.filter(Boolean).join(" ")
+}
+
+// FieldContent helper component
+function FieldContent({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="field-content"
+      className={cn("flex flex-1 flex-col gap-0.5 leading-snug", className)}
+      {...props}
+    />
+  )
 }
 
 function getExcludedAgentIds(agentId: number | undefined, allAgents: AgentRecord[]): Set<number> {
