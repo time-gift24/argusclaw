@@ -522,6 +522,26 @@ impl ArgusWing {
             .await
     }
 
+    /// Get the thread message history, recovering persisted turn summaries when needed.
+    pub async fn get_thread_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        self.session_manager
+            .get_thread_messages(session_id, &thread_id)
+            .await
+    }
+
+    /// Activate a persisted thread into live memory so it can continue chatting.
+    pub async fn activate_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<(AgentId, Option<ProviderId>)> {
+        self.session_manager.activate_thread(session_id, &thread_id).await
+    }
+
     /// Subscribe to thread events.
     pub async fn subscribe(
         &self,

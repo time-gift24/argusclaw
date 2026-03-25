@@ -209,6 +209,12 @@ export const chat = {
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
     }),
 
+  activateExistingThread: (sessionId: string, threadId: string) =>
+    invoke<ChatSessionPayload>("activate_existing_thread", {
+      sessionId,
+      threadId,
+    }),
+
   sendMessage: (sessionId: string, threadId: string, content: string) =>
     invoke<void>("send_message", { sessionId, threadId, content }),
 

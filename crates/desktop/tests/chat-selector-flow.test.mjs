@@ -36,3 +36,15 @@ test("dropdown menu trigger bridges radix-style asChild usage without leaking pr
   assert.match(dropdownMenuSource, /render=\{children\}/);
   assert.doesNotMatch(dropdownMenuSource, /<MenuPrimitive\.Trigger[^>]*asChild/);
 });
+
+test("provider selector prefers the active session provider for display", () => {
+  assert.match(providerSelectorSource, /const activeSession = useChatStore/);
+  assert.match(
+    providerSelectorSource,
+    /const currentProviderId =[\s\S]*activeSession\?\.effectiveProviderId \?\? selectedProviderPreferenceId/,
+  );
+  assert.match(
+    providerSelectorSource,
+    /providers\.find\(\(p\) => p\.id === currentProviderId\)/,
+  );
+});

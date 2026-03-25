@@ -355,7 +355,7 @@ pub async fn create_chat_session(
     // Start event forwarder
     subscriptions
         .start_forwarder(
-            session_key.clone(),
+            session_id.to_string(),
             session_id,
             thread_id,
             app,
@@ -370,6 +370,42 @@ pub async fn create_chat_session(
         template_id: template_id_i64,
         thread_id: thread_id.to_string(),
         effective_provider_id,
+    })
+}
+
+#[tauri::command]
+pub async fn activate_existing_thread(
+    wing: State<'_, Arc<ArgusWing>>,
+    subscriptions: State<'_, ThreadSubscriptions>,
+    app: tauri::AppHandle,
+    session_id: String,
+    thread_id: String,
+) -> Result<ChatSessionPayload, String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+
+    let (template_id, provider_id) = wing
+        .activate_thread(session_id, thread_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    subscriptions
+        .start_forwarder(
+            session_id.to_string(),
+            session_id,
+            thread_id,
+            app,
+            wing.inner().clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(ChatSessionPayload {
+        session_key: session_id.to_string(),
+        session_id: session_id.to_string(),
+        template_id: template_id.into_inner(),
+        thread_id: thread_id.to_string(),
+        effective_provider_id: provider_id.map(|id| id.inner()),
     })
 }
 
@@ -405,18 +441,23 @@ pub async fn get_thread_snapshot(
         .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
 
     let thread = thread.lock().await;
+    let turn_count = thread.turn_count();
+    let token_count = thread.token_count();
+    let plan_item_count = thread.info().plan_item_count;
+    drop(thread);
+
+    let messages = wing
+        .get_thread_messages(session_id, thread_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(ThreadSnapshotPayload {
         session_id: session_id.to_string(),
         thread_id: thread_id.to_string(),
-        messages: thread
-            .history()
-            .iter()
-            .map(ChatMessagePayload::from)
-            .collect(),
-        turn_count: thread.turn_count(),
-        token_count: thread.token_count(),
-        plan_item_count: thread.info().plan_item_count,
+        messages: messages.iter().map(ChatMessagePayload::from).collect(),
+        turn_count,
+        token_count,
+        plan_item_count,
     })
 }
 
