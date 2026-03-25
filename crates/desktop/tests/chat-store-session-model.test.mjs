@@ -89,3 +89,50 @@ test("turn_failed clears any pending assistant state before snapshot refresh", (
     /case "turn_failed":[\s\S]*?status:\s*"error"[\s\S]*?pendingAssistant:\s*null[\s\S]*?refreshSnapshot\(sessionKey,\s*\{\s*preserveError:\s*true\s*\}\)/,
   );
 });
+
+test("store defers session creation until explicit new-session or first send", () => {
+  const initializeBranch = storeSource.match(
+    /async initialize\(\) \{(?<branch>[\s\S]*?)\n  \},/,
+  );
+  assert.ok(initializeBranch?.groups?.branch, "initialize branch should exist");
+  assert.doesNotMatch(
+    initializeBranch.groups.branch,
+    /createChatSession|activateSession/,
+    "initialize should not create or activate sessions",
+  );
+  assert.match(
+    initializeBranch.groups.branch,
+    /selectedTemplateId:\s*state\.selectedTemplateId\s*\?\?\s*templateList\[0\]\?\.id\s*\?\?\s*null/,
+    "initialize should seed the selected template without creating a session",
+  );
+
+  const providerBranch = storeSource.match(
+    /async selectProviderPreference\(providerId: number \| null\) \{(?<branch>[\s\S]*?)\n  \},/,
+  );
+  assert.ok(providerBranch?.groups?.branch, "selectProviderPreference branch should exist");
+  assert.doesNotMatch(
+    providerBranch.groups.branch,
+    /activateSession\(/,
+    "changing provider preference should not auto-create a session",
+  );
+
+  const modelBranch = storeSource.match(
+    /async selectModelOverride\(model: string \| null\) \{(?<branch>[\s\S]*?)\n  \},/,
+  );
+  assert.ok(modelBranch?.groups?.branch, "selectModelOverride branch should exist");
+  assert.doesNotMatch(
+    modelBranch.groups.branch,
+    /activateSession\(/,
+    "changing model preference should not auto-create a session",
+  );
+
+  const activateSessionBranch = storeSource.match(
+    /async activateSession\(templateId: number\) \{(?<branch>[\s\S]*?)\n  \},/,
+  );
+  assert.ok(activateSessionBranch?.groups?.branch, "activateSession branch should exist");
+  assert.doesNotMatch(
+    activateSessionBranch.groups.branch,
+    /sessionId === state\.activeSessionKey|existingById/,
+    "explicit new-session activation should always create a fresh session",
+  );
+});

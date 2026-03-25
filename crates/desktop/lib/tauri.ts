@@ -46,6 +46,7 @@ export interface ProviderInput {
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
+  meta_data: Record<string, string>;
 }
 
 export type ProviderTestStatus =
@@ -151,17 +152,45 @@ export const tools = {
   list: () => invoke<ToolInfo[]>("list_tools"),
 };
 
+// Session API
+export interface SessionSummary {
+  id: string;
+  name: string;
+  thread_count: number;
+  updated_at: string;
+}
+
+export interface ThreadSummary {
+  thread_id: string;
+  title: string | null;
+  turn_count: number;
+  token_count: number;
+  updated_at: string;
+}
+
+export const sessions = {
+  list: () => invoke<SessionSummary[]>("list_sessions"),
+
+  delete: (sessionId: string) => invoke<void>("delete_session", { sessionId }),
+
+  renameSession: (sessionId: string, name: string) =>
+    invoke<void>("rename_session", { sessionId, name }),
+
+  renameThread: (sessionId: string, threadId: string, title: string) =>
+    invoke<void>("rename_thread", { sessionId, threadId, title }),
+};
+
 // Chat API
 export interface ChatSessionPayload {
   session_key: string;
-  session_id: number;
+  session_id: string;
   template_id: number;
   thread_id: string;
   effective_provider_id: number | null;
 }
 
 export interface ThreadSnapshotPayload {
-  session_id: number;
+  session_id: string;
   thread_id: string;
   messages: Array<{
     role: "system" | "user" | "assistant" | "tool";
@@ -187,14 +216,23 @@ export const chat = {
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
     }),
 
-  sendMessage: (sessionId: number, threadId: string, content: string) =>
+  activateExistingThread: (sessionId: string, threadId: string) =>
+    invoke<ChatSessionPayload>("activate_existing_thread", {
+      sessionId,
+      threadId,
+    }),
+
+  sendMessage: (sessionId: string, threadId: string, content: string) =>
     invoke<void>("send_message", { sessionId, threadId, content }),
 
-  getThreadSnapshot: (sessionId: number, threadId: string) =>
+  getThreadSnapshot: (sessionId: string, threadId: string) =>
     invoke<ThreadSnapshotPayload>("get_thread_snapshot", {
       sessionId,
       threadId,
     }),
+
+  listThreads: (sessionId: string) =>
+    invoke<ThreadSummary[]>("list_threads", { sessionId }),
 
   resolveApproval: (
     requestId: string,

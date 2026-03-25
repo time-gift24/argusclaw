@@ -269,33 +269,38 @@ async fn test_turn_trace_file_created_on_success() {
     assert!(output.messages.len() >= 2);
 
     // Verify trace file exists
-    let trace_path = temp_dir.path().join("test-thread").join("1.json");
+    let trace_path = temp_dir.path().join("test-thread").join("turns").join("1.jsonl");
     assert!(
         trace_path.exists(),
         "Trace file should exist at {:?}",
         trace_path
     );
 
-    // Parse and verify JSON structure
+    // Parse and verify JSONL structure
     let content = fs::read_to_string(&trace_path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(!lines.is_empty(), "Should have at least one JSONL line");
 
-    // Verify required top-level keys (TraceFile structure)
-    assert!(json.get("version").is_some());
-    assert!(json.get("thread_id").is_some());
-    assert!(json.get("turn_number").is_some());
-    assert!(json.get("start_time").is_some());
-    assert!(json.get("iterations").is_some());
-
-    // Verify final_output is present (success case)
-    assert!(
-        json.get("final_output").is_some(),
-        "Should have final_output on success"
-    );
-
-    // Verify we have at least one iteration
-    let iterations = json["iterations"].as_array().unwrap();
-    assert!(!iterations.is_empty(), "Should have at least one iteration");
+    // Each line should be a valid JSON with wrapper + data
+    let mut found_user_input = false;
+    let mut found_llm_req = false;
+    let mut found_llm_resp = false;
+    let mut found_turn_end = false;
+    for line in &lines {
+        let json: serde_json::Value = serde_json::from_str(line).unwrap();
+        let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match event_type {
+            "user_input" => found_user_input = true,
+            "llm_req" => found_llm_req = true,
+            "llm_response" => found_llm_resp = true,
+            "turn_end" => found_turn_end = true,
+            _ => {}
+        }
+    }
+    assert!(found_user_input, "Should have user_input event");
+    assert!(found_llm_req, "Should have llm_req event");
+    assert!(found_llm_resp, "Should have llm_response event");
+    assert!(found_turn_end, "Should have turn_end event on success");
 }
 
 #[tokio::test]
@@ -340,37 +345,44 @@ async fn test_turn_trace_contains_tool_execution() {
     assert!(output.messages.len() >= 3);
 
     // Verify trace file exists
-    let trace_path = temp_dir.path().join("test-thread-tools").join("1.json");
+    let trace_path = temp_dir.path().join("test-thread-tools").join("turns").join("1.jsonl");
     assert!(
         trace_path.exists(),
         "Trace file should exist at {:?}",
         trace_path
     );
 
-    // Parse and verify JSON structure
+    // Parse and verify JSONL structure
     let content = fs::read_to_string(&trace_path).unwrap();
-    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(!lines.is_empty(), "Should have at least one JSONL line");
 
-    // Verify we have iterations
-    let iterations = json["iterations"].as_array().unwrap();
-    assert!(!iterations.is_empty(), "Should have at least one iteration");
-
-    // First iteration should have tool_calls in response
-    let first_iter = &iterations[0];
-    assert!(
-        first_iter["llm_response"]["tool_calls"].is_array(),
-        "First iteration should have tool_calls"
-    );
-    let tool_calls = first_iter["llm_response"]["tool_calls"].as_array().unwrap();
-    assert!(!tool_calls.is_empty(), "Should have at least one tool call");
-
-    // If we have tools in trace, verify structure
-    if let Some(tools) = first_iter["tools"].as_array()
-        && !tools.is_empty()
-    {
-        assert!(tools[0].get("name").is_some());
-        assert!(tools[0].get("result").is_some());
+    // Verify we have llm_req, tool_result, llm_response, turn_end, and new events
+    let mut found_user_input = false;
+    let mut found_llm_req = false;
+    let mut found_llm_resp = false;
+    let mut found_tool_call_start = false;
+    let mut found_tool_result = false;
+    let mut found_turn_end = false;
+    for line in &lines {
+        let json: serde_json::Value = serde_json::from_str(line).unwrap();
+        let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match event_type {
+            "user_input" => found_user_input = true,
+            "llm_req" => found_llm_req = true,
+            "llm_response" => found_llm_resp = true,
+            "tool_call_start" => found_tool_call_start = true,
+            "tool_result" => found_tool_result = true,
+            "turn_end" => found_turn_end = true,
+            _ => {}
+        }
     }
+    assert!(found_user_input, "Should have user_input event");
+    assert!(found_llm_req, "Should have llm_req event");
+    assert!(found_llm_resp, "Should have llm_response event");
+    assert!(found_tool_call_start, "Should have tool_call_start event");
+    assert!(found_tool_result, "Should have tool_result event");
+    assert!(found_turn_end, "Should have turn_end event on success");
 }
 
 #[tokio::test]
@@ -378,4 +390,88 @@ async fn test_turn_trace_disabled_by_default() {
     // Default config should have tracing disabled
     let config = TraceConfig::default();
     assert!(!config.enabled, "Trace should be disabled by default");
+}
+
+#[tokio::test]
+async fn test_full_jsonl_event_sequence() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+
+    // Provider returns tool call first, then final response (stop)
+    let responses = vec![
+        (
+            "Let me echo that.".to_string(),
+            vec![ToolCall {
+                id: "call-abc".to_string(),
+                name: "echo".to_string(),
+                arguments: serde_json::json!({"message": "hello"}),
+            }],
+        ),
+        ("Done!".to_string(), vec![]),
+    ];
+    let provider = Arc::new(ToolCallMockProvider::new(responses));
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread-seq".to_string())
+        .messages(vec![ChatMessage::user("Say hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![Arc::new(EchoTool)])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .trace_config(trace_config)
+        .build()
+        .unwrap();
+
+    let output = turn.execute().await.unwrap();
+    assert!(output.messages.len() >= 3);
+
+    // Read JSONL file
+    let trace_path = temp_dir.path().join("test-thread-seq").join("turns").join("1.jsonl");
+    assert!(trace_path.exists());
+    let content = fs::read_to_string(&trace_path).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(!lines.is_empty());
+
+    // Collect event types in order
+    let event_types: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            json.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    // Verify expected sequence (tools run in parallel, so tool events interleave with post-tools llm_response):
+    // user_input (from turn start), llm_req (iteration 1), tool_call_start, tool_result,
+    // llm_response (iteration 1 completion), llm_req (iteration 2), llm_response (stop), turn_end
+    let expected_sequence = vec![
+        "user_input", "llm_req", "tool_call_start", "tool_result", "llm_response",
+        "llm_req", "llm_response", "turn_end",
+    ];
+    assert_eq!(event_types, expected_sequence, "Event sequence mismatch");
+
+    // Verify duration_ms > 0 in tool_result (fields are flattened into the wrapper)
+    let tool_result_line = lines
+        .iter()
+        .find(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            json.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+        })
+        .expect("Should have a tool_result event");
+    let json: serde_json::Value = serde_json::from_str(tool_result_line).unwrap();
+    // Verify duration_ms is present and is a valid u64 (may be 0 for fast tool executions)
+    let _duration_ms = json
+        .get("duration_ms")
+        .expect("tool_result should have duration_ms")
+        .as_u64()
+        .expect("duration_ms should be a number");
 }

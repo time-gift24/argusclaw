@@ -32,10 +32,12 @@ interface ProviderTestPanelProps {
     base_url: string;
     api_key: string;
     models: string[];
+    model_config: Record<string, { max_context_window: number }>;
     default_model: string;
     is_default: boolean;
     extra_headers: Record<string, string>;
     secret_status: ProviderSecretStatus;
+    meta_data: Record<string, string>;
   } | null;
   canTest: boolean;
 }

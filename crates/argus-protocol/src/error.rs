@@ -1,15 +1,17 @@
 use thiserror::Error;
 
+use crate::SessionId;
+
 #[derive(Debug, Error)]
 pub enum ArgusError {
     #[error("Session not found: {0}")]
-    SessionNotFound(i64),
+    SessionNotFound(SessionId),
 
     #[error("Session already loaded: {0}")]
-    SessionAlreadyLoaded(i64),
+    SessionAlreadyLoaded(SessionId),
 
     #[error("Session not loaded: {0}")]
-    SessionNotLoaded(i64),
+    SessionNotLoaded(SessionId),
 
     #[error("Thread not found: {0}")]
     ThreadNotFound(String),

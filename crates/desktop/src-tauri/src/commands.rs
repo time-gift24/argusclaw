@@ -127,6 +127,7 @@ pub async fn test_provider_input(
         base_url: record.base_url,
         api_key: SecretString::new(record.api_key),
         models: record.models,
+        model_config: record.model_config,
         default_model: record.default_model,
         is_default: record.is_default,
         extra_headers: record.extra_headers,
@@ -246,7 +247,7 @@ pub struct ChatSessionPayload {
     /// Unique session key (template_id::provider_preference_id).
     pub session_key: String,
     /// The session ID for this chat.
-    pub session_id: i64,
+    pub session_id: String,
     /// The template ID this session was created from.
     pub template_id: i64,
     /// The thread ID for this session.
@@ -254,6 +255,15 @@ pub struct ChatSessionPayload {
     /// The effective provider ID bound to this session.
     /// `None` if no provider is configured (session will fail on first LLM call).
     pub effective_provider_id: Option<i64>,
+}
+
+/// Session summary for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryPayload {
+    pub id: String,
+    pub name: String,
+    pub thread_count: i64,
+    pub updated_at: String,
 }
 
 /// Serialized message snapshot for frontend consumption.
@@ -283,7 +293,7 @@ impl From<&ChatMessage> for ChatMessagePayload {
 /// Current snapshot of a chat thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSnapshotPayload {
-    pub session_id: i64,
+    pub session_id: String,
     pub thread_id: String,
     pub messages: Vec<ChatMessagePayload>,
     pub turn_count: u32,
@@ -314,7 +324,7 @@ pub async fn create_chat_session(
 
     // Create a new session for this chat
     let session_id = wing
-        .create_session(&format!("Chat-{}", template_id))
+        .create_session("")
         .await
         .map_err(|e| e.to_string())?;
 
@@ -346,7 +356,7 @@ pub async fn create_chat_session(
     // Start event forwarder
     subscriptions
         .start_forwarder(
-            session_key.clone(),
+            session_id.to_string(),
             session_id,
             thread_id,
             app,
@@ -357,7 +367,7 @@ pub async fn create_chat_session(
 
     Ok(ChatSessionPayload {
         session_key,
-        session_id: session_id.inner(),
+        session_id: session_id.to_string(),
         template_id: template_id_i64,
         thread_id: thread_id.to_string(),
         effective_provider_id,
@@ -365,14 +375,51 @@ pub async fn create_chat_session(
 }
 
 #[tauri::command]
+pub async fn activate_existing_thread(
+    wing: State<'_, Arc<ArgusWing>>,
+    subscriptions: State<'_, ThreadSubscriptions>,
+    app: tauri::AppHandle,
+    session_id: String,
+    thread_id: String,
+) -> Result<ChatSessionPayload, String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+
+    let (template_id, provider_id) = wing
+        .activate_thread(session_id, thread_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    subscriptions
+        .start_forwarder(
+            session_id.to_string(),
+            session_id,
+            thread_id,
+            app,
+            wing.inner().clone(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(ChatSessionPayload {
+        session_key: session_id.to_string(),
+        session_id: session_id.to_string(),
+        template_id: template_id.into_inner(),
+        thread_id: thread_id.to_string(),
+        effective_provider_id: provider_id.map(|id| id.inner()),
+    })
+}
+
+#[tauri::command]
 pub async fn send_message(
     wing: State<'_, Arc<ArgusWing>>,
-    session_id: i64,
+    session_id: String,
     thread_id: String,
     content: String,
 ) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
-    wing.send_message(SessionId::new(session_id), thread_id, content)
+    wing.send_message(session_id, thread_id, content)
         .await
         .map_err(|e| e.to_string())
 }
@@ -380,10 +427,10 @@ pub async fn send_message(
 #[tauri::command]
 pub async fn get_thread_snapshot(
     wing: State<'_, Arc<ArgusWing>>,
-    session_id: i64,
+    session_id: String,
     thread_id: String,
 ) -> Result<ThreadSnapshotPayload, String> {
-    let session_id = SessionId::new(session_id);
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
 
     let session = wing
@@ -395,18 +442,23 @@ pub async fn get_thread_snapshot(
         .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
 
     let thread = thread.lock().await;
+    let turn_count = thread.turn_count();
+    let token_count = thread.token_count();
+    let plan_item_count = thread.info().plan_item_count;
+    drop(thread);
+
+    let messages = wing
+        .get_thread_messages(session_id, thread_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(ThreadSnapshotPayload {
-        session_id: session_id.inner(),
+        session_id: session_id.to_string(),
         thread_id: thread_id.to_string(),
-        messages: thread
-            .history()
-            .iter()
-            .map(ChatMessagePayload::from)
-            .collect(),
-        turn_count: thread.turn_count(),
-        token_count: thread.token_count(),
-        plan_item_count: thread.info().plan_item_count,
+        messages: messages.iter().map(ChatMessagePayload::from).collect(),
+        turn_count,
+        token_count,
+        plan_item_count,
     })
 }
 
@@ -428,6 +480,88 @@ pub fn resolve_approval(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// Thread summary for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadSummaryPayload {
+    pub thread_id: String,
+    pub title: Option<String>,
+    pub turn_count: i64,
+    pub token_count: i64,
+    pub updated_at: String,
+}
+
+#[tauri::command]
+pub async fn list_sessions(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<SessionSummaryPayload>, String> {
+    wing.list_sessions()
+        .await
+        .map_err(|e| e.to_string())
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .map(|s| SessionSummaryPayload {
+                    id: s.id.to_string(),
+                    name: s.name,
+                    thread_count: s.thread_count,
+                    updated_at: s.updated_at.to_rfc3339(),
+                })
+                .collect()
+        })
+}
+
+#[tauri::command]
+pub async fn delete_session(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    wing.delete_session(session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn rename_session(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+    name: String,
+) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    wing.rename_session(session_id, name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_threads(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<Vec<ThreadSummaryPayload>, String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    wing.list_threads(session_id)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|threads| {
+            threads
+                .into_iter()
+                .map(|t| ThreadSummaryPayload {
+                    thread_id: t.id.to_string(),
+                    title: t.title,
+                    turn_count: t.turn_count,
+                    token_count: t.token_count,
+                    updated_at: t.updated_at.to_rfc3339(),
+                })
+                .collect()
+        })
+}
+
+#[tauri::command]
+pub async fn rename_thread(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+    thread_id: String,
+    title: String,
+) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    wing.rename_thread(session_id, thread_id, title)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -531,6 +665,7 @@ mod tests {
             base_url: "https://legacy.example.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
+            model_config: HashMap::new(),
             default_model: "gpt-4.1".to_string(),
             is_default: false,
             extra_headers: HashMap::new(),
@@ -574,11 +709,11 @@ mod tests {
 
     #[test]
     fn chat_session_payload_serializes_effective_provider_id() {
-        use super::ChatSessionPayload;
+        use super::{ChatSessionPayload, SessionId};
 
         let payload = ChatSessionPayload {
             session_key: "arguswing::__default__".to_string(),
-            session_id: 1,
+            session_id: SessionId::new().to_string(),
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: Some(1),
@@ -587,16 +722,16 @@ mod tests {
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["effective_provider_id"], json!(1));
         assert_eq!(value["session_key"], json!("arguswing::__default__"));
-        assert_eq!(value["session_id"], json!(1));
+        assert!(value["session_id"].is_string());
     }
 
     #[test]
     fn chat_session_payload_serializes_none_effective_provider_id() {
-        use super::ChatSessionPayload;
+        use super::{ChatSessionPayload, SessionId};
 
         let payload = ChatSessionPayload {
             session_key: "arguswing::__default__".to_string(),
-            session_id: 1,
+            session_id: SessionId::new().to_string(),
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: None,

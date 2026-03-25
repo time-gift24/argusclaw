@@ -12,7 +12,7 @@ import { useAuthStore } from "@/components/auth/use-auth-store"
 import { LoginToast, useLoginToastStore } from "@/components/auth/login-toast"
 
 const navigationItems = [
-  { title: "主页", href: "/", icon: <Home className="h-4 w-4" />, isActive: true },
+  { title: "聊天", href: "/", icon: <Home className="h-4 w-4" />, isActive: true },
 ]
 
 export default function RootLayout({

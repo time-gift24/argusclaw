@@ -17,6 +17,9 @@ import { cn } from "@/lib/utils";
 
 export function ProviderSelector() {
   const providers = useChatStore((state) => state.providers);
+  const activeSession = useChatStore((state) =>
+    state.activeSessionKey ? state.sessionsByKey[state.activeSessionKey] ?? null : null,
+  );
   const selectedProviderPreferenceId = useChatStore(
     (state) => state.selectedProviderPreferenceId,
   );
@@ -31,11 +34,15 @@ export function ProviderSelector() {
   );
 
   // Find the current provider and model
-  const currentProvider = selectedProviderPreferenceId
-    ? providers.find((p) => p.id === selectedProviderPreferenceId)
+  const currentProviderId =
+    activeSession?.effectiveProviderId ?? selectedProviderPreferenceId;
+  const currentProvider = currentProviderId
+    ? providers.find((p) => p.id === currentProviderId)
     : providers.find((p) => p.is_default);
 
-  const currentModel = selectedModelOverride ?? currentProvider?.default_model ?? "未知模型";
+  const currentModel = activeSession
+    ? currentProvider?.default_model ?? "未知模型"
+    : selectedModelOverride ?? currentProvider?.default_model ?? "未知模型";
 
   // Handle selecting a model
   const handleSelectModel = (providerId: number, model: string) => {
@@ -100,11 +107,16 @@ export function ProviderSelector() {
               <div className="grid gap-0.5 mt-1">
                 {provider.models.map((model) => {
                   const isModelSelected = 
-                    selectedProviderPreferenceId === provider.id && 
-                    (selectedModelOverride === model || (selectedModelOverride === null && model === provider.default_model));
+                    currentProviderId === provider.id && 
+                    (activeSession
+                      ? model === currentProvider?.default_model
+                      : selectedModelOverride === model || (selectedModelOverride === null && model === provider.default_model));
                   
                   // Special case: if nothing selected, use default provider's default model
-                  const isEffectivelySelected = !selectedProviderPreferenceId && provider.is_default && model === provider.default_model;
+                  const isEffectivelySelected =
+                    currentProviderId == null &&
+                    provider.is_default &&
+                    model === provider.default_model;
 
                   const active = isModelSelected || isEffectivelySelected;
 

@@ -1,17 +1,36 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Session ID - INTEGER auto-increment from database
+/// Session ID - UUIDv7 (time-sortable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionId(pub i64);
+pub struct SessionId(pub Uuid);
 
 impl SessionId {
-    pub fn new(id: i64) -> Self {
-        Self(id)
+    /// Create a new SessionId using UUIDv7 (time-sortable).
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
     }
 
-    pub fn inner(&self) -> i64 {
-        self.0
+    /// Parse a SessionId from a string representation.
+    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+
+    /// Get the inner UUID value.
+    pub fn inner(&self) -> &Uuid {
+        &self.0
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -20,9 +39,9 @@ impl SessionId {
 pub struct ThreadId(pub Uuid);
 
 impl ThreadId {
-    /// Create a new unique ThreadId.
+    /// Create a new ThreadId using UUIDv7 (time-sortable).
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(Uuid::now_v7())
     }
 
     /// Parse a ThreadId from a string representation.

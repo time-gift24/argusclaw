@@ -180,8 +180,8 @@ impl Thread {
     }
 
     /// Set the thread title.
-    pub fn set_title(&mut self, title: String) {
-        self.title = Some(title);
+    pub fn set_title(&mut self, title: Option<String>) {
+        self.title = title.filter(|value| !value.trim().is_empty());
         self.updated_at = Utc::now();
     }
 
@@ -256,6 +256,33 @@ impl Thread {
     /// Set the token count (for Compactor).
     pub fn set_token_count(&mut self, count: u32) {
         self.token_count = count;
+    }
+
+    /// Hydrate thread runtime state from persisted history.
+    pub fn hydrate_from_persisted_state(
+        &mut self,
+        mut messages: Vec<ChatMessage>,
+        token_count: u32,
+        turn_count: u32,
+        updated_at: DateTime<Utc>,
+    ) {
+        let existing_system = self
+            .messages
+            .first()
+            .filter(|message| message.role == argus_protocol::llm::Role::System)
+            .cloned();
+        let has_system_message = messages
+            .first()
+            .is_some_and(|message| message.role == argus_protocol::llm::Role::System);
+
+        if !has_system_message && let Some(system_message) = existing_system {
+            messages.insert(0, system_message);
+        }
+
+        self.messages = messages;
+        self.token_count = token_count;
+        self.turn_count = turn_count;
+        self.updated_at = updated_at;
     }
 
     /// Recalculate token count from messages.
@@ -358,6 +385,7 @@ impl Thread {
         let mut turn_builder = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
+            .session_id(self.session_id)
             .messages(self.messages.clone())
             .provider(self.provider.clone())
             .tools(tools)
@@ -466,7 +494,7 @@ mod tests {
         let result = ThreadBuilder::new()
             .compactor(compactor)
             .agent_record(test_agent_record())
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .build();
         assert!(matches!(result, Err(ThreadError::ProviderNotConfigured)));
     }
@@ -475,7 +503,7 @@ mod tests {
     fn thread_builder_requires_compactor() {
         let result = ThreadBuilder::new()
             .agent_record(test_agent_record())
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .build();
         assert!(result.is_err());
     }
@@ -485,7 +513,7 @@ mod tests {
         let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
         let result = ThreadBuilder::new()
             .compactor(compactor)
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .build();
         assert!(matches!(result, Err(ThreadError::AgentRecordNotSet)));
     }
@@ -505,6 +533,34 @@ mod tests {
         assert_eq!(Thread::estimate_tokens("test"), 1);
         assert_eq!(Thread::estimate_tokens("test test"), 2);
         assert_eq!(Thread::estimate_tokens(""), 1);
+    }
+
+    #[test]
+    fn hydrate_from_persisted_state_preserves_system_prompt_and_updates_runtime_state() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let updated_at = Utc::now();
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .build()
+            .unwrap();
+
+        thread.hydrate_from_persisted_state(
+            vec![ChatMessage::user("历史问题"), ChatMessage::assistant("历史回答")],
+            42,
+            3,
+            updated_at,
+        );
+
+        assert_eq!(thread.history().len(), 3);
+        assert_eq!(thread.history()[0].role, argus_protocol::llm::Role::System);
+        assert_eq!(thread.history()[1].content, "历史问题");
+        assert_eq!(thread.history()[2].content, "历史回答");
+        assert_eq!(thread.token_count(), 42);
+        assert_eq!(thread.turn_count(), 3);
+        assert_eq!(thread.updated_at(), updated_at);
     }
 
     #[test]
@@ -535,7 +591,7 @@ mod tests {
             .provider(Arc::new(DummyProvider))
             .compactor(compactor)
             .agent_record(test_agent_record())
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .plan_store(plan_store)
             .build()
             .unwrap();

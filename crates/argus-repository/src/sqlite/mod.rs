@@ -164,3 +164,20 @@ impl ArgusSqlite {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn build_script_watches_migrations_directory() {
+        let build_script = std::fs::read_to_string(format!(
+            "{}/build.rs",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("argus-repository build.rs should exist");
+
+        assert!(
+            build_script.contains("cargo:rerun-if-changed=migrations"),
+            "build.rs should watch the migrations directory so embedded sqlx migrations stay fresh after rebases"
+        );
+    }
+}

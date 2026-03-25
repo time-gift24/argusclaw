@@ -506,6 +506,23 @@ impl ArgusWing {
             .await
     }
 
+    /// Rename a persisted session.
+    pub async fn rename_session(&self, session_id: SessionId, name: String) -> Result<()> {
+        self.session_manager.rename_session(session_id, name).await
+    }
+
+    /// Rename a persisted thread title.
+    pub async fn rename_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        title: String,
+    ) -> Result<()> {
+        self.session_manager
+            .rename_thread(session_id, &thread_id, title)
+            .await
+    }
+
     // =========================================================================
     // Messaging API
     // =========================================================================
@@ -520,6 +537,26 @@ impl ArgusWing {
         self.session_manager
             .send_message(session_id, &thread_id, message)
             .await
+    }
+
+    /// Get the thread message history, recovering persisted turn summaries when needed.
+    pub async fn get_thread_messages(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
+        self.session_manager
+            .get_thread_messages(session_id, &thread_id)
+            .await
+    }
+
+    /// Activate a persisted thread into live memory so it can continue chatting.
+    pub async fn activate_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<(AgentId, Option<ProviderId>)> {
+        self.session_manager.activate_thread(session_id, &thread_id).await
     }
 
     /// Subscribe to thread events.
