@@ -51,6 +51,7 @@
 
 pub mod config;
 pub mod error;
+pub mod events;
 pub mod execution;
 pub mod trace;
 pub mod tool_context;
@@ -61,6 +62,7 @@ pub use config::{
     TurnStreamEvent,
 };
 pub use error::{TurnError, TurnLogError};
+pub use events::TurnLogEvent;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
 pub use trace::{IterationRecord, LlmRequest, LlmResponse, ToolExecution, TraceConfig};
 pub use turn::{Turn, TurnBuilder};
