@@ -12,6 +12,7 @@ use argus_protocol::token_usage::TokenUsage;
 pub enum TurnLogEvent {
     TurnStart { system_prompt: String, model: String },
     UserInput { content: String, role: String },
+    #[serde(rename = "llm_req")]
     LlmRequest { messages: Vec<ChatMessage>, tools: Vec<Value> },
     LlmDelta { delta: String, is_complete: bool },
     ToolCallStart { id: String, name: String, arguments: Value },
