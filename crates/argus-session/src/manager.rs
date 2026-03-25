@@ -688,7 +688,7 @@ impl SessionManager {
 
         if let Some(session) = self.sessions.get(&session_id) {
             if let Some(thread) = session.get_thread(thread_id) {
-                let mut thread = thread.lock().await;
+                let mut thread = thread.write().await;
                 thread.set_title(persisted_title);
             }
         }
@@ -754,7 +754,7 @@ impl SessionManager {
         let session = self
             .sessions
             .get(&session_id)
-            .ok_or(ArgusError::SessionNotFound(session_id.inner()))?;
+            .ok_or(ArgusError::SessionNotFound(session_id))?;
 
         let thread = session
             .get_thread(thread_id)
@@ -783,7 +783,7 @@ impl SessionManager {
             .get_thread(thread_id)
             .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
-        let thread = thread.lock().await;
+        let thread = thread.read().await;
         if !thread.history().is_empty() || thread.turn_count() == 0 {
             return Ok(thread.history().to_vec());
         }
@@ -831,7 +831,7 @@ impl SessionManager {
             .get_thread(thread_id)
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
-        let mut thread = thread.lock().await;
+        let mut thread = thread.write().await;
         if !thread.history().is_empty() {
             return Ok((template_id, provider_id));
         }
@@ -915,7 +915,7 @@ async fn recover_thread_state_from_trace(
                     ..
                 } => {
                     if tool_calls.is_empty() {
-                        if !content.trim().is_empty() || reasoning_content.as_deref().unwrap_or("").trim().len() > 0 {
+                        if !content.trim().is_empty() || !reasoning_content.as_deref().unwrap_or("").trim().is_empty() {
                             messages.push(ChatMessage::assistant_with_reasoning(
                                 content,
                                 reasoning_content,

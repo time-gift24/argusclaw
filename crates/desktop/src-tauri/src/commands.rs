@@ -441,7 +441,7 @@ pub async fn get_thread_snapshot(
         .get_thread(&thread_id)
         .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
 
-    let thread = thread.lock().await;
+    let thread = thread.read().await;
     let turn_count = thread.turn_count();
     let token_count = thread.token_count();
     let plan_item_count = thread.info().plan_item_count;
