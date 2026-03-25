@@ -123,7 +123,7 @@ impl SessionManager {
 
         // Load from DB
         let row = sqlx::query("SELECT id, name FROM sessions WHERE id = ?")
-            .bind(&session_id.to_string())
+            .bind(session_id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -148,7 +148,7 @@ impl SessionManager {
             FROM threads WHERE session_id = ?
             "#,
         )
-        .bind(&session_id.to_string())
+        .bind(session_id.to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {
@@ -204,7 +204,12 @@ impl SessionManager {
             // Build Thread directly
             let title: Option<String> = thread_row.get("title");
             let trace_cfg =
-                TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
+                TraceConfig::new(true, self.trace_dir.clone())
+                    .with_session_id(session_id)
+                    .with_turn_start(
+                        Some(agent_record.system_prompt.clone()),
+                        Some(provider.model_name().to_string()),
+                    );
             let on_turn_complete = {
                 let sm = sm.clone();
                 Arc::new(move |sid: argus_protocol::SessionId, turn_num: u32| {
@@ -264,7 +269,7 @@ impl SessionManager {
         sqlx::query(
             "INSERT INTO sessions (id, name, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))",
         )
-        .bind(&session_id.to_string())
+        .bind(session_id.to_string())
         .bind(&name)
         .execute(&self.pool)
         .await
@@ -330,7 +335,7 @@ impl SessionManager {
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         // Delete from DB (threads will be cascade deleted)
         sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(&session_id.to_string())
+            .bind(session_id.to_string())
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -429,7 +434,7 @@ impl SessionManager {
             "#,
         )
         .bind(thread_id.inner().to_string())
-        .bind(&session_id.to_string())
+        .bind(session_id.to_string())
         .bind(template_id.inner())
         .bind(provider_id.inner())
         .execute(&self.pool)
@@ -447,7 +452,7 @@ impl SessionManager {
         // Delete from DB
         sqlx::query("DELETE FROM threads WHERE id = ? AND session_id = ?")
             .bind(thread_id.inner().to_string())
-            .bind(&session_id.to_string())
+            .bind(session_id.to_string())
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -477,7 +482,7 @@ impl SessionManager {
             ORDER BY updated_at DESC
             "#,
         )
-        .bind(&session_id.to_string())
+        .bind(session_id.to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {

@@ -326,9 +326,9 @@ impl Turn {
         };
 
         // Write TurnStart event if tracing is enabled
-        if let Some(config) = self.trace_config.as_ref() {
-            if config.enabled {
-                if let Some(writer) = trace_writer.as_mut() {
+        if let Some(config) = self.trace_config.as_ref()
+            && config.enabled
+                && let Some(writer) = trace_writer.as_mut() {
                     if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
                         let _ = writer.write_event(&TurnLogEvent::TurnStart {
                             system_prompt: sp.clone(),
@@ -344,8 +344,6 @@ impl Turn {
                         }
                     }
                 }
-            }
-        }
 
         tracing::info!(
             thread_id = %self.thread_id,

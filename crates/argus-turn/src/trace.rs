@@ -159,13 +159,12 @@ impl TraceWriter {
         });
         if let Some(obj) = wrapper.as_object_mut() {
             obj.insert("type".to_string(), event_value.get("type").cloned().unwrap_or(serde_json::Value::String(event.type_name().to_string())));
-            if let Some(data) = event_value.get("data") {
-                if let Some(fields) = data.as_object() {
+            if let Some(data) = event_value.get("data")
+                && let Some(fields) = data.as_object() {
                     for (k, v) in fields {
                         obj.insert(k.clone(), v.clone());
                     }
                 }
-            }
         }
         let line = serde_json::to_string(&wrapper)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -217,7 +216,7 @@ pub async fn read_jsonl_events(
         }
         let line_num = line_idx + 1;
         // Try parsing as the full JSONL wrapper
-        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(line) {
             // New flattened format: type and fields at wrapper level
             if let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str()) {
                 // Build synthetic inner data for TurnLogEvent deserialization
@@ -241,7 +240,7 @@ pub async fn read_jsonl_events(
             }
         }
         // Try direct parse (for bare TurnLogEvent lines)
-        match serde_json::from_str::<TurnLogEvent>(&line) {
+        match serde_json::from_str::<TurnLogEvent>(line) {
             Ok(event) => events.push(event),
             Err(_) => {
                 tracing::warn!("Malformed JSONL line {}: skipped", line_num);
@@ -299,8 +298,8 @@ pub async fn recover_turn_events(
                 reason: "empty line".into(),
             });
         }
-        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str()) {
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line)
+            && let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str()) {
                 let mut event_data = serde_json::Map::new();
                 for (k, v) in wrapper.as_object().unwrap_or(&serde_json::Map::new()) {
                     if !["v", "thread_id", "turn", "ts", "type"].contains(&k.as_str()) {
@@ -315,7 +314,6 @@ pub async fn recover_turn_events(
                     return Ok(event);
                 }
             }
-        }
         match serde_json::from_str::<TurnLogEvent>(&line) {
             Ok(event) => Ok(event),
             Err(e) => {
