@@ -284,6 +284,13 @@ impl SessionManager {
                 }
             };
 
+            // Spawn the thread's main orchestration loop
+            let thread_for_run = Arc::clone(&thread);
+            tokio::spawn(async move {
+                let mut t = thread_for_run.lock().await;
+                t.run().await;
+            });
+
             session.add_thread(thread);
         }
 
@@ -494,8 +501,16 @@ impl SessionManager {
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
+        // Spawn the thread's main orchestration loop
+        let thread_arc = Arc::new(Mutex::new(thread));
+        let thread_for_run = Arc::clone(&thread_arc);
+        tokio::spawn(async move {
+            let mut t = thread_for_run.lock().await;
+            t.run().await;
+        });
+
         // Add to in-memory session
-        session.add_thread(Arc::new(Mutex::new(thread)));
+        session.add_thread(thread_arc);
 
         Ok(thread_id)
     }
@@ -626,22 +641,25 @@ impl SessionManager {
         Ok(threads)
     }
 
-    /// Send a message to a thread.
+    /// Send a message to a thread via the unified pipe.
     pub async fn send_message(
         &self,
         session_id: SessionId,
         thread_id: &ThreadId,
         message: String,
     ) -> Result<()> {
-        let session = self.load(session_id).await?;
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or(ArgusError::SessionNotFound(session_id.inner()))?;
+
         let thread = session
             .get_thread(thread_id)
-            .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+            .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
 
-        let mut thread = thread.lock().await;
+        let thread = thread.lock().await;
         thread
-            .send_message(message, None)
-            .await
+            .send_user_message(message, None)
             .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
             })
