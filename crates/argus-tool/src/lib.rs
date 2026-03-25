@@ -122,7 +122,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Ok(input)
         }
     }
@@ -144,7 +148,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Err(ToolError::ExecutionFailed {
                 tool_name: "failing".to_string(),
                 reason: "intentional failure".to_string(),
@@ -169,7 +177,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({"processed": input}))
         }
     }
@@ -194,7 +206,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({"value": self.value}))
         }
     }
@@ -219,7 +235,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({}))
         }
 
@@ -318,7 +338,9 @@ mod tests {
             pipe_tx: tx,
         });
 
-        let result = manager.execute("nonexistent", serde_json::json!({}), ctx).await;
+        let result = manager
+            .execute("nonexistent", serde_json::json!({}), ctx)
+            .await;
 
         assert!(result.is_err());
         match result {

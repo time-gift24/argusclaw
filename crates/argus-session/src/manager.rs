@@ -284,14 +284,8 @@ impl SessionManager {
                 }
             };
 
-            // Spawn the thread's main orchestration loop
-            let thread_for_run = Arc::clone(&thread);
-            tokio::spawn(async move {
-                let mut t = thread_for_run.lock().await;
-                t.run().await;
-            });
-
-            session.add_thread(thread);
+            // Add thread to session (spawn lazily in send_message instead)
+            session.add_thread(thread.clone());
         }
 
         // Store in memory
@@ -501,16 +495,11 @@ impl SessionManager {
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        // Spawn the thread's main orchestration loop
+        // Wrap in Arc<Mutex<>> for safe shared access
         let thread_arc = Arc::new(Mutex::new(thread));
-        let thread_for_run = Arc::clone(&thread_arc);
-        tokio::spawn(async move {
-            let mut t = thread_for_run.lock().await;
-            t.run().await;
-        });
 
-        // Add to in-memory session
-        session.add_thread(thread_arc);
+        // Add to in-memory session (spawn lazily in send_message instead)
+        session.add_thread(thread_arc.clone());
 
         Ok(thread_id)
     }

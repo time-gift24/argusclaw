@@ -225,7 +225,11 @@ impl NamedTool for HttpTool {
         RiskLevel::Critical
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         let args: HttpArgs =
             serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "http".to_string(),
@@ -414,10 +418,13 @@ mod tests {
     async fn test_unsupported_scheme() {
         let tool = HttpTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "url": "file:///etc/passwd",
-                "method": "GET"
-            }), make_ctx())
+            .execute(
+                serde_json::json!({
+                    "url": "file:///etc/passwd",
+                    "method": "GET"
+                }),
+                make_ctx(),
+            )
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -429,10 +436,13 @@ mod tests {
     async fn test_unsupported_method() {
         let tool = HttpTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "url": "https://example.com",
-                "method": "CONNECT"
-            }), make_ctx())
+            .execute(
+                serde_json::json!({
+                    "url": "https://example.com",
+                    "method": "CONNECT"
+                }),
+                make_ctx(),
+            )
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -444,10 +454,13 @@ mod tests {
     async fn test_invalid_url() {
         let tool = HttpTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "url": "not a valid url at all",
-                "method": "GET"
-            }), make_ctx())
+            .execute(
+                serde_json::json!({
+                    "url": "not a valid url at all",
+                    "method": "GET"
+                }),
+                make_ctx(),
+            )
             .await;
         assert!(result.is_err());
         // Invalid URL without scheme returns SecurityBlocked
@@ -460,10 +473,13 @@ mod tests {
     async fn test_localhost_blocked() {
         let tool = HttpTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "url": "https://localhost/path",
-                "method": "GET"
-            }), make_ctx())
+            .execute(
+                serde_json::json!({
+                    "url": "https://localhost/path",
+                    "method": "GET"
+                }),
+                make_ctx(),
+            )
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -475,10 +491,13 @@ mod tests {
     async fn test_private_ip_blocked() {
         let tool = HttpTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "url": "https://192.168.1.1/path",
-                "method": "GET"
-            }), make_ctx())
+            .execute(
+                serde_json::json!({
+                    "url": "https://192.168.1.1/path",
+                    "method": "GET"
+                }),
+                make_ctx(),
+            )
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -489,10 +508,13 @@ mod tests {
     async fn test_http_scheme_blocked() {
         let tool = HttpTool::new();
         let result = tool
-            .execute(serde_json::json!({
-                "url": "http://example.com",
-                "method": "GET"
-            }), make_ctx())
+            .execute(
+                serde_json::json!({
+                    "url": "http://example.com",
+                    "method": "GET"
+                }),
+                make_ctx(),
+            )
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();

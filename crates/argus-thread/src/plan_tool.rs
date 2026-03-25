@@ -84,7 +84,11 @@ impl NamedTool for UpdatePlanTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, input: Value, _ctx: Arc<ToolExecutionContext>) -> Result<Value, ToolError> {
+    async fn execute(
+        &self,
+        input: Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<Value, ToolError> {
         // Parse arguments
         let args: UpdatePlanArgs =
             serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {

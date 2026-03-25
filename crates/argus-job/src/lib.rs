@@ -5,8 +5,8 @@
 
 pub mod dispatch_tool;
 pub mod error;
-pub mod list_subagents_tool;
 pub mod job_manager;
+pub mod list_subagents_tool;
 pub mod sse_broadcaster;
 pub mod types;
 

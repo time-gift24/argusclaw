@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 use argus_protocol::AgentRecord;
+use argus_protocol::ToolExecutionContext;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent, ToolCall, ToolCallDelta, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
-use argus_protocol::ToolExecutionContext;
 use argus_turn::trace::TraceConfig;
 use argus_turn::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
@@ -117,7 +117,11 @@ impl NamedTool for EchoTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         let message = args
             .get("message")
             .and_then(|v| v.as_str())

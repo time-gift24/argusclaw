@@ -33,6 +33,15 @@ fn generate_turn_id(thread_id: &str, turn_number: u32) -> String {
     format!("{}-turn-{}", thread_id, turn_number)
 }
 
+/// Creates a dummy broadcast receiver for builder default.
+/// The actual receiver is created at execute() time via thread_event_tx.subscribe().
+fn dummy_broadcast_rx() -> broadcast::Receiver<ThreadEvent> {
+    let (tx, rx) = broadcast::channel(1);
+    // Drop the sender so the channel closes
+    drop(tx);
+    rx
+}
+
 /// Result of processing an LLM response's finish_reason.
 enum NextAction {
     /// Turn is complete, return the output.
@@ -234,6 +243,7 @@ pub struct Turn {
 
     /// Receiver for the unified pipe (Thread-owned).
     /// Initialized at execute() start via thread_event_tx.subscribe().
+    #[builder(default = "dummy_broadcast_rx()")]
     rx: broadcast::Receiver<ThreadEvent>,
 
     /// Event forwarder task handle (cleaned up on drop).

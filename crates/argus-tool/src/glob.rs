@@ -69,7 +69,11 @@ impl NamedTool for GlobTool {
         RiskLevel::High
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse pattern argument (required)
         let pattern = input
             .get("pattern")
@@ -188,10 +192,13 @@ mod tests {
 
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "*.rs",
-                "path": dir.path().to_str().unwrap()
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "*.rs",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -218,10 +225,13 @@ mod tests {
 
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "**/*.rs",
-                "path": dir.path().to_str().unwrap()
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "**/*.rs",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -234,10 +244,13 @@ mod tests {
 
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "*.nonexistent",
-                "path": dir.path().to_str().unwrap()
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "*.nonexistent",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -248,10 +261,13 @@ mod tests {
     async fn test_glob_tool_invalid_pattern() {
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "[invalid",
-                "path": "."
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "[invalid",
+                    "path": "."
+                }),
+                make_ctx(),
+            )
             .await;
 
         assert!(result.is_err());

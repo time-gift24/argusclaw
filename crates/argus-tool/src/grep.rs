@@ -80,7 +80,11 @@ impl NamedTool for GrepTool {
         RiskLevel::High
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse pattern argument (required)
         let pattern = input
             .get("pattern")
@@ -268,10 +272,13 @@ mod tests {
 
         let tool = GrepTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "hello",
-                "path": file_path.to_str().unwrap()
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "hello",
+                    "path": file_path.to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -290,11 +297,14 @@ mod tests {
 
         let tool = GrepTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "hello",
-                "path": file_path.to_str().unwrap(),
-                "ignore_case": true
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "hello",
+                    "path": file_path.to_str().unwrap(),
+                    "ignore_case": true
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -311,10 +321,13 @@ mod tests {
 
         let tool = GrepTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "nonexistent",
-                "path": file_path.to_str().unwrap()
-            }), make_ctx())
+            .execute(
+                json!({
+                    "pattern": "nonexistent",
+                    "path": file_path.to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -324,7 +337,9 @@ mod tests {
     #[tokio::test]
     async fn test_grep_tool_invalid_regex() {
         let tool = GrepTool::new();
-        let result = tool.execute(json!({"pattern": "[invalid"}), make_ctx()).await;
+        let result = tool
+            .execute(json!({"pattern": "[invalid"}), make_ctx())
+            .await;
 
         assert!(result.is_err());
         match result {

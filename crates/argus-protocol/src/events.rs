@@ -2,11 +2,11 @@
 //!
 //! These events are emitted during thread processing and consumed by subscribers (CLI, Tauri).
 
-use crate::ids::AgentId;
-use crate::message_override::MessageOverride;
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
+use crate::ids::AgentId;
 use crate::llm::LlmStreamEvent;
+use crate::message_override::MessageOverride;
 
 /// Thread event broadcast to subscribers (CLI, Tauri).
 #[derive(Debug, Clone)]

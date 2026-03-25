@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
-use argus_protocol::tool::NamedTool;
 #[allow(unused_imports)]
 use argus_protocol::ToolExecutionContext;
+use argus_protocol::tool::NamedTool;
 
 use super::{Turn, TurnBuilder, TurnConfig, TurnError, TurnInput, TurnOutput};
 

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError, ToolExecutionContext};
+use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, ToolExecutionContext, tool::ToolError};
 use argus_template::TemplateManager;
 use async_trait::async_trait;
 
@@ -46,12 +46,17 @@ impl NamedTool for ListSubagentsTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, _input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
-        let agent_id = argus_turn::tool_context::current_agent_id()
-            .ok_or_else(|| ToolError::ExecutionFailed {
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let agent_id = argus_turn::tool_context::current_agent_id().ok_or_else(|| {
+            ToolError::ExecutionFailed {
                 tool_name: self.name().to_string(),
                 reason: "current agent_id not available".to_string(),
-            })?;
+            }
+        })?;
 
         tracing::debug!("list_subagents called for agent {:?}", agent_id);
 
@@ -75,9 +80,11 @@ impl NamedTool for ListSubagentsTool {
             })
             .collect();
 
-        Ok(serde_json::to_value(&result).map_err(|e| ToolError::ExecutionFailed {
-            tool_name: self.name().to_string(),
-            reason: e.to_string(),
-        })?)
+        Ok(
+            serde_json::to_value(&result).map_err(|e| ToolError::ExecutionFailed {
+                tool_name: self.name().to_string(),
+                reason: e.to_string(),
+            })?,
+        )
     }
 }

@@ -71,7 +71,11 @@ impl NamedTool for ReadTool {
         RiskLevel::High
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse path argument (required)
         let path = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
             ToolError::ExecutionFailed {
@@ -207,11 +211,14 @@ mod tests {
 
         let tool = ReadTool::new();
         let result = tool
-            .execute(json!({
-                "path": file.path().to_str().unwrap(),
-                "offset": 2,
-                "limit": 2
-            }), make_ctx())
+            .execute(
+                json!({
+                    "path": file.path().to_str().unwrap(),
+                    "offset": 2,
+                    "limit": 2
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -228,7 +235,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_tool_file_not_found() {
         let tool = ReadTool::new();
-        let result = tool.execute(json!({"path": "/nonexistent/path"}), make_ctx()).await;
+        let result = tool
+            .execute(json!({"path": "/nonexistent/path"}), make_ctx())
+            .await;
 
         assert!(result.is_err());
         match result {

@@ -101,7 +101,11 @@ impl NamedTool for ShellTool {
         RiskLevel::Critical
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse command argument (required)
         let command = input
             .get("command")
