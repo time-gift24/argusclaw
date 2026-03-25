@@ -233,17 +233,26 @@ For **each** of the 10 files above, the change is identical in pattern:
 
 - [ ] **Step 1: Update execute signature in each file**
 
-Find the line:
+Each file has a different parameter name. Handle each case:
+
+**For 8 files that use `args`:**
 ```rust
+// OLD:
 async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>
+// NEW:
+async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError>
+```
+Files: `glob.rs`, `grep.rs`, `http.rs`, `read.rs`, `shell.rs`, `execution.rs`, `bin/turn.rs`, `plan_tool.rs`
+
+**For `crates/argus-job/src/dispatch_tool.rs`:** Already uses `input` — only add the `ctx` parameter:
+```rust
+async fn execute(&self, input: serde_json::Value, ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError>
 ```
 
-Replace with:
+**For `crates/argus-job/src/list_subagents_tool.rs`:** Uses `_input` — change to `input` and add ctx:
 ```rust
 async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError>
 ```
-
-> **Note:** The parameter name changes from `args` to `input`. Update all internal usages of `args` → `input` within the execute body in each file.
 
 Also add the import at the top of each file:
 ```rust
@@ -1200,21 +1209,23 @@ pub async fn send_message(
 There are two places where a Thread is added to a Session:
 
 **Location A — `load()` method (around line 226):**
-Find `session.add_thread(thread.clone());`. Before that line, add:
+The current code is:
+```rust
+session.add_thread(thread.clone());
+```
+Where `thread` is already `Arc<Mutex<Thread>>`. Add the spawn before that line:
 ```rust
 // Spawn the thread's main orchestration loop
-let thread_clone = Arc::clone(&thread);
+let thread_clone = Arc::clone(&thread);  // Arc<Mutex<Thread>> does not impl Clone
 tokio::spawn(async move {
     let mut t = thread_clone.lock().await;
     t.run().await;
 });
-session.add_thread(thread.clone());
+session.add_thread(thread);  // already Arc, no .clone() needed
 ```
 
 **Location B — `create_thread()` method (around line 348):**
-Same pattern — before `session.add_thread(thread.clone())`, add the spawn.
-
-Note: `add_thread` calls `thread.try_lock().map(|t| t.id())` to get the thread ID before inserting. Make sure the spawn is added after the Arc is created but before or after the lock attempt — the Arc keeps the thread alive for the spawned task.
+Same pattern — before `session.add_thread(thread.clone())`, add the spawn with `Arc::clone(&thread)`.
 
 - [ ] **Step 5: Verify compiles**
 
