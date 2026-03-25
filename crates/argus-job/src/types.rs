@@ -14,21 +14,6 @@ pub struct JobDispatchArgs {
     /// Optional context JSON for the job.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
-    /// Whether to wait for the result synchronously.
-    #[serde(default)]
-    pub wait_for_result: bool,
-}
-
-/// Result of a job dispatch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobDispatchResult {
-    /// The job ID.
-    pub job_id: String,
-    /// Status: "submitted" or "completed".
-    pub status: String,
-    /// Result data if wait_for_result was true.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<JobResult>,
 }
 
 /// Result of a completed job.

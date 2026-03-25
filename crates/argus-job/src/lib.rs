@@ -15,4 +15,4 @@ pub use error::JobError;
 pub use job_manager::JobManager;
 pub use list_subagents_tool::ListSubagentsTool;
 pub use sse_broadcaster::SseBroadcaster;
-pub use types::{JobDispatchArgs, JobDispatchResult, JobResult};
+pub use types::{JobDispatchArgs, JobResult};

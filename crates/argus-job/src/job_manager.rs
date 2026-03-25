@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
@@ -13,14 +13,13 @@ use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnConfig, TurnOutput};
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, broadcast};
-use tokio::time::{Instant, sleep};
 use uuid::Uuid;
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
 use crate::list_subagents_tool::ListSubagentsTool;
 use crate::sse_broadcaster::SseBroadcaster;
-use crate::types::{JobDispatchArgs, JobDispatchResult, JobResult};
+use crate::types::{JobDispatchArgs, JobResult};
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
@@ -47,9 +46,6 @@ struct JobState {
     result: Option<JobResult>,
 }
 
-const JOB_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
-
 impl JobManager {
     /// Create a new JobManager.
     pub fn new(
@@ -73,10 +69,9 @@ impl JobManager {
         &self.broadcaster
     }
 
-    /// Dispatch a new job.
-    pub async fn dispatch(&self, args: JobDispatchArgs) -> Result<JobDispatchResult, JobError> {
+    /// Dispatch a new job (fire-and-forget).
+    pub async fn dispatch(&self, args: JobDispatchArgs) -> Result<String, JobError> {
         let job_id = Uuid::new_v4().to_string();
-        let wait_for_result = args.wait_for_result;
 
         // Store initial job state
         {
@@ -93,25 +88,7 @@ impl JobManager {
         tracing::info!("job {} dispatched for agent {:?}", job_id, args.agent_id);
         self.spawn_background_execution(job_id.clone(), args);
 
-        if wait_for_result {
-            let result = self.wait_for_result(&job_id).await?;
-            let status = if result.success {
-                "completed"
-            } else {
-                "failed"
-            };
-            return Ok(JobDispatchResult {
-                job_id,
-                status: status.to_string(),
-                result: Some(result),
-            });
-        }
-
-        Ok(JobDispatchResult {
-            job_id,
-            status: "submitted".to_string(),
-            result: None,
-        })
+        Ok(job_id)
     }
 
     /// Get the result of a job.
@@ -206,32 +183,6 @@ impl JobManager {
                 broadcaster.broadcast_failed(job_id.clone(), None, final_result.message.clone());
             }
         });
-    }
-
-    async fn wait_for_result(&self, job_id: &str) -> Result<JobResult, JobError> {
-        let start = Instant::now();
-        loop {
-            let maybe_result = {
-                let jobs = self.jobs.read().await;
-                let state = jobs
-                    .get(job_id)
-                    .ok_or_else(|| JobError::JobNotFound(job_id.to_string()))?;
-                state.result.clone()
-            };
-
-            if let Some(result) = maybe_result {
-                return Ok(result);
-            }
-
-            if start.elapsed() >= JOB_WAIT_TIMEOUT {
-                return Err(JobError::ExecutionFailed(format!(
-                    "timed out waiting for job {job_id} after {}s",
-                    JOB_WAIT_TIMEOUT.as_secs()
-                )));
-            }
-
-            sleep(JOB_WAIT_POLL_INTERVAL).await;
-        }
     }
 
     async fn execute_job(

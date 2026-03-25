@@ -54,11 +54,6 @@ impl NamedTool for DispatchJobTool {
                     "context": {
                         "type": "object",
                         "description": "Optional context JSON for the job",
-                    },
-                    "wait_for_result": {
-                        "type": "boolean",
-                        "description": "Whether to wait for the result synchronously",
-                        "default": false
                     }
                 },
                 "required": ["prompt", "agent_id"]
