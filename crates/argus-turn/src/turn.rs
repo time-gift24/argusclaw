@@ -299,7 +299,12 @@ impl Turn {
         #[allow(unused_variables)]
         let trace_writer = match self.trace_config.as_ref() {
             Some(config) if config.enabled => {
-                match TraceWriter::new(&self.thread_id, self.turn_number, config).await {
+                let mut base_dir = config.trace_dir.clone();
+                if let Some(session_id) = &config.session_id {
+                    base_dir = base_dir.join(session_id.to_string());
+                }
+                base_dir = base_dir.join(&self.thread_id);
+                match TraceWriter::new(&base_dir, self.turn_number, config).await {
                     Ok(writer) => Some(writer),
                     Err(e) => {
                         tracing::warn!(

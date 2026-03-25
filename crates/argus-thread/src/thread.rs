@@ -466,7 +466,7 @@ mod tests {
         let result = ThreadBuilder::new()
             .compactor(compactor)
             .agent_record(test_agent_record())
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .build();
         assert!(matches!(result, Err(ThreadError::ProviderNotConfigured)));
     }
@@ -475,7 +475,7 @@ mod tests {
     fn thread_builder_requires_compactor() {
         let result = ThreadBuilder::new()
             .agent_record(test_agent_record())
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .build();
         assert!(result.is_err());
     }
@@ -485,7 +485,7 @@ mod tests {
         let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
         let result = ThreadBuilder::new()
             .compactor(compactor)
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .build();
         assert!(matches!(result, Err(ThreadError::AgentRecordNotSet)));
     }
@@ -535,7 +535,7 @@ mod tests {
             .provider(Arc::new(DummyProvider))
             .compactor(compactor)
             .agent_record(test_agent_record())
-            .session_id(SessionId::new(1))
+            .session_id(SessionId::new())
             .plan_store(plan_store)
             .build()
             .unwrap();

@@ -246,7 +246,7 @@ pub struct ChatSessionPayload {
     /// Unique session key (template_id::provider_preference_id).
     pub session_key: String,
     /// The session ID for this chat.
-    pub session_id: i64,
+    pub session_id: String,
     /// The template ID this session was created from.
     pub template_id: i64,
     /// The thread ID for this session.
@@ -283,7 +283,7 @@ impl From<&ChatMessage> for ChatMessagePayload {
 /// Current snapshot of a chat thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSnapshotPayload {
-    pub session_id: i64,
+    pub session_id: String,
     pub thread_id: String,
     pub messages: Vec<ChatMessagePayload>,
     pub turn_count: u32,
@@ -357,7 +357,7 @@ pub async fn create_chat_session(
 
     Ok(ChatSessionPayload {
         session_key,
-        session_id: session_id.inner(),
+        session_id: session_id.to_string(),
         template_id: template_id_i64,
         thread_id: thread_id.to_string(),
         effective_provider_id,
@@ -367,12 +367,13 @@ pub async fn create_chat_session(
 #[tauri::command]
 pub async fn send_message(
     wing: State<'_, Arc<ArgusWing>>,
-    session_id: i64,
+    session_id: String,
     thread_id: String,
     content: String,
 ) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
-    wing.send_message(SessionId::new(session_id), thread_id, content)
+    wing.send_message(session_id, thread_id, content)
         .await
         .map_err(|e| e.to_string())
 }
@@ -380,10 +381,10 @@ pub async fn send_message(
 #[tauri::command]
 pub async fn get_thread_snapshot(
     wing: State<'_, Arc<ArgusWing>>,
-    session_id: i64,
+    session_id: String,
     thread_id: String,
 ) -> Result<ThreadSnapshotPayload, String> {
-    let session_id = SessionId::new(session_id);
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
 
     let session = wing
@@ -397,7 +398,7 @@ pub async fn get_thread_snapshot(
     let thread = thread.lock().await;
 
     Ok(ThreadSnapshotPayload {
-        session_id: session_id.inner(),
+        session_id: session_id.to_string(),
         thread_id: thread_id.to_string(),
         messages: thread
             .history()
@@ -574,11 +575,11 @@ mod tests {
 
     #[test]
     fn chat_session_payload_serializes_effective_provider_id() {
-        use super::ChatSessionPayload;
+        use super::{ChatSessionPayload, SessionId};
 
         let payload = ChatSessionPayload {
             session_key: "arguswing::__default__".to_string(),
-            session_id: 1,
+            session_id: SessionId::new().to_string(),
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: Some(1),
@@ -587,16 +588,16 @@ mod tests {
         let value = serde_json::to_value(payload).expect("payload should serialize");
         assert_eq!(value["effective_provider_id"], json!(1));
         assert_eq!(value["session_key"], json!("arguswing::__default__"));
-        assert_eq!(value["session_id"], json!(1));
+        assert!(value["session_id"].is_string());
     }
 
     #[test]
     fn chat_session_payload_serializes_none_effective_provider_id() {
-        use super::ChatSessionPayload;
+        use super::{ChatSessionPayload, SessionId};
 
         let payload = ChatSessionPayload {
             session_key: "arguswing::__default__".to_string(),
-            session_id: 1,
+            session_id: SessionId::new().to_string(),
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: None,

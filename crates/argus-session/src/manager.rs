@@ -96,7 +96,8 @@ impl SessionManager {
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 SessionSummary {
-                    id: SessionId::new(row.get("id")),
+                    id: SessionId::parse(&row.get::<String, _>("id"))
+                        .unwrap_or_else(|_| SessionId::new()),
                     name: row.get("name"),
                     thread_count: row.get("thread_count"),
                     updated_at,
@@ -116,7 +117,7 @@ impl SessionManager {
 
         // Load from DB
         let row = sqlx::query("SELECT id, name FROM sessions WHERE id = ?")
-            .bind(session_id.inner())
+            .bind(&session_id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -128,7 +129,7 @@ impl SessionManager {
                 let name: String = row.get("name");
                 Arc::new(Session::new(session_id, name))
             }
-            None => return Err(ArgusError::SessionNotFound(session_id.inner())),
+            None => return Err(ArgusError::SessionNotFound(session_id)),
         };
 
         // Load threads metadata from DB
@@ -138,7 +139,7 @@ impl SessionManager {
             FROM threads WHERE session_id = ?
             "#,
         )
-        .bind(session_id.inner())
+        .bind(&session_id.to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {
@@ -240,23 +241,24 @@ impl SessionManager {
 
     /// Create a new session.
     pub async fn create(&self, name: String) -> Result<SessionId> {
-        let result = sqlx::query(
-            "INSERT INTO sessions (name, created_at, updated_at) VALUES (?, datetime('now'), datetime('now'))",
+        let session_id = SessionId::new();
+        sqlx::query(
+            "INSERT INTO sessions (id, name, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))",
         )
+        .bind(&session_id.to_string())
         .bind(&name)
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        let id = result.last_insert_rowid() as i64;
-        Ok(SessionId::new(id))
+        Ok(session_id)
     }
 
     /// Delete a session and all its threads.
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         // Delete from DB (threads will be cascade deleted)
         sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(session_id.inner())
+            .bind(&session_id.to_string())
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -308,7 +310,8 @@ impl SessionManager {
         let plan_store = FilePlanStore::new(self.trace_dir.clone(), &thread_id.inner().to_string());
 
         // Create Thread directly
-        let trace_cfg = TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
+        let trace_cfg = TraceConfig::new(true, self.trace_dir.clone())
+            .with_session_id(session_id);
         let mut turn_config = TurnConfig::new();
         turn_config.trace_config = Some(trace_cfg);
         let config = ThreadConfigBuilder::default()
@@ -337,7 +340,7 @@ impl SessionManager {
             "#,
         )
         .bind(thread_id.inner().to_string())
-        .bind(session_id.inner())
+        .bind(&session_id.to_string())
         .bind(template_id.inner())
         .bind(provider_id.inner())
         .execute(&self.pool)
@@ -355,7 +358,7 @@ impl SessionManager {
         // Delete from DB
         sqlx::query("DELETE FROM threads WHERE id = ? AND session_id = ?")
             .bind(thread_id.inner().to_string())
-            .bind(session_id.inner())
+            .bind(&session_id.to_string())
             .execute(&self.pool)
             .await
             .map_err(|e| ArgusError::DatabaseError {
@@ -385,7 +388,7 @@ impl SessionManager {
             ORDER BY updated_at DESC
             "#,
         )
-        .bind(session_id.inner())
+        .bind(&session_id.to_string())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError {

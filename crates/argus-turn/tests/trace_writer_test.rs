@@ -10,7 +10,9 @@ async fn test_trace_writer_success() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config = TraceConfig::new(true, temp_dir.path().to_path_buf());
 
-    let mut writer = TraceWriter::new("thread-1", 1, &config).await.unwrap();
+    // base_dir = {trace_dir}/{session_id}/{thread_id}
+    let thread_dir = temp_dir.path().join("session-1").join("thread-1");
+    let mut writer = TraceWriter::new(&thread_dir, 1, &config).await.unwrap();
 
     let req_event = TurnLogEvent::LlmRequest {
         messages: vec![],
@@ -33,7 +35,7 @@ async fn test_trace_writer_success() {
     };
     writer.finish_success(&token_usage).await.unwrap();
 
-    let trace_path = temp_dir.path().join("thread-1").join("turns").join("1.jsonl");
+    let trace_path = thread_dir.join("turns").join("1.jsonl");
     assert!(trace_path.exists());
 
     let events = read_jsonl_events(&trace_path).await.unwrap();
@@ -48,7 +50,8 @@ async fn test_trace_writer_failure() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config = TraceConfig::new(true, temp_dir.path().to_path_buf());
 
-    let mut writer = TraceWriter::new("thread-1", 1, &config).await.unwrap();
+    let thread_dir = temp_dir.path().join("session-1").join("thread-1");
+    let mut writer = TraceWriter::new(&thread_dir, 1, &config).await.unwrap();
 
     let req_event = TurnLogEvent::LlmRequest {
         messages: vec![],
@@ -66,7 +69,7 @@ async fn test_trace_writer_failure() {
 
     writer.finish_failure("Test error message").await.unwrap();
 
-    let trace_path = temp_dir.path().join("thread-1").join("turns").join("1.jsonl");
+    let trace_path = thread_dir.join("turns").join("1.jsonl");
     assert!(trace_path.exists());
 
     let events = read_jsonl_events(&trace_path).await.unwrap();
@@ -81,7 +84,8 @@ async fn test_trace_writer_with_tool_execution() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config = TraceConfig::new(true, temp_dir.path().to_path_buf());
 
-    let mut writer = TraceWriter::new("thread-1", 1, &config).await.unwrap();
+    let thread_dir = temp_dir.path().join("session-1").join("thread-1");
+    let mut writer = TraceWriter::new(&thread_dir, 1, &config).await.unwrap();
 
     let req_event = TurnLogEvent::LlmRequest {
         messages: vec![ChatMessage::user("test")],
@@ -113,7 +117,7 @@ async fn test_trace_writer_with_tool_execution() {
     };
     writer.finish_success(&token_usage).await.unwrap();
 
-    let trace_path = temp_dir.path().join("thread-1").join("turns").join("1.jsonl");
+    let trace_path = thread_dir.join("turns").join("1.jsonl");
     assert!(trace_path.exists());
 
     let content = tokio::fs::read_to_string(&trace_path).await.unwrap();

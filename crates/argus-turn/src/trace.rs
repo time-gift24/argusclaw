@@ -16,8 +16,10 @@ use super::error::TurnLogError;
 pub struct TraceConfig {
     /// Whether tracing is enabled.
     pub enabled: bool,
-    /// Directory where trace files are written.
+    /// Root directory where trace files are written.
     pub trace_dir: PathBuf,
+    /// Session ID (included in path: {trace_dir}/{session_id}/{thread_id}/).
+    pub session_id: Option<argus_protocol::SessionId>,
     /// Whether to record streaming deltas (llm_delta, tool_call_delta).
     pub include_streaming_deltas: bool,
 }
@@ -28,8 +30,15 @@ impl TraceConfig {
         Self {
             enabled,
             trace_dir,
+            session_id: None,
             include_streaming_deltas: true,
         }
+    }
+
+    /// Set the session ID for trace directory path.
+    pub fn with_session_id(mut self, session_id: argus_protocol::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
     }
 
     /// Create a disabled TraceConfig (no tracing).
@@ -37,6 +46,7 @@ impl TraceConfig {
         Self {
             enabled: false,
             trace_dir: PathBuf::new(),
+            session_id: None,
             include_streaming_deltas: true,
         }
     }
@@ -76,17 +86,20 @@ pub struct TraceWriter {
     file: BufStream<File>,
     thread_id: String,
     turn_number: u32,
+    include_streaming_deltas: bool,
 }
 
 impl TraceWriter {
     /// Create a new TraceWriter for the given thread and turn.
     /// Opens file in append mode, creates if not exists.
+    ///
+    /// `base_dir` should be `{trace_dir}/{session_id}/{thread_id}/turns/`.
     pub async fn new(
-        thread_id: &str,
+        base_dir: &std::path::Path,
         turn_number: u32,
         config: &TraceConfig,
     ) -> std::io::Result<Self> {
-        let dir = config.trace_dir.join(thread_id).join("turns");
+        let dir = base_dir.join("turns");
         tokio::fs::create_dir_all(&dir).await?;
 
         let file_path = dir.join(format!("{}.jsonl", turn_number));
@@ -98,13 +111,25 @@ impl TraceWriter {
 
         Ok(Self {
             file: BufStream::new(file),
-            thread_id: thread_id.to_string(),
+            thread_id: base_dir.file_name().and_then(|s| s.to_str()).unwrap_or("unknown").to_string(),
             turn_number,
+            include_streaming_deltas: config.include_streaming_deltas,
         })
     }
 
     /// Write a single event to the JSONL file.
+    /// Skips delta events if `include_streaming_deltas` is false.
     pub async fn write_event(&mut self, event: &TurnLogEvent) -> std::io::Result<()> {
+        // Skip delta events if streaming deltas are disabled
+        if !self.include_streaming_deltas {
+            match event {
+                TurnLogEvent::LlmDelta { .. } | TurnLogEvent::ToolCallDelta { .. } => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         let ts = Utc::now().to_rfc3339();
         let json = serde_json::json!({
             "v": "1",
@@ -114,7 +139,8 @@ impl TraceWriter {
             "type": event.type_name(),
             "data": event,
         });
-        let line = serde_json::to_string(&json).unwrap();
+        let line = serde_json::to_string(&json)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         self.file.write_all(line.as_bytes()).await?;
         self.file.write_all(b"\n").await?;
         self.file.flush().await?;
@@ -151,9 +177,9 @@ impl TraceWriter {
 pub async fn read_jsonl_events(
     path: &PathBuf,
 ) -> Result<Vec<TurnLogEvent>, TurnLogError> {
-    let content = tokio::fs::read_to_string(path).await.map_err(|_e| {
-        TurnLogError::TurnNotFound(path.clone())
-    })?;
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|_e| TurnLogError::TurnNotFound(path.clone()))?;
 
     let mut events = Vec::new();
     for (line_idx, line) in content.lines().enumerate() {
@@ -161,6 +187,7 @@ pub async fn read_jsonl_events(
         if line.is_empty() {
             continue;
         }
+        let line_num = line_idx + 1;
         // Try parsing as the full JSONL wrapper
         if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
             if let Some(data) = wrapper.get("data") {
@@ -174,7 +201,7 @@ pub async fn read_jsonl_events(
         match serde_json::from_str::<TurnLogEvent>(&line) {
             Ok(event) => events.push(event),
             Err(_) => {
-                tracing::warn!("Malformed JSONL line {}: skipped", line_idx + 1);
+                tracing::warn!("Malformed JSONL line {}: skipped", line_num);
             }
         }
     }
@@ -205,23 +232,27 @@ pub async fn recover_turn_events(
         }
     };
 
+    use std::cell::Cell;
+    let line_num = Cell::new(0usize);
+
     let lines_stream = tokio_stream::wrappers::LinesStream::new(
         tokio::io::BufReader::new(file).lines(),
     );
 
-    Box::pin(tokio_stream::StreamExt::map(lines_stream, move |line: std::io::Result<String>| {
-        let line = match line {
+    Box::pin(tokio_stream::StreamExt::map(lines_stream, move |line_result: std::io::Result<String>| {
+        line_num.set(line_num.get() + 1);
+        let line = match line_result {
             Ok(l) => l.trim().to_string(),
             Err(e) => {
                 return Err(TurnLogError::MalformedEvent {
-                    line: 0,
+                    line: line_num.get(),
                     reason: format!("IO error reading line: {}", e),
                 });
             }
         };
         if line.is_empty() {
             return Err(TurnLogError::MalformedEvent {
-                line: 0,
+                line: line_num.get(),
                 reason: "empty line".into(),
             });
         }
@@ -237,12 +268,12 @@ pub async fn recover_turn_events(
             Err(e) => {
                 if line.len() < 10 {
                     Err(TurnLogError::TruncatedEvent {
-                        line: 0,
+                        line: line_num.get(),
                         reason: format!("incomplete JSON: {}", e),
                     })
                 } else {
                     Err(TurnLogError::MalformedEvent {
-                        line: 0,
+                        line: line_num.get(),
                         reason: e.to_string(),
                     })
                 }
