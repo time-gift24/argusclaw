@@ -54,10 +54,6 @@ impl SessionManager {
         let dispatch_tool = job_manager.clone().create_dispatch_tool();
         tool_manager.register(Arc::new(dispatch_tool));
 
-        // Register the get_job_result tool for polling job status
-        let get_result_tool = job_manager.clone().create_get_result_tool();
-        tool_manager.register(Arc::new(get_result_tool));
-
         // Register the list_subagents tool for querying subagents
         let list_subagents_tool = job_manager.clone().create_list_subagents_tool();
         tool_manager.register(Arc::new(list_subagents_tool));
