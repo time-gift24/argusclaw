@@ -284,11 +284,18 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
+        let context_window = record
+            .model_config
+            .get(model)
+            .map(|c| c.max_context_window)
+            .unwrap_or(128_000);
+
         let mut config = OpenAiCompatibleConfig::new(
             record.base_url.clone(),
             record.api_key.expose_secret().to_string(),
             model.to_string(),
-        );
+        )
+        .with_context_window(context_window);
 
         for (name, value) in &record.extra_headers {
             config = config.with_extra_header(name, value);
@@ -710,6 +717,7 @@ mod tests {
             base_url: "https://api.example.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4".to_string()],
+            model_config: HashMap::new(),
             default_model: "gpt-4".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),

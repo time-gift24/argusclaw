@@ -12,10 +12,12 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     display_name TEXT NOT NULL,
     base_url TEXT NOT NULL,
     models TEXT NOT NULL DEFAULT '[]',
+    model_config TEXT NOT NULL DEFAULT '{}',
     default_model TEXT NOT NULL,
     encrypted_api_key BLOB NOT NULL,
     api_key_nonce BLOB NOT NULL,
     extra_headers TEXT NOT NULL DEFAULT '{}',
+    meta_data TEXT NOT NULL DEFAULT '{}',
     is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -183,15 +185,17 @@ UPDATE threads SET template_id = (SELECT id FROM agents ORDER BY id LIMIT 1) WHE
 
 -- Insert default provider with placeholder URL for user to configure
 -- (from 20260320020000_add_default_provider.sql)
-INSERT INTO llm_providers (kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, extra_headers, is_default)
+INSERT INTO llm_providers (kind, display_name, base_url, models, model_config, default_model, encrypted_api_key, api_key_nonce, extra_headers, meta_data, is_default)
 VALUES (
     'openai-compatible',
     'My LLM Provider',
     'https://placeholder.example.com/v1',
     '["gpt-4o-mini"]',
+    '{"gpt-4o-mini": {"max_context_window": 128000}}',
     'gpt-4o-mini',
     CAST(X'' AS BLOB),  -- empty encrypted api key
     CAST(X'' AS BLOB),   -- empty nonce
     '{}',
+    '{"account_token_source": "true"}',
     1
 );

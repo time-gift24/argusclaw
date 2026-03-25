@@ -11,7 +11,7 @@ pub mod repository;
 // Re-export provider types for convenience
 pub use provider_types::{
     LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    LlmProviderRecordJson, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
+    LlmProviderRecordJson, ModelConfig, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
     SecretString,
 };
 

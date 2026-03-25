@@ -29,6 +29,7 @@ export interface LlmProviderRecord {
   base_url: string
   api_key: string
   models: string[]
+  model_config: Record<string, { max_context_window: number }>
   default_model: string
   is_default: boolean
   extra_headers: Record<string, string>
@@ -48,6 +49,7 @@ function createDefaultFormData(): LlmProviderRecord {
     base_url: "",
     api_key: "",
     models: [],
+    model_config: {},
     default_model: "",
     is_default: false,
     extra_headers: {},
@@ -90,6 +92,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                   ? provider.api_key
                   : (provider.api_key as { api_key: string }).api_key || "",
               models: provider.models,
+              model_config: provider.model_config ?? {},
               default_model: provider.default_model,
               is_default: provider.is_default,
               extra_headers: provider.extra_headers,
@@ -139,6 +142,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         base_url: formData.base_url,
         api_key: formData.api_key,
         models: formData.models,
+        model_config: formData.model_config,
         default_model: formData.default_model,
         is_default: formData.is_default,
         extra_headers: formData.extra_headers,
@@ -180,7 +184,16 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     const model = newModel.trim()
     if (!model || formData.models.includes(model)) return
     const newModels = [...formData.models, model]
-    setFormData({ ...formData, models: newModels, default_model: formData.default_model || model })
+    const newModelConfig = {
+      ...formData.model_config,
+      [model]: { max_context_window: 128000 },
+    }
+    setFormData({
+      ...formData,
+      models: newModels,
+      model_config: newModelConfig,
+      default_model: formData.default_model || model,
+    })
     setNewModel("")
     if (formData.base_url.trim() && formData.api_key.trim()) {
       await testModel(model, newModels)
@@ -221,9 +234,12 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
 
   const handleRemoveModel = (model: string) => {
     const newModels = formData.models.filter((m) => m !== model)
+    const newModelConfig = { ...formData.model_config }
+    delete newModelConfig[model]
     setFormData({
       ...formData,
       models: newModels,
+      model_config: newModelConfig,
       default_model: formData.default_model === model ? (newModels[0] || "") : formData.default_model,
     })
   }
@@ -291,6 +307,14 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                   <Checkbox id="is_default" checked={formData.is_default} onCheckedChange={(v) => setFormData({ ...formData, is_default: !!v })} />
                   <Label htmlFor="is_default" className="text-sm cursor-pointer font-bold">设为全局默认提供者</Label>
                 </div>
+                <div className="flex items-center gap-3 bg-background/50 p-3 rounded-xl border border-muted/40 h-14 shadow-inner">
+                  <Checkbox
+                    id="account_token_source"
+                    checked={formData.meta_data.account_token_source === "true"}
+                    onCheckedChange={(v) => setFormData({ ...formData, meta_data: { ...formData.meta_data, account_token_source: !!v ? "true" : "" } })}
+                  />
+                  <Label htmlFor="account_token_source" className="text-sm cursor-pointer font-bold">使用账号鉴权</Label>
+                </div>
               </div>
             </div>
 
@@ -312,15 +336,44 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                   {formData.models.length === 0 ? (
                     <div className="h-full flex items-center justify-center text-xs text-muted-foreground italic opacity-60 font-medium">尚未添加任何模型，请从上方输入并添加</div>
                   ) : (
-                    <div className="flex flex-wrap gap-2">
+                    <div className="space-y-2">
                       {formData.models.map((m) => (
-                        <Badge key={m} variant={m === formData.default_model ? "default" : "secondary"} className="h-7 pl-3 pr-1 cursor-pointer group rounded-lg font-mono text-[11px]" onClick={() => handleSetDefaultModel(m)}>
-                          {m}
-                          {m === formData.default_model && <span className="ml-1.5 text-[9px] font-bold bg-primary-foreground/20 px-1 rounded uppercase tracking-tighter">Default</span>}
-                          <button className="ml-1.5 p-0.5 rounded-md hover:bg-destructive hover:text-destructive-foreground opacity-40 group-hover:opacity-100 transition-all" onClick={(e) => (e.stopPropagation(), handleRemoveModel(m))}>
+                        <div key={m} className="flex items-center gap-2">
+                          <button
+                            className="flex-1 flex items-center gap-2 cursor-pointer"
+                            onClick={() => handleSetDefaultModel(m)}
+                          >
+                            <Badge variant={m === formData.default_model ? "default" : "secondary"} className="h-7 pl-3 pr-1 rounded-lg font-mono text-[11px]">
+                              {m}
+                              {m === formData.default_model && <span className="ml-1.5 text-[9px] font-bold bg-primary-foreground/20 px-1 rounded uppercase tracking-tighter">Default</span>}
+                            </Badge>
+                          </button>
+                          <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                            <span className="whitespace-nowrap">Context:</span>
+                            <input
+                              type="number"
+                              className="w-20 h-7 px-2 text-[11px] font-mono bg-background border border-muted/60 rounded-md text-center focus:outline-none focus:ring-1 focus:ring-primary"
+                              value={formData.model_config[m]?.max_context_window ?? 128000}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value, 10)
+                                if (!isNaN(val) && val > 0) {
+                                  setFormData({
+                                    ...formData,
+                                    model_config: { ...formData.model_config, [m]: { max_context_window: val } },
+                                  })
+                                }
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                            />
+                            <span className="text-[10px]">tokens</span>
+                          </div>
+                          <button
+                            className="p-1 rounded-md hover:bg-destructive hover:text-destructive-foreground text-muted-foreground opacity-40 hover:opacity-100 transition-all"
+                            onClick={(e) => { e.stopPropagation(); handleRemoveModel(m) }}
+                          >
                             <X className="h-3 w-3" />
                           </button>
-                        </Badge>
+                        </div>
                       ))}
                     </div>
                   )}

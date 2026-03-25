@@ -16,6 +16,10 @@ export interface LlmProviderSummary {
   secret_status: ProviderSecretStatus;
 }
 
+export interface ModelConfig {
+  max_context_window: number;
+}
+
 export interface LlmProviderRecord {
   id: number;
   kind: "openai-compatible";
@@ -23,6 +27,7 @@ export interface LlmProviderRecord {
   base_url: string;
   api_key: string;
   models: string[];
+  model_config: Record<string, ModelConfig>;
   default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
@@ -36,6 +41,7 @@ export interface ProviderInput {
   base_url: string;
   api_key: string;
   models: string[];
+  model_config: Record<string, ModelConfig>;
   default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
