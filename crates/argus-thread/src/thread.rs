@@ -82,9 +82,13 @@ pub struct Thread {
     #[builder(default)]
     turn_count: u32,
 
-    /// Event broadcaster (internal).
+    /// Pipe for sending/receiving ThreadEvents.
     #[builder(default)]
-    event_sender: broadcast::Sender<ThreadEvent>,
+    pipe_tx: broadcast::Sender<ThreadEvent>,
+
+    /// Whether a Turn is currently running.
+    #[builder(default)]
+    turn_running: bool,
 
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
@@ -120,7 +124,7 @@ impl ThreadBuilder {
     ///
     /// Returns `ThreadError` if required fields (`provider`, `compactor`, `agent_record`, `session_id`) are not set.
     pub fn build(self) -> Result<Thread, ThreadError> {
-        let (event_sender, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (pipe_tx, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         let agent_record = self.agent_record.ok_or(ThreadError::AgentRecordNotSet)?;
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
@@ -151,7 +155,8 @@ impl ThreadBuilder {
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
-            event_sender,
+            pipe_tx,
+            turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
         })
     }
@@ -210,12 +215,81 @@ impl Thread {
     ///
     /// Multiple subscribers can receive events simultaneously.
     pub fn subscribe(&self) -> broadcast::Receiver<ThreadEvent> {
-        self.event_sender.subscribe()
+        self.pipe_tx.subscribe()
     }
 
     /// Broadcast a ThreadEvent to this thread's subscribers.
     pub fn broadcast_to_self(&self, event: ThreadEvent) {
-        let _ = self.event_sender.send(event);
+        let _ = self.pipe_tx.send(event);
+    }
+
+    /// Returns true if a Turn is currently executing.
+    pub fn is_turn_running(&self) -> bool {
+        self.turn_running
+    }
+
+    /// Mark that a turn has started or stopped.
+    fn set_turn_running(&mut self, running: bool) {
+        self.turn_running = running;
+    }
+
+    async fn spawn_turn(
+        &mut self,
+        content: String,
+        msg_override: Option<MessageOverride>,
+    ) -> Result<(), ThreadError> {
+        self.set_turn_running(true);
+        self.send_message_internal(content, msg_override).await?;
+        self.set_turn_running(false);
+        Ok(())
+    }
+
+    /// Main orchestration loop.
+    ///
+    /// Runs as a background task (spawned by session). Waits on the pipe,
+    /// spawning turns when UserMessage arrives. Queues one pending message
+    /// if a turn is already running.
+    pub async fn run(&mut self) {
+        use argus_protocol::ThreadEvent::{Idle, UserMessage};
+
+        let mut rx = self.pipe_tx.subscribe();
+        let mut pending_user_message: Option<ThreadEvent> = None;
+
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    match event {
+                        UserMessage { content, msg_override } => {
+                            if self.is_turn_running() {
+                                if pending_user_message.is_none() {
+                                    pending_user_message = Some(ThreadEvent::UserMessage {
+                                        content: content.clone(),
+                                        msg_override: msg_override.clone(),
+                                    });
+                                }
+                            } else {
+                                if let Err(e) = self.spawn_turn(content, msg_override).await {
+                                    tracing::error!("turn failed: {}", e);
+                                }
+                            }
+                        }
+                        Idle { .. } => {
+                            if let Some(msg) = pending_user_message.take() {
+                                if let ThreadEvent::UserMessage { content, msg_override } = msg {
+                                    if let Err(e) = self.spawn_turn(content, msg_override).await {
+                                        tracing::error!("turn failed: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("pipe recv error in run(): {}", e);
+                }
+            }
+        }
     }
 
     /// Get current state.
@@ -302,8 +376,26 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
-    /// Send user message and execute Turn.
-    pub async fn send_message(
+    /// Send a user message into the pipe for processing.
+    ///
+    /// This is the entry point for external callers (CLI, Tauri).
+    /// The message is written to the pipe; Thread.run() picks it up.
+    pub fn send_user_message(
+        &self,
+        content: String,
+        msg_override: Option<MessageOverride>,
+    ) -> Result<(), ThreadError> {
+        let event = ThreadEvent::UserMessage {
+            content,
+            msg_override,
+        };
+        if self.pipe_tx.send(event).is_err() {
+            tracing::warn!("pipe send failed in send_user_message");
+        }
+        Ok(())
+    }
+
+    async fn send_message_internal(
         &mut self,
         user_input: String,
         msg_override: Option<MessageOverride>,
@@ -393,7 +485,7 @@ impl Thread {
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
-            .thread_event_tx(self.event_sender.clone());
+            .thread_event_tx(self.pipe_tx.clone());
 
         if let Some(ref tc) = self.config.turn_config.trace_config {
             turn_builder = turn_builder.trace_config(tc.clone());
