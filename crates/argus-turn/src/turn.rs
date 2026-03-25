@@ -19,13 +19,13 @@ use argus_protocol::llm::{
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
-    ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext, sanitize_tool_output,
-    ids::ThreadId,
+    ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext, ids::ThreadId,
+    sanitize_tool_output,
 };
 
 use super::events::TurnLogEvent;
+use super::tool_context::{clear_current_agent_id, set_current_agent_id};
 use super::trace::{TraceConfig, TraceWriter};
-use super::tool_context::{set_current_agent_id, clear_current_agent_id};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
 /// Turn identifier generator (simple counter for now).
@@ -232,6 +232,10 @@ pub struct Turn {
     /// Thread event sender for broadcasting to subscribers.
     thread_event_tx: broadcast::Sender<ThreadEvent>,
 
+    /// Receiver for the unified pipe (Thread-owned).
+    /// Initialized at execute() start via thread_event_tx.subscribe().
+    rx: broadcast::Receiver<ThreadEvent>,
+
     /// Event forwarder task handle (cleaned up on drop).
     #[builder(default)]
     _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
@@ -301,6 +305,10 @@ impl Turn {
             self.thread_id.clone(),
             self.turn_number,
         ));
+
+        // Subscribe to the unified pipe for polling at iteration start.
+        // Each Turn gets its own receiver via broadcast::Sender::subscribe().
+        self.rx = self.thread_event_tx.subscribe();
 
         // Create trace writer if configured
         #[allow(unused_variables)]
@@ -599,6 +607,24 @@ impl Turn {
         }
 
         for iteration in 0..max_iterations {
+            // Non-blocking drain of the unified pipe.
+            // Inject JobResult and UserInterrupt as user messages into the turn.
+            while let Ok(event) = self.rx.try_recv() {
+                match event {
+                    ThreadEvent::JobResult { job_id, success, message, .. } => {
+                        let status = if success { "completed" } else { "failed" };
+                        let content = format!("Job {} {}: {}", job_id, status, message);
+                        tracing::debug!("injecting JobResult into turn: {}", content);
+                        messages.push(ChatMessage::user(&content));
+                    }
+                    ThreadEvent::UserInterrupt { content } => {
+                        tracing::debug!("injecting UserInterrupt into turn: {}", content);
+                        messages.push(ChatMessage::user(&content));
+                    }
+                    _ => {}
+                }
+            }
+
             tracing::debug!(
                 thread_id = %self.thread_id,
                 turn_number = %self.turn_number,
