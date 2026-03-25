@@ -1,17 +1,18 @@
 "use client"
 
 import { useEffect } from "react"
+import { Home } from "lucide-react"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { ToastProvider } from "@/components/ui/toast"
-import Navbar from "@/components/shadcn-studio/blocks/navbar-component-06/navbar-component-06"
+import DashboardShell from "@/components/shadcn-studio/blocks/dashboard-shell-05"
 import { useAuthStore } from "@/components/auth/use-auth-store"
 import { LoginToast, useLoginToastStore } from "@/components/auth/login-toast"
 
 const navigationItems = [
-  { title: "Home", href: "/", isActive: true },
+  { title: "主页", href: "/", icon: <Home className="h-4 w-4" />, isActive: true },
 ]
 
 export default function RootLayout({
@@ -29,7 +30,7 @@ export default function RootLayout({
 
   return (
     <html
-      lang="en"
+      lang="zh"
       suppressHydrationWarning
       className="h-full antialiased font-sans"
     >
@@ -37,8 +38,9 @@ export default function RootLayout({
         <TooltipProvider>
           <ToastProvider>
             <ThemeProvider>
-              <Navbar navigationItems={navigationItems} />
-              <main className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</main>
+              <DashboardShell navigationItems={navigationItems}>
+                {children}
+              </DashboardShell>
             </ThemeProvider>
           </ToastProvider>
         </TooltipProvider>

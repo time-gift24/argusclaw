@@ -50,6 +50,10 @@ const loginDialogPath = new URL(
   "../components/auth/login-dialog.tsx",
   import.meta.url,
 );
+const settingsLayoutPath = new URL(
+  "../app/settings/layout.tsx",
+  import.meta.url,
+);
 
 test("settings exposes a dedicated new-agent route that renders create mode", () => {
   assert.equal(existsSync(newAgentPagePath), true);
@@ -99,6 +103,28 @@ test("agent editor treats provider as optional when deciding whether the form ca
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(formData\)/);
   assert.match(agentEditorSource, /router\.push\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
   assert.doesNotMatch(providerSelectBlock, /required/);
+});
+
+test("settings layout keeps edit pages inside a shrinkable scroll container", () => {
+  const settingsLayoutSource = readFileSync(settingsLayoutPath, "utf8");
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(
+    settingsLayoutSource,
+    /className="flex min-h-0 flex-1 flex-col overflow-y-auto"/,
+  );
+  assert.match(
+    settingsLayoutSource,
+    /className="mx-auto w-full max-w-7xl px-6 py-4"/,
+  );
+  assert.match(
+    agentEditorSource,
+    /className="w-full h-full flex flex-col min-h-0 animate-in fade-in duration-500 overflow-hidden"/,
+  );
+  assert.match(
+    agentEditorSource,
+    /className="flex-1 overflow-y-auto custom-scrollbar px-1 py-8"/,
+  );
 });
 
 test("provider editing flow uses dedicated routes while keeping dialog open state controllable", () => {

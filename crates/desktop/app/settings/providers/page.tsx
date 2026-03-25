@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Plus } from "lucide-react";
+import { Plus, Cloud, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   providers,
@@ -142,37 +142,49 @@ export default function ProvidersPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-muted-foreground">Loading providers...</div>
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <div className="h-8 w-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+        <div className="text-muted-foreground text-sm">正在加载提供者...</div>
       </div>
     );
   }
 
   return (
-    <div className="w-full space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-sm font-semibold">LLM 提供者</h1>
-          <p className="text-muted-foreground text-xs">
-            配置你的 LLM 提供者连接
+    <div className="w-full space-y-6 animate-in fade-in duration-500">
+      {/* 顶部标题栏 */}
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between border-b pb-6">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Cloud className="h-5 w-5 text-primary" />
+            <h1 className="text-xl font-bold tracking-tight">模型提供者 (LLM Providers)</h1>
+          </div>
+          <p className="text-muted-foreground text-sm">
+            管理您的 AI 模型提供者连接、API 密钥及模型列表。
           </p>
         </div>
-        <Button size="sm" onClick={() => router.push("/settings/providers/new")}>
-          <Plus className="h-4 w-4 mr-1" />
-          Add Provider
+        
+        <Button size="sm" onClick={() => router.push("/settings/providers/new")} className="h-9 shadow-sm">
+          <Plus className="h-4 w-4 mr-1.5" />
+          添加提供者
         </Button>
       </div>
 
       {providerList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-64 border rounded-lg border-dashed">
-          <p className="text-muted-foreground mb-4">No providers configured</p>
-          <Button size="sm" onClick={() => router.push("/settings/providers/new")}>
-            <Plus className="h-4 w-4 mr-1" />
-            Add Provider
+        <div className="flex flex-col items-center justify-center h-80 border-2 border-dashed rounded-2xl bg-muted/20 gap-4">
+          <div className="bg-muted p-4 rounded-full">
+            <Cloud className="h-8 w-8 text-muted-foreground/50" />
+          </div>
+          <div className="text-center space-y-1">
+            <p className="font-medium text-muted-foreground">暂无模型提供者</p>
+            <p className="text-xs text-muted-foreground/60">开始配置您的第一个 AI 推理服务吧</p>
+          </div>
+          <Button size="sm" onClick={() => router.push("/settings/providers/new")} className="px-6">
+            <Plus className="h-4 w-4 mr-1.5" />
+            立即添加
           </Button>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {providerList.map((provider) => (
             <ProviderCard
               key={provider.id}
@@ -188,12 +200,12 @@ export default function ProvidersPage() {
         </div>
       )}
 
-      {/* Delete Confirmation */}
+      {/* 删除确认对话框 */}
       <DeleteConfirmDialog
         open={!!deleteId}
         onOpenChange={(open) => !open && setDeleteId(null)}
-        title="Delete Provider"
-        description="Are you sure you want to delete this provider? This action cannot be undone."
+        title="确认删除提供者"
+        description="此操作将永久删除该模型提供者配置，且无法撤销。您确定要继续吗？"
         onConfirm={handleDelete}
         loading={deleteLoading}
       />

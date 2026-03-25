@@ -1,22 +1,27 @@
 "use client";
 
+import * as React from "react";
+import { Cloud, Check, ChevronRight, Cpu, Zap, Globe } from "lucide-react";
 import { useChatStore } from "@/lib/chat-store";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuPortal,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { UnfoldMoreIcon, Tick02Icon } from "@hugeicons/core-free-icons";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 export function ProviderSelector() {
   const providers = useChatStore((state) => state.providers);
   const selectedProviderPreferenceId = useChatStore(
     (state) => state.selectedProviderPreferenceId,
+  );
+  const selectedModelOverride = useChatStore(
+    (state) => state.selectedModelOverride,
   );
   const selectProviderPreference = useChatStore(
     (state) => state.selectProviderPreference,
@@ -25,102 +30,124 @@ export function ProviderSelector() {
     (state) => state.selectModelOverride,
   );
 
-  // Find the selected provider
-  const selectedProvider = selectedProviderPreferenceId
+  // Find the current provider and model
+  const currentProvider = selectedProviderPreferenceId
     ? providers.find((p) => p.id === selectedProviderPreferenceId)
-    : null;
+    : providers.find((p) => p.is_default);
 
-  // Get the effective model name for display
-  const effectiveModel =
-    selectedProvider?.default_model ??
-    providers.find((p) => p.is_default)?.default_model ??
-    "默认模型";
+  const currentModel = selectedModelOverride ?? currentProvider?.default_model ?? "未知模型";
 
-  // Display text: Provider name / Model name
-  const displayText = selectedProvider
-    ? `${selectedProvider.display_name} / ${effectiveModel}`
-    : providers.find((p) => p.is_default)
-      ? `${providers.find((p) => p.is_default)!.display_name} / ${effectiveModel}`
-      : `无提供商 / ${effectiveModel}`;
-
-  // Handle selecting a model from a provider
+  // Handle selecting a model
   const handleSelectModel = (providerId: number, model: string) => {
-    const provider = providers.find((item) => item.id === providerId);
-    if (!provider || model !== provider.default_model) {
-      return;
-    }
+    const provider = providers.find((p) => p.id === providerId);
+    if (!provider) return;
 
     void selectProviderPreference(providerId);
-    void selectModelOverride(null);
+    // If it's the default model, we don't need an override
+    void selectModelOverride(model === provider.default_model ? null : model);
   };
 
-  // Check if a specific item is selected
-  const isSelected = (providerId: number, model: string) => {
-    // If no preference set, use the default provider
-    const effectiveProviderId = selectedProviderPreferenceId ?? providers.find((p) => p.is_default)?.id;
-    const effectiveProvider = providers.find((provider) => provider.id === effectiveProviderId);
+  const trigger = (
+    <button
+      type="button"
+      className="flex h-8 items-center gap-2 px-3 rounded-full bg-muted/50 hover:bg-muted transition-all border border-transparent hover:border-muted-foreground/20 group outline-none focus-visible:ring-2 focus-visible:ring-primary/20"
+    >
+      <div className="flex h-4 w-4 items-center justify-center rounded-full bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-colors">
+        <Cpu className="size-3" />
+      </div>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="max-w-[100px] truncate text-[11px] font-bold tracking-tight opacity-70">
+          {currentProvider?.display_name ?? "选择提供者"}
+        </span>
+        <span className="text-[10px] opacity-30 font-bold">/</span>
+        <span className="max-w-[120px] truncate text-[11px] font-bold tracking-tight text-primary">
+          {currentModel}
+        </span>
+      </div>
+      <ChevronRight className="size-3 opacity-40 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+    </button>
+  );
 
-    return effectiveProviderId === providerId && effectiveProvider?.default_model === model;
-  };
+  if (providers.length === 0) return null;
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger
-        className="flex h-7 items-center gap-1 rounded-md border border-input bg-background px-2 py-1 text-xs outline-none hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring/30 data-[popup-open]:bg-accent"
-        render={
-          <button type="button">
-            <span className="max-w-[200px] truncate">{displayText}</span>
-            <HugeiconsIcon
-              icon={UnfoldMoreIcon}
-              strokeWidth={2}
-              className="size-3.5 text-muted-foreground"
-            />
-          </button>
-        }
-      />
-      <DropdownMenuPortal>
-        <DropdownMenuContent align="start" className="max-h-80 min-w-48 overflow-y-auto">
-          {providers.map((provider, index) => (
+      <DropdownMenuTrigger asChild>
+        {trigger}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-64 p-2 rounded-[24px] shadow-2xl border-none bg-background/95 backdrop-blur-xl">
+        <div className="px-3 py-2 mb-1">
+          <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest opacity-60">
+            Available AI Models
+          </p>
+        </div>
+        
+        <div className="max-h-[400px] overflow-y-auto custom-scrollbar pr-1">
+          {providers.map((provider, providerIndex) => (
             <div key={provider.id}>
-              {index > 0 && <DropdownMenuSeparator />}
-              <DropdownMenuLabel className="flex items-center gap-1 text-muted-foreground">
-                {provider.display_name}
+              {providerIndex > 0 && <DropdownMenuSeparator className="my-2 opacity-50" />}
+              
+              <div className="px-3 py-1.5 flex items-center gap-2">
+                <div className="p-1 rounded-md bg-muted text-muted-foreground">
+                  <Globe className="size-3" />
+                </div>
+                <span className="text-[11px] font-bold truncate flex-1">{provider.display_name}</span>
                 {provider.is_default && (
-                  <span className="text-muted-foreground text-[10px]">(默认)</span>
+                  <Badge className="text-[8px] h-3.5 px-1 bg-primary/10 text-primary border-none font-bold uppercase">Default</Badge>
                 )}
-              </DropdownMenuLabel>
-              {provider.models.map((model) => (
-                <DropdownMenuItem
-                  key={`${provider.id}-${model}`}
-                  onClick={() => handleSelectModel(provider.id, model)}
-                  className="pl-6"
-                  disabled={model !== provider.default_model}
-                >
-                  <span className="flex-1 truncate">{model}</span>
-                  {model === provider.default_model && (
-                    <span className="text-muted-foreground text-[10px]">默认</span>
-                  )}
-                  {model !== provider.default_model && (
-                    <span className="text-muted-foreground text-[10px]">暂未支持</span>
-                  )}
-                  {isSelected(provider.id, model) && (
-                    <HugeiconsIcon
-                      icon={Tick02Icon}
-                      strokeWidth={2}
-                      className="size-3.5 text-primary"
-                    />
-                  )}
-                </DropdownMenuItem>
-              ))}
+              </div>
+
+              <div className="grid gap-0.5 mt-1">
+                {provider.models.map((model) => {
+                  const isModelSelected = 
+                    selectedProviderPreferenceId === provider.id && 
+                    (selectedModelOverride === model || (selectedModelOverride === null && model === provider.default_model));
+                  
+                  // Special case: if nothing selected, use default provider's default model
+                  const isEffectivelySelected = !selectedProviderPreferenceId && provider.is_default && model === provider.default_model;
+
+                  const active = isModelSelected || isEffectivelySelected;
+
+                  return (
+                    <DropdownMenuItem
+                      key={`${provider.id}-${model}`}
+                      onClick={() => handleSelectModel(provider.id, model)}
+                      className={cn(
+                        "flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-all",
+                        active ? "bg-primary/5 text-primary" : "hover:bg-muted"
+                      )}
+                    >
+                      <div className={cn(
+                        "size-1.5 rounded-full shrink-0",
+                        active ? "bg-primary" : "bg-muted-foreground/30"
+                      )} />
+                      <span className={cn(
+                        "flex-1 truncate text-xs font-medium",
+                        active ? "font-bold" : ""
+                      )}>
+                        {model}
+                      </span>
+                      {model === provider.default_model && (
+                        <Zap className="size-3 text-amber-500 opacity-70 shrink-0" />
+                      )}
+                      {active && (
+                        <Check className="size-3.5 text-primary shrink-0" />
+                      )}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </div>
             </div>
           ))}
-          {providers.length === 0 && (
-            <DropdownMenuItem disabled>
-              无可用提供商
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenuPortal>
+        </div>
+
+        <DropdownMenuSeparator className="my-2" />
+        <div className="px-3 py-2">
+          <p className="text-[9px] text-muted-foreground leading-tight italic opacity-60">
+            * 默认模型由图标 <Zap className="inline size-2.5" /> 标识。
+          </p>
+        </div>
+      </DropdownMenuContent>
     </DropdownMenu>
   );
 }

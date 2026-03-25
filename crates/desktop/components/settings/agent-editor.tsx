@@ -3,7 +3,7 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
-import { CircleHelp, Save } from "lucide-react"
+import { CircleHelp, Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye } from "lucide-react"
 import { agents, providers, tools, type AgentRecord, type LlmProviderSummary, type ToolInfo } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
@@ -13,6 +13,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useToast } from "@/components/ui/toast"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { cn } from "@/lib/utils"
 
 interface AgentEditorProps {
   agentId?: number
@@ -86,7 +88,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       formData.system_prompt.trim(),
   )
 
-  // Load providers and agent data (if editing)
+  // Load data
   React.useEffect(() => {
     const loadData = async () => {
       try {
@@ -105,11 +107,8 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         const preferredProviderId = getPreferredProviderId(providersData)
         if (agentId !== undefined) {
           const agent = await agents.get(agentId)
-          if (agent) {
-            setFormData(agent)
-          }
+          if (agent) setFormData(agent)
         } else if (parentId !== undefined) {
-          // 新建模式，parentId 由 URL 传入，预填 parent_agent_id
           setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
         } else {
           setFormData(createDefaultFormData(preferredProviderId))
@@ -124,18 +123,15 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   }, [agentId, parentId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
-    if (!canSave) {
-      return
-    }
-
+    if (!canSave) return
     setSaving(true)
     try {
       const savedId = await agents.upsert(formData)
-      addToast("success", isEditing ? "智能体已更新" : "智能体已创建")
+      addToast("success", isEditing ? "配置已保存" : "创建成功")
       router.push(`/settings/agents/edit?id=${savedId}`)
     } catch (error) {
       console.error("Failed to save agent:", error)
-      addToast("error", "保存失败，请重试")
+      addToast("error", "保存失败")
     } finally {
       setSaving(false)
     }
@@ -143,252 +139,228 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-muted-foreground">加载中...</div>
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <div className="h-8 w-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+        <div className="text-muted-foreground text-sm">正在加载配置...</div>
       </div>
     )
   }
 
   return (
-    <div className="w-full space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-base font-semibold">
-          {parentId !== undefined ? "新建子智能体" : isEditing && formData.parent_agent_id ? "编辑子智能体" : isEditing ? "编辑智能体" : "新建智能体"}
-        </h1>
-        <Button size="sm" onClick={handleSave} disabled={saving || !canSave}>
-          <Save className="h-4 w-4 mr-1" />
-          {saving ? "保存中..." : "保存"}
-        </Button>
+    <div className="w-full h-full flex flex-col min-h-0 animate-in fade-in duration-500 overflow-hidden">
+      {/* 顶部标题栏 - 固定 */}
+      <div className="flex items-center justify-between border-b pb-6 shrink-0 px-1">
+        <div className="flex items-center gap-4">
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            className="h-9 w-9 rounded-full hover:bg-muted" 
+            onClick={() => router.push("/settings/agents")}
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div className="space-y-0.5">
+            <h1 className="text-lg font-bold tracking-tight">
+              {parentId !== undefined ? "新建子智能体" : isEditing && formData.parent_agent_id ? "编辑子智能体" : isEditing ? "编辑智能体" : "新建智能体"}
+            </h1>
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold opacity-70">
+              {isEditing ? `Agent Configuration / ${formData.display_name}` : "Agent Configuration / New Assistant"}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/agents")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
+            取消
+          </Button>
+          <Button size="sm" onClick={handleSave} disabled={saving || !canSave} className="h-9 px-6 text-sm font-bold shadow-lg shadow-primary/20">
+            <Save className="h-4 w-4 mr-2" />
+            {saving ? "正在保存..." : "保存配置"}
+          </Button>
+        </div>
       </div>
 
-      {/* Main Content */}
-      <div className="grid grid-cols-5 gap-6">
-        {/* Left Sidebar - Config */}
-        <div className="col-span-2 space-y-4">
-          {/* Basic Info */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">基本信息</h2>
+      {/* 核心滚动区域 */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar px-1 py-8">
+        <div className="space-y-10 pb-20">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-stretch">
+            {/* 基本设置 */}
+            <div className="flex flex-col h-full space-y-4">
+              <div className="flex items-center gap-2 text-[11px] font-bold text-primary uppercase tracking-widest px-1">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Bot className="h-3.5 w-3.5" />
+                </div>
+                Basic Information
+              </div>
+              <div className="flex-1 flex flex-col justify-between gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
+                <div className="space-y-2">
+                  <Label htmlFor="display_name" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">显示名称</Label>
+                  <Input
+                    id="display_name"
+                    value={formData.display_name}
+                    onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+                    placeholder="例如: 翻译专家"
+                    className="h-10 bg-background border-muted/60 focus-visible:ring-primary/20 text-sm"
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="col-span-1 space-y-2">
+                    <Label htmlFor="version" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">版本</Label>
+                    <Input
+                      id="version"
+                      value={formData.version}
+                      onChange={(e) => setFormData({ ...formData, version: e.target.value })}
+                      placeholder="1.0.0"
+                      className="h-10 bg-background border-muted/60 focus-visible:ring-primary/20 text-sm font-mono"
+                    />
+                  </div>
+                  <div className="col-span-2 space-y-2">
+                    <Label htmlFor="description" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">简介</Label>
+                    <Input
+                      id="description"
+                      value={formData.description}
+                      onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                      placeholder="简单的功能说明"
+                      className="h-10 bg-background border-muted/60 focus-visible:ring-primary/20 text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="parent_agent_id" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">继承自</Label>
+                  <select
+                    id="parent_agent_id"
+                    value={formData.parent_agent_id?.toString() ?? ""}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        parent_agent_id: e.target.value ? parseInt(e.target.value) : undefined,
+                      })
+                    }
+                    className="flex h-10 w-full rounded-md border border-muted/60 bg-background px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/20 transition-all appearance-none"
+                  >
+                    <option value="">独立智能体 (无继承)</option>
+                    {parentAgentList
+                      .filter((a) => !excludedAgentIds.has(a.id))
+                      .map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.display_name} (v{a.version})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
             </div>
-            <div className="p-4 space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="display_name" className="text-xs">名称</Label>
-                <Input
-                  id="display_name"
-                  value={formData.display_name}
-                  onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                  placeholder="我的智能体"
-                  required
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="version" className="text-xs">版本</Label>
-                  <Input
-                    id="version"
-                    value={formData.version}
-                    onChange={(e) => setFormData({ ...formData, version: e.target.value })}
-                    placeholder="1.0.0"
-                    required
-                  />
+
+            {/* 模型与策略 */}
+            <div className="flex flex-col h-full space-y-4">
+              <div className="flex items-center gap-2 text-[11px] font-bold text-primary uppercase tracking-widest px-1">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Cpu className="h-3.5 w-3.5" />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="description" className="text-xs">描述</Label>
-                  <Input
-                    id="description"
-                    value={formData.description}
-                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                    placeholder="简短描述"
-                  />
-                </div>
+                Model Parameters
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="parent_agent_id" className="text-xs">父智能体</Label>
-                <select
-                  id="parent_agent_id"
-                  value={formData.parent_agent_id?.toString() ?? ""}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      parent_agent_id: e.target.value ? parseInt(e.target.value) : undefined,
-                    })
-                  }
-                  disabled={loading}
-                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <option value="">无（独立智能体）</option>
-                  {parentAgentList
-                    .filter((a) => !excludedAgentIds.has(a.id))
-                    .map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.display_name} (v{a.version})
+              <div className="flex-1 flex flex-col justify-between gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
+                <div className="space-y-2">
+                  <Label htmlFor="provider_id" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">模型提供者</Label>
+                  <select
+                    id="provider_id"
+                    value={formData.provider_id ?? ""}
+                    onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
+                    className="flex h-10 w-full rounded-md border border-muted/60 bg-background px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/20 appearance-none"
+                  >
+                    <option value="">自动选择默认模型</option>
+                    {providerList.map((p) => (
+                      <option
+                        key={p.id}
+                        value={p.id}
+                        disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
+                      >
+                        {p.display_name} {p.is_default ? "(默认)" : ""}
                       </option>
                     ))}
-                </select>
-              </div>
-            </div>
-          </div>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="max_tokens" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">最大 Token</Label>
+                    <Input
+                      id="max_tokens"
+                      type="number"
+                      value={formData.max_tokens || ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          max_tokens: e.target.value ? parseInt(e.target.value) : undefined,
+                        })
+                      }
+                      placeholder="4096"
+                      className="h-10 bg-background border-muted/60 focus-visible:ring-primary/20 text-sm font-mono"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="temperature" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">温度 (Temp)</Label>
+                    <Input
+                      id="temperature"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="2"
+                      value={formData.temperature ?? ""}
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          temperature: e.target.value ? parseFloat(e.target.value) : undefined,
+                        })
+                      }
+                      placeholder="0.7"
+                      className="h-10 bg-background border-muted/60 focus-visible:ring-primary/20 text-sm font-mono"
+                    />
+                  </div>
+                </div>
 
-          {/* LLM Config */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">模型配置</h2>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="provider_id" className="text-xs">LLM 提供者</Label>
-                <select
-                  id="provider_id"
-                  value={formData.provider_id ?? ""}
-                  onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
-                  className="flex h-9 w-full rounded-md border border-input bg-input/20 px-3 py-1.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30"
-                >
-                  <option value="">不指定提供者</option>
-                  {providerList.map((p) => (
-                    <option
-                      key={p.id}
-                      value={p.id}
-                      disabled={p.secret_status === "requires_reentry" && formData.provider_id !== p.id}
-                    >
-                      {p.display_name} {p.is_default ? "(默认)" : ""} {p.secret_status === "requires_reentry" ? "(需要重新填写)" : ""}
-                    </option>
-                  ))}
-                </select>
-                {selectedProvider?.secret_status === "requires_reentry" && (
-                  <p className="text-xs text-amber-600 mt-1">当前 Provider 的密钥需要重新填写</p>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="max_tokens" className="text-xs">最大 Token</Label>
-                  <Input
-                    id="max_tokens"
-                    type="number"
-                    value={formData.max_tokens || ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        max_tokens: e.target.value ? parseInt(e.target.value) : undefined,
-                      })
-                    }
-                    placeholder="4096"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="temperature" className="text-xs">Temperature</Label>
-                  <Input
-                    id="temperature"
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    max="2"
-                    value={formData.temperature ?? ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        temperature: e.target.value ? parseFloat(e.target.value) : undefined,
-                      })
-                    }
-                    placeholder="0.7"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Advanced */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b">
-              <h2 className="text-sm font-medium">高级配置</h2>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="thinking_enabled"
-                    checked={formData.thinking_config?.type === "enabled"}
-                    onCheckedChange={(checked) => {
-                      setFormData((prev) => ({
-                        ...prev,
-                        thinking_config: checked
-                          ? { type: "enabled", clear_thinking: prev.thinking_config?.clear_thinking ?? false }
-                          : { type: "disabled", clear_thinking: false },
-                      }))
-                    }}
-                  />
-                  <Label htmlFor="thinking_enabled" className="text-sm cursor-pointer">
-                    启用思考模式
-                  </Label>
-                </div>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={(
-                      <button
-                        type="button"
-                        className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                      >
-                        <CircleHelp className="size-3.5" />
-                      </button>
-                    )}
-                  />
-                  <TooltipContent side="right">
-                    启用后，模型将输出思考过程
-                  </TooltipContent>
-                </Tooltip>
-              </div>
-              {formData.thinking_config?.type === "enabled" && (
-                <div className="flex items-center justify-between ml-6">
-                  <div className="flex items-center gap-2">
+                <div className="pt-2">
+                  <div className="flex items-center gap-3 bg-background/50 p-3 rounded-xl border border-muted/40 h-14 shadow-inner">
                     <Checkbox
-                      id="clear_thinking"
-                      checked={formData.thinking_config?.clear_thinking ?? false}
+                      id="thinking_enabled"
+                      checked={formData.thinking_config?.type === "enabled"}
                       onCheckedChange={(checked) => {
                         setFormData((prev) => ({
                           ...prev,
-                          thinking_config: prev.thinking_config
-                            ? { ...prev.thinking_config, clear_thinking: checked as boolean }
-                            : undefined,
+                          thinking_config: checked
+                            ? { type: "enabled", clear_thinking: prev.thinking_config?.clear_thinking ?? false }
+                            : { type: "disabled", clear_thinking: false },
                         }))
                       }}
                     />
-                    <Label htmlFor="clear_thinking" className="text-sm cursor-pointer text-muted-foreground">
-                      清除历史思考
-                    </Label>
+                    <div className="flex flex-col gap-0.5 min-w-0">
+                      <Label htmlFor="thinking_enabled" className="text-sm cursor-pointer font-bold truncate">思维链 (CoT)</Label>
+                      <p className="text-[10px] text-muted-foreground leading-tight truncate font-medium">显示模型思考过程。</p>
+                    </div>
                   </div>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={(
-                        <button
-                          type="button"
-                          className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                        >
-                          <CircleHelp className="size-3" />
-                        </button>
-                      )}
-                    />
-                    <TooltipContent side="right">
-                      启用后，模型不会在后续对话中看到之前的思考内容
-                    </TooltipContent>
-                  </Tooltip>
                 </div>
-              )}
+              </div>
             </div>
           </div>
 
-          {/* Tools */}
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="text-sm font-medium">可用工具</h2>
-              <span className="text-xs text-muted-foreground">
-                {formData.tool_names.length} / {toolList.length}
+          {/* 第二排：能力与工具 */}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between text-sm font-bold text-foreground px-1">
+              <div className="flex items-center gap-2">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Wrench className="h-4 w-4" />
+                </div>
+                可用工具箱
+              </div>
+              <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest bg-muted/40 px-2 py-0.5 rounded-full">
+                已选 {formData.tool_names.length} / {toolList.length}
               </span>
             </div>
-            <div className="p-3">
+            <div className="bg-muted/20 p-6 rounded-3xl border border-muted/60 shadow-sm">
               {toolList.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-4">暂无可用工具</p>
+                <div className="text-center py-10">
+                  <p className="text-xs text-muted-foreground">当前环境下没有可用的插件工具</p>
+                </div>
               ) : (
-                <div className="grid grid-cols-2 gap-2 max-h-[240px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   {[...new Map(toolList.map((tool) => [tool.name, tool])).values()].map((tool) => (
                     <div
                       key={tool.name}
@@ -402,38 +374,28 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                         }))
                       }}
                       className={cn(
-                        "rounded-md border p-2.5 cursor-pointer transition-all text-left",
-                        "hover:border-primary/50 hover:bg-primary/5",
+                        "group flex items-start gap-3 rounded-2xl border p-4 cursor-pointer transition-all",
                         formData.tool_names.includes(tool.name)
-                          ? "border-primary/30 bg-primary/5"
-                          : "border-border"
+                          ? "border-primary bg-primary/5 shadow-inner"
+                          : "border-muted/60 bg-background hover:border-primary/30"
                       )}
                     >
-                      <div className="flex items-start gap-2">
-                        <Checkbox
-                          id={`tool-${tool.name}`}
-                          checked={formData.tool_names.includes(tool.name)}
-                          onCheckedChange={(checked) => {
-                            setFormData((prev) => ({
-                              ...prev,
-                              tool_names: checked
-                                ? [...prev.tool_names, tool.name]
-                                : prev.tool_names.filter((n) => n !== tool.name),
-                            }))
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <Label
-                            htmlFor={`tool-${tool.name}`}
-                            className="text-sm font-medium cursor-pointer block truncate"
-                          >
-                            {tool.name}
-                          </Label>
-                          <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">
-                            {tool.description}
-                          </p>
-                        </div>
+                      <Checkbox
+                        id={`tool-${tool.name}`}
+                        checked={formData.tool_names.includes(tool.name)}
+                        className="mt-0.5 shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="space-y-1 min-w-0">
+                        <Label
+                          htmlFor={`tool-${tool.name}`}
+                          className="text-xs font-bold cursor-pointer block truncate"
+                        >
+                          {tool.name}
+                        </Label>
+                        <p className="text-[10px] text-muted-foreground leading-snug line-clamp-2">
+                          {tool.description}
+                        </p>
                       </div>
                     </div>
                   ))}
@@ -441,55 +403,67 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
               )}
             </div>
           </div>
-        </div>
 
-        {/* Right Main - System Prompt */}
-        <div className="col-span-3">
-          <div className="rounded-lg border bg-card text-card-foreground shadow-sm h-full">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="text-sm font-medium">系统提示词</h2>
-              <span className="text-xs text-muted-foreground">
-                {formData.system_prompt.length} 字符
-              </span>
-            </div>
-            <div className="p-4 space-y-4">
-              <textarea
-                id="system_prompt"
-                value={formData.system_prompt}
-                onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
-                placeholder="你是一个有帮助的助手...&#10;&#10;在这里定义智能体的角色、能力和行为规范。"
-                className="flex min-h-[300px] w-full rounded-md border border-input bg-input/20 px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30 resize-none font-mono"
-                required
-              />
-              <div className="border rounded-lg overflow-hidden">
-                <div className="px-3 py-2 bg-muted/50 border-b text-xs font-medium text-muted-foreground">
-                  实时预览
-                </div>
-                <div className="min-h-[300px] max-h-[400px] overflow-y-auto p-4">
-                  {formData.system_prompt ? (
-                    <MessageProvider message={previewMessage} index={0} isLast>
-                      <div className="wrap-break-word text-foreground leading-relaxed [&_.aui-md-h3]:text-sm">
-                        <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
-                      </div>
-                    </MessageProvider>
-                  ) : (
-                    <div className="text-muted-foreground text-sm text-center py-12">
-                      输入系统提示词后，这里将显示渲染效果
-                    </div>
-                  )}
-                </div>
+          {/* 第三排：系统提示词 - 占据整宽 */}
+          <div className="space-y-4 pb-10">
+            <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
+              <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                <Settings className="h-4 w-4" />
               </div>
+              核心行为指令 (System Prompt)
+            </div>
+            <div className="bg-muted/10 rounded-[32px] border border-muted/60 overflow-hidden shadow-sm">
+              <Tabs defaultValue="editor" className="w-full">
+                <div className="px-8 py-3 border-b flex items-center justify-between bg-background/50 backdrop-blur-sm">
+                  <TabsList className="bg-muted/50 p-1 h-9 rounded-xl">
+                    <TabsTrigger value="editor" className="text-xs px-6 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                      编写指令
+                    </TabsTrigger>
+                    <TabsTrigger value="preview" className="text-xs px-6 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm">
+                      效果预览
+                    </TabsTrigger>
+                  </TabsList>
+                  <div className="text-[10px] font-mono text-muted-foreground px-3 py-1 rounded-full bg-muted/40 uppercase tracking-tighter">
+                    {formData.system_prompt.length} Characters
+                  </div>
+                </div>
+
+                <TabsContent value="editor" className="m-0 p-0">
+                  <textarea
+                    id="system_prompt"
+                    value={formData.system_prompt}
+                    onChange={(e) => setFormData({ ...formData, system_prompt: e.target.value })}
+                    placeholder="在此详细定义您的智能体。包含角色定位、知识范围、语言风格等。"
+                    className="w-full min-h-[500px] p-8 text-sm leading-relaxed outline-none bg-transparent resize-y font-mono custom-scrollbar"
+                    required
+                  />
+                </TabsContent>
+
+                <TabsContent value="preview" className="m-0 p-0 bg-background min-h-[500px]">
+                  <div className="max-w-4xl mx-auto p-12">
+                    {formData.system_prompt ? (
+                      <MessageProvider message={previewMessage} index={0} isLast>
+                        <div className="prose prose-sm dark:prose-invert max-w-none">
+                          <MessagePrimitive.Parts components={{ Text: MarkdownText }} />
+                        </div>
+                      </MessageProvider>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-20 gap-4">
+                        <div className="bg-muted p-4 rounded-full">
+                          <Eye className="h-8 w-8 text-muted-foreground/20" />
+                        </div>
+                        <p className="text-sm text-muted-foreground">暂无提示词内容可供渲染预览</p>
+                      </div>
+                    )}
+                  </div>
+                </TabsContent>
+              </Tabs>
             </div>
           </div>
         </div>
       </div>
     </div>
   )
-}
-
-// Helper function
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(" ")
 }
 
 function getExcludedAgentIds(agentId: number | undefined, allAgents: AgentRecord[]): Set<number> {
