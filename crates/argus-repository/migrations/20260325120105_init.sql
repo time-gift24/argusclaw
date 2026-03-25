@@ -140,17 +140,6 @@ CREATE INDEX IF NOT EXISTS idx_jobs_job_type ON jobs(job_type);
 CREATE INDEX IF NOT EXISTS idx_jobs_parent_job_id ON jobs(parent_job_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_result ON jobs(result);
 
--- Users
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    password_salt TEXT NOT NULL,
-    is_logged_in BOOLEAN NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 -- Accounts (single-user, from 20260320010000)
 CREATE TABLE IF NOT EXISTS accounts (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
