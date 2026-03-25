@@ -284,8 +284,64 @@ impl SessionManager {
                 }
             };
 
-            // Add thread to session (spawn lazily in send_message instead)
-            session.add_thread(thread.clone());
+            // Add thread to session. Spawn run() first so it holds the lock
+            // immediately (prevents send_message from racing).
+            // Spawn run() orchestration loop. The loop holds the lock briefly for
+            // event processing, then releases it while polling the broadcast channel.
+            // This allows list_threads() (which uses try_lock()) to succeed concurrently.
+            let thread_for_run = Arc::clone(&thread);
+            tokio::spawn(async move {
+                // Create the broadcast receiver — acquire lock briefly to clone pipe_tx,
+                // then drop the guard (NOT the Arc) so the Arc stays alive for the loop.
+                let pipe_tx = {
+                    let guard = thread_for_run.lock().await;
+                    guard.pipe_tx().clone()
+                };
+                // guard is dropped here; Arc stays alive.
+
+                let mut rx = pipe_tx.subscribe();
+                let mut pending_user_message: Option<argus_protocol::ThreadEvent> = None;
+
+                loop {
+                    // Wait for next event WITHOUT holding the lock.
+                    let event = match rx.recv().await {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!("pipe recv error in run loop: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // Re-acquire lock for event processing.
+                    let mut guard = thread_for_run.lock().await;
+                    use argus_protocol::ThreadEvent::{Idle, UserMessage};
+
+                    match event {
+                        UserMessage { content, msg_override } => {
+                            if guard.is_turn_running() && pending_user_message.is_none() {
+                                pending_user_message = Some(argus_protocol::ThreadEvent::UserMessage {
+                                    content: content.clone(),
+                                    msg_override: msg_override.clone(),
+                                });
+                            } else if let Err(e) = guard.spawn_turn(content, msg_override).await {
+                                tracing::error!("turn failed: {}", e);
+                            }
+                        }
+                        Idle { .. } => {
+                            if let Some(argus_protocol::ThreadEvent::UserMessage { content, msg_override }) =
+                                pending_user_message.take()
+                            {
+                                if let Err(e) = guard.spawn_turn(content, msg_override).await {
+                                    tracing::error!("turn failed: {}", e);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    drop(guard);
+                }
+            });
+            session.add_thread(thread);
         }
 
         // Store in memory
@@ -498,8 +554,60 @@ impl SessionManager {
         // Wrap in Arc<Mutex<>> for safe shared access
         let thread_arc = Arc::new(Mutex::new(thread));
 
-        // Add to in-memory session (spawn lazily in send_message instead)
-        session.add_thread(thread_arc.clone());
+        // Spawn run() orchestration loop. Same lock-release-while-polling pattern as load().
+        let thread_for_run = Arc::clone(&thread_arc);
+        tokio::spawn(async move {
+            // Create the broadcast receiver — acquire lock briefly to clone pipe_tx,
+            // then drop the guard (NOT the Arc) so the Arc stays alive for the loop.
+            let pipe_tx = {
+                let guard = thread_for_run.lock().await;
+                guard.pipe_tx().clone()
+            };
+            // guard is dropped here; Arc stays alive.
+
+            let mut rx = pipe_tx.subscribe();
+            let mut pending_user_message: Option<argus_protocol::ThreadEvent> = None;
+
+            loop {
+                let event = match rx.recv().await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("pipe recv error in run loop: {}", e);
+                        continue;
+                    }
+                };
+
+                let mut guard = thread_for_run.lock().await;
+                use argus_protocol::ThreadEvent::{Idle, UserMessage};
+
+                match event {
+                    UserMessage { content, msg_override } => {
+                        if guard.is_turn_running() && pending_user_message.is_none() {
+                            pending_user_message = Some(argus_protocol::ThreadEvent::UserMessage {
+                                content: content.clone(),
+                                msg_override: msg_override.clone(),
+                            });
+                        } else if let Err(e) = guard.spawn_turn(content, msg_override).await {
+                            tracing::error!("turn failed: {}", e);
+                        }
+                    }
+                    Idle { .. } => {
+                        if let Some(argus_protocol::ThreadEvent::UserMessage { content, msg_override }) =
+                            pending_user_message.take()
+                        {
+                            if let Err(e) = guard.spawn_turn(content, msg_override).await {
+                                tracing::error!("turn failed: {}", e);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                drop(guard);
+            }
+        });
+
+        // Add to in-memory session
+        session.add_thread(thread_arc);
 
         Ok(thread_id)
     }
@@ -594,6 +702,8 @@ impl SessionManager {
             return Ok(session.list_threads().await);
         }
 
+
+
         // Otherwise, load from DB
         let rows = sqlx::query(
             r#"
@@ -649,12 +759,16 @@ impl SessionManager {
             .get_thread(thread_id)
             .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
 
-        let thread = thread.lock().await;
-        thread
+        // send_user_message writes to the broadcast pipe (Sender::send is &self).
+        // The pipe is owned by Thread, so we need the lock briefly.
+        let result = thread
+            .lock()
+            .await
             .send_user_message(message, None)
             .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
-            })
+            });
+        result
     }
 
     /// Get the thread message history, falling back to turn trace recovery when

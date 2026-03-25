@@ -90,6 +90,10 @@ pub struct Thread {
     #[builder(default)]
     turn_running: bool,
 
+    /// Whether the run() orchestration loop has been spawned.
+    #[builder(default)]
+    run_spawned: Arc<std::sync::atomic::AtomicBool>,
+
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
@@ -157,6 +161,7 @@ impl ThreadBuilder {
             turn_count: 0,
             pipe_tx,
             turn_running: false,
+            run_spawned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             plan_store: self.plan_store.unwrap_or_default(),
         })
     }
@@ -223,6 +228,11 @@ impl Thread {
         let _ = self.pipe_tx.send(event);
     }
 
+    /// Get a reference to the broadcast sender (for creating receivers).
+    pub fn pipe_tx(&self) -> &broadcast::Sender<ThreadEvent> {
+        &self.pipe_tx
+    }
+
     /// Returns true if a Turn is currently executing.
     pub fn is_turn_running(&self) -> bool {
         self.turn_running
@@ -233,7 +243,26 @@ impl Thread {
         self.turn_running = running;
     }
 
-    async fn spawn_turn(
+    /// Returns true if the run() orchestration loop has been spawned.
+    pub fn is_run_spawned(&self) -> bool {
+        self.run_spawned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Try to mark that the run() loop has been spawned. Returns true if this
+    /// was the first call (spawn needed), false if already spawned.
+    pub fn try_set_run_spawned(&self) -> bool {
+        self.run_spawned
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Spawn a new turn to handle a user message.
+    pub async fn spawn_turn(
         &mut self,
         content: String,
         msg_override: Option<MessageOverride>,
