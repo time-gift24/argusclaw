@@ -46,7 +46,7 @@ let agent = manager.get_agent("default").await?;
 ## 依赖关系
 
 ### 上游依赖
-- `argus-protocol`：AgentRecord 类型
+- `argus-protocol`：`AgentRecord` 类型定义
 
 ### 下游消费者
 - `argus-session`：使用模板创建会话

@@ -58,12 +58,12 @@ pub struct ApprovalManager {
 
 ```rust
 pub struct ApprovalPolicy {
-    pub require_approval_for_tools: Vec<String>,  // 需要审批的工具列表
-    pub default_timeout_secs: u64,                // 默认超时时间
+    pub require_approval: Vec<String>,    // 需要审批的工具列表，默认 ["shell", "http"]
+    pub timeout_secs: u64,               // 审批超时（秒），默认 60，范围 10..=300
+    pub auto_approve_autonomous: bool,   // 自动驾驶模式下自动批准，默认 false
+    pub auto_approve: bool,              // 别名：设为 true 则清空 require_approval 列表
 }
 ```
-
-**默认策略**：`shell_exec` 等危险工具需要审批。
 
 ### 4. RuntimeAllowList
 
@@ -94,7 +94,8 @@ registry.register(HookEvent::BeforeToolCall, Arc::new(hook));
 - `argus-protocol`：ApprovalRequest、HookHandler 等
 
 ### 下游消费者
-- `argus-turn`：通过 HookRegistry 集成
+- `argus-session`：通过 `ApprovalManager` 管理审批请求，`ApprovalHook` 注册到 Thread
+- `argus-wing`：通过 `approval_manager()` 暴露审批 API
 
 ## 设计原则
 

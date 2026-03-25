@@ -6,7 +6,10 @@
 
 ```
 src/
-├── lib.rs           # 公共 API 导出（ArgusWing）
+├── lib.rs           # 公共 API 导出（ArgusWing facade）
+├── db.rs           # 数据库路径解析
+├── init.rs         # 追踪初始化（init_tracing）
+└── resolver.rs     # ProviderManagerResolver
 ```
 
 ## 核心概念
@@ -25,45 +28,55 @@ pub struct ArgusWing {
 - `ArgusWing::init()`：初始化应用
 - `ArgusWing::with_pool()`：带数据库连接池初始化
 
-### 2. AppContext
+### 2. ArgusWing 结构
 
-**AppContext** 提供应用级上下文：
+**ArgusWing** 组合了以下管理器：
 
 ```rust
-pub struct AppContext {
-    pub session_manager: Arc<SessionManager>,
-    pub provider_manager: Arc<ProviderManager>,
-    pub tool_manager: Arc<ToolManager>,
-    // ...
+pub struct ArgusWing {
+    pool: SqlitePool,
+    provider_manager: Arc<ProviderManager>,
+    template_manager: Arc<TemplateManager>,
+    session_manager: Arc<SessionManager>,
+    approval_manager: Arc<ApprovalManager>,
+    tool_manager: Arc<ToolManager>,
+    compactor_manager: Arc<CompactorManager>,
+    job_manager: Arc<JobManager>,
+    job_broadcaster: Arc<SseBroadcaster>,
+    account_manager: Arc<AccountManager>,
+    credential_store: Arc<CredentialStore>,
 }
 ```
 
-## 公共 API
+### 3. 公共 API
+
+**argus-wing 是 facade**，组合所有 argus-* 模块，通过单一 `ArgusWing` 结构暴露统一 API：
 
 ```rust
 use argus_wing::ArgusWing;
 
-// 初始化
-let app = ArgusWing::init().await?;
+// 初始化（自动完成数据库迁移、模板初始化等）
+let wing = ArgusWing::init(None).await?;
 
-// 获取上下文
-let ctx = app.context();
-let session = ctx.session_manager.load(session_id).await?;
+// Provider CRUD
+let providers = wing.list_providers().await?;
+wing.upsert_provider(record).await?;
+
+// Template CRUD
+let templates = wing.list_templates().await?;
+
+// Session/Thread 管理
+let session_id = wing.create_session("My Session").await?;
+let thread_id = wing.create_thread(session_id, template_id, None).await?;
+wing.send_message(session_id, thread_id, "Hello".to_string()).await?;
+
+// 审批
+let pending = wing.list_pending_approvals();
+wing.resolve_approval(request_id, decision, None)?;
+
+// 订阅事件
+let mut rx = wing.subscribe(session_id, thread_id).await?;
 ```
-
-## 依赖关系
-
-**argus-wing 是 facade**，组合所有 argus-* 模块：
-- `argus-protocol`：核心类型
-- `argus-session`：会话管理
-- `argus-thread`：线程管理
-- `argus-turn`：轮次执行
-- `argus-llm`：LLM 抽象
-- `argus-approval`：审批系统
-- `argus-tool`：工具注册表
-- `argus-repository`：持久化
-- `argus-auth`：认证
-- `argus-crypto`：加密
 
 ## 设计原则
 

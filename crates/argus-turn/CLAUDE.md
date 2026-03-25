@@ -2,7 +2,6 @@
 
 > 特性：对话轮次执行引擎，负责 LLM 调用、工具执行、Hook 生命周期和流式事件广播。
 
-
 - **单个 Turn 的执行逻辑**
 - **LLM 调用与响应处理**
 - **工具调用执行**（并行）
@@ -16,9 +15,10 @@ src/
 ├── lib.rs              # 公共 API 导出
 ├── config.rs           # TurnConfig、TurnInput、TurnOutput、TurnStreamEvent
 ├── error.rs            # TurnError 错误类型
-├── execution.rs        # 向后兼容的执行包装器
-├── turn.rs             # 核心 Turn 结构和执行逻辑
-├── hooks.rs            # Hook 类型重导出
+├── execution.rs        # execute_turn / execute_turn_streaming（基于 Turn 的包装器）
+├── trace.rs            # TraceConfig、IterationRecord（执行追踪）
+├── tool_context.rs     # ToolContext（工具执行上下文）
+├── turn.rs             # Turn 结构体和 TurnBuilder（核心执行器）
 └── bin/
     └── turn.rs         # CLI 测试工具
 
@@ -502,16 +502,18 @@ let output = turn_handle.await??;
 
 ### 下游消费者
 - `argus-thread`：使用 Turn 执行单个对话轮次
-- `claw`：高层 API，通过 Thread 间接使用 Turn
+- `argus-session`：通过 Thread 间接使用 Turn
+- `argus-repository`：执行追踪（TraceConfig）
+- `cli`、`argus-wing`：命令行和桌面入口
 
 ## 关键文件路径
 
 | 功能 | 文件 |
 |------|------|
-| Turn 核心 | `src/turn.rs` |
-| 配置类型 | `src/config.rs` |
+| Turn 核心 | `src/turn.rs` + `src/config.rs` |
+| 旧 API 包装器 | `src/execution.rs` |
 | 错误类型 | `src/error.rs` |
-| 执行包装器 | `src/execution.rs` |
+| 执行追踪 | `src/trace.rs` |
 | 集成测试 | `tests/integration_test.rs` |
 | CLI 工具 | `src/bin/turn.rs` |
 

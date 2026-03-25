@@ -83,7 +83,7 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 │  ★ 核心类型 ★    │    │   会话管理      ││                        │  线程管理         │
 │                 │    └─────────────────┘│                        └───────────────────┘
 │ • ThreadId      │             ▲          │
-│ • ThreadEvent   │             │          │              ┌───────────────────┐
+│ • ThreadEvent ★ │             │          │              ┌───────────────────┐
 │ • TokenUsage    │             └──────────┴──────────────│ argus-turn        │
 │ • Approval*     │                        │              │  轮次执行          │
 │ • RiskLevel     │             ┌───────────┴───────────┐  └───────────────────┘
@@ -101,15 +101,27 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
         │    └─────────────────┘                      └──────────────────┘
         │
         │    ┌────────────────┐        ┌──────────────────┐
-        ├────┤ argus-log      │        │ argus-template   │
-        │    │  日志          │        │  模板            │
+        ├────┤ argus-job      │        │ argus-template   │
+        │    │  后台任务      │        │  模板            │
         │    └────────────────┘        └──────────────────┘
         │
         │    ┌────────────────┐
         ├────┤ argus-test-support │
         │    │  测试辅助       │
         │    └────────────────┘
+        │
+        │    ┌────────────────┐
+        ├────┤ argus-auth      │
+        │    │  账号认证       │
+        │    └────────────────┘
+        │
+        │    ┌────────────────┐
+        └────┤ argus-crypto    │
+             │  加密          │
+             └────────────────┘
 ```
+
+**叶子 crate**（无内部依赖）：`argus-protocol`、`argus-auth`、`argus-crypto`、`argus-test-support`
 
 ## 核心规则
 
@@ -121,15 +133,42 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 
 它存在的主要目的：
 1. **打破循环依赖**：`agents` ↔ `approval` ↔ `tool` 之间不能直接相互依赖
-2. **提供核心 trait**：`LlmProvider`、`NamedTool`、`HookHandler`
+2. **提供核心 trait**：`LlmProvider`、`NamedTool`、`HookHandler`、`ProviderResolver`
 3. **定义共享类型**：`ThreadId`、`ThreadEvent`、`TokenUsage`、`Approval*`、`RiskLevel`
 
-包含以下核心类型：
-- `ThreadId`：强类型 UUID 包装器
-- `ThreadEvent`：线程生命周期事件（Processing/TurnCompleted/TurnFailed/Idle/Compacted/WaitingForApproval/ApprovalResolved）
+### ThreadEvent — 核心事件总线 ★
+
+`ThreadEvent` 是整个应用的事件总线，所有层通过它向上传播状态：
+
+```rust
+pub enum ThreadEvent {
+    Processing { thread_id, turn_number, event: LlmStreamEvent }, // LLM/工具流式事件
+    ToolStarted { thread_id, turn_number, tool_call_id, tool_name, arguments },
+    ToolCompleted { thread_id, turn_number, tool_call_id, tool_name, result },
+    TurnCompleted { thread_id, turn_number, token_usage },
+    TurnFailed { thread_id, turn_number, error },
+    Idle { thread_id },                    // 线程进入空闲
+    Compacted { thread_id, new_token_count }, // 上下文被压缩
+    WaitingForApproval { thread_id, turn_number, request },
+    ApprovalResolved { thread_id, turn_number, response },
+    JobCompleted { job_id, status, session_id, message }, // 后台任务完成
+}
+```
+
+**事件流向**：
+```
+Turn (stream_tx: TurnStreamEvent)
+  → Event Forwarder Task
+  → thread_event_tx: ThreadEvent
+  → Thread → Session → ArgusWing → Desktop/CLI
+```
+
+### 其他核心类型
+
+- `ThreadId` / `SessionId` / `AgentId` / `ProviderId`：强类型 ID 包装器
 - `TokenUsage`：token 使用统计
 - `ApprovalDecision` / `ApprovalRequest` / `ApprovalResponse`：审批协议类型
-- `RiskLevel`：操作风险等级
+- `RiskLevel`：操作风险等级（Low / Medium / High / Critical）
 - `HookEvent` / `HookHandler` / `HookRegistry`：生命周期 Hook 系统
 - `LlmProvider` trait：LLM 提供者抽象
 - `NamedTool` trait：工具抽象
@@ -146,16 +185,19 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 
 | Crate | 职责 | 关键依赖 |
 |-------|------|---------|
-| `argus-protocol` | 核心类型定义 | 无内部依赖 |
-| `argus-session` | 会话管理 | protocol, log, template, thread, tool |
+| `argus-protocol` | 核心类型定义（叶子模块） | 无内部依赖 |
+| `argus-session` | 会话管理 | protocol, template, thread, tool, turn, llm, job |
 | `argus-thread` | 线程管理 | protocol, turn, tool |
 | `argus-turn` | 轮次执行 | protocol, test-support, tool, llm |
-| `argus-llm` | LLM 抽象层 | protocol, test-support |
+| `argus-llm` | LLM 抽象层 | protocol, test-support, crypto |
 | `argus-approval` | 审批系统 | protocol |
 | `argus-tool` | 工具注册表 | protocol |
 | `argus-repository` | 持久化层 | protocol, llm |
-| `argus-log` | 日志 | protocol |
 | `argus-template` | 模板 | protocol |
+| `argus-job` | 后台任务管理 | protocol, template, tool |
+| `argus-auth` | 账号认证（叶子模块） | protocol, crypto |
+| `argus-crypto` | 加密（叶子模块） | 无内部依赖 |
+| `argus-test-support` | 测试辅助（叶子模块） | protocol |
 
 ## cli — 命令行前端
 
