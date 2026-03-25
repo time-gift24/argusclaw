@@ -4,7 +4,8 @@ use std::sync::Arc;
 use argus_job::JobManager;
 use argus_protocol::{
     llm::{ChatMessage, ToolCall},
-    AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
+    AgentId, ArgusError, ProviderId, QueuedUserMessage, Result, SessionId, ThreadControlEvent,
+    ThreadEvent, ThreadId,
 };
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
@@ -13,7 +14,7 @@ use argus_tool::ToolManager;
 use argus_turn::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
 use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -75,6 +76,112 @@ impl SessionManager {
         for session in self.sessions.iter() {
             session.value().broadcast(event.clone());
         }
+    }
+
+    fn spawn_thread_orchestrator(thread: Arc<RwLock<argus_thread::Thread>>) {
+        tokio::spawn(async move {
+            let (mut control_rx, mailbox) = {
+                let mut guard = thread.write().await;
+                let control_rx = match guard.take_control_rx() {
+                    Some(rx) => rx,
+                    None => {
+                        tracing::warn!("thread control receiver already taken");
+                        return;
+                    }
+                };
+                (control_rx, guard.mailbox())
+            };
+
+            let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
+
+            loop {
+                tokio::select! {
+                    Some(control_event) = control_rx.recv() => {
+                        let thread_running = {
+                            let guard = thread.read().await;
+                            guard.is_turn_running()
+                        };
+
+                        if thread_running {
+                            mailbox.lock().await.push(control_event);
+                            continue;
+                        }
+
+                        match control_event {
+                            ThreadControlEvent::UserMessage { content, msg_override } => {
+                                if let Err(error) = Self::start_turn_task(
+                                    Arc::clone(&thread),
+                                    content,
+                                    msg_override,
+                                    turn_done_tx.clone(),
+                                ).await {
+                                    tracing::error!("failed to start queued user turn: {}", error);
+                                }
+                            }
+                            ThreadControlEvent::JobResult(result) => {
+                                if let Err(error) = Self::start_turn_task(
+                                    Arc::clone(&thread),
+                                    result.into_message_text(),
+                                    None,
+                                    turn_done_tx.clone(),
+                                ).await {
+                                    tracing::error!("failed to start job-result turn: {}", error);
+                                }
+                            }
+                            ThreadControlEvent::UserInterrupt { .. } => {}
+                        }
+                    }
+                    Some(result) = turn_done_rx.recv() => {
+                        let finish_result = {
+                            let mut guard = thread.write().await;
+                            guard.finish_turn(result)
+                        };
+
+                        if let Err(error) = finish_result {
+                            tracing::error!("turn failed: {}", error);
+                        }
+
+                        let next_message = {
+                            let mut mailbox = mailbox.lock().await;
+                            mailbox.take_next_turn_message()
+                        };
+
+                        if let Some(QueuedUserMessage { content, msg_override }) = next_message {
+                            if let Err(error) = Self::start_turn_task(
+                                Arc::clone(&thread),
+                                content,
+                                msg_override,
+                                turn_done_tx.clone(),
+                            )
+                            .await
+                            {
+                                tracing::error!("failed to start follow-up turn: {}", error);
+                            }
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+    }
+
+    async fn start_turn_task(
+        thread: Arc<RwLock<argus_thread::Thread>>,
+        content: String,
+        msg_override: Option<argus_protocol::MessageOverride>,
+        turn_done_tx: mpsc::UnboundedSender<std::result::Result<argus_turn::TurnOutput, argus_thread::ThreadError>>,
+    ) -> std::result::Result<(), argus_thread::ThreadError> {
+        let turn = {
+            let mut guard = thread.write().await;
+            guard.begin_turn(content, msg_override).await?
+        };
+
+        tokio::spawn(async move {
+            let result = turn.execute().await.map_err(argus_thread::ThreadError::TurnFailed);
+            let _ = turn_done_tx.send(result);
+        });
+
+        Ok(())
     }
 
     /// List all sessions (from DB).
@@ -284,64 +391,7 @@ impl SessionManager {
                 }
             };
 
-            // Add thread to session. Spawn run() first so it holds the lock
-            // immediately (prevents send_message from racing).
-            // Spawn run() orchestration loop. The loop holds the lock briefly for
-            // event processing, then releases it while polling the broadcast channel.
-            // list_threads() acquires a read lock, so it can run concurrently with
-            // the orchestrator even while a turn is executing.
-            let thread_for_run = Arc::clone(&thread);
-            tokio::spawn(async move {
-                // Create the broadcast receiver — acquire lock briefly to clone pipe_tx,
-                // then drop the guard (NOT the Arc) so the Arc stays alive for the loop.
-                let pipe_tx = {
-                    let guard = thread_for_run.read().await;
-                    guard.pipe_tx().clone()
-                };
-                // guard is dropped here; Arc stays alive.
-
-                let mut rx = pipe_tx.subscribe();
-                let mut pending_user_message: Option<argus_protocol::ThreadEvent> = None;
-
-                loop {
-                    // Wait for next event WITHOUT holding the lock.
-                    let event = match rx.recv().await {
-                        Ok(e) => e,
-                        Err(e) => {
-                            tracing::warn!("pipe recv error in run loop: {}", e);
-                            continue;
-                        }
-                    };
-
-                    // Re-acquire lock for event processing.
-                    let mut guard = thread_for_run.write().await;
-                    use argus_protocol::ThreadEvent::{Idle, UserMessage};
-
-                    match event {
-                        UserMessage { content, msg_override } => {
-                            if guard.is_turn_running() && pending_user_message.is_none() {
-                                pending_user_message = Some(argus_protocol::ThreadEvent::UserMessage {
-                                    content: content.clone(),
-                                    msg_override: msg_override.clone(),
-                                });
-                            } else if let Err(e) = guard.spawn_turn(content, msg_override).await {
-                                tracing::error!("turn failed: {}", e);
-                            }
-                        }
-                        Idle { .. } => {
-                            if let Some(argus_protocol::ThreadEvent::UserMessage { content, msg_override }) =
-                                pending_user_message.take()
-                            {
-                                if let Err(e) = guard.spawn_turn(content, msg_override).await {
-                                    tracing::error!("turn failed: {}", e);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    drop(guard);
-                }
-            });
+            Self::spawn_thread_orchestrator(Arc::clone(&thread));
             session.add_thread(thread);
         }
 
@@ -555,57 +605,7 @@ impl SessionManager {
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
 
-        // Spawn run() orchestration loop. Same lock-release-while-polling pattern as load().
-        let thread_for_run = Arc::clone(&thread_arc);
-        tokio::spawn(async move {
-            // Create the broadcast receiver — acquire lock briefly to clone pipe_tx,
-            // then drop the guard (NOT the Arc) so the Arc stays alive for the loop.
-            let pipe_tx = {
-                let guard = thread_for_run.read().await;
-                guard.pipe_tx().clone()
-            };
-            // guard is dropped here; Arc stays alive.
-
-            let mut rx = pipe_tx.subscribe();
-            let mut pending_user_message: Option<argus_protocol::ThreadEvent> = None;
-
-            loop {
-                let event = match rx.recv().await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("pipe recv error in run loop: {}", e);
-                        continue;
-                    }
-                };
-
-                let mut guard = thread_for_run.write().await;
-                use argus_protocol::ThreadEvent::{Idle, UserMessage};
-
-                match event {
-                    UserMessage { content, msg_override } => {
-                        if guard.is_turn_running() && pending_user_message.is_none() {
-                            pending_user_message = Some(argus_protocol::ThreadEvent::UserMessage {
-                                content: content.clone(),
-                                msg_override: msg_override.clone(),
-                            });
-                        } else if let Err(e) = guard.spawn_turn(content, msg_override).await {
-                            tracing::error!("turn failed: {}", e);
-                        }
-                    }
-                    Idle { .. } => {
-                        if let Some(argus_protocol::ThreadEvent::UserMessage { content, msg_override }) =
-                            pending_user_message.take()
-                        {
-                            if let Err(e) = guard.spawn_turn(content, msg_override).await {
-                                tracing::error!("turn failed: {}", e);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                drop(guard);
-            }
-        });
+        Self::spawn_thread_orchestrator(Arc::clone(&thread_arc));
 
         // Add to in-memory session
         session.add_thread(thread_arc);
@@ -1024,10 +1024,155 @@ async fn resolve_turn_numbers(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use argus_protocol::{Role, SessionId, ThreadId};
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use argus_protocol::{
+        AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
+        ThreadEvent, ThreadId, ThreadJobResult,
+    };
+    use argus_thread::{KeepRecentCompactor, ThreadBuilder};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::time::{sleep, timeout};
 
-    use super::{recover_messages_from_trace, recover_thread_state_from_trace};
+    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager};
+
+    #[derive(Debug)]
+    struct CapturingProvider {
+        response: String,
+        delay: Duration,
+        captured_user_inputs: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturingProvider {
+        fn new(response: &str, delay: Duration) -> Self {
+            Self {
+                response: response.to_string(),
+                delay,
+                captured_user_inputs: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn captured_user_inputs(&self) -> Vec<String> {
+            self.captured_user_inputs.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl argus_protocol::LlmProvider for CapturingProvider {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "capturing".to_string(),
+                reason: "streaming only in tests".to_string(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> std::result::Result<ToolCompletionResponse, LlmError> {
+            let last_user_input = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == argus_protocol::Role::User)
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            self.captured_user_inputs
+                .lock()
+                .unwrap()
+                .push(last_user_input);
+
+            sleep(self.delay).await;
+
+            Ok(ToolCompletionResponse {
+                content: Some(self.response.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    fn test_agent_record() -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
+            id: AgentId::new(1),
+            display_name: "Main Agent".to_string(),
+            description: "Main orchestration agent".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            system_prompt: "You are a test orchestrator.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: None,
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        })
+    }
+
+    fn build_test_thread(
+        session_id: SessionId,
+        provider: Arc<CapturingProvider>,
+    ) -> Arc<tokio::sync::RwLock<argus_thread::Thread>> {
+        let compactor = Arc::new(KeepRecentCompactor::with_defaults());
+        Arc::new(tokio::sync::RwLock::new(
+            ThreadBuilder::new()
+                .provider(provider)
+                .compactor(compactor)
+                .agent_record(test_agent_record())
+                .session_id(session_id)
+                .build()
+                .expect("thread should build"),
+        ))
+    }
+
+    async fn wait_for_idle(
+        thread: &Arc<tokio::sync::RwLock<argus_thread::Thread>>,
+        expected_count: usize,
+    ) {
+        let mut rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+        let mut idle_count = 0usize;
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ThreadEvent::Idle { .. }) => {
+                        idle_count += 1;
+                        if idle_count >= expected_count {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("thread should emit idle");
+    }
 
     #[tokio::test]
     async fn recover_messages_from_trace_restores_full_turn_history() {
@@ -1209,5 +1354,112 @@ mod tests {
         assert_eq!(recovered.messages.len(), 4);
         assert_eq!(recovered.messages[0].content, "hi");
         assert_eq!(recovered.messages[3].content, "welcome back");
+    }
+
+    #[tokio::test]
+    async fn busy_thread_remains_visible_while_orchestrator_runs_turn() {
+        let session_id = SessionId::new();
+        let session = Arc::new(Session::new(session_id, "Test".to_string()));
+        let provider = Arc::new(CapturingProvider::new(
+            "done",
+            Duration::from_millis(150),
+        ));
+        let thread = build_test_thread(session_id, Arc::clone(&provider));
+        let thread_id = thread.read().await.id();
+
+        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        session.add_thread(Arc::clone(&thread));
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("hello".to_string(), None)
+                .expect("message should queue");
+        }
+
+        sleep(Duration::from_millis(30)).await;
+
+        let summaries = session.list_threads().await;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, thread_id);
+
+        wait_for_idle(&thread, 1).await;
+    }
+
+    #[tokio::test]
+    async fn idle_job_result_triggers_new_turn_with_synthetic_user_message() {
+        let session_id = SessionId::new();
+        let provider = Arc::new(CapturingProvider::new("job consumed", Duration::from_millis(10)));
+        let thread = build_test_thread(session_id, Arc::clone(&provider));
+
+        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_control_event(ThreadControlEvent::JobResult(ThreadJobResult {
+                    job_id: "job-42".to_string(),
+                    success: true,
+                    message: "completed successfully".to_string(),
+                    token_usage: None,
+                    agent_id: AgentId::new(99),
+                    agent_display_name: "Researcher".to_string(),
+                    agent_description: "Investigates background context".to_string(),
+                }))
+                .expect("job result should queue");
+        }
+
+        wait_for_idle(&thread, 1).await;
+
+        let captured = provider.captured_user_inputs();
+        assert_eq!(captured.len(), 1);
+        assert!(captured[0].contains("Job: job-42"));
+        assert!(captured[0].contains("Subagent: Researcher"));
+        assert!(captured[0].contains("Description: Investigates background context"));
+        assert!(captured[0].contains("Result: completed successfully"));
+    }
+
+    #[tokio::test]
+    async fn running_turn_consumes_job_result_after_idle_if_no_next_iteration_happens() {
+        let session_id = SessionId::new();
+        let provider = Arc::new(CapturingProvider::new(
+            "turn complete",
+            Duration::from_millis(120),
+        ));
+        let thread = build_test_thread(session_id, Arc::clone(&provider));
+
+        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("initial request".to_string(), None)
+                .expect("message should queue");
+        }
+
+        sleep(Duration::from_millis(20)).await;
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_control_event(ThreadControlEvent::JobResult(ThreadJobResult {
+                    job_id: "job-late".to_string(),
+                    success: true,
+                    message: "late background answer".to_string(),
+                    token_usage: None,
+                    agent_id: AgentId::new(100),
+                    agent_display_name: "Builder".to_string(),
+                    agent_description: "Builds follow-up plans".to_string(),
+                }))
+                .expect("job result should queue");
+        }
+
+        wait_for_idle(&thread, 2).await;
+
+        let captured = provider.captured_user_inputs();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0], "initial request");
+        assert!(captured[1].contains("Job: job-late"));
+        assert!(captured[1].contains("Subagent: Builder"));
     }
 }

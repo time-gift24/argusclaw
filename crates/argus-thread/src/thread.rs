@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadEvent, ThreadId,
+    AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadControlEvent,
+    ThreadEvent, ThreadId, ThreadMailbox,
 };
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnOutput};
@@ -86,6 +87,18 @@ pub struct Thread {
     #[builder(default)]
     pipe_tx: broadcast::Sender<ThreadEvent>,
 
+    /// Internal control-plane sender for low-volume orchestration messages.
+    #[builder(default)]
+    control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+
+    /// Single-consumer control receiver, taken by the session orchestrator.
+    #[builder(default)]
+    control_rx: Option<mpsc::UnboundedReceiver<ThreadControlEvent>>,
+
+    /// Thread-level mailbox shared between the orchestrator and active turns.
+    #[builder(default = "Arc::new(Mutex::new(ThreadMailbox::default()))")]
+    mailbox: Arc<Mutex<ThreadMailbox>>,
+
     /// Whether a Turn is currently running.
     #[builder(default)]
     turn_running: bool,
@@ -125,6 +138,7 @@ impl ThreadBuilder {
     /// Returns `ThreadError` if required fields (`provider`, `compactor`, `agent_record`, `session_id`) are not set.
     pub fn build(self) -> Result<Thread, ThreadError> {
         let (pipe_tx, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
 
         let agent_record = self.agent_record.ok_or(ThreadError::AgentRecordNotSet)?;
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
@@ -156,6 +170,9 @@ impl ThreadBuilder {
             token_count: 0,
             turn_count: 0,
             pipe_tx,
+            control_tx,
+            control_rx: Some(control_rx),
+            mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
             turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
         })
@@ -228,6 +245,21 @@ impl Thread {
         &self.pipe_tx
     }
 
+    /// Clone the internal control sender for this thread.
+    pub fn control_tx(&self) -> mpsc::UnboundedSender<ThreadControlEvent> {
+        self.control_tx.clone()
+    }
+
+    /// Take the single control receiver owned by the session orchestrator.
+    pub fn take_control_rx(&mut self) -> Option<mpsc::UnboundedReceiver<ThreadControlEvent>> {
+        self.control_rx.take()
+    }
+
+    /// Clone the shared mailbox.
+    pub fn mailbox(&self) -> Arc<Mutex<ThreadMailbox>> {
+        Arc::clone(&self.mailbox)
+    }
+
     /// Returns true if a Turn is currently executing.
     pub fn is_turn_running(&self) -> bool {
         self.turn_running
@@ -237,19 +269,6 @@ impl Thread {
     fn set_turn_running(&mut self, running: bool) {
         self.turn_running = running;
     }
-
-    /// Spawn a new turn to handle a user message.
-    pub async fn spawn_turn(
-        &mut self,
-        content: String,
-        msg_override: Option<MessageOverride>,
-    ) -> Result<(), ThreadError> {
-        self.set_turn_running(true);
-        let result = self.send_message_internal(content, msg_override).await;
-        self.set_turn_running(false);
-        result
-    }
-
 
     /// Get current state.
     pub fn state(&self) -> ThreadState {
@@ -344,21 +363,32 @@ impl Thread {
         content: String,
         msg_override: Option<MessageOverride>,
     ) -> Result<(), ThreadError> {
-        let event = ThreadEvent::UserMessage {
+        let event = ThreadControlEvent::UserMessage {
             content,
             msg_override,
         };
-        if self.pipe_tx.send(event).is_err() {
-            tracing::warn!("pipe send failed in send_user_message");
+        if self.control_tx.send(event).is_err() {
+            tracing::warn!("control send failed in send_user_message");
         }
         Ok(())
     }
 
-    async fn send_message_internal(
+    /// Send a low-volume control event into this thread.
+    pub fn send_control_event(&self, event: ThreadControlEvent) -> Result<(), ThreadError> {
+        if self.control_tx.send(event).is_err() {
+            tracing::warn!("control send failed in send_control_event");
+        }
+        Ok(())
+    }
+
+    /// Begin building a turn without holding the caller's lock for the whole execution.
+    pub async fn begin_turn(
         &mut self,
         user_input: String,
         msg_override: Option<MessageOverride>,
-    ) -> Result<(), ThreadError> {
+    ) -> Result<argus_turn::Turn, ThreadError> {
+        self.set_turn_running(true);
+
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
@@ -393,13 +423,32 @@ impl Thread {
 
         self.messages.push(ChatMessage::user(user_input));
         self.recalculate_token_count();
-        self.execute_turn_streaming(effective_record).await
+        match self.build_turn(effective_record) {
+            Ok(turn) => Ok(turn),
+            Err(error) => {
+                self.set_turn_running(false);
+                Err(error)
+            }
+        }
     }
 
-    async fn execute_turn_streaming(
+    /// Finish a previously started turn and apply its output to thread state.
+    pub fn finish_turn(&mut self, result: Result<TurnOutput, ThreadError>) -> Result<(), ThreadError> {
+        self.set_turn_running(false);
+
+        match result {
+            Ok(output) => {
+                self.apply_turn_output(output);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn build_turn(
         &mut self,
         agent_record: Arc<AgentRecord>,
-    ) -> Result<(), ThreadError> {
+    ) -> Result<argus_turn::Turn, ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id.to_string();
@@ -436,6 +485,7 @@ impl Thread {
         let mut turn_builder = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
+            .originating_thread_id(self.id)
             .session_id(self.session_id)
             .messages(self.messages.clone())
             .provider(self.provider.clone())
@@ -444,26 +494,17 @@ impl Thread {
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
-            .thread_event_tx(self.pipe_tx.clone());
+            .thread_event_tx(self.pipe_tx.clone())
+            .control_tx(self.control_tx.clone())
+            .mailbox(Arc::clone(&self.mailbox));
 
         if let Some(ref tc) = self.config.turn_config.trace_config {
             turn_builder = turn_builder.trace_config(tc.clone());
         }
 
-        let turn = turn_builder
+        turn_builder
             .build()
-            .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))?;
-
-        // Turn is responsible for execution
-        let result = turn.execute().await;
-
-        match result {
-            Ok(output) => {
-                self.apply_turn_output(output);
-                Ok(())
-            }
-            Err(error) => Err(ThreadError::TurnFailed(error)),
-        }
+            .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))
     }
 
     /// Estimate token count for a string.

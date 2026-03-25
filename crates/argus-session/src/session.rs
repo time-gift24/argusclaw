@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use argus_protocol::{SessionId, ThreadEvent, ThreadId};
+use argus_protocol::{SessionId, ThreadControlEvent, ThreadEvent, ThreadId};
 use argus_thread::Thread;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -64,7 +64,14 @@ impl Session {
         for entry in self.threads.iter() {
             let thread = entry.value();
             if let Ok(t) = thread.try_read() {
-                t.broadcast_to_self(event.clone());
+                match &event {
+                    ThreadEvent::UserInterrupt { content } => {
+                        let _ = t.send_control_event(ThreadControlEvent::UserInterrupt {
+                            content: content.clone(),
+                        });
+                    }
+                    _ => t.broadcast_to_self(event.clone()),
+                }
             }
         }
     }

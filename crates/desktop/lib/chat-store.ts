@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { agents, chat, providers, sessions } from "@/lib/tauri";
 import type {
   ApprovalRequestPayload,
+  JobStatusPayload,
   ThreadEventEnvelope,
   ThreadEventPayload,
   ThreadSnapshotPayload,
@@ -43,6 +44,7 @@ export interface ChatSessionState {
     requested_at: string;
     timeout_secs: number;
   } | null;
+  jobStatuses: Record<string, JobStatusPayload>;
   error: string | null;
   tokenCount: number;
   contextWindow: number | null;
@@ -164,6 +166,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
+        jobStatuses: {},
         error: null,
         tokenCount: 0,
         contextWindow: null,
@@ -234,6 +237,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
+        jobStatuses: existingSession?.jobStatuses ?? {},
         error: null,
         tokenCount: snapshot.token_count,
         contextWindow: existingSession?.contextWindow ?? null,
@@ -412,6 +416,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             status: options?.preserveError ? "error" : "idle",
             error: options?.preserveError ? state.sessionsByKey[sessionKey].error : null,
             tokenCount: snapshot.token_count,
+            jobStatuses: state.sessionsByKey[sessionKey].jobStatuses,
           },
         },
       }));
@@ -624,6 +629,63 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         });
         break;
       }
+
+      case "job_dispatched":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session) return {};
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                jobStatuses: {
+                  ...session.jobStatuses,
+                  [payload.job_id]: {
+                    job_id: payload.job_id,
+                    agent_id: payload.agent_id,
+                    prompt: payload.prompt,
+                    status: "running",
+                    message: null,
+                    agent_display_name:
+                      session.jobStatuses[payload.job_id]?.agent_display_name ?? null,
+                    agent_description:
+                      session.jobStatuses[payload.job_id]?.agent_description ?? null,
+                  },
+                },
+              },
+            },
+          };
+        });
+        break;
+
+      case "job_result":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session) return {};
+          const existing = session.jobStatuses[payload.job_id];
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                jobStatuses: {
+                  ...session.jobStatuses,
+                  [payload.job_id]: {
+                    job_id: payload.job_id,
+                    agent_id: payload.agent_id,
+                    prompt: existing?.prompt ?? "",
+                    status: payload.success ? "completed" : "failed",
+                    message: payload.message,
+                    agent_display_name: payload.agent_display_name,
+                    agent_description: payload.agent_description,
+                  },
+                },
+              },
+            },
+          };
+        });
+        break;
 
       case "turn_completed":
         set((state) => ({

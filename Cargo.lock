@@ -272,6 +272,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap 6.1.0",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sqlx",

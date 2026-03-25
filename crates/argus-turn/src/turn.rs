@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
@@ -19,7 +19,7 @@ use argus_protocol::llm::{
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
-    ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext, ids::ThreadId,
+    ThreadEvent, ThreadMailbox, TokenUsage, ToolExecutionContext, ToolHookContext, ids::ThreadId,
     sanitize_tool_output,
 };
 
@@ -33,13 +33,13 @@ fn generate_turn_id(thread_id: &str, turn_number: u32) -> String {
     format!("{}-turn-{}", thread_id, turn_number)
 }
 
-/// Creates a dummy broadcast receiver for builder default.
-/// The actual receiver is created at execute() time via thread_event_tx.subscribe().
-fn dummy_broadcast_rx() -> broadcast::Receiver<ThreadEvent> {
-    let (tx, rx) = broadcast::channel(1);
-    // Drop the sender so the channel closes
-    drop(tx);
-    rx
+fn dummy_control_tx() -> mpsc::UnboundedSender<argus_protocol::ThreadControlEvent> {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    tx
+}
+
+fn default_mailbox() -> Arc<Mutex<ThreadMailbox>> {
+    Arc::new(Mutex::new(ThreadMailbox::default()))
 }
 
 /// Result of processing an LLM response's finish_reason.
@@ -210,6 +210,10 @@ pub struct Turn {
     #[builder(setter(custom))]
     thread_id: String,
 
+    /// Stable routing thread used for control-plane callbacks and nested jobs.
+    #[builder(default = "ThreadId::new()", setter(custom))]
+    originating_thread_id: ThreadId,
+
     /// Session identifier (for callback).
     #[builder(default, setter(strip_option))]
     session_id: Option<argus_protocol::SessionId>,
@@ -241,10 +245,13 @@ pub struct Turn {
     /// Thread event sender for broadcasting to subscribers.
     thread_event_tx: broadcast::Sender<ThreadEvent>,
 
-    /// Receiver for the unified pipe (Thread-owned).
-    /// Initialized at execute() start via thread_event_tx.subscribe().
-    #[builder(default = "dummy_broadcast_rx()")]
-    rx: broadcast::Receiver<ThreadEvent>,
+    /// Control sender used by nested tool executions.
+    #[builder(default = "dummy_control_tx()")]
+    control_tx: mpsc::UnboundedSender<argus_protocol::ThreadControlEvent>,
+
+    /// Shared thread mailbox consulted before each loop iteration.
+    #[builder(default = "default_mailbox()")]
+    mailbox: Arc<Mutex<ThreadMailbox>>,
 
     /// Event forwarder task handle (cleaned up on drop).
     #[builder(default)]
@@ -270,6 +277,12 @@ impl TurnBuilder {
     /// Set thread ID.
     pub fn thread_id(mut self, value: String) -> Self {
         self.thread_id = Some(value);
+        self
+    }
+
+    /// Set the stable originating thread route for control-plane callbacks.
+    pub fn originating_thread_id(mut self, value: ThreadId) -> Self {
+        self.originating_thread_id = Some(value);
         self
     }
 }
@@ -315,10 +328,6 @@ impl Turn {
             self.thread_id.clone(),
             self.turn_number,
         ));
-
-        // Subscribe to the unified pipe for polling at iteration start.
-        // Each Turn gets its own receiver via broadcast::Sender::subscribe().
-        self.rx = self.thread_event_tx.subscribe();
 
         // Create trace writer if configured
         #[allow(unused_variables)]
@@ -617,22 +626,15 @@ impl Turn {
         }
 
         for iteration in 0..max_iterations {
-            // Non-blocking drain of the unified pipe.
-            // Inject JobResult and UserInterrupt as user messages into the turn.
-            while let Ok(event) = self.rx.try_recv() {
-                match event {
-                    ThreadEvent::JobResult { job_id, success, message, .. } => {
-                        let status = if success { "completed" } else { "failed" };
-                        let content = format!("Job {} {}: {}", job_id, status, message);
-                        tracing::debug!("injecting JobResult into turn: {}", content);
-                        messages.push(ChatMessage::user(&content));
-                    }
-                    ThreadEvent::UserInterrupt { content } => {
-                        tracing::debug!("injecting UserInterrupt into turn: {}", content);
-                        messages.push(ChatMessage::user(&content));
-                    }
-                    _ => {}
-                }
+            let pending_inputs = {
+                let mut mailbox = self.mailbox.lock().await;
+                mailbox.drain_for_turn()
+            };
+
+            for input in pending_inputs {
+                let content = input.into_message_text();
+                tracing::debug!("injecting control input into turn: {}", content);
+                messages.push(ChatMessage::user(&content));
             }
 
             tracing::debug!(
@@ -1170,8 +1172,9 @@ impl Turn {
                         "Executing tool"
                     );
                     let ctx = Arc::new(ToolExecutionContext {
-                        thread_id: ThreadId::parse_or_default(&self.thread_id),
+                        thread_id: self.originating_thread_id,
                         pipe_tx: self.thread_event_tx.clone(),
+                        control_tx: self.control_tx.clone(),
                     });
                     tool.execute(tool_input.clone(), ctx).await
                 } else {
@@ -1317,7 +1320,7 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::{broadcast, Mutex};
+    use tokio::sync::broadcast;
 
     #[test]
     fn test_generate_turn_id() {

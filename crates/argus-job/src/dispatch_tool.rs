@@ -100,6 +100,7 @@ impl NamedTool for DispatchJobTool {
                 args.prompt,
                 args.context,
                 ctx.pipe_tx.clone(),
+                ctx.control_tx.clone(),
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed {

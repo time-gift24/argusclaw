@@ -15,6 +15,8 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /case "content_delta"/);
   assert.match(storeSource, /case "reasoning_delta"/);
   assert.match(storeSource, /case "turn_completed"/);
+  assert.match(storeSource, /case "job_dispatched"/);
+  assert.match(storeSource, /case "job_result"/);
   assert.match(storeSource, /case "waiting_for_approval"/);
   assert.match(storeSource, /case "approval_resolved"/);
   assert.match(storeSource, /case "idle"/);
@@ -46,6 +48,24 @@ test("chat store tracks pending reasoning alongside streamed assistant text", ()
   assert.match(
     storeSource,
     /case "reasoning_delta":[\s\S]*?pendingAssistant:[\s\S]*?reasoning:\s*session\.pendingAssistant\.reasoning \+ payload\.delta/,
+  );
+});
+
+test("chat store tracks ephemeral job status outside the transcript", () => {
+  assert.match(
+    storeSource,
+    /jobStatuses:\s*Record<string,\s*JobStatusPayload>/,
+    "session state should keep per-job status for temporary UI rendering",
+  );
+  assert.match(
+    storeSource,
+    /case "job_dispatched":[\s\S]*status:\s*"running"/,
+    "job_dispatched should mark the job as running",
+  );
+  assert.match(
+    storeSource,
+    /case "job_result":[\s\S]*status:\s*payload\.success\s*\?\s*"completed"\s*:\s*"failed"/,
+    "job_result should only update job status instead of appending transcript text",
   );
 });
 

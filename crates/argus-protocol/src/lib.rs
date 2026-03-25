@@ -18,7 +18,10 @@ pub mod tool;
 pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};
-pub use events::ThreadEvent;
+pub use events::{
+    QueuedUserMessage, ThreadControlEvent, ThreadEvent, ThreadJobResult, ThreadMailbox,
+    TurnControlInput,
+};
 pub use hooks::{
     BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,
     HookRegistry, ToolHookContext,

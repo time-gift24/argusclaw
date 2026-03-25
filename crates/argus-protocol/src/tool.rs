@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
-use crate::ThreadEvent;
+use crate::{ThreadControlEvent, ThreadEvent};
 use crate::ids::ThreadId;
 use crate::llm::ToolDefinition;
 use crate::risk_level::RiskLevel;
@@ -21,6 +21,8 @@ pub struct ToolExecutionContext {
     /// The pipe sender for this thread. Tools can send ThreadEvent variants
     /// into this pipe. Failures are logged as warnings and do not block execution.
     pub pipe_tx: broadcast::Sender<ThreadEvent>,
+    /// Internal control sender for routing low-volume control-plane events.
+    pub control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
 }
 
 /// Error type for tool operations.

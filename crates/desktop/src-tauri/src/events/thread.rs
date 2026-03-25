@@ -160,6 +160,9 @@ impl ThreadEventEnvelope {
                 success,
                 message,
                 token_usage,
+                agent_id,
+                agent_display_name,
+                agent_description,
             } => Some(Self {
                 session_id,
                 thread_id: thread_id.inner().to_string(),
@@ -170,6 +173,9 @@ impl ThreadEventEnvelope {
                     message,
                     input_tokens: token_usage.as_ref().map(|u| u.input_tokens),
                     output_tokens: token_usage.as_ref().map(|u| u.output_tokens),
+                    agent_id: agent_id.inner(),
+                    agent_display_name,
+                    agent_description,
                 },
             }),
             ThreadEvent::UserInterrupt { .. } => None,
@@ -244,6 +250,9 @@ pub enum ThreadEventPayload {
         message: String,
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
+        agent_id: i64,
+        agent_display_name: String,
+        agent_description: String,
     },
 }
 

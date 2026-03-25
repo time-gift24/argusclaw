@@ -278,9 +278,11 @@ mod tests {
         // Execute to verify we got the new version
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
             pipe_tx: tx,
+            control_tx,
         });
         let result = rt.block_on(retrieved.unwrap().execute(serde_json::json!({}), ctx));
         assert!(result.is_ok());
@@ -319,9 +321,11 @@ mod tests {
 
         let args = serde_json::json!({"message": "hello"});
         let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
             pipe_tx: tx,
+            control_tx,
         });
         let result = manager.execute("echo", args.clone(), ctx).await;
 
@@ -333,9 +337,11 @@ mod tests {
     async fn execute_error_not_found() {
         let manager = ToolManager::new();
         let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
             pipe_tx: tx,
+            control_tx,
         });
 
         let result = manager
@@ -354,9 +360,11 @@ mod tests {
         let manager = ToolManager::new();
         manager.register(Arc::new(FailingTool));
         let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
             pipe_tx: tx,
+            control_tx,
         });
 
         let result = manager.execute("failing", serde_json::json!({}), ctx).await;

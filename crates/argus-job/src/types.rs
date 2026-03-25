@@ -26,4 +26,10 @@ pub struct JobResult {
     /// Token usage if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<argus_protocol::TokenUsage>,
+    /// Agent ID that handled the subagent work.
+    pub agent_id: AgentId,
+    /// Human-readable subagent name.
+    pub agent_display_name: String,
+    /// Subagent description.
+    pub agent_description: String,
 }
