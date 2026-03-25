@@ -311,7 +311,11 @@ impl SessionManager {
 
         // Create Thread directly
         let trace_cfg = TraceConfig::new(true, self.trace_dir.clone())
-            .with_session_id(session_id);
+            .with_session_id(session_id)
+            .with_turn_start(
+                Some(agent_record.system_prompt.clone()),
+                Some(provider.model_name().to_string()),
+            );
         let mut turn_config = TurnConfig::new();
         turn_config.trace_config = Some(trace_cfg);
         let config = ThreadConfigBuilder::default()

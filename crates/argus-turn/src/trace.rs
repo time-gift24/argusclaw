@@ -20,6 +20,10 @@ pub struct TraceConfig {
     pub trace_dir: PathBuf,
     /// Session ID (included in path: {trace_dir}/{session_id}/{thread_id}/).
     pub session_id: Option<argus_protocol::SessionId>,
+    /// System prompt for this turn (written as TurnStart event).
+    pub system_prompt: Option<String>,
+    /// Model name for this turn (written as TurnStart event).
+    pub model: Option<String>,
     /// Whether to record streaming deltas (llm_delta, tool_call_delta).
     pub include_streaming_deltas: bool,
 }
@@ -31,6 +35,8 @@ impl TraceConfig {
             enabled,
             trace_dir,
             session_id: None,
+            system_prompt: None,
+            model: None,
             include_streaming_deltas: true,
         }
     }
@@ -41,12 +47,21 @@ impl TraceConfig {
         self
     }
 
+    /// Set system prompt and model for TurnStart event.
+    pub fn with_turn_start(mut self, system_prompt: Option<String>, model: Option<String>) -> Self {
+        self.system_prompt = system_prompt;
+        self.model = model;
+        self
+    }
+
     /// Create a disabled TraceConfig (no tracing).
     pub fn disabled() -> Self {
         Self {
             enabled: false,
             trace_dir: PathBuf::new(),
             session_id: None,
+            system_prompt: None,
+            model: None,
             include_streaming_deltas: true,
         }
     }

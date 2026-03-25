@@ -297,7 +297,7 @@ impl Turn {
 
         // Create trace writer if configured
         #[allow(unused_variables)]
-        let trace_writer = match self.trace_config.as_ref() {
+        let mut trace_writer = match self.trace_config.as_ref() {
             Some(config) if config.enabled => {
                 let mut base_dir = config.trace_dir.clone();
                 if let Some(session_id) = &config.session_id {
@@ -318,6 +318,28 @@ impl Turn {
             }
             _ => None,
         };
+
+        // Write TurnStart event if tracing is enabled
+        if let Some(config) = self.trace_config.as_ref() {
+            if config.enabled {
+                if let Some(ref mut writer) = trace_writer {
+                    if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
+                        let _ = writer.write_event(&TurnLogEvent::TurnStart {
+                            system_prompt: sp.clone(),
+                            model: model.clone(),
+                        }).await;
+                    }
+                    for msg in self.messages.iter() {
+                        if let ChatMessage { role: argus_protocol::llm::Role::User, content, .. } = msg {
+                            let _ = writer.write_event(&TurnLogEvent::UserInput {
+                                content: content.clone(),
+                                role: "user".to_string(),
+                            }).await;
+                        }
+                    }
+                }
+            }
+        }
 
         tracing::info!(
             thread_id = %self.thread_id,
