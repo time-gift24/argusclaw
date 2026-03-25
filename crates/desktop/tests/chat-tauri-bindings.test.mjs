@@ -13,10 +13,18 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
   );
   assert.match(
     tauriSource,
-    /getThreadSnapshot:\s*\(sessionId: number, threadId: string\)\s*=>\s*invoke<ThreadSnapshotPayload>\("get_thread_snapshot"/,
+    /getThreadSnapshot:\s*\(sessionId: string, threadId: string\)\s*=>\s*invoke<ThreadSnapshotPayload>\("get_thread_snapshot"/,
   );
   assert.match(
     tauriSource,
     /resolveApproval:\s*\(\s*requestId: string,\s*decision: ApprovalDecision,\s*resolvedBy\?: string \| null/,
+  );
+  assert.match(
+    tauriSource,
+    /renameSession:\s*\(sessionId: string,\s*name: string\)\s*=>\s*invoke<void>\("rename_session"/,
+  );
+  assert.match(
+    tauriSource,
+    /renameThread:\s*\(sessionId: string,\s*threadId: string,\s*title: string\)\s*=>\s*invoke<void>\("rename_thread"/,
   );
 });

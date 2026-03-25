@@ -180,8 +180,8 @@ impl Thread {
     }
 
     /// Set the thread title.
-    pub fn set_title(&mut self, title: String) {
-        self.title = Some(title);
+    pub fn set_title(&mut self, title: Option<String>) {
+        self.title = title.filter(|value| !value.trim().is_empty());
         self.updated_at = Utc::now();
     }
 

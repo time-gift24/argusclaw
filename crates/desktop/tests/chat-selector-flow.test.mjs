@@ -18,6 +18,24 @@ test("thread composer exposes chat selectors and approval affordances", () => {
   assert.match(approvalSource, /批准|拒绝/);
 });
 
+test("composer action places new-session and history buttons on the far left", () => {
+  assert.match(threadSource, /NewSessionButton/);
+  assert.match(threadSource, /SessionHistoryButton/);
+  const leftControls = threadSource.match(
+    /<div className="flex items-center gap-1\.5 pl-1">(?<controls>[\s\S]*?)<\/div>/,
+  );
+  assert.ok(leftControls?.groups?.controls, "left control group should exist");
+  const controls = leftControls.groups.controls;
+  assert.ok(
+    controls.indexOf("<NewSessionButton />") < controls.indexOf("<SessionHistoryButton />"),
+    "new-session button should come before history button",
+  );
+  assert.ok(
+    controls.indexOf("<SessionHistoryButton />") < controls.indexOf("<AgentSelector />"),
+    "history button should stay to the left of the agent selector",
+  );
+});
+
 test("composer action uses composer primitives for both send and cancel states", () => {
   assert.match(threadSource, /<ComposerPrimitive\.Send asChild>/);
   assert.match(threadSource, /<ComposerPrimitive\.Cancel asChild>/);

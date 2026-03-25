@@ -518,6 +518,18 @@ pub async fn delete_session(wing: State<'_, Arc<ArgusWing>>, session_id: String)
 }
 
 #[tauri::command]
+pub async fn rename_session(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+    name: String,
+) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    wing.rename_session(session_id, name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn list_threads(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<Vec<ThreadSummaryPayload>, String> {
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     wing.list_threads(session_id)
@@ -535,6 +547,20 @@ pub async fn list_threads(wing: State<'_, Arc<ArgusWing>>, session_id: String) -
                 })
                 .collect()
         })
+}
+
+#[tauri::command]
+pub async fn rename_thread(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+    thread_id: String,
+    title: String,
+) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    wing.rename_thread(session_id, thread_id, title)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ============================================================================

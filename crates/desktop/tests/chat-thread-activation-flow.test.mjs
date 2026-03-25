@@ -18,3 +18,8 @@ test("existing thread activation reuses a stable session-based forwarder key", (
   assert.match(commandSource, /start_forwarder\(\s*session_id\.to_string\(\)/);
   assert.match(subscriptionSource, /subscriptions: HashMap<String, CancellationToken>/);
 });
+
+test("desktop commands expose persistent session and thread rename entry points", () => {
+  assert.match(commandSource, /pub async fn rename_session/);
+  assert.match(commandSource, /pub async fn rename_thread/);
+});

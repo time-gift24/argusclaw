@@ -506,6 +506,23 @@ impl ArgusWing {
             .await
     }
 
+    /// Rename a persisted session.
+    pub async fn rename_session(&self, session_id: SessionId, name: String) -> Result<()> {
+        self.session_manager.rename_session(session_id, name).await
+    }
+
+    /// Rename a persisted thread title.
+    pub async fn rename_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        title: String,
+    ) -> Result<()> {
+        self.session_manager
+            .rename_thread(session_id, &thread_id, title)
+            .await
+    }
+
     // =========================================================================
     // Messaging API
     // =========================================================================

@@ -171,6 +171,12 @@ export const sessions = {
   list: () => invoke<SessionSummary[]>("list_sessions"),
 
   delete: (sessionId: string) => invoke<void>("delete_session", { sessionId }),
+
+  renameSession: (sessionId: string, name: string) =>
+    invoke<void>("rename_session", { sessionId, name }),
+
+  renameThread: (sessionId: string, threadId: string, title: string) =>
+    invoke<void>("rename_thread", { sessionId, threadId, title }),
 };
 
 // Chat API

@@ -524,6 +524,69 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Rename a persisted session.
+    pub async fn rename_session(&self, session_id: SessionId, name: String) -> Result<()> {
+        let result = sqlx::query(
+            r#"
+            UPDATE sessions
+            SET name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#,
+        )
+        .bind(name.trim())
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(ArgusError::SessionNotFound(session_id));
+        }
+
+        Ok(())
+    }
+
+    /// Rename a thread title and keep loaded runtime state in sync.
+    pub async fn rename_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+        title: String,
+    ) -> Result<()> {
+        let normalized = title.trim().to_string();
+        let persisted_title = (!normalized.is_empty()).then_some(normalized);
+        let result = sqlx::query(
+            r#"
+            UPDATE threads
+            SET title = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND session_id = ?
+            "#,
+        )
+        .bind(persisted_title.as_deref())
+        .bind(thread_id.inner().to_string())
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+
+        if let Some(session) = self.sessions.get(&session_id) {
+            if let Some(thread) = session.get_thread(thread_id) {
+                let mut thread = thread.lock().await;
+                thread.set_title(persisted_title);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get threads for a session (metadata only, from DB).
     pub async fn list_threads(&self, session_id: SessionId) -> Result<Vec<ThreadSummary>> {
         // If session is loaded, return in-memory threads
