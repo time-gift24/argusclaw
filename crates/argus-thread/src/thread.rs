@@ -358,6 +358,7 @@ impl Thread {
         let mut turn_builder = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
+            .session_id(self.session_id)
             .messages(self.messages.clone())
             .provider(self.provider.clone())
             .tools(tools)

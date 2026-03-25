@@ -282,6 +282,7 @@ async fn test_turn_trace_file_created_on_success() {
     assert!(!lines.is_empty(), "Should have at least one JSONL line");
 
     // Each line should be a valid JSON with wrapper + data
+    let mut found_user_input = false;
     let mut found_llm_req = false;
     let mut found_llm_resp = false;
     let mut found_turn_end = false;
@@ -289,12 +290,14 @@ async fn test_turn_trace_file_created_on_success() {
         let json: serde_json::Value = serde_json::from_str(line).unwrap();
         let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
+            "user_input" => found_user_input = true,
             "llm_req" => found_llm_req = true,
             "llm_response" => found_llm_resp = true,
             "turn_end" => found_turn_end = true,
             _ => {}
         }
     }
+    assert!(found_user_input, "Should have user_input event");
     assert!(found_llm_req, "Should have llm_req event");
     assert!(found_llm_resp, "Should have llm_response event");
     assert!(found_turn_end, "Should have turn_end event on success");
@@ -354,25 +357,31 @@ async fn test_turn_trace_contains_tool_execution() {
     let lines: Vec<&str> = content.lines().collect();
     assert!(!lines.is_empty(), "Should have at least one JSONL line");
 
-    // Verify we have llm_req, tool_result, llm_response, and turn_end
+    // Verify we have llm_req, tool_result, llm_response, turn_end, and new events
+    let mut found_user_input = false;
     let mut found_llm_req = false;
-    let mut found_tool_result = false;
     let mut found_llm_resp = false;
+    let mut found_tool_call_start = false;
+    let mut found_tool_result = false;
     let mut found_turn_end = false;
     for line in &lines {
         let json: serde_json::Value = serde_json::from_str(line).unwrap();
         let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
+            "user_input" => found_user_input = true,
             "llm_req" => found_llm_req = true,
             "llm_response" => found_llm_resp = true,
+            "tool_call_start" => found_tool_call_start = true,
             "tool_result" => found_tool_result = true,
             "turn_end" => found_turn_end = true,
             _ => {}
         }
     }
+    assert!(found_user_input, "Should have user_input event");
     assert!(found_llm_req, "Should have llm_req event");
-    assert!(found_tool_result, "Should have tool_result event");
     assert!(found_llm_resp, "Should have llm_response event");
+    assert!(found_tool_call_start, "Should have tool_call_start event");
+    assert!(found_tool_result, "Should have tool_result event");
     assert!(found_turn_end, "Should have turn_end event on success");
 }
 
@@ -381,4 +390,88 @@ async fn test_turn_trace_disabled_by_default() {
     // Default config should have tracing disabled
     let config = TraceConfig::default();
     assert!(!config.enabled, "Trace should be disabled by default");
+}
+
+#[tokio::test]
+async fn test_full_jsonl_event_sequence() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+
+    // Provider returns tool call first, then final response (stop)
+    let responses = vec![
+        (
+            "Let me echo that.".to_string(),
+            vec![ToolCall {
+                id: "call-abc".to_string(),
+                name: "echo".to_string(),
+                arguments: serde_json::json!({"message": "hello"}),
+            }],
+        ),
+        ("Done!".to_string(), vec![]),
+    ];
+    let provider = Arc::new(ToolCallMockProvider::new(responses));
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread-seq".to_string())
+        .messages(vec![ChatMessage::user("Say hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![Arc::new(EchoTool)])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .trace_config(trace_config)
+        .build()
+        .unwrap();
+
+    let output = turn.execute().await.unwrap();
+    assert!(output.messages.len() >= 3);
+
+    // Read JSONL file
+    let trace_path = temp_dir.path().join("test-thread-seq").join("turns").join("1.jsonl");
+    assert!(trace_path.exists());
+    let content = fs::read_to_string(&trace_path).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(!lines.is_empty());
+
+    // Collect event types in order
+    let event_types: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            json.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    // Verify expected sequence (tools run in parallel, so tool events interleave with post-tools llm_response):
+    // user_input (from turn start), llm_req (iteration 1), tool_call_start, tool_result,
+    // llm_response (iteration 1 completion), llm_req (iteration 2), llm_response (stop), turn_end
+    let expected_sequence = vec![
+        "user_input", "llm_req", "tool_call_start", "tool_result", "llm_response",
+        "llm_req", "llm_response", "turn_end",
+    ];
+    assert_eq!(event_types, expected_sequence, "Event sequence mismatch");
+
+    // Verify duration_ms > 0 in tool_result (fields are flattened into the wrapper)
+    let tool_result_line = lines
+        .iter()
+        .find(|line| {
+            let json: serde_json::Value = serde_json::from_str(line).unwrap();
+            json.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+        })
+        .expect("Should have a tool_result event");
+    let json: serde_json::Value = serde_json::from_str(tool_result_line).unwrap();
+    // Verify duration_ms is present and is a valid u64 (may be 0 for fast tool executions)
+    let _duration_ms = json
+        .get("duration_ms")
+        .expect("tool_result should have duration_ms")
+        .as_u64()
+        .expect("duration_ms should be a number");
 }

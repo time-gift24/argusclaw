@@ -7,7 +7,7 @@ use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
 use argus_thread::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_tool::ToolManager;
-use argus_turn::{TraceConfig, TurnConfig};
+use argus_turn::{OnTurnComplete, TraceConfig, TurnConfig};
 use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{broadcast, Mutex};
@@ -16,6 +16,7 @@ use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
 /// Manages sessions and their threads.
+#[derive(Clone)]
 pub struct SessionManager {
     pool: SqlitePool,
     sessions: DashMap<SessionId, Arc<Session>>,
@@ -115,6 +116,11 @@ impl SessionManager {
             return Ok(existing.clone());
         }
 
+        // Ensure session trace directory exists (for recovery)
+        if let Err(e) = self.ensure_session_dir(session_id).await {
+            tracing::warn!(session_id = %session_id, error = %e, "Failed to ensure session directory");
+        }
+
         // Load from DB
         let row = sqlx::query("SELECT id, name FROM sessions WHERE id = ?")
             .bind(&session_id.to_string())
@@ -131,6 +137,9 @@ impl SessionManager {
             }
             None => return Err(ArgusError::SessionNotFound(session_id)),
         };
+
+        // Capture self as Arc for use in callbacks (Clone impl uses Arc fields internally)
+        let sm = self.clone();
 
         // Load threads metadata from DB
         let thread_rows = sqlx::query(
@@ -196,8 +205,18 @@ impl SessionManager {
             let title: Option<String> = thread_row.get("title");
             let trace_cfg =
                 TraceConfig::new(true, self.trace_dir.join(thread_id.inner().to_string()));
+            let on_turn_complete = {
+                let sm = sm.clone();
+                Arc::new(move |sid: argus_protocol::SessionId, turn_num: u32| {
+                    let sm = sm.clone();
+                    tokio::spawn(async move {
+                        let _ = sm.update_session_turn(sid, turn_num).await;
+                    });
+                }) as OnTurnComplete
+            };
             let mut turn_config = TurnConfig::new();
             turn_config.trace_config = Some(trace_cfg);
+            turn_config.on_turn_complete = Some(on_turn_complete);
             let config = ThreadConfigBuilder::default()
                 .turn_config(turn_config)
                 .build()
@@ -251,7 +270,60 @@ impl SessionManager {
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
+        // Create session trace directory with meta.json
+        if let Err(e) = self.ensure_session_dir(session_id).await {
+            tracing::warn!(session_id = %session_id, error = %e, "Failed to create session directory");
+        }
+
         Ok(session_id)
+    }
+
+    /// Ensure the session trace directory exists with meta.json.
+    /// Idempotent: safe to call multiple times.
+    pub async fn ensure_session_dir(&self, session_id: SessionId) -> std::io::Result<()> {
+        let session_dir = self.trace_dir.join(session_id.to_string());
+        tokio::fs::create_dir_all(&session_dir).await?;
+        let meta_path = session_dir.join("meta.json");
+
+        // Only create meta.json if it doesn't exist
+        if !meta_path.exists() {
+            let meta = serde_json::json!({
+                "session_id": session_id.to_string(),
+                "current_turn": 0,
+            });
+            tokio::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Update the current_turn in meta.json after a turn completes.
+    pub async fn update_session_turn(&self, session_id: SessionId, turn_number: u32) -> std::io::Result<()> {
+        let meta_path = self.trace_dir.join(session_id.to_string()).join("meta.json");
+
+        let meta = if meta_path.exists() {
+            let content = tokio::fs::read_to_string(&meta_path).await?;
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "session_id": session_id.to_string(),
+                    "current_turn": 0,
+                })
+            })
+        } else {
+            serde_json::json!({
+                "session_id": session_id.to_string(),
+                "current_turn": 0,
+            })
+        };
+
+        let updated = serde_json::json!({
+            "session_id": meta.get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&session_id.to_string()),
+            "current_turn": turn_number,
+        });
+        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await?;
+        Ok(())
     }
 
     /// Delete a session and all its threads.
@@ -316,8 +388,21 @@ impl SessionManager {
                 Some(agent_record.system_prompt.clone()),
                 Some(provider.model_name().to_string()),
             );
+
+        // Wire on_turn_complete callback to update session turn count
+        let on_turn_complete = {
+            let sm = self.clone();
+            Arc::new(move |sid: argus_protocol::SessionId, turn_num: u32| {
+                let sm = sm.clone();
+                tokio::spawn(async move {
+                    let _ = sm.update_session_turn(sid, turn_num).await;
+                });
+            }) as argus_turn::OnTurnComplete
+        };
+
         let mut turn_config = TurnConfig::new();
         turn_config.trace_config = Some(trace_cfg);
+        turn_config.on_turn_complete = Some(on_turn_complete);
         let config = ThreadConfigBuilder::default()
             .turn_config(turn_config)
             .build()

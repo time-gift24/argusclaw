@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
@@ -51,6 +51,8 @@ struct ToolExecutionResult {
     tool_call_id: String,
     name: String,
     content: String,
+    #[allow(dead_code)]
+    duration_ms: u64,
 }
 
 /// Accumulates streaming events into a complete response.
@@ -198,6 +200,10 @@ pub struct Turn {
     #[builder(setter(custom))]
     thread_id: String,
 
+    /// Session identifier (for callback).
+    #[builder(default, setter(strip_option))]
+    session_id: Option<argus_protocol::SessionId>,
+
     /// Message history for this turn.
     messages: Vec<ChatMessage>,
 
@@ -322,7 +328,7 @@ impl Turn {
         // Write TurnStart event if tracing is enabled
         if let Some(config) = self.trace_config.as_ref() {
             if config.enabled {
-                if let Some(ref mut writer) = trace_writer {
+                if let Some(writer) = trace_writer.as_mut() {
                     if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
                         let _ = writer.write_event(&TurnLogEvent::TurnStart {
                             system_prompt: sp.clone(),
@@ -349,9 +355,12 @@ impl Turn {
             "Turn execution started"
         );
 
-        // Execute main loop
-        let mut trace_writer = trace_writer;
-        let result = self.execute_loop(&mut trace_writer).await;
+        // Execute main loop (takes ownership of trace_writer)
+        let loop_result = self.execute_loop(trace_writer).await;
+        let (result, trace_writer) = match loop_result {
+            Ok((output, tw)) => (Ok(output), tw),
+            Err(e) => (Err(e), None),
+        };
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -359,6 +368,13 @@ impl Turn {
             result = ?result.as_ref().map(|_| "ok"),
             "Turn execution completed"
         );
+
+        // Invoke on_turn_complete callback if configured
+        if let (Some(callback), Some(session_id)) =
+            (&self.config.on_turn_complete, &self.session_id)
+        {
+            callback(*session_id, self.turn_number);
+        }
 
         // Finalize trace - handles both success and failure cases
         if let Some(writer) = trace_writer {
@@ -561,12 +577,13 @@ impl Turn {
     #[allow(dead_code)]
     async fn execute_loop(
         &mut self,
-        trace_writer: &mut Option<TraceWriter>,
-    ) -> Result<TurnOutput, TurnError> {
+        trace_writer: Option<TraceWriter>,
+    ) -> Result<(TurnOutput, Option<TraceWriter>), TurnError> {
         let mut messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
+        let mut trace_writer = trace_writer;
 
         // Add system message about max_tool_calls ONCE before loop (not inside to avoid accumulation)
         let max_tool_calls = self.config.max_tool_calls;
@@ -712,7 +729,7 @@ impl Turn {
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
 
-                    return Ok(output);
+                    return Ok((output, trace_writer));
                 }
                 NextAction::ContinueWithTools {
                     tool_calls,
@@ -728,11 +745,16 @@ impl Turn {
                     );
 
                     // Execute tools in parallel
+                    let trace_writer_arc = Arc::new(Mutex::new(trace_writer.take()));
                     let tool_results = self
-                        .execute_tools_parallel(tool_calls, tool_timeout_secs)
+                        .execute_tools_parallel(tool_calls, tool_timeout_secs, trace_writer_arc.clone())
                         .await;
+                    // Restore trace_writer from Arc after all writes complete
+                    if let Ok(mutex) = Arc::try_unwrap(trace_writer_arc) {
+                        trace_writer = mutex.into_inner();
+                    }
 
-                    // Record LLM response and tool results to trace
+                    // Record LLM response to trace (tool results are written in execute_single_tool)
                     if let Some(writer) = trace_writer.as_mut() {
                         let llm_resp_event = TurnLogEvent::LlmResponse {
                             content: trace_response.content.clone().unwrap_or_default(),
@@ -745,16 +767,6 @@ impl Turn {
                             finish_reason: format!("{:?}", trace_response.finish_reason),
                         };
                         let _ = writer.write_event(&llm_resp_event).await;
-                        for r in &tool_results {
-                            let tool_result_event = TurnLogEvent::ToolResult {
-                                id: r.tool_call_id.clone(),
-                                name: r.name.clone(),
-                                result: r.content.clone(),
-                                duration_ms: 0,
-                                error: None,
-                            };
-                            let _ = writer.write_event(&tool_result_event).await;
-                        }
                     }
 
                     tracing::debug!(
@@ -988,10 +1000,11 @@ impl Turn {
         &self,
         tool_calls: Vec<ToolCall>,
         tool_timeout_secs: u64,
+        trace_writer: Arc<Mutex<Option<TraceWriter>>>,
     ) -> Vec<ToolExecutionResult> {
         let futures: Vec<_> = tool_calls
             .into_iter()
-            .map(|tool_call| self.execute_single_tool(tool_call, tool_timeout_secs))
+            .map(|tool_call| self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone()))
             .collect();
 
         join_all(futures).await
@@ -1002,10 +1015,23 @@ impl Turn {
         &self,
         tool_call: ToolCall,
         tool_timeout_secs: u64,
+        trace_writer: Arc<Mutex<Option<TraceWriter>>>,
     ) -> ToolExecutionResult {
         let tool_call_id = tool_call.id.clone();
         let tool_name = tool_call.name.clone();
         let tool_input = tool_call.arguments.clone();
+
+        // Write ToolCallStart event
+        {
+            let mut guard = trace_writer.lock().await;
+            if let Some(writer) = guard.as_mut() {
+                let _ = writer.write_event(&TurnLogEvent::ToolCallStart {
+                    id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    arguments: tool_input.clone(),
+                }).await;
+            }
+        }
 
         // Find the tool in self.tools
         let tool = self.tools.iter().find(|t| t.name() == tool_name).cloned();
@@ -1024,12 +1050,28 @@ impl Turn {
             turn_number: Some(self.turn_number),
         };
 
-        if let Ok(HookAction::Block(reason)) = self
+        if let Ok(HookAction::Block(ref reason)) = self
             .fire_hooks(HookEvent::BeforeToolCall, &HookContext::ToolEvent(ctx))
             .await
         {
             // Hook blocked the tool call
+            let block_start = std::time::Instant::now();
             let content = format!("Tool call blocked: {}", reason);
+            let duration_ms = block_start.elapsed().as_millis() as u64;
+
+            // Write blocked tool result to trace
+            {
+                let mut guard = trace_writer.lock().await;
+                if let Some(writer) = guard.as_mut() {
+                    let _ = writer.write_event(&TurnLogEvent::ToolResult {
+                        id: tool_call_id.clone(),
+                        name: tool_name.clone(),
+                        result: content.clone(),
+                        duration_ms,
+                        error: Some(reason.clone()),
+                    }).await;
+                }
+            }
 
             // Fire AfterToolCall hook with error
             let after_ctx = ToolHookContext {
@@ -1038,7 +1080,7 @@ impl Turn {
                 tool_call_id: tool_call_id.clone(),
                 tool_input,
                 tool_result: None,
-                error: Some(reason),
+                error: Some(reason.clone()),
                 tool_manager: None,
                 thread_event_sender: Some(self.thread_event_tx.clone()),
                 thread_id: Some(self.thread_id.clone()),
@@ -1052,6 +1094,7 @@ impl Turn {
                 tool_call_id,
                 name: tool_name,
                 content,
+                duration_ms,
             };
         }
 
@@ -1080,6 +1123,7 @@ impl Turn {
         // Execute the tool with timeout
         let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
         set_current_agent_id(self.agent_record.id);
+        let start_time = std::time::Instant::now();
         let execute_result = {
             let execute_future = async {
                 if let Some(tool) = tool {
@@ -1195,18 +1239,38 @@ impl Turn {
             .fire_hooks(HookEvent::AfterToolCall, &HookContext::ToolEvent(ctx))
             .await;
 
-        // Convert result to string content
-        let content = match result {
-            Ok(value) => serde_json::to_string(&value).unwrap_or_else(|e| {
+        // Convert result to string content and measure duration
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        let content = match &result {
+            Ok(value) => serde_json::to_string(value).unwrap_or_else(|e| {
                 format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
             }),
             Err(e) => format!("{{\"error\": \"{}\"}}", e),
         };
 
+        // Write ToolResult to trace
+        {
+            let mut guard = trace_writer.lock().await;
+            if let Some(writer) = guard.as_mut() {
+                let error_str = match &result {
+                    Ok(_) => None,
+                    Err(e) => Some(e.clone()),
+                };
+                let _ = writer.write_event(&TurnLogEvent::ToolResult {
+                    id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    result: content.clone(),
+                    duration_ms,
+                    error: error_str,
+                }).await;
+            }
+        }
+
         ToolExecutionResult {
             tool_call_id,
             name: tool_name,
             content,
+            duration_ms,
         }
     }
 }
@@ -1214,7 +1278,7 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, Mutex};
 
     #[test]
     fn test_generate_turn_id() {

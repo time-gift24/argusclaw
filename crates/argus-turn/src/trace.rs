@@ -146,15 +146,28 @@ impl TraceWriter {
         }
 
         let ts = Utc::now().to_rfc3339();
-        let json = serde_json::json!({
+        // Serialize the event to extract its fields, then flatten into the wrapper
+        let event_value = serde_json::to_value(event)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // event_value has form: {"type": "...", "data": {...fields...}}
+        // We flatten: wrapper has "type", "v", "thread_id", "turn", "ts", plus all event fields
+        let mut wrapper = serde_json::json!({
             "v": "1",
             "thread_id": self.thread_id,
             "turn": self.turn_number,
             "ts": ts,
-            "type": event.type_name(),
-            "data": event,
         });
-        let line = serde_json::to_string(&json)
+        if let Some(obj) = wrapper.as_object_mut() {
+            obj.insert("type".to_string(), event_value.get("type").cloned().unwrap_or(serde_json::Value::String(event.type_name().to_string())));
+            if let Some(data) = event_value.get("data") {
+                if let Some(fields) = data.as_object() {
+                    for (k, v) in fields {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        let line = serde_json::to_string(&wrapper)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         self.file.write_all(line.as_bytes()).await?;
         self.file.write_all(b"\n").await?;
@@ -205,8 +218,23 @@ pub async fn read_jsonl_events(
         let line_num = line_idx + 1;
         // Try parsing as the full JSONL wrapper
         if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(data) = wrapper.get("data") {
-                if let Ok(event) = serde_json::from_value(data.clone()) {
+            // New flattened format: type and fields at wrapper level
+            if let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str()) {
+                // Build synthetic inner data for TurnLogEvent deserialization
+                // TurnLogEvent uses #[serde(tag = "type", content = "data")]
+                // so we need {"type": "...", "data": {...variant_fields...}}
+                let mut event_data = serde_json::Map::new();
+                // Collect all event fields from wrapper (except metadata)
+                for (k, v) in wrapper.as_object().unwrap_or(&serde_json::Map::new()) {
+                    if !["v", "thread_id", "turn", "ts", "type"].contains(&k.as_str()) {
+                        event_data.insert(k.clone(), v.clone());
+                    }
+                }
+                let inner = serde_json::json!({
+                    "type": type_str,
+                    "data": serde_json::Value::Object(event_data),
+                });
+                if let Ok(event) = serde_json::from_value(inner) {
                     events.push(event);
                     continue;
                 }
@@ -272,8 +300,18 @@ pub async fn recover_turn_events(
             });
         }
         if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
-            if let Some(data) = wrapper.get("data") {
-                if let Ok(event) = serde_json::from_value(data.clone()) {
+            if let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str()) {
+                let mut event_data = serde_json::Map::new();
+                for (k, v) in wrapper.as_object().unwrap_or(&serde_json::Map::new()) {
+                    if !["v", "thread_id", "turn", "ts", "type"].contains(&k.as_str()) {
+                        event_data.insert(k.clone(), v.clone());
+                    }
+                }
+                let inner = serde_json::json!({
+                    "type": type_str,
+                    "data": serde_json::Value::Object(event_data),
+                });
+                if let Ok(event) = serde_json::from_value(inner) {
                     return Ok(event);
                 }
             }

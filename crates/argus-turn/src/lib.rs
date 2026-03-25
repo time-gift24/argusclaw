@@ -58,8 +58,8 @@ pub mod tool_context;
 pub mod turn;
 
 pub use config::{
-    TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput, TurnOutputBuilder,
-    TurnStreamEvent,
+    OnTurnComplete, TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput,
+    TurnOutputBuilder, TurnStreamEvent,
 };
 pub use error::{TurnError, TurnLogError};
 pub use events::TurnLogEvent;
