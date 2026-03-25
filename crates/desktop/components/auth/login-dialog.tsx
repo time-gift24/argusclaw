@@ -36,6 +36,7 @@ const getLoginErrorMessage = (message?: string): string => {
 };
 
 export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
+  const router = useRouter();
   const { checkHasUser, setupAccount, login } = useAuthStore();
   const { showToast } = useLoginToastStore();
   const [username, setUsername] = useState('');
@@ -72,6 +73,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
         setUsername('');
         setPassword('');
         showToast('登录成功', 'success');
+        router.push('/settings/providers/edit?id=1');
       } else {
         setError(getLoginErrorMessage(result.error));
       }
