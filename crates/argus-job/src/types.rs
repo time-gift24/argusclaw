@@ -16,7 +16,7 @@ pub struct JobDispatchArgs {
     pub context: Option<serde_json::Value>,
 }
 
-/// Result of a completed job.
+/// Result of a completed job (serialized into tool responses).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobResult {
     /// Whether the job succeeded.
@@ -26,19 +26,4 @@ pub struct JobResult {
     /// Token usage if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<argus_protocol::TokenUsage>,
-}
-
-/// Job status for SSE events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobStatusEvent {
-    /// The job ID.
-    pub job_id: String,
-    /// Status: "completed", "failed", "stuck".
-    pub status: String,
-    /// Optional session ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    /// Result message.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }

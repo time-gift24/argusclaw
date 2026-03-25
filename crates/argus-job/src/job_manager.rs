@@ -9,45 +9,27 @@ use std::sync::Arc;
 
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::tool::NamedTool;
-use argus_protocol::{AgentId, ProviderResolver, ThreadEvent, TokenUsage};
+use argus_protocol::{AgentId, ProviderResolver, ThreadEvent};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnConfig, TurnOutput};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
 use crate::list_subagents_tool::ListSubagentsTool;
-
-/// Job result (internal, not exported).
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct JobResult {
-    success: bool,
-    message: String,
-    token_usage: Option<TokenUsage>,
-}
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
-    jobs: Arc<RwLock<std::collections::HashMap<String, JobState>>>,
 }
 
 impl fmt::Debug for JobManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JobManager")
-            .field("jobs", &self.jobs)
-            .finish()
+        f.debug_struct("JobManager").finish()
     }
-}
-
-#[derive(Debug, Clone)]
-struct JobState {
-    status: String,
-    result: Option<JobResult>,
 }
 
 impl JobManager {
@@ -61,7 +43,6 @@ impl JobManager {
             template_manager,
             provider_resolver,
             tool_manager,
-            jobs: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -73,17 +54,6 @@ impl JobManager {
     /// Create a ListSubagentsTool for this manager.
     pub fn create_list_subagents_tool(self: Arc<Self>) -> ListSubagentsTool {
         ListSubagentsTool::new(Arc::clone(&self.template_manager))
-    }
-
-    /// Dispatch a job (legacy API — use spawn_job_executor instead).
-    ///
-    /// This method is a shim that returns a placeholder job ID.
-    /// The caller (dispatch_tool) should migrate to `spawn_job_executor`.
-    #[allow(dead_code)]
-    pub async fn dispatch(&self, _args: crate::types::JobDispatchArgs) -> Result<String, JobError> {
-        Err(JobError::ExecutionFailed(
-            "dispatch() is deprecated — use spawn_job_executor instead".to_string(),
-        ))
     }
 
     /// Spawn a background job executor.
@@ -104,20 +74,7 @@ impl JobManager {
             ));
         }
 
-        // Store initial job state
-        {
-            let mut jobs = self.jobs.write().await;
-            jobs.insert(
-                job_id.clone(),
-                JobState {
-                    status: "running".to_string(),
-                    result: None,
-                },
-            );
-        }
-
         // Capture clones for the background task
-        let jobs = Arc::clone(&self.jobs);
         let template_manager = Arc::clone(&self.template_manager);
         let provider_resolver = Arc::clone(&self.provider_resolver);
         let tool_manager = Arc::clone(&self.tool_manager);
@@ -131,7 +88,6 @@ impl JobManager {
                 Ok(Some(record)) => record,
                 Ok(None) => {
                     let msg = format!("agent {} not found", agent_id.inner());
-                    Self::mark_failed(&jobs, &job_id, &msg).await;
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                         job_id,
                         success: false,
@@ -142,7 +98,6 @@ impl JobManager {
                 }
                 Err(e) => {
                     let msg = format!("failed to load agent: {}", e);
-                    Self::mark_failed(&jobs, &job_id, &msg).await;
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                         job_id,
                         success: false,
@@ -159,7 +114,6 @@ impl JobManager {
                     Ok(p) => p,
                     Err(e) => {
                         let msg = format!("failed to resolve provider: {}", e);
-                        Self::mark_failed(&jobs, &job_id, &msg).await;
                         let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                             job_id,
                             success: false,
@@ -173,7 +127,6 @@ impl JobManager {
                     Ok(p) => p,
                     Err(e) => {
                         let msg = format!("no provider configured: {}", e);
-                        Self::mark_failed(&jobs, &job_id, &msg).await;
                         let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                             job_id,
                             success: false,
@@ -216,7 +169,6 @@ impl JobManager {
                 Ok(turn) => turn.execute().await,
                 Err(e) => {
                     let msg = format!("failed to build turn: {}", e);
-                    Self::mark_failed(&jobs, &job_id, &msg).await;
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                         job_id,
                         success: false,
@@ -230,14 +182,6 @@ impl JobManager {
             match output {
                 Ok(o) => {
                     let message = Self::summarize_output(&o);
-                    if let Some(state) = jobs.write().await.get_mut(&job_id) {
-                        state.status = "completed".to_string();
-                        state.result = Some(JobResult {
-                            success: true,
-                            message: message.clone(),
-                            token_usage: Some(o.token_usage.clone()),
-                        });
-                    }
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                         job_id,
                         success: true,
@@ -247,7 +191,6 @@ impl JobManager {
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    Self::mark_failed(&jobs, &job_id, &msg).await;
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
                         job_id,
                         success: false,
@@ -261,22 +204,6 @@ impl JobManager {
         Ok(())
     }
 
-    async fn mark_failed(
-        jobs: &Arc<RwLock<std::collections::HashMap<String, JobState>>>,
-        job_id: &str,
-        message: &str,
-    ) {
-        let mut guard = jobs.write().await;
-        if let Some(state) = guard.get_mut(job_id) {
-            state.status = "failed".to_string();
-            state.result = Some(JobResult {
-                success: false,
-                message: message.to_string(),
-                token_usage: None,
-            });
-        }
-    }
-
     /// Summarize turn output into a brief result message.
     fn summarize_output(output: &TurnOutput) -> String {
         for msg in output.messages.iter().rev() {
@@ -285,14 +212,12 @@ impl JobManager {
                 content,
                 ..
             } = msg
-            {
-                if !content.is_empty() {
+                && !content.is_empty() {
                     if content.len() > 500 {
                         return format!("{}...", &content[..500]);
                     }
                     return content.clone();
                 }
-            }
         }
         format!("job completed, {} messages in turn", output.messages.len())
     }

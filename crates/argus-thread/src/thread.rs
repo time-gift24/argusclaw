@@ -90,10 +90,6 @@ pub struct Thread {
     #[builder(default)]
     turn_running: bool,
 
-    /// Whether the run() orchestration loop has been spawned.
-    #[builder(default)]
-    run_spawned: Arc<std::sync::atomic::AtomicBool>,
-
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
@@ -161,7 +157,6 @@ impl ThreadBuilder {
             turn_count: 0,
             pipe_tx,
             turn_running: false,
-            run_spawned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             plan_store: self.plan_store.unwrap_or_default(),
         })
     }
@@ -243,24 +238,6 @@ impl Thread {
         self.turn_running = running;
     }
 
-    /// Returns true if the run() orchestration loop has been spawned.
-    pub fn is_run_spawned(&self) -> bool {
-        self.run_spawned.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Try to mark that the run() loop has been spawned. Returns true if this
-    /// was the first call (spawn needed), false if already spawned.
-    pub fn try_set_run_spawned(&self) -> bool {
-        self.run_spawned
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_ok()
-    }
-
     /// Spawn a new turn to handle a user message.
     pub async fn spawn_turn(
         &mut self,
@@ -268,55 +245,11 @@ impl Thread {
         msg_override: Option<MessageOverride>,
     ) -> Result<(), ThreadError> {
         self.set_turn_running(true);
-        self.send_message_internal(content, msg_override).await?;
+        let result = self.send_message_internal(content, msg_override).await;
         self.set_turn_running(false);
-        Ok(())
+        result
     }
 
-    /// Main orchestration loop.
-    ///
-    /// Runs as a background task (spawned by session). Waits on the pipe,
-    /// spawning turns when UserMessage arrives. Queues one pending message
-    /// if a turn is already running.
-    pub async fn run(&mut self) {
-        use argus_protocol::ThreadEvent::{Idle, UserMessage};
-
-        let mut rx = self.pipe_tx.subscribe();
-        let mut pending_user_message: Option<ThreadEvent> = None;
-
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    match event {
-                        UserMessage { content, msg_override } => {
-                            if self.is_turn_running() {
-                                if pending_user_message.is_none() {
-                                    pending_user_message = Some(ThreadEvent::UserMessage {
-                                        content: content.clone(),
-                                        msg_override: msg_override.clone(),
-                                    });
-                                }
-                            } else if let Err(e) = self.spawn_turn(content, msg_override).await {
-                                tracing::error!("turn failed: {}", e);
-                            }
-                        }
-                        Idle { .. } => {
-                            if let Some(ThreadEvent::UserMessage { content, msg_override }) =
-                                pending_user_message.take()
-                                && let Err(e) = self.spawn_turn(content, msg_override).await
-                            {
-                                tracing::error!("turn failed: {}", e);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("pipe recv error in run(): {}", e);
-                }
-            }
-        }
-    }
 
     /// Get current state.
     pub fn state(&self) -> ThreadState {
