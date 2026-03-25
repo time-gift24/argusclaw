@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { agents, chat, providers } from "@/lib/tauri";
+import { agents, chat, providers, sessions } from "@/lib/tauri";
 import type {
   ApprovalRequestPayload,
   ThreadEventEnvelope,
@@ -9,6 +9,7 @@ import type {
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
 import type { PlanItem } from "@/lib/types/plan";
+import type { SessionSummary } from "@/lib/tauri";
 
 export interface PendingToolCall {
   tool_call_id: string;
@@ -27,7 +28,7 @@ const toErrorMessage = (error: unknown) =>
 
 export interface ChatSessionState {
   sessionKey: string;
-  sessionId: number;
+  sessionId: string;
   templateId: number;
   threadId: string;
   effectiveProviderId: number | null;
@@ -56,10 +57,15 @@ export interface ChatStore {
   sessionsByKey: Record<string, ChatSessionState>;
   templates: Awaited<ReturnType<typeof agents.list>>;
   providers: Awaited<ReturnType<typeof providers.list>>;
+  sessionList: SessionSummary[];
+  sessionListLoading: boolean;
   _unlisten: UnlistenFn | null;
 
   initialize: () => Promise<void>;
   activateSession: (templateId: number) => Promise<void>;
+  switchToSession: (sessionId: string) => Promise<void>;
+  loadSessionList: () => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
@@ -80,6 +86,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sessionsByKey: {},
   templates: [],
   providers: [],
+  sessionList: [],
+  sessionListLoading: false,
   _unlisten: null,
 
   async initialize() {
@@ -110,13 +118,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   async activateSession(templateId: number) {
+    // Reuse existing session if available (keyed by session_id)
     const state = get();
-    const sessionKey = toSessionKey(templateId, state.selectedProviderPreferenceId);
-
-    // Reuse existing session if available
-    if (state.sessionsByKey[sessionKey]) {
+    const existing = Object.values(state.sessionsByKey).find(
+      (s) => s.templateId === templateId && s.effectiveProviderId === state.selectedProviderPreferenceId,
+    );
+    if (existing) {
       set({
-        activeSessionKey: sessionKey,
+        activeSessionKey: existing.sessionId,
         selectedTemplateId: templateId,
         errorMessage: null,
       });
@@ -149,12 +158,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       };
 
       set((state) => ({
-        activeSessionKey: sessionKey,
+        activeSessionKey: session.session_id,
         selectedTemplateId: templateId,
         errorMessage: null,
         sessionsByKey: {
           ...state.sessionsByKey,
-          [sessionKey]: newSessionState,
+          [session.session_id]: newSessionState,
         },
       }));
     } catch (error) {
@@ -163,6 +172,80 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         errorMessage: toErrorMessage(error),
       });
       throw error;
+    }
+  },
+
+  async switchToSession(sessionId: string) {
+    const state = get();
+    // Reuse existing loaded session
+    if (state.sessionsByKey[sessionId]) {
+      set({ activeSessionKey: sessionId, errorMessage: null });
+      return;
+    }
+
+    try {
+      // Load threads for this session
+      const threadList = await chat.listThreads(sessionId);
+      if (threadList.length === 0) {
+        throw new Error("No threads in session");
+      }
+      const firstThread = threadList[0];
+      const snapshot = await chat.getThreadSnapshot(sessionId, firstThread.thread_id);
+
+      const newSessionState: ChatSessionState = {
+        sessionKey: sessionId,
+        sessionId: sessionId,
+        templateId: 0, // Will be inferred from snapshot
+        threadId: firstThread.thread_id,
+        effectiveProviderId: null,
+        status: "idle",
+        messages: snapshot.messages,
+        pendingAssistant: null,
+        pendingApprovalRequest: null,
+        error: null,
+        tokenCount: snapshot.token_count,
+        contextWindow: null,
+      };
+
+      set((state) => ({
+        activeSessionKey: sessionId,
+        errorMessage: null,
+        sessionsByKey: {
+          ...state.sessionsByKey,
+          [sessionId]: newSessionState,
+        },
+      }));
+    } catch (error) {
+      set({ errorMessage: toErrorMessage(error) });
+      throw error;
+    }
+  },
+
+  async loadSessionList() {
+    set({ sessionListLoading: true });
+    try {
+      const list = await sessions.list();
+      set({ sessionList: list, sessionListLoading: false });
+    } catch (error) {
+      set({ sessionListLoading: false, errorMessage: toErrorMessage(error) });
+    }
+  },
+
+  async deleteSession(sessionId: string) {
+    try {
+      await sessions.delete(sessionId);
+      set((state) => {
+        const newSessionsByKey = { ...state.sessionsByKey };
+        delete newSessionsByKey[sessionId];
+        return {
+          sessionList: state.sessionList.filter((s) => s.id !== sessionId),
+          sessionsByKey: newSessionsByKey,
+          activeSessionKey:
+            state.activeSessionKey === sessionId ? null : state.activeSessionKey,
+        };
+      });
+    } catch (error) {
+      set({ errorMessage: toErrorMessage(error) });
     }
   },
 
@@ -306,7 +389,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const sessionKey = Object.keys(state.sessionsByKey).find(
       (key) =>
         state.sessionsByKey[key].threadId === envelope.thread_id &&
-        state.sessionsByKey[key].sessionId.toString() === envelope.session_id,
+        state.sessionsByKey[key].sessionId === envelope.session_id,
     );
 
     if (!sessionKey) return;

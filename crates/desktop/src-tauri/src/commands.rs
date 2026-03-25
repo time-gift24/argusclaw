@@ -256,6 +256,15 @@ pub struct ChatSessionPayload {
     pub effective_provider_id: Option<i64>,
 }
 
+/// Session summary for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummaryPayload {
+    pub id: String,
+    pub name: String,
+    pub thread_count: i64,
+    pub updated_at: String,
+}
+
 /// Serialized message snapshot for frontend consumption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessagePayload {
@@ -429,6 +438,62 @@ pub fn resolve_approval(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// Thread summary for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadSummaryPayload {
+    pub thread_id: String,
+    pub title: Option<String>,
+    pub turn_count: i64,
+    pub token_count: i64,
+    pub updated_at: String,
+}
+
+#[tauri::command]
+pub async fn list_sessions(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<SessionSummaryPayload>, String> {
+    wing.list_sessions()
+        .await
+        .map_err(|e| e.to_string())
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .map(|s| SessionSummaryPayload {
+                    id: s.id.to_string(),
+                    name: s.name,
+                    thread_count: s.thread_count,
+                    updated_at: s.updated_at.to_rfc3339(),
+                })
+                .collect()
+        })
+}
+
+#[tauri::command]
+pub async fn delete_session(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    wing.delete_session(session_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_threads(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<Vec<ThreadSummaryPayload>, String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    wing.list_threads(session_id)
+        .await
+        .map_err(|e| e.to_string())
+        .map(|threads| {
+            threads
+                .into_iter()
+                .map(|t| ThreadSummaryPayload {
+                    thread_id: t.id.to_string(),
+                    title: t.title,
+                    turn_count: t.turn_count,
+                    token_count: t.token_count,
+                    updated_at: t.updated_at.to_rfc3339(),
+                })
+                .collect()
+        })
 }
 
 // ============================================================================

@@ -46,6 +46,9 @@ pub fn run() {
             commands::send_message,
             commands::get_thread_snapshot,
             commands::resolve_approval,
+            commands::list_sessions,
+            commands::delete_session,
+            commands::list_threads,
             commands::list_tools,
             // Account commands
             commands::get_current_user,

@@ -8,6 +8,7 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { TokenRing } from "@/components/token-ring";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
 import { ProviderSelector } from "@/components/assistant-ui/provider-selector";
+import { SessionSelector } from "@/components/assistant-ui/session-selector";
 import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
@@ -83,6 +84,7 @@ const ComposerAction: FC = () => {
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
       <div className="flex items-center gap-1.5 pl-1">
         <AgentSelector />
+        <SessionSelector />
         <ProviderSelector />
       </div>
       <div className="flex items-center gap-2 pr-1">
