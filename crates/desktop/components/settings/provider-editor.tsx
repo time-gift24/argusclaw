@@ -94,6 +94,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
               is_default: provider.is_default,
               extra_headers: provider.extra_headers,
               secret_status: provider.secret_status,
+              credential_id: provider.credential_id ?? null,
             })
           }
         } catch (error) {

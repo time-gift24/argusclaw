@@ -145,7 +145,7 @@ export function ProviderTestDialog({
                   <Label className="text-[10px] font-bold text-muted-foreground/60 uppercase ml-1">测试目标模型</Label>
                   <Select
                     value={selectedModel || provider?.default_model}
-                    onValueChange={(value) => onModelChange?.(value)}
+                    onValueChange={(value) => value && onModelChange?.(value)}
                     disabled={testing}
                   >
                     <SelectTrigger className="h-10 bg-background border-muted/60 text-sm font-mono focus:ring-primary/20">
