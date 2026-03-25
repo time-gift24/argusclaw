@@ -79,8 +79,9 @@ impl NamedTool for DispatchJobTool {
             args.agent_id
         );
 
-        // Send JobDispatched into the pipe
+        // Send JobDispatched into the pipe (includes thread_id for desktop routing)
         let dispatch_event = ThreadEvent::JobDispatched {
+            thread_id: ctx.thread_id,
             job_id: job_id.clone(),
             agent_id: args.agent_id,
             prompt: args.prompt.clone(),
@@ -93,6 +94,7 @@ impl NamedTool for DispatchJobTool {
         // Spawn background executor using the JobManager's spawn method
         self.job_manager
             .spawn_job_executor(
+                ctx.thread_id,
                 job_id.clone(),
                 args.agent_id,
                 args.prompt,

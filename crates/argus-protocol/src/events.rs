@@ -4,7 +4,7 @@
 
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
-use crate::ids::AgentId;
+use crate::ids::{AgentId, ThreadId};
 use crate::llm::LlmStreamEvent;
 use crate::message_override::MessageOverride;
 
@@ -96,6 +96,8 @@ pub enum ThreadEvent {
     },
     /// A job was dispatched by the dispatch_job tool.
     JobDispatched {
+        /// Thread ID of the originating thread (for routing to the correct session).
+        thread_id: ThreadId,
         /// Job ID.
         job_id: String,
         /// Agent ID for this job.
@@ -107,6 +109,8 @@ pub enum ThreadEvent {
     },
     /// A dispatched job produced a result.
     JobResult {
+        /// Thread ID of the originating thread (for routing to the correct session).
+        thread_id: ThreadId,
         /// Job ID.
         job_id: String,
         /// Whether the job succeeded.

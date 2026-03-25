@@ -138,13 +138,14 @@ impl ThreadEventEnvelope {
                 },
             }),
             ThreadEvent::JobDispatched {
+                thread_id,
                 job_id,
                 agent_id,
                 prompt,
                 context,
             } => Some(Self {
                 session_id,
-                thread_id: String::new(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
                 payload: ThreadEventPayload::JobDispatched {
                     job_id,
@@ -154,13 +155,14 @@ impl ThreadEventEnvelope {
                 },
             }),
             ThreadEvent::JobResult {
+                thread_id,
                 job_id,
                 success,
                 message,
                 token_usage,
             } => Some(Self {
                 session_id,
-                thread_id: String::new(),
+                thread_id: thread_id.inner().to_string(),
                 turn_number: None,
                 payload: ThreadEventPayload::JobResult {
                     job_id,

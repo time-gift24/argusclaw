@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::tool::NamedTool;
-use argus_protocol::{AgentId, ProviderResolver, ThreadEvent};
+use argus_protocol::{AgentId, ProviderResolver, ThreadEvent, ThreadId};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnConfig, TurnOutput};
@@ -62,6 +62,7 @@ impl JobManager {
     /// ThreadEvent::JobResult into the pipe when done.
     pub async fn spawn_job_executor(
         &self,
+        originating_thread_id: ThreadId,
         job_id: String,
         agent_id: AgentId,
         prompt: String,
@@ -74,7 +75,7 @@ impl JobManager {
             ));
         }
 
-        // Capture clones for the background task
+        // ThreadId is Copy — captured into async block directly
         let template_manager = Arc::clone(&self.template_manager);
         let provider_resolver = Arc::clone(&self.provider_resolver);
         let tool_manager = Arc::clone(&self.tool_manager);
@@ -89,6 +90,7 @@ impl JobManager {
                 Ok(None) => {
                     let msg = format!("agent {} not found", agent_id.inner());
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                        thread_id: originating_thread_id,
                         job_id,
                         success: false,
                         message: msg,
@@ -99,6 +101,7 @@ impl JobManager {
                 Err(e) => {
                     let msg = format!("failed to load agent: {}", e);
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                        thread_id: originating_thread_id,
                         job_id,
                         success: false,
                         message: msg,
@@ -115,6 +118,7 @@ impl JobManager {
                     Err(e) => {
                         let msg = format!("failed to resolve provider: {}", e);
                         let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                            thread_id: originating_thread_id,
                             job_id,
                             success: false,
                             message: msg,
@@ -128,6 +132,7 @@ impl JobManager {
                     Err(e) => {
                         let msg = format!("no provider configured: {}", e);
                         let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                            thread_id: originating_thread_id,
                             job_id,
                             success: false,
                             message: msg,
@@ -170,6 +175,7 @@ impl JobManager {
                 Err(e) => {
                     let msg = format!("failed to build turn: {}", e);
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                        thread_id: originating_thread_id,
                         job_id,
                         success: false,
                         message: msg,
@@ -183,6 +189,7 @@ impl JobManager {
                 Ok(o) => {
                     let message = Self::summarize_output(&o);
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                        thread_id: originating_thread_id,
                         job_id,
                         success: true,
                         message,
@@ -192,6 +199,7 @@ impl JobManager {
                 Err(e) => {
                     let msg = e.to_string();
                     let _ = pipe_tx_clone.send(ThreadEvent::JobResult {
+                        thread_id: originating_thread_id,
                         job_id,
                         success: false,
                         message: msg,
