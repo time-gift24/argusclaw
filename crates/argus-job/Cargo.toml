@@ -7,6 +7,7 @@ edition = "2024"
 argus-protocol = { path = "../argus-protocol" }
 argus-turn = { path = "../argus-turn" }
 argus-llm = { path = "../argus-llm" }
+argus-repository = { path = "../argus-repository" }
 argus-template = { path = "../argus-template" }
 argus-tool = { path = "../argus-tool" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
@@ -19,3 +20,5 @@ async-trait = "0.1"
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

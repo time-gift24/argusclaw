@@ -174,13 +174,16 @@ dependencies = [
 name = "argus-job"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argus-llm",
  "argus-protocol",
+ "argus-repository",
  "argus-template",
  "argus-tool",
  "argus-turn",
  "async-trait",
  "chrono",
+ "clap",
  "futures-util",
  "serde",
  "serde_json",
