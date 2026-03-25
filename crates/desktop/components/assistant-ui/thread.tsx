@@ -48,13 +48,13 @@ import { useEffect, useRef } from "react";
 export const Thread: FC = () => {
   return (
     <ThreadPrimitive.Root
-      className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background"
+      className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background overflow-hidden"
       style={{
         ["--thread-max-width" as string]: "52rem",
         ["--composer-max-width" as string]: "44rem",
       }}
     >
-      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-32">
+      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-8">
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
@@ -68,7 +68,7 @@ export const Thread: FC = () => {
         />
         <PendingAssistantArtifacts />
 
-        <div className="pointer-events-none sticky bottom-24 z-40 mx-auto mt-4 flex w-fit">
+        <div className="pointer-events-none sticky bottom-4 z-40 mx-auto mt-4 flex w-fit">
           <ThreadPrimitive.ScrollToBottom asChild>
             <button className="pointer-events-auto flex size-8 items-center justify-center rounded-full border border-border/60 bg-background/80 text-muted-foreground shadow-md backdrop-blur-sm transition-all hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-0">
               <ArrowDownIcon className="size-4" />
@@ -77,12 +77,14 @@ export const Thread: FC = () => {
         </div>
       </ThreadPrimitive.Viewport>
 
-      {/* Fixed bottom composer */}
-      <div className="fixed bottom-0 left-0 right-0 z-50 bg-background">
-        <div className="mx-auto flex w-full max-w-(--composer-max-width) flex-col gap-2 px-4 pb-4 pt-2">
-          <ChatStatusBanner />
-          <ApprovalPrompt />
-          <Composer />
+      {/* Floating bottom composer - Truly detached from scroll */}
+      <div className="z-50 pointer-events-none flex justify-center pb-8 pt-4">
+        <div className="w-full max-w-(--composer-max-width) px-4 pointer-events-auto">
+          <div className="flex flex-col gap-2">
+            <ChatStatusBanner />
+            <ApprovalPrompt />
+            <Composer />
+          </div>
         </div>
       </div>
     </ThreadPrimitive.Root>

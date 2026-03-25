@@ -5,7 +5,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-    --font-sans-base: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+    --font-sans-base: "Inter", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
     --font-mono-base: "SF Mono", "SFMono-Regular", "JetBrains Mono", "Menlo", "Consolas", monospace;
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
@@ -125,12 +125,14 @@
   html,
   body {
     height: 100%;
+    @apply scroll-smooth;
   }
   html {
     @apply font-sans text-sm;
     font-size: 14px;
     }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
     }
 }
+
