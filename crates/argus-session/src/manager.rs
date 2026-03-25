@@ -648,6 +648,9 @@ impl SessionManager {
         thread_id: &ThreadId,
         message: String,
     ) -> Result<()> {
+        // Load session from DB if not already in memory
+        self.load(session_id).await?;
+
         let session = self
             .sessions
             .get(&session_id)
