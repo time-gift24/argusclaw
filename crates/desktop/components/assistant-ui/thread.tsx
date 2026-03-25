@@ -3,7 +3,7 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
-import { ToolFallbackImpl } from "@/components/assistant-ui/tool-fallback";
+import { ToolFallbackImpl, ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { TokenRing } from "@/components/token-ring";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
@@ -28,6 +28,7 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import {
@@ -47,6 +48,8 @@ import {
   Bot,
   Sparkles,
   CircleAlert,
+  Wrench,
+  ChevronDown,
 } from "lucide-react";
 import type { FC } from "react";
 import { useEffect, useRef } from "react";
@@ -54,6 +57,7 @@ import { useEffect, useRef } from "react";
 const ComposerAction: FC = () => {
   const session = useActiveChatSession();
   const isRunning = useAuiState(s => s.thread.isRunning);
+  const aui = useAui();
 
   // Fetch context window
   useEffect(() => {
@@ -71,6 +75,10 @@ const ComposerAction: FC = () => {
     });
   }, [session?.effectiveProviderId, session?.contextWindow]);
 
+  const handleCancel = () => {
+    aui.thread().cancelRun();
+  };
+
   return (
     <div className="aui-composer-action-wrapper relative mx-2 mb-2 flex items-center justify-between gap-2">
       <div className="flex items-center gap-1.5 pl-1">
@@ -87,11 +95,15 @@ const ComposerAction: FC = () => {
         )}
         
         {isRunning ? (
-          <ComposerPrimitive.Cancel asChild>
-            <Button variant="ghost" size="icon" className="size-8 rounded-full text-destructive hover:bg-destructive/10" aria-label="Stop generation">
-              <StopCircle className="size-5" />
-            </Button>
-          </ComposerPrimitive.Cancel>
+          <Button 
+            variant="ghost" 
+            size="icon" 
+            className="size-8 rounded-full text-destructive hover:bg-destructive/10" 
+            aria-label="Stop generation"
+            onClick={handleCancel}
+          >
+            <StopCircle className="size-5" />
+          </Button>
         ) : (
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton tooltip="发送消息" side="top" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full shadow-lg shadow-primary/20 transition-all active:scale-95" aria-label="Send message">
@@ -208,9 +220,9 @@ const PendingAssistantArtifacts: FC = () => {
   if (!pendingAssistant) return null;
 
   const hasPlan = !!pendingAssistant.plan && pendingAssistant.plan.length > 0;
-  const hasToolCalls = pendingAssistant.toolCalls.length > 0;
+  const toolCalls = pendingAssistant.toolCalls;
 
-  if (!hasPlan && !hasToolCalls) return null;
+  if (!hasPlan && toolCalls.length === 0) return null;
 
   const ManualToolFallback = ToolFallbackImpl as (props: {
     toolName: string;
@@ -223,17 +235,37 @@ const PendingAssistantArtifacts: FC = () => {
   }) => React.ReactElement;
 
   return (
-    <div className="mx-auto w-full max-w-(--thread-max-width) px-2 pb-2">
-      {hasPlan ? <PlanPanel plan={pendingAssistant.plan!} /> : null}
-      {pendingAssistant.toolCalls.map((tc) => (
-        <ManualToolFallback
-          key={tc.tool_call_id}
-          toolName={tc.tool_name}
-          argsText={tc.arguments_text}
-          result={tc.result}
-          status={toManualToolStatus(tc.status)}
-        />
-      ))}
+    <div className="mx-auto w-full max-w-(--thread-max-width) px-4 pb-2 flex flex-col gap-3">
+      {hasPlan && <PlanPanel plan={pendingAssistant.plan!} />}
+      {toolCalls.length > 0 && (
+        <details className="group/tools w-full" open={false}>
+          <summary className="flex w-full cursor-pointer list-none items-center gap-2.5 rounded-xl bg-muted/30 px-3 py-2 text-muted-foreground transition-all hover:bg-muted/50 [&::-webkit-details-marker]:hidden border border-muted/40">
+            <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+              <Wrench className="size-3.5" />
+            </div>
+            <span className="text-[11px] font-bold uppercase tracking-widest">
+              调用了 {toolCalls.length} 个工具
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+               {toolCalls.some(tc => tc.status === "running" || tc.status === "streaming") && (
+                 <Loader2 className="size-3 animate-spin text-primary" />
+               )}
+               <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/tools:rotate-180" />
+            </div>
+          </summary>
+          <div className="mt-2 flex flex-col gap-1 pl-4 border-l-2 border-muted/30 ml-4">
+            {toolCalls.map((tc) => (
+              <ManualToolFallback
+                key={tc.tool_call_id}
+                toolName={tc.tool_name}
+                argsText={tc.arguments_text}
+                result={tc.result}
+                status={toManualToolStatus(tc.status)}
+              />
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 };
@@ -346,6 +378,7 @@ const AssistantMessage: FC = () => {
           components={{
             Text: MarkdownText,
             Reasoning: ReasoningBlock,
+            ToolCall: ToolFallback,
           }}
         />
         <MessageError />
@@ -470,7 +503,6 @@ export const Thread: FC = () => {
             AssistantMessage,
           }}
         />
-        <PendingAssistantArtifacts />
 
         <div className="pointer-events-none sticky bottom-4 z-40 mx-auto mt-4 flex w-fit">
           <ThreadPrimitive.ScrollToBottom asChild>
@@ -483,12 +515,11 @@ export const Thread: FC = () => {
 
       {/* Floating bottom composer - Truly detached from scroll */}
       <div className="z-50 pointer-events-none flex justify-center pb-8 pt-4">
-        <div className="w-full max-w-(--composer-max-width) px-4 pointer-events-auto">
-          <div className="flex flex-col gap-3">
-            <ChatStatusBanner />
-            <ApprovalPrompt />
-            <Composer />
-          </div>
+        <div className="w-full max-w-(--composer-max-width) px-4 pointer-events-auto flex flex-col gap-3">
+          <PendingAssistantArtifacts />
+          <ChatStatusBanner />
+          <ApprovalPrompt />
+          <Composer />
         </div>
       </div>
     </ThreadPrimitive.Root>

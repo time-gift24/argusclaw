@@ -6,6 +6,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   MinusIcon,
+  LayoutList,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { PlanItem } from "@/lib/types/plan";
@@ -21,54 +22,60 @@ export function PlanPanel({ plan }: PlanPanelProps) {
   const total = plan.length;
 
   return (
-    <div className="mb-2 w-full rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
+    <div className="w-full rounded-[24px] border border-muted/60 bg-background/95 backdrop-blur-xl shadow-xl overflow-hidden animate-in slide-in-from-bottom-2 duration-300">
       {/* Header */}
       <div
-        className="flex cursor-pointer items-center gap-2 select-none"
+        className="flex cursor-pointer items-center gap-2.5 select-none px-5 py-3 hover:bg-muted/30 transition-colors border-b border-muted/40 bg-muted/10"
         onClick={() => setCollapsed((c) => !c)}
       >
-        {collapsed ? (
-          <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground" />
-        )}
-        <span className="text-sm font-medium text-foreground">
-          Plan
+        <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+          <LayoutList className="size-3.5" />
+        </div>
+        <span className="text-xs font-bold uppercase tracking-widest text-foreground/80">
+          执行计划
         </span>
-        <span className="text-sm text-muted-foreground">
-          ({completed}/{total})
+        <span className="text-[10px] font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full">
+          {completed} / {total}
         </span>
-        <button
-          className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted"
-          onClick={(e) => {
-            e.stopPropagation();
-            setCollapsed(true);
-          }}
-          aria-label="折叠"
-        >
-          <MinusIcon className="size-3" />
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            className="rounded-full p-1 text-muted-foreground hover:bg-muted transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed(!collapsed);
+            }}
+            aria-label={collapsed ? "展开" : "折叠"}
+          >
+            {collapsed ? (
+              <ChevronRightIcon className="size-3.5" />
+            ) : (
+              <MinusIcon className="size-3.5" />
+            )}
+          </button>
+        </div>
       </div>
 
-      {/* Steps list */}
+      {/* Steps list - Fixed height & Scrollable */}
       {!collapsed && (
-        <ul className="mt-2 space-y-1.5 pl-6">
-          {plan.map((item, i) => (
-            <li key={i} className="flex items-start gap-2 text-sm">
-              <StatusIcon status={item.status} />
-              <span
-                className={cn(
-                  "leading-snug",
-                  item.status === "pending" && "text-muted-foreground",
-                  item.status === "in_progress" && "text-foreground font-medium",
-                  item.status === "completed" && "text-muted-foreground line-through",
-                )}
-              >
-                {item.step}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div className="max-h-[180px] overflow-y-auto custom-scrollbar px-5 py-4 bg-background/50">
+          <ul className="space-y-3">
+            {plan.map((item, i) => (
+              <li key={i} className="flex items-start gap-3 text-[13px] animate-in fade-in duration-300">
+                <StatusIcon status={item.status} />
+                <span
+                  className={cn(
+                    "leading-relaxed break-words flex-1",
+                    item.status === "pending" && "text-muted-foreground/60",
+                    item.status === "in_progress" && "text-foreground font-semibold",
+                    item.status === "completed" && "text-muted-foreground/50 line-through decoration-muted-foreground/30",
+                  )}
+                >
+                  {item.step}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );
@@ -77,21 +84,23 @@ export function PlanPanel({ plan }: PlanPanelProps) {
 function StatusIcon({ status }: { status: PlanItem["status"] }) {
   if (status === "completed") {
     return (
-      <CheckIcon className="size-3.5 mt-0.5 shrink-0 text-green-500" />
+      <div className="bg-emerald-100 dark:bg-emerald-900/30 p-0.5 rounded-full mt-0.5 shrink-0">
+        <CheckIcon className="size-3 text-emerald-600 dark:text-emerald-400" />
+      </div>
     );
   }
   if (status === "in_progress") {
     return (
-      <span className="mt-0.5 flex size-3.5 shrink-0 items-center justify-center">
-        <span className="relative flex size-2 items-center justify-center">
-          <span className="absolute inline-flex size-full animate-pulse rounded-full bg-primary/40 opacity-75" />
-          <span className="relative inline-flex size-2 rounded-full bg-primary/70" />
+      <div className="mt-1 flex size-3.5 shrink-0 items-center justify-center">
+        <span className="relative flex size-2.5 items-center justify-center">
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/40 opacity-75" />
+          <span className="relative inline-flex size-2 rounded-full bg-primary" />
         </span>
-      </span>
+      </div>
     );
   }
   // pending
   return (
-    <span className="mt-0.5 size-3.5 shrink-0 rounded-full border border-muted-foreground/40" />
+    <div className="mt-1 size-3.5 shrink-0 rounded-full border-2 border-muted-foreground/20" />
   );
 }

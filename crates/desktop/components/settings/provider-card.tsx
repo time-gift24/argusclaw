@@ -1,21 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { Cloud, Pencil, Trash2, Check, Activity } from "lucide-react";
+import { Cloud, Pencil, Trash2, Check, Activity, Globe, Cpu } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type {
   LlmProviderSummary,
-  ProviderSecretStatus,
   ProviderTestResult,
 } from "@/lib/tauri";
 
@@ -49,133 +41,134 @@ export function ProviderCard({
   isTesting = false,
 }: ProviderCardProps) {
   const router = useRouter();
-  const hasResult = !!testResult;
   const isSuccess = testResult?.status === "success";
   const isFailure = !!testResult && failureStatuses.has(testResult.status);
   const requiresReentry = provider.secret_status === "requires_reentry";
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Cloud className="h-5 w-5 text-muted-foreground" />
-            <span>{provider.display_name}</span>
-            {provider.is_default && (
-              <Badge
-                variant="default"
-                className="bg-primary text-primary-foreground text-xs"
-              >
-                <Check className="mr-1 h-3 w-3" />
-                Default
-              </Badge>
-            )}
-            {requiresReentry && (
-              <Badge variant="outline" className="border-amber-300 text-amber-700">
-                需要重新填写 API Key
-              </Badge>
-            )}
-          </CardTitle>
-          <CardDescription className="text-xs">{provider.id}</CardDescription>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3 text-sm">
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">Kind:</span>
-          <span className="font-mono text-xs bg-muted px-2 py-1 rounded">
-            {provider.kind}
-          </span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">Default Model:</span>
-          <span className="font-mono text-xs break-all bg-muted px-2 py-1 rounded">
-            {provider.default_model}
-          </span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">Models:</span>
-          <span className="font-mono text-xs break-all bg-muted px-2 py-1 rounded max-w-[200px]">
-            {provider.models.join(", ")}
-          </span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-muted-foreground">Base URL:</span>
-          <span className="font-mono text-xs break-all bg-muted px-2 py-1 rounded max-w-[200px]">
-            {provider.base_url}
-          </span>
-        </div>
-        {requiresReentry && (
-          <div className="rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            当前保存的密钥无法解密，编辑后重新填写 API Key 才能继续使用。
-          </div>
-        )}
-        {(isTesting || hasResult) && (
-          <div className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
-            <div className="flex items-center gap-2">
-              <Badge
-                variant="outline"
-                className={
-                  isTesting
-                    ? "border-sky-200 text-sky-700"
-                    : isSuccess
-                      ? "border-emerald-200 text-emerald-700"
-                      : isFailure
-                        ? "border-destructive/30 text-destructive"
-                        : ""
-                }
-              >
-                {isTesting ? "运行中" : isSuccess ? "成功" : "失败"}
-              </Badge>
-              {hasResult ? (
-                <Button
-                  size="sm"
-                  variant="link"
-                  className="h-auto px-0 text-xs"
-                  onClick={() => onViewStatus(provider.id)}
-                >
-                  查看状态
-                </Button>
-              ) : null}
+    <Card className="group overflow-hidden border-muted/60 transition-all hover:border-primary/30 hover:shadow-md bg-background">
+      <div className="flex flex-col p-4 gap-4">
+        {/* Top: Header Group */}
+        <div className="flex items-center justify-between gap-3 min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="rounded-lg bg-primary/5 p-2 text-primary shrink-0 transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
+              <Cloud className="h-4 w-4" />
             </div>
-            {testResult?.latency_ms !== undefined ? (
-              <span className="font-mono text-[11px] text-muted-foreground">
-                {testResult.latency_ms} ms
-              </span>
-            ) : null}
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold truncate leading-none">{provider.display_name}</h3>
+                {provider.is_default && (
+                  <Badge className="text-[9px] h-3.5 px-1 bg-primary/10 text-primary border-none shadow-none font-bold">
+                    默认
+                  </Badge>
+                )}
+              </div>
+              <p className="text-[11px] text-muted-foreground font-mono mt-1.5 leading-none opacity-50">
+                ID: {provider.id}
+              </p>
+            </div>
+          </div>
+          
+          <div className="shrink-0">
+            {isTesting ? (
+              <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-sky-200 text-sky-600 animate-pulse font-bold uppercase">测试中</Badge>
+            ) : isSuccess ? (
+              <Badge 
+                variant="outline" 
+                className="text-[9px] h-4 px-1.5 border-emerald-200 text-emerald-600 cursor-pointer hover:bg-emerald-50 font-bold uppercase"
+                onClick={() => onViewStatus(provider.id)}
+              >
+                在线 · {testResult?.latency_ms}ms
+              </Badge>
+            ) : isFailure ? (
+              <Badge 
+                variant="outline" 
+                className="text-[9px] h-4 px-1.5 border-destructive/30 text-destructive cursor-pointer hover:bg-destructive/5 font-bold uppercase"
+                onClick={() => onViewStatus(provider.id)}
+              >
+                连接失败
+              </Badge>
+            ) : (
+              <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-muted/60 text-muted-foreground font-bold uppercase">未测试</Badge>
+            )}
+          </div>
+        </div>
+
+        {/* Middle: Info Grid */}
+        <div className="grid grid-cols-2 gap-4 pt-3 border-t border-muted/30">
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-1.5 text-[9px] font-bold text-muted-foreground/50 uppercase tracking-wider leading-none">
+              <Globe className="h-2.5 w-2.5" />
+              接入地址
+            </div>
+            <span className="text-[11px] font-medium truncate leading-none">{provider.base_url}</span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-1.5 text-[9px] font-bold text-muted-foreground/50 uppercase tracking-wider leading-none">
+              <Cpu className="h-2.5 w-2.5" />
+              默认模型
+            </div>
+            <span className="text-[11px] font-mono font-medium truncate leading-none">{provider.default_model}</span>
+          </div>
+        </div>
+
+        {requiresReentry && (
+          <div className="rounded-xl bg-amber-50 p-3 border border-amber-100">
+            <p className="text-[10px] text-amber-700 leading-normal flex items-start gap-2 font-medium">
+              <span className="shrink-0 bg-amber-200 text-amber-800 rounded-full w-3.5 h-3.5 flex items-center justify-center text-[8px] font-bold">!</span>
+              密钥已失效，请重新编辑并填写 API Key 才能继续使用。
+            </p>
           </div>
         )}
-      </CardContent>
-      <CardFooter className="flex flex-wrap gap-2">
-        <Button
-          size="sm"
-          onClick={() => onTestConnection(provider.id)}
-          disabled={isTesting || requiresReentry}
-        >
-          <Activity className="h-3 w-3 mr-1" />
-          测试连接
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => router.push(`/settings/providers/edit?id=${provider.id}`)}>
-          <Pencil className="h-3 w-3 mr-1" />
-          Edit
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => onSetDefault(provider.id)}
-        >
-          <Check className="h-3 w-3 mr-1" />
-          Set Default
-        </Button>
-        <Button
-          size="sm"
-          variant="destructive"
-          onClick={() => onDelete(provider.id)}
-          disabled={provider.is_default}
-        >
-          <Trash2 className="h-3 w-3 mr-1" />
-          Delete
-        </Button>
-      </CardFooter>
+
+        {/* Bottom: Actions */}
+        <div className="flex items-center justify-between gap-2 pt-1">
+          <div className="flex items-center gap-1">
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              className="h-8 text-[11px] px-3 rounded-lg hover:bg-primary/5 hover:text-primary transition-colors font-medium"
+              onClick={() => onTestConnection(provider.id)}
+              disabled={isTesting || requiresReentry}
+            >
+              <Activity className="h-3.5 w-3.5 mr-1.5" />
+              连接测试
+            </Button>
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              className="h-8 text-[11px] px-3 rounded-lg hover:bg-muted/80 transition-colors font-medium text-muted-foreground"
+              onClick={() => onSetDefault(provider.id)}
+              disabled={provider.is_default}
+            >
+              <Check className="h-3.5 w-3.5 mr-1.5" />
+              设为默认
+            </Button>
+          </div>
+          
+          <div className="flex items-center gap-1">
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              className="h-8 w-8 rounded-lg hover:bg-muted/80 transition-colors"
+              onClick={() => router.push(`/settings/providers/edit?id=${provider.id}`)}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              <span className="sr-only">编辑</span>
+            </Button>
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              className="h-8 w-8 rounded-lg hover:bg-destructive/5 hover:text-destructive transition-colors text-muted-foreground hover:text-destructive"
+              onClick={() => onDelete(provider.id)}
+              disabled={provider.is_default}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span className="sr-only">删除</span>
+            </Button>
+          </div>
+        </div>
+      </div>
     </Card>
   );
 }

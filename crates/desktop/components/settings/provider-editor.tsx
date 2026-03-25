@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Save, Plus, X, Check, AlertCircle, Loader2 } from "lucide-react"
+import { Save, Plus, X, Check, AlertCircle, Loader2, ArrowLeft, Cloud, Globe, Key, List, Activity } from "lucide-react"
 import {
   providers,
   type ProviderSecretStatus,
@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useToast } from "@/components/ui/toast"
+import { cn } from "@/lib/utils"
 
 export interface LlmProviderRecord {
   id: number
@@ -64,14 +65,13 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   const [newModel, setNewModel] = React.useState("")
   const [newHeaderName, setNewHeaderName] = React.useState("")
   const [newHeaderValue, setNewHeaderValue] = React.useState("")
-  const [headersExpanded, setHeadersExpanded] = React.useState(false)
 
-  // Test connection state - one result per model
+  // Test connection state
   const [testResults, setTestResults] = React.useState<Record<string, ProviderTestResult>>({})
   const [testingModels, setTestingModels] = React.useState<Set<string>>(new Set())
   const [hasAutoTested, setHasAutoTested] = React.useState(false)
 
-  // Load provider data if editing
+  // Load provider data
   React.useEffect(() => {
     const loadData = async () => {
       if (providerId) {
@@ -106,11 +106,10 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     loadData()
   }, [providerId])
 
-  // Auto-test all models when provider is loaded and has models
+  // Auto-test all models
   React.useEffect(() => {
     if (!loading && isEditing && formData.models.length > 0 && !hasAutoTested) {
       setHasAutoTested(true)
-      // Test all models after a short delay to let UI render
       const timer = setTimeout(() => {
         formData.models.forEach((model) => {
           testModel(model, formData.models)
@@ -128,7 +127,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
 
   const handleSubmit = async () => {
     if (!canSave) return
-
     setSaving(true)
     try {
       const input: ProviderInput = {
@@ -144,11 +142,11 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         secret_status: formData.secret_status,
       }
       await providers.upsert(input)
-      addToast("success", isEditing ? "LLM 提供者已更新" : "LLM 提供者已创建")
+      addToast("success", isEditing ? "提供者已更新" : "提供者已创建")
       router.push("/settings/providers")
     } catch (error) {
       console.error("Failed to save provider:", error)
-      addToast("error", "保存失败，请重试")
+      addToast("error", "保存失败")
     } finally {
       setSaving(false)
     }
@@ -160,391 +158,224 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
 
   const handleAddHeader = () => {
     const name = newHeaderName.trim()
-    const value = newHeaderValue.trim()
-    if (!name) return
-    if (formData.extra_headers[name] !== undefined) return
+    if (!name || formData.extra_headers[name] !== undefined) return
     setFormData({
       ...formData,
-      extra_headers: { ...formData.extra_headers, [name]: value },
+      extra_headers: { ...formData.extra_headers, [name]: newHeaderValue.trim() },
     })
     setNewHeaderName("")
     setNewHeaderValue("")
   }
 
   const handleRemoveHeader = (name: string) => {
-    setFormData((prev) => {
-      const next = { ...prev.extra_headers }
-      delete next[name]
-      return { ...prev, extra_headers: next }
-    })
+    const next = { ...formData.extra_headers }
+    delete next[name]
+    setFormData({ ...formData, extra_headers: next })
   }
 
   const handleAddModel = async () => {
     const model = newModel.trim()
     if (!model || formData.models.includes(model)) return
-
     const newModels = [...formData.models, model]
-    setFormData({
-      ...formData,
-      models: newModels,
-      default_model: formData.default_model || model,
-    })
+    setFormData({ ...formData, models: newModels, default_model: formData.default_model || model })
     setNewModel("")
-
-    // Auto-test the new model if we have all required fields
-    if (formData.id > 0 && formData.base_url.trim() && formData.api_key.trim()) {
+    if (formData.base_url.trim() && formData.api_key.trim()) {
       await testModel(model, newModels)
     }
   }
 
   const testModel = async (model: string, models: string[]) => {
     setTestingModels((prev) => new Set(prev).add(model))
-
     try {
       const input: ProviderInput = {
-        id: formData.id,
-        kind: formData.kind,
-        display_name: formData.display_name,
-        base_url: formData.base_url,
-        api_key: formData.api_key,
+        ...formData,
         models: models,
         default_model: formData.default_model || model,
-        is_default: formData.is_default,
-        extra_headers: formData.extra_headers,
-        secret_status: formData.secret_status,
       }
-
-      // For existing providers, test the saved record
-      // For new providers, test the input without saving
       const result = formData.id > 0
         ? await providers.testConnection(formData.id, model)
         : await providers.testInput(input, model)
-
       setTestResults((prev) => ({ ...prev, [model]: result }))
     } catch (error) {
-      const fallbackResult: ProviderTestResult = {
-        provider_id: String(formData.id),
-        model,
-        base_url: formData.base_url,
-        checked_at: new Date().toISOString(),
-        latency_ms: 0,
-        status: "request_failed",
-        message: error instanceof Error ? error.message : String(error),
-        request: undefined,
-        response: undefined,
-      }
-      setTestResults((prev) => ({ ...prev, [model]: fallbackResult }))
-      console.error("Failed to test model:", error)
+      setTestResults((prev) => ({ 
+        ...prev, 
+        [model]: {
+          provider_id: String(formData.id),
+          model,
+          base_url: formData.base_url,
+          checked_at: new Date().toISOString(),
+          latency_ms: 0,
+          status: "request_failed",
+          message: String(error),
+        }
+      }))
     } finally {
       setTestingModels((prev) => {
-        const next = new Set(prev)
-        next.delete(model)
-        return next
+        const next = new Set(prev); next.delete(model); return next
       })
     }
   }
 
   const handleRemoveModel = (model: string) => {
-    setFormData((prev) => {
-      const newModels = prev.models.filter((m) => m !== model)
-      return {
-        ...prev,
-        models: newModels,
-        default_model: prev.default_model === model ? (newModels[0] || "") : prev.default_model,
-      }
+    const newModels = formData.models.filter((m) => m !== model)
+    setFormData({
+      ...formData,
+      models: newModels,
+      default_model: formData.default_model === model ? (newModels[0] || "") : formData.default_model,
     })
-    setTestResults((prev) => {
-      const next = { ...prev }
-      delete next[model]
-      return next
-    })
-  }
-
-  const handleRetestModel = async (model: string) => {
-    await testModel(model, formData.models)
   }
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-muted-foreground">加载中...</div>
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <div className="h-8 w-8 border-4 border-primary border-t-transparent rounded-full animate-spin" />
+        <div className="text-muted-foreground text-sm">正在加载...</div>
       </div>
     )
   }
 
   return (
-    <div className="w-full space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-sm font-semibold">
-          {isEditing ? "编辑 LLM 提供者" : "新建 LLM 提供者"}
-        </h1>
-        <Button size="sm" onClick={handleSubmit} disabled={saving || !canSave}>
-          <Save className="h-4 w-4 mr-1" />
-          {saving ? "保存中..." : "保存"}
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-2 gap-6">
-        {/* Left: Basic Info + Models */}
-        <div className="space-y-4">
-          {/* Basic Info */}
-          <div className="space-y-2">
-            <Label htmlFor="display_name">名称</Label>
-            <Input
-              id="display_name"
-              value={formData.display_name}
-              onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-              placeholder="我的提供者"
-              required
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="base_url">Base URL</Label>
-            <Input
-              id="base_url"
-              value={formData.base_url}
-              onChange={(e) => setFormData({ ...formData, base_url: e.target.value })}
-              placeholder="https://api.example.com/v1"
-              required
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="api_key">API Key <span className="text-muted-foreground text-xs">(可选)</span></Label>
-            <Input
-              id="api_key"
-              type="password"
-              value={formData.api_key}
-              onChange={(e) => setFormData({ ...formData, api_key: e.target.value })}
-              placeholder="sk-... (可选，登录后配置)"
-            />
-          </div>
-
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="is_default"
-              checked={formData.is_default}
-              onCheckedChange={(checked) => setFormData({ ...formData, is_default: !!checked })}
-            />
-            <Label htmlFor="is_default" className="cursor-pointer">
-              设为默认提供者
-            </Label>
-          </div>
-
-          {/* Extra Headers Section */}
-          <div className="space-y-2 pt-4 border-t">
-            <button
-              type="button"
-              className="flex items-center gap-2 text-sm font-medium w-full"
-              onClick={() => setHeadersExpanded((v) => !v)}
-            >
-              <span className="text-xs text-muted-foreground">▸</span>
-              Extra Headers
-            </button>
-            {headersExpanded && (
-              <div className="space-y-2 pl-3">
-                <div className="flex gap-2">
-                  <Input
-                    value={newHeaderName}
-                    onChange={(e) => setNewHeaderName(e.target.value)}
-                    placeholder="Header 名称"
-                    className="text-sm"
-                  />
-                  <Input
-                    value={newHeaderValue}
-                    onChange={(e) => setNewHeaderValue(e.target.value)}
-                    placeholder="Header 值"
-                    className="text-sm"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => void handleAddHeader()}
-                    disabled={!newHeaderName.trim()}
-                  >
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </div>
-                {Object.keys(formData.extra_headers).length > 0 && (
-                  <div className="space-y-1">
-                    {Object.entries(formData.extra_headers).map(([name, value]) => (
-                      <div key={name} className="flex items-center gap-2 text-xs">
-                        <Badge variant="secondary" className="shrink-0 font-mono">
-                          {name}
-                        </Badge>
-                        <span className="truncate text-muted-foreground font-mono flex-1 min-w-0">
-                          {value || <span className="italic opacity-40">(空)</span>}
-                        </span>
-                        <button
-                          type="button"
-                          className="shrink-0 hover:text-destructive"
-                          onClick={() => handleRemoveHeader(name)}
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <p className="text-[11px] text-muted-foreground">
-                  用于向 API 请求添加自定义 HTTP Header
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* Models Section */}
-          <div className="space-y-2 pt-4 border-t">
-            <Label>模型列表</Label>
-            <div className="flex gap-2">
-              <Input
-                value={newModel}
-                onChange={(e) => setNewModel(e.target.value)}
-                placeholder="输入模型名称后回车添加"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault()
-                    void handleAddModel()
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void handleAddModel()}
-                disabled={!newModel.trim()}
-              >
-                <Plus className="h-4 w-4" />
-              </Button>
-            </div>
-            {formData.models.length > 0 && (
-              <div className="flex flex-wrap gap-2 mt-2">
-                {formData.models.map((model) => (
-                  <Badge
-                    key={model}
-                    variant={model === formData.default_model ? "default" : "secondary"}
-                    className="cursor-pointer pr-1"
-                    onClick={() => handleSetDefaultModel(model)}
-                  >
-                    {model}
-                    {model === formData.default_model && (
-                      <span className="ml-1 text-[10px] opacity-70">默认</span>
-                    )}
-                    <button
-                      type="button"
-                      className="ml-1 hover:text-destructive"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        handleRemoveModel(model)
-                      }}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </Badge>
-                ))}
-              </div>
-            )}
-            <p className="text-[11px] text-muted-foreground">
-              点击标签设为默认模型，添加模型后自动测试连接
+    <div className="w-full h-full flex flex-col min-h-0 animate-in fade-in duration-500 overflow-hidden">
+      {/* 顶部标题栏 */}
+      <div className="flex items-center justify-between border-b pb-6 shrink-0 px-1">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full hover:bg-muted" onClick={() => router.push("/settings/providers")}>
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div className="space-y-0.5">
+            <h1 className="text-lg font-bold tracking-tight">{isEditing ? "编辑提供者" : "新建提供者"}</h1>
+            <p className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold opacity-70">
+              Provider Configuration / {isEditing ? formData.display_name : "New Provider"}
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/providers")} className="h-9 text-sm text-muted-foreground hover:text-foreground">取消</Button>
+          <Button size="sm" onClick={handleSubmit} disabled={saving || !canSave} className="h-9 px-6 text-sm font-bold shadow-lg shadow-primary/20">
+            <Save className="h-4 w-4 mr-2" />
+            {saving ? "正在保存..." : "保存配置"}
+          </Button>
+        </div>
+      </div>
 
-        {/* Right: Test Results */}
-        <div className="space-y-2">
-          <Label>连接测试</Label>
-          <div className="border rounded-lg divide-y min-h-[300px]">
-            {formData.models.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-muted-foreground text-sm py-12">
-                添加模型后将自动测试连接
+      {/* 核心滚动区域 */}
+      <div className="flex-1 overflow-y-auto custom-scrollbar px-1 py-8">
+        <div className="space-y-10 pb-20">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-stretch">
+            {/* 基础连接设置 */}
+            <div className="flex flex-col space-y-4 h-full">
+              <div className="flex items-center gap-2 text-[11px] font-bold text-primary uppercase tracking-widest px-1">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary"><Globe className="h-3.5 w-3.5" /></div>
+                Connection Settings
               </div>
-            ) : (
-              formData.models.map((model) => {
-                const result = testResults[model]
-                const isTesting = testingModels.has(model)
-                const isSuccess = result?.status === "success"
-                const isFailed = result && result.status !== "success"
-                const hasDetails = result && (result.request != null || result.response != null)
+              <div className="flex-1 grid gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
+                <div className="space-y-2">
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">显示名称</Label>
+                  <Input value={formData.display_name} onChange={(e) => setFormData({ ...formData, display_name: e.target.value })} placeholder="例如: DeepSeek Official" className="h-10 bg-background border-muted/60 text-sm" />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Base URL</Label>
+                  <Input value={formData.base_url} onChange={(e) => setFormData({ ...formData, base_url: e.target.value })} placeholder="https://api.deepseek.com/v1" className="h-10 bg-background border-muted/60 text-sm font-mono" />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">API Key</Label>
+                  <div className="relative">
+                    <Key className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50" />
+                    <Input type="password" value={formData.api_key} onChange={(e) => setFormData({ ...formData, api_key: e.target.value })} placeholder="sk-..." className="h-10 pl-9 bg-background border-muted/60 text-sm font-mono" />
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 bg-background/50 p-3 rounded-xl border border-muted/40 h-14 shadow-inner mt-2">
+                  <Checkbox id="is_default" checked={formData.is_default} onCheckedChange={(v) => setFormData({ ...formData, is_default: !!v })} />
+                  <Label htmlFor="is_default" className="text-sm cursor-pointer font-bold">设为全局默认提供者</Label>
+                </div>
+              </div>
+            </div>
 
-                return (
-                  <Collapsible key={model} defaultOpen={false} className="w-full">
-                    <div className="flex items-center justify-between px-3 py-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Badge
-                          variant={model === formData.default_model ? "default" : "secondary"}
-                          className="shrink-0"
-                        >
-                          {model}
+            {/* 模型列表 */}
+            <div className="flex flex-col space-y-4 h-full">
+              <div className="flex items-center gap-2 text-[11px] font-bold text-primary uppercase tracking-widest px-1">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary"><List className="h-3.5 w-3.5" /></div>
+                Available Models
+              </div>
+              <div className="flex-1 flex flex-col gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
+                <div className="space-y-2">
+                  <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">添加新模型</Label>
+                  <div className="flex gap-2">
+                    <Input value={newModel} onChange={(e) => setNewModel(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleAddModel())} placeholder="模型 ID (如 gpt-4)" className="h-10 bg-background border-muted/60 text-sm font-mono" />
+                    <Button variant="outline" className="h-10 w-10 p-0 rounded-xl" onClick={handleAddModel} disabled={!newModel.trim()}><Plus className="h-4 w-4" /></Button>
+                  </div>
+                </div>
+                <div className="flex-1 min-h-[120px] bg-background/50 rounded-xl border border-muted/40 p-4 overflow-y-auto shadow-inner">
+                  {formData.models.length === 0 ? (
+                    <div className="h-full flex items-center justify-center text-xs text-muted-foreground italic opacity-60 font-medium">尚未添加任何模型，请从上方输入并添加</div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {formData.models.map((m) => (
+                        <Badge key={m} variant={m === formData.default_model ? "default" : "secondary"} className="h-7 pl-3 pr-1 cursor-pointer group rounded-lg font-mono text-[11px]" onClick={() => handleSetDefaultModel(m)}>
+                          {m}
+                          {m === formData.default_model && <span className="ml-1.5 text-[9px] font-bold bg-primary-foreground/20 px-1 rounded uppercase tracking-tighter">Default</span>}
+                          <button className="ml-1.5 p-0.5 rounded-md hover:bg-destructive hover:text-destructive-foreground opacity-40 group-hover:opacity-100 transition-all" onClick={(e) => (e.stopPropagation(), handleRemoveModel(m))}>
+                            <X className="h-3 w-3" />
+                          </button>
                         </Badge>
-                        {isTesting && (
-                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                        )}
-                        {isSuccess && (
-                          <Check className="h-4 w-4 text-green-500" />
-                        )}
-                        {isFailed && (
-                          <AlertCircle className="h-4 w-4 text-destructive" />
-                        )}
-                        {result && !isTesting && (
-                          <span className="text-xs text-muted-foreground">
-                            {result.latency_ms}ms
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        {hasDetails && (
-                          <CollapsibleTrigger className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded border-0 cursor-pointer bg-transparent">
-                            详情
-                          </CollapsibleTrigger>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7"
-                          onClick={() => void handleRetestModel(model)}
-                          disabled={isTesting || !formData.api_key.trim()}
-                        >
-                          {isTesting ? "测试中..." : "重测"}
-                        </Button>
-                      </div>
+                      ))}
                     </div>
-                    <CollapsibleContent>
-                      <div className="px-3 pb-3 pt-1 border-t space-y-2">
-                        {result?.request != null && (
-                          <div>
-                            <p className="text-[10px] font-medium text-muted-foreground mb-1">
-                              请求
-                            </p>
-                            <pre className="overflow-x-auto rounded bg-muted/30 p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-all">
-                              {(() => {
-                                try {
-                                  return JSON.stringify(JSON.parse(result!.request!), null, 2)
-                                } catch {
-                                  return result!.request
-                                }
-                              })()}
-                            </pre>
-                          </div>
-                        )}
-                        {result?.response != null && isSuccess && (
-                          <div>
-                            <p className="text-[10px] font-medium text-muted-foreground mb-1">
-                              响应
-                            </p>
-                            <pre className="overflow-x-auto rounded bg-muted/30 p-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-all">
-                              {result!.response}
-                            </pre>
-                          </div>
-                        )}
+                  )}
+                </div>
+                <p className="text-[10px] text-muted-foreground leading-tight font-medium opacity-80">💡 技巧：点击模型标签可切换默认模型。模型添加后将自动进行连通性测试。</p>
+              </div>
+            </div>
+          </div>
+
+          {/* 连接测试详情 - 全宽 */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
+              <div className="bg-primary/10 p-1.5 rounded-lg text-primary"><Activity className="h-4 w-4" /></div>
+              实时连接测试详情
+            </div>
+            <div className="bg-muted/10 rounded-[32px] border border-muted/60 overflow-hidden shadow-sm divide-y divide-muted/40">
+              {formData.models.length === 0 ? (
+                <div className="py-20 text-center text-sm text-muted-foreground">添加模型后将在此实时显示测试反馈</div>
+              ) : (
+                formData.models.map((model) => {
+                  const result = testResults[model]; const isTesting = testingModels.has(model)
+                  const isSuccess = result?.status === "success"; const isFailed = result && result.status !== "success"
+                  return (
+                    <Collapsible key={model} className="w-full group">
+                      <div className="flex items-center justify-between px-8 py-4 hover:bg-muted/30 transition-colors">
+                        <div className="flex items-center gap-4">
+                          <Badge variant={model === formData.default_model ? "default" : "outline"} className="font-mono">{model}</Badge>
+                          {isTesting ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : 
+                           isSuccess ? <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold"><Check className="h-4 w-4" /> 成功 · {result.latency_ms}ms</div> :
+                           isFailed ? <div className="flex items-center gap-1.5 text-xs text-destructive font-bold"><AlertCircle className="h-4 w-4" /> 失败</div> :
+                           <span className="text-xs text-muted-foreground">待测试</span>}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {result && <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-8 text-xs">查看报文</Button></CollapsibleTrigger>}
+                          <Button variant="ghost" size="sm" className="h-8 text-xs hover:bg-primary/5 hover:text-primary" onClick={() => testModel(model, formData.models)} disabled={isTesting || !formData.api_key.trim()}>重新测试</Button>
+                        </div>
                       </div>
-                    </CollapsibleContent>
-                  </Collapsible>
-                )
-              })
-            )}
+                      <CollapsibleContent className="bg-muted/20 border-t border-muted/40">
+                        <div className="p-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+                          {result?.request && (
+                            <div className="space-y-2">
+                              <Label className="text-[10px] uppercase font-bold text-muted-foreground ml-1">Request Payload</Label>
+                              <pre className="p-4 rounded-2xl bg-background border border-muted/60 font-mono text-[10px] overflow-auto max-h-64">{result.request}</pre>
+                            </div>
+                          )}
+                          {result?.response && (
+                            <div className="space-y-2">
+                              <Label className="text-[10px] uppercase font-bold text-muted-foreground ml-1">Response Data</Label>
+                              <pre className="p-4 rounded-2xl bg-background border border-muted/60 font-mono text-[10px] overflow-auto max-h-64">{result.response}</pre>
+                            </div>
+                          )}
+                        </div>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  )
+                })
+              )}
+            </div>
           </div>
         </div>
       </div>
