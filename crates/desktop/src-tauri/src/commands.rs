@@ -664,6 +664,7 @@ mod tests {
             base_url: "https://legacy.example.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string()],
+            model_config: HashMap::new(),
             default_model: "gpt-4.1".to_string(),
             is_default: false,
             extra_headers: HashMap::new(),
