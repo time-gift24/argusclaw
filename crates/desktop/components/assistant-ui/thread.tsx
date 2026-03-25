@@ -119,7 +119,7 @@ const ComposerAction: FC = () => {
 const Composer: FC = () => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-[24px] border border-muted/60 bg-background/95 backdrop-blur-xl px-1 pt-2 shadow-2xl shadow-primary/5 transition-all duration-300 has-[textarea:focus-visible]:border-primary/40 has-[textarea:focus-visible]:ring-4 has-[textarea:focus-visible]:ring-primary/5 data-[dragging=true]:border-primary data-[dragging=true]:border-dashed data-[dragging=true]:bg-primary/5">
+      <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-[24px] border border-muted/60 bg-background/80 backdrop-blur-2xl px-1 pt-2 shadow-[0_8px_32px_0_rgba(0,0,0,0.15)] shadow-primary/10 transition-all duration-300 has-[textarea:focus-visible]:border-primary/40 has-[textarea:focus-visible]:ring-4 has-[textarea:focus-visible]:ring-primary/5 data-[dragging=true]:border-primary data-[dragging=true]:border-dashed data-[dragging=true]:bg-primary/5">
         <ComposerAttachments />
         <ComposerPrimitive.Input
           placeholder="给 ArgusWing 发送消息..."
@@ -487,8 +487,8 @@ export const Thread: FC = () => {
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background overflow-hidden"
       style={{
-        ["--thread-max-width" as string]: "52rem",
-        ["--composer-max-width" as string]: "44rem",
+        ["--thread-max-width" as string]: "72rem",
+        ["--composer-max-width" as string]: "60rem",
       }}
     >
       <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-8 custom-scrollbar">

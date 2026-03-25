@@ -240,7 +240,7 @@ export default function DashboardShell({
 
         {/* Content Area */}
         <main className="flex-1 relative flex flex-col min-h-0 overflow-hidden">
-          <div className="mx-auto w-full max-w-7xl flex-1 flex flex-col min-h-0">
+          <div className="w-full flex-1 flex flex-col min-h-0">
             {children}
           </div>
         </main>

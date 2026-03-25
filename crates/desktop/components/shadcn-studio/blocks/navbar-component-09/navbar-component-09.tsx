@@ -29,7 +29,7 @@ type NavigationItem = {
 const Navbar = ({ navigationData }: { navigationData: NavigationItem }) => {
   return (
     <header className='bg-background sticky top-0 z-50'>
-      <div className='mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6'>
+      <div className='mx-auto flex max-w-screen-2xl items-center justify-between gap-4 px-4 py-3 sm:px-6'>
         <div className='flex items-center gap-4 lg:gap-10'>
           <a href='#'>
             <Logo className='gap-3' />
