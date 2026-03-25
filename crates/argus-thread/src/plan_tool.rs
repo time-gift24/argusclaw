@@ -4,7 +4,6 @@
 //! plan state, and returns the updated plan with metadata.
 
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 use async_trait::async_trait;
 use serde_json::{Value, json, to_value};
@@ -125,6 +124,7 @@ impl NamedTool for UpdatePlanTool {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use tokio::sync::broadcast;
 
     fn make_tool() -> UpdatePlanTool {
         UpdatePlanTool::default()

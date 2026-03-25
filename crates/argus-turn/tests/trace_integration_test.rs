@@ -12,6 +12,7 @@ use argus_protocol::llm::{
     ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
+use argus_protocol::ToolExecutionContext;
 use argus_turn::trace::TraceConfig;
 use argus_turn::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
@@ -116,7 +117,7 @@ impl NamedTool for EchoTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(&self, args: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
         let message = args
             .get("message")
             .and_then(|v| v.as_str())

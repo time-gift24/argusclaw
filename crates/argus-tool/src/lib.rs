@@ -99,7 +99,6 @@ mod tests {
 
     // Import async_trait to implement NamedTool from argus_protocol
     use async_trait::async_trait;
-    use tokio::sync::broadcast;
 
     /// A test tool that echoes back its input arguments.
     struct EchoTool;
