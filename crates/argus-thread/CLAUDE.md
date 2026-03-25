@@ -11,6 +11,8 @@ src/
 ├── config.rs           # ThreadConfig：线程配置
 ├── compact.rs          # Compactor：消息压缩策略
 ├── types.rs            # ThreadInfo、ThreadState
+├── plan_store.rs       # FilePlanStore：计划文件持久化
+├── plan_tool.rs        # UpdatePlanTool：计划更新工具
 └── error.rs           # ThreadError、CompactError
 ```
 
@@ -23,17 +25,21 @@ src/
 ```rust
 pub struct Thread {
     id: ThreadId,                           // 强类型 ID
-    agent_record: Arc<AgentRecord>,         // Agent 配置
+    agent_record: Arc<AgentRecord>,         // Agent 配置（模型、工具、超参）
     session_id: SessionId,                  // 父会话 ID
     title: Option<String>,                  // 可选标题
+    created_at: DateTime<Utc>,             // 创建时间
+    updated_at: DateTime<Utc>,             // 更新时间
     messages: Vec<ChatMessage>,             // 消息历史
     provider: Arc<dyn LlmProvider>,         // LLM 提供者
     tool_manager: Arc<ToolManager>,         // 工具管理器
     compactor: Arc<dyn Compactor>,          // 上下文压缩器
-    hooks: Option<Arc<HookRegistry>>,       // Hook 注册表
+    hooks: Option<Arc<HookRegistry>>,       // Hook 注册表（可选）
     config: ThreadConfig,                   // 线程配置
     token_count: u32,                       // 当前 token 数
     turn_count: u32,                        // Turn 计数
+    event_sender: broadcast::Sender<ThreadEvent>, // 事件广播
+    plan_store: FilePlanStore,             // 文件持久化的计划存储
 }
 ```
 

@@ -347,7 +347,7 @@ WARN Retrying after transient error
 ### 下游消费者
 - `argus-repository`：Provider repository 实现
 - `argus-turn`：Turn 执行
-- `claw`：核心应用逻辑
+- `argus-wing`：Provider 管理（通过 ProviderManager）
 
 ## 关键文件路径
 

@@ -37,7 +37,9 @@ pub struct SessionManager {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
-    compactor_manager: Arc<CompactorManager>,
+    compactor_manager: Arc<CompactorManager>,    // 上下文压缩器
+    trace_dir: PathBuf,                          // 执行追踪目录
+    job_manager: Arc<JobManager>,                 // 后台任务管理
 }
 ```
 
@@ -45,6 +47,7 @@ pub struct SessionManager {
 - 惰性加载：会话按需从数据库加载到内存
 - 多层存储：内存 + SQLite 持久化
 - Thread 聚合管理
+- 自动注册 dispatch_job / get_job_result / list_subagents 工具
 
 ### 3. ProviderResolver Trait
 
@@ -72,10 +75,13 @@ let thread = session.get_thread(&thread_id)?;
 ## 依赖关系
 
 ### 上游依赖
-- `argus-protocol`：SessionId、ThreadId 等核心类型
-- `argus-thread`：Thread 实现
+- `argus-protocol`：SessionId、ThreadId、ProviderResolver 等核心类型
 - `argus-template`：TemplateManager
+- `argus-thread`：Thread 实现
+- `argus-turn`：TurnConfig、TraceConfig
 - `argus-tool`：ToolManager
+- `argus-llm`：LlmProvider
+- `argus-job`：JobManager
 
 ### 下游消费者
 - `argus-wing`：应用入口
