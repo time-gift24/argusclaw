@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError};
+use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError, ToolExecutionContext};
 use async_trait::async_trait;
 
 use crate::job_manager::JobManager;
@@ -48,7 +48,7 @@ impl NamedTool for GetJobResultTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
         let job_id = input
             .get("job_id")
             .and_then(|v| v.as_str())

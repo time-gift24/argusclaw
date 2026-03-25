@@ -4,13 +4,14 @@
 //! plan state, and returns the updated plan with metadata.
 
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use async_trait::async_trait;
 use serde_json::{Value, json, to_value};
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
-use argus_protocol::{NamedTool, ToolError, UpdatePlanArgs};
+use argus_protocol::{NamedTool, ToolError, ToolExecutionContext, UpdatePlanArgs};
 
 use super::plan_store::FilePlanStore;
 
@@ -84,7 +85,7 @@ impl NamedTool for UpdatePlanTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, args: Value) -> Result<Value, ToolError> {
+    async fn execute(&self, args: Value, _ctx: Arc<ToolExecutionContext>) -> Result<Value, ToolError> {
         // Parse arguments
         let args: UpdatePlanArgs =
             serde_json::from_value(args).map_err(|e| ToolError::ExecutionFailed {
@@ -123,8 +124,18 @@ impl NamedTool for UpdatePlanTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ids::ThreadId;
+
     fn make_tool() -> UpdatePlanTool {
         UpdatePlanTool::default()
+    }
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new_v4(),
+            pipe_tx: tx,
+        })
     }
 
     #[tokio::test]
@@ -171,7 +182,7 @@ mod tests {
             }]
         });
 
-        let result = tool.execute(args).await.unwrap();
+        let result = tool.execute(args, make_ctx()).await.unwrap();
         assert_eq!(result["updated"], 1);
         assert_eq!(result["total"], 1);
         assert_eq!(result["plan"].as_array().unwrap().len(), 1);
@@ -191,7 +202,7 @@ mod tests {
             ]
         });
 
-        let result = tool.execute(args).await.unwrap();
+        let result = tool.execute(args, make_ctx()).await.unwrap();
         assert_eq!(result["updated"], 3);
         assert_eq!(result["total"], 3);
         assert_eq!(store.store().read().unwrap().len(), 3);
@@ -207,7 +218,7 @@ mod tests {
             "plan": [{ "step": "Step 1", "status": "completed" }]
         });
 
-        let result = tool.execute(args).await.unwrap();
+        let result = tool.execute(args, make_ctx()).await.unwrap();
         // Explanation should NOT appear in result
         assert!(!result.as_object().unwrap().contains_key("explanation"));
         assert_eq!(result["total"], 1);
@@ -217,7 +228,7 @@ mod tests {
     async fn execute_empty_plan_rejected() {
         let tool = make_tool();
         let args = json!({ "plan": [] });
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, make_ctx()).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         match err {
@@ -234,7 +245,7 @@ mod tests {
         let args = json!({
             "plan": [{ "step": "Test", "status": "invalid_status" }]
         });
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, make_ctx()).await;
         assert!(result.is_err());
     }
 
@@ -247,7 +258,7 @@ mod tests {
         let args1 = json!({
             "plan": [{ "step": "Step A", "status": "pending" }]
         });
-        tool.execute(args1).await.unwrap();
+        tool.execute(args1, make_ctx()).await.unwrap();
         assert_eq!(store.store().read().unwrap().len(), 1);
 
         // Second update (different content)
@@ -257,7 +268,7 @@ mod tests {
                 { "step": "Step B", "status": "pending" }
             ]
         });
-        tool.execute(args2).await.unwrap();
+        tool.execute(args2, make_ctx()).await.unwrap();
         assert_eq!(store.store().read().unwrap().len(), 2);
 
         // Full overwrite: both items should be present
@@ -274,7 +285,7 @@ mod tests {
         let args = json!({
             "plan": [{ "step": "Test", "status": "pending", "extra": "field" }]
         });
-        let result = tool.execute(args).await;
+        let result = tool.execute(args, make_ctx()).await;
         assert!(result.is_err());
     }
 }

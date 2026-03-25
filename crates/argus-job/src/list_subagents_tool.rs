@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError};
+use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError, ToolExecutionContext};
 use argus_template::TemplateManager;
 use async_trait::async_trait;
 
@@ -46,7 +46,7 @@ impl NamedTool for ListSubagentsTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, _input: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
         let agent_id = argus_turn::tool_context::current_agent_id()
             .ok_or_else(|| ToolError::ExecutionFailed {
                 tool_name: self.name().to_string(),

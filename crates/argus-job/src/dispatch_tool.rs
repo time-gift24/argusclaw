@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError};
+use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError, ToolExecutionContext};
 use async_trait::async_trait;
 use tokio::time::sleep;
 
@@ -71,7 +71,7 @@ impl NamedTool for DispatchJobTool {
         RiskLevel::Medium
     }
 
-    async fn execute(&self, input: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
         // Parse the input
         let args: JobDispatchArgs =
             serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {

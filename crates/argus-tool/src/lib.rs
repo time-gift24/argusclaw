@@ -11,7 +11,7 @@ use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 
 // Re-export from argus_protocol
-pub use argus_protocol::{NamedTool, ToolError};
+pub use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 pub mod glob;
 pub mod grep;
@@ -65,11 +65,12 @@ impl ToolManager {
         &self,
         name: &str,
         args: serde_json::Value,
+        ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
         let tool = self.get(name).ok_or_else(|| ToolError::NotFound {
             id: name.to_string(),
         })?;
-        tool.execute(args).await
+        tool.execute(args, ctx).await
     }
 
     /// Get the risk level for a tool by name.

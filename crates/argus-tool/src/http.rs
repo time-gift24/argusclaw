@@ -13,11 +13,12 @@ use argus_protocol::is_blocked_ip_v4;
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::ssrf::{MAX_RESPONSE_SIZE, validate_url};
-use argus_protocol::tool::{NamedTool, ToolError};
+use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use std::net::{IpAddr, ToSocketAddrs};
+use std::sync::Arc;
 use url::Url;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -224,9 +225,9 @@ impl NamedTool for HttpTool {
         RiskLevel::Critical
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
         let args: HttpArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::ExecutionFailed {
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "http".to_string(),
                 reason: format!("invalid arguments: {e}"),
             })?;
@@ -397,6 +398,15 @@ impl NamedTool for HttpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ids::ThreadId;
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new_v4(),
+            pipe_tx: tx,
+        })
+    }
 
     #[tokio::test]
     async fn test_unsupported_scheme() {
@@ -405,7 +415,7 @@ mod tests {
             .execute(serde_json::json!({
                 "url": "file:///etc/passwd",
                 "method": "GET"
-            }))
+            }), make_ctx())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -420,7 +430,7 @@ mod tests {
             .execute(serde_json::json!({
                 "url": "https://example.com",
                 "method": "CONNECT"
-            }))
+            }), make_ctx())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -435,7 +445,7 @@ mod tests {
             .execute(serde_json::json!({
                 "url": "not a valid url at all",
                 "method": "GET"
-            }))
+            }), make_ctx())
             .await;
         assert!(result.is_err());
         // Invalid URL without scheme returns SecurityBlocked
@@ -451,7 +461,7 @@ mod tests {
             .execute(serde_json::json!({
                 "url": "https://localhost/path",
                 "method": "GET"
-            }))
+            }), make_ctx())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -466,7 +476,7 @@ mod tests {
             .execute(serde_json::json!({
                 "url": "https://192.168.1.1/path",
                 "method": "GET"
-            }))
+            }), make_ctx())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -480,7 +490,7 @@ mod tests {
             .execute(serde_json::json!({
                 "url": "http://example.com",
                 "method": "GET"
-            }))
+            }), make_ctx())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();

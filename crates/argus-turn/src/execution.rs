@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use argus_protocol::tool::NamedTool;
+use argus_protocol::ToolExecutionContext;
 
 use super::{Turn, TurnBuilder, TurnConfig, TurnError, TurnInput, TurnOutput};
 
@@ -204,6 +205,7 @@ mod tests {
         async fn execute(
             &self,
             args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
         ) -> Result<serde_json::Value, argus_tool::ToolError> {
             Ok(args)
         }

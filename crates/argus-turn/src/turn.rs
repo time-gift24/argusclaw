@@ -19,7 +19,8 @@ use argus_protocol::llm::{
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
-    ThreadEvent, TokenUsage, ToolHookContext, sanitize_tool_output,
+    ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext, sanitize_tool_output,
+    ids::ThreadId,
 };
 
 use super::events::TurnLogEvent;
@@ -1132,7 +1133,11 @@ impl Turn {
                         tool_name = %tool_name,
                         "Executing tool"
                     );
-                    tool.execute(tool_input.clone()).await
+                    let ctx = Arc::new(ToolExecutionContext {
+                        thread_id: ThreadId::parse_or_default(&self.thread_id),
+                        pipe_tx: self.thread_event_tx.clone(),
+                    });
+                    tool.execute(tool_input.clone(), ctx).await
                 } else {
                     tracing::error!(
                         thread_id = %self.thread_id,
