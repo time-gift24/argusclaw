@@ -137,21 +137,41 @@ impl ThreadEventEnvelope {
                     response: serde_json::to_value(&response).unwrap_or_default(),
                 },
             }),
-            ThreadEvent::JobCompleted {
+            ThreadEvent::JobDispatched {
                 job_id,
-                status,
-                session_id,
-                message,
+                agent_id,
+                prompt,
+                context,
             } => Some(Self {
-                session_id: session_id.unwrap_or_default(),
+                session_id,
                 thread_id: String::new(),
                 turn_number: None,
-                payload: ThreadEventPayload::JobCompleted {
+                payload: ThreadEventPayload::JobDispatched {
                     job_id,
-                    status,
-                    message,
+                    agent_id: agent_id.inner(),
+                    prompt,
+                    context,
                 },
             }),
+            ThreadEvent::JobResult {
+                job_id,
+                success,
+                message,
+                token_usage,
+            } => Some(Self {
+                session_id,
+                thread_id: String::new(),
+                turn_number: None,
+                payload: ThreadEventPayload::JobResult {
+                    job_id,
+                    success,
+                    message,
+                    input_tokens: token_usage.as_ref().map(|u| u.input_tokens),
+                    output_tokens: token_usage.as_ref().map(|u| u.output_tokens),
+                },
+            }),
+            ThreadEvent::UserInterrupt { .. } => None,
+            ThreadEvent::UserMessage { .. } => None,
         }
     }
 }
@@ -210,10 +230,18 @@ pub enum ThreadEventPayload {
     ApprovalResolved {
         response: serde_json::Value,
     },
-    JobCompleted {
+    JobDispatched {
         job_id: String,
-        status: String,
-        message: Option<String>,
+        agent_id: i64,
+        prompt: String,
+        context: Option<serde_json::Value>,
+    },
+    JobResult {
+        job_id: String,
+        success: bool,
+        message: String,
+        input_tokens: Option<u32>,
+        output_tokens: Option<u32>,
     },
 }
 
