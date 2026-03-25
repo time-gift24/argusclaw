@@ -146,8 +146,8 @@ impl NamedTool for EchoTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
-        let message = args
+    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
+        let message = input
             .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed {

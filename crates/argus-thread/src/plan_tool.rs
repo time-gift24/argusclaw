@@ -85,10 +85,10 @@ impl NamedTool for UpdatePlanTool {
         RiskLevel::Low
     }
 
-    async fn execute(&self, args: Value, _ctx: Arc<ToolExecutionContext>) -> Result<Value, ToolError> {
+    async fn execute(&self, input: Value, _ctx: Arc<ToolExecutionContext>) -> Result<Value, ToolError> {
         // Parse arguments
         let args: UpdatePlanArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::ExecutionFailed {
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "update_plan".to_string(),
                 reason: format!("Invalid arguments: {}", e),
             })?;
@@ -133,7 +133,7 @@ mod tests {
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (tx, _) = broadcast::channel(16);
         Arc::new(ToolExecutionContext {
-            thread_id: ThreadId::new_v4(),
+            thread_id: ThreadId::new(),
             pipe_tx: tx,
         })
     }

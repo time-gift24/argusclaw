@@ -228,7 +228,7 @@ mod tests {
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (tx, _) = broadcast::channel(16);
         Arc::new(ToolExecutionContext {
-            thread_id: ThreadId::new_v4(),
+            thread_id: ThreadId::new(),
             pipe_tx: tx,
         })
     }
