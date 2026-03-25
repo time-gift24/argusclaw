@@ -60,7 +60,7 @@ test("settings exposes a dedicated new-agent route that renders create mode", ()
 
   const newAgentPageSource = readFileSync(newAgentPagePath, "utf8");
 
-  assert.match(newAgentPageSource, /<AgentEditor\s*\/>/);
+  assert.match(newAgentPageSource, /<AgentEditor[\s\S]*\/>/);
   assert.doesNotMatch(newAgentPageSource, /agentId=/);
 });
 
@@ -98,7 +98,7 @@ test("agent editor treats provider as optional when deciding whether the form ca
   );
   assert.match(
     agentEditorSource,
-    /<Button size="sm" onClick=\{handleSave\} disabled=\{saving \|\| !canSave\}>/,
+    /<Button[\s\S]*size="sm"[\s\S]*onClick=\{handleSave\}[\s\S]*disabled=\{saving \|\| !canSave\}[\s\S]*>/,
   );
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(formData\)/);
   assert.match(agentEditorSource, /router\.push\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);

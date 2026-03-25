@@ -64,7 +64,7 @@ export function ProviderTestDialog({
       : "border-destructive/30 text-destructive bg-destructive/5";
       
   const statusLabel = testing
-    ? "运行中"
+    ? "正在测试"
     : isSuccess
       ? "连接成功"
       : "连接失败";
@@ -253,7 +253,7 @@ export function ProviderTestDialog({
               {testing ? (
                 <><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> 测试中...</>
               ) : (
-                "重新发起测试"
+                "重新测试"
               )}
             </Button>
           </div>

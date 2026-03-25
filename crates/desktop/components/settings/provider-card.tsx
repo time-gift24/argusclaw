@@ -76,6 +76,8 @@ export function ProviderCard({
               <Badge 
                 variant="outline" 
                 className="text-[9px] h-4 px-1.5 border-emerald-200 text-emerald-600 cursor-pointer hover:bg-emerald-50 font-bold uppercase"
+                aria-label="查看状态"
+                title="查看状态"
                 onClick={() => onViewStatus(provider.id)}
               >
                 在线 · {testResult?.latency_ms}ms
@@ -84,6 +86,8 @@ export function ProviderCard({
               <Badge 
                 variant="outline" 
                 className="text-[9px] h-4 px-1.5 border-destructive/30 text-destructive cursor-pointer hover:bg-destructive/5 font-bold uppercase"
+                aria-label="查看状态"
+                title="查看状态"
                 onClick={() => onViewStatus(provider.id)}
               >
                 连接失败
@@ -132,7 +136,7 @@ export function ProviderCard({
               disabled={isTesting || requiresReentry}
             >
               <Activity className="h-3.5 w-3.5 mr-1.5" />
-              连接测试
+              测试连接
             </Button>
             <Button 
               variant="ghost" 
