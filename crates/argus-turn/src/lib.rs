@@ -60,7 +60,7 @@ pub use config::{
     TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput, TurnOutputBuilder,
     TurnStreamEvent,
 };
-pub use error::TurnError;
+pub use error::{TurnError, TurnLogError};
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
 pub use trace::{IterationRecord, LlmRequest, LlmResponse, ToolExecution, TraceConfig};
 pub use turn::{Turn, TurnBuilder};

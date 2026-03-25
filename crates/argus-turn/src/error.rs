@@ -1,5 +1,7 @@
 //! Turn error types.
 
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use argus_protocol::llm::LlmError;
@@ -53,6 +55,22 @@ impl From<derive_builder::UninitializedFieldError> for TurnError {
     fn from(err: derive_builder::UninitializedFieldError) -> Self {
         TurnError::BuildFailed(err.to_string())
     }
+}
+
+/// Errors for turn log recovery operations.
+#[derive(Debug, Error)]
+pub enum TurnLogError {
+    #[error("turn file not found: {0}")]
+    TurnNotFound(PathBuf),
+
+    #[error("malformed JSON event at line {line}: {reason}")]
+    MalformedEvent { line: usize, reason: String },
+
+    #[error("unknown event type: {0}")]
+    UnknownEventType(String),
+
+    #[error("truncated event at line {line}: {reason}")]
+    TruncatedEvent { line: usize, reason: String },
 }
 
 #[cfg(test)]
