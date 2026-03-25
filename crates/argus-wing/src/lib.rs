@@ -33,7 +33,7 @@ use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, D
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::{AccountManager};
 use argus_crypto::{Cipher, FileKeySource};
-use argus_job::{JobManager, SseBroadcaster};
+use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
@@ -72,9 +72,6 @@ pub struct ArgusWing {
     compactor_manager: Arc<CompactorManager>,
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
-    /// Job broadcaster for subscribing to job events.
-    #[allow(dead_code)]
-    job_broadcaster: Arc<SseBroadcaster>,
     pub account_manager: Arc<AccountManager>,
 }
 
@@ -131,12 +128,10 @@ impl ArgusWing {
 
         // Create job manager with all dependencies
         let job_manager = Arc::new(JobManager::new(
-            pool.clone(),
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
         ));
-        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
 
         // Create session manager
         let trace_dir = default_trace_dir();
@@ -151,33 +146,6 @@ impl ArgusWing {
             job_manager.clone(),
         ));
 
-        // Spawn job event forwarder: subscribes to job events and broadcasts as ThreadEvents
-        let session_manager_for_fwd = session_manager.clone();
-        let job_broadcaster_for_fwd = job_broadcaster.clone();
-        tokio::spawn(async move {
-            let mut job_rx = job_broadcaster_for_fwd.subscribe();
-            loop {
-                match job_rx.recv().await {
-                    Ok(event) => {
-                        let thread_event = ThreadEvent::JobCompleted {
-                            job_id: event.job_id,
-                            status: event.status,
-                            session_id: event.session_id,
-                            message: event.message,
-                        };
-                        session_manager_for_fwd.broadcast_event(thread_event);
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        tracing::debug!("job event subscriber lagged, skipping");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::debug!("job broadcaster closed, stopping forwarder");
-                        break;
-                    }
-                }
-            }
-        });
-
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
@@ -190,7 +158,6 @@ impl ArgusWing {
             tool_manager,
             compactor_manager,
             job_manager,
-            job_broadcaster,
             account_manager,
         }))
     }
@@ -215,12 +182,10 @@ impl ArgusWing {
 
         // Create job manager with all dependencies
         let job_manager = Arc::new(JobManager::new(
-            pool.clone(),
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
         ));
-        let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
@@ -243,7 +208,6 @@ impl ArgusWing {
             tool_manager,
             compactor_manager,
             job_manager,
-            job_broadcaster,
             account_manager,
         })
     }
