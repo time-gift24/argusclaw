@@ -159,6 +159,8 @@ pub struct LlmProviderRecord {
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
+    /// Credential ID for token-based auth. None means static API key.
+    pub credential_id: Option<i64>,
 }
 
 // ============================================================================
@@ -181,6 +183,7 @@ pub struct LlmProviderRecordJson {
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
+    pub credential_id: Option<i64>,
 }
 
 impl From<LlmProviderRecord> for LlmProviderRecordJson {
@@ -196,6 +199,7 @@ impl From<LlmProviderRecord> for LlmProviderRecordJson {
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
+            credential_id: record.credential_id,
         }
     }
 }
@@ -260,10 +264,12 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
+            credential_id: Some(42),
         };
 
         assert_eq!(record.models.len(), 2);
         assert_eq!(record.default_model, "gpt-4.1");
+        assert_eq!(record.credential_id, Some(42));
     }
 
     #[test]

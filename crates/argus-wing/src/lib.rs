@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
 use argus_approval::{ApprovalManager, ApprovalPolicy};
-use argus_auth::{AccountManager, CredentialStore};
+use argus_auth::{AccountManager, CredentialStore, TokenConfig, TokenContext};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::{JobManager, SseBroadcaster};
 use argus_llm::ProviderManager;
@@ -104,9 +104,29 @@ impl ArgusWing {
         }?;
         migrate(&pool).await?;
 
-        // Create LLM provider repository and manager
+        // Create auth components first (needed for TokenContext)
+        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
+        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
+        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher.clone()));
+
+        // Create token config and context for token-based auth
+        let token_config = TokenConfig::new(
+            "https://auth.example.com/oauth/token".to_string(),
+            "Authorization".to_string(),
+            "Bearer ".to_string(),
+        )
+        .with_refresh_interval(std::time::Duration::from_secs(300));
+
+        let token_context = Arc::new(TokenContext {
+            account_manager: account_manager.clone(),
+            credential_store: credential_store.clone(),
+            config: token_config,
+        });
+
+        // Create LLM provider repository and manager with token context
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        let provider_manager =
+            Arc::new(ProviderManager::with_token_context(llm_repository, token_context));
 
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
@@ -176,11 +196,6 @@ impl ArgusWing {
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
-        // Create auth components
-        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
-        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
-        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher));
-
         Ok(Arc::new(Self {
             pool,
             provider_manager,
@@ -199,8 +214,29 @@ impl ArgusWing {
     /// Create a new ArgusWing with a pre-configured database pool.
     #[must_use]
     pub fn with_pool(pool: SqlitePool) -> Arc<Self> {
+        // Create auth components first
+        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
+        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
+        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher.clone()));
+
+        // Create token config and context
+        let token_config = TokenConfig::new(
+            "https://auth.example.com/oauth/token".to_string(),
+            "Authorization".to_string(),
+            "Bearer ".to_string(),
+        )
+        .with_refresh_interval(std::time::Duration::from_secs(300));
+
+        let token_context = Arc::new(TokenContext {
+            account_manager: account_manager.clone(),
+            credential_store: credential_store.clone(),
+            config: token_config,
+        });
+
+        // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        let provider_manager =
+            Arc::new(ProviderManager::with_token_context(llm_repository, token_context));
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
@@ -227,11 +263,6 @@ impl ArgusWing {
             job_manager.clone(),
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
-
-        // Create auth components
-        let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
-        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
-        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher));
 
         Arc::new(Self {
             pool,
@@ -759,6 +790,7 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: argus_protocol::ProviderSecretStatus::Ready,
+            credential_id: None,
         };
 
         let provider_id = wing
@@ -836,6 +868,7 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: argus_protocol::ProviderSecretStatus::Ready,
+            credential_id: None,
         };
 
         let provider_id = wing

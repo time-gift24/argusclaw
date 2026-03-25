@@ -58,6 +58,7 @@ fn build_provider_reentry_record(record: LlmProviderRecord) -> LlmProviderRecord
         is_default: record.is_default,
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
+        credential_id: record.credential_id,
     }
 }
 
@@ -77,6 +78,7 @@ pub async fn upsert_provider(
         is_default: record.is_default,
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
+        credential_id: record.credential_id,
     };
     let id = wing
         .upsert_provider(record)
@@ -127,6 +129,7 @@ pub async fn test_provider_input(
         is_default: record.is_default,
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
+        credential_id: record.credential_id,
     };
     wing.test_provider_record(record, &model)
         .await
@@ -619,6 +622,7 @@ mod tests {
             is_default: false,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::RequiresReentry,
+            credential_id: Some(5),
         });
 
         assert_eq!(record.id, 2);

@@ -194,6 +194,7 @@ name = "argus-llm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-auth",
  "argus-crypto",
  "argus-protocol",
  "argus-test-support",
@@ -206,6 +207,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

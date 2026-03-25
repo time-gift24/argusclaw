@@ -27,8 +27,8 @@ export interface LlmProviderRecord {
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
+  credential_id: number | null;
 }
-
 export interface ProviderInput {
   id: number;
   kind: "openai-compatible";

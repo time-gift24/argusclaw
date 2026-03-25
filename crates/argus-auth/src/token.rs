@@ -13,6 +13,42 @@ use tokio::sync::RwLock;
 
 use super::error::AuthError;
 
+/// Token endpoint configuration for UserCredentialTokenSource.
+#[derive(Clone)]
+pub struct TokenConfig {
+    pub token_url: String,
+    pub header_name: String,
+    pub header_prefix: String,
+    pub refresh_interval: Duration,
+}
+
+impl TokenConfig {
+    #[must_use]
+    pub fn new(token_url: String, header_name: String, header_prefix: String) -> Self {
+        Self {
+            token_url,
+            header_name,
+            header_prefix,
+            refresh_interval: Duration::from_secs(300),
+        }
+    }
+
+    #[must_use]
+    pub fn with_refresh_interval(mut self, interval: Duration) -> Self {
+        self.refresh_interval = interval;
+        self
+    }
+}
+
+/// Holds auth dependencies needed to construct token-wrapped LLM providers.
+/// Passed to ProviderManager via `with_token_context()`.
+#[derive(Clone)]
+pub struct TokenContext {
+    pub account_manager: Arc<super::account::AccountManager>,
+    pub credential_store: Arc<super::credential::CredentialStore>,
+    pub config: TokenConfig,
+}
+
 pub trait TokenSource: Send + Sync {
     fn fetch_token(&self, username: &str, password: &str) -> Result<String, AuthError>;
     fn header_name(&self) -> &str;
@@ -77,6 +113,63 @@ impl TokenSource for SimpleTokenSource {
 
     fn header_prefix(&self) -> &str {
         &self.header_prefix
+    }
+}
+
+/// Token source that fetches tokens from an endpoint using stored credentials.
+pub struct UserCredentialTokenSource {
+    config: TokenConfig,
+    username: String,
+    password: String,
+}
+
+impl UserCredentialTokenSource {
+    #[must_use]
+    pub fn new(config: TokenConfig, username: String, password: String) -> Self {
+        Self { config, username, password }
+    }
+}
+
+impl TokenSource for UserCredentialTokenSource {
+    fn fetch_token(&self, _: &str, _: &str) -> Result<String, AuthError> {
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(&self.config.token_url)
+            .json(&serde_json::json!({
+                "username": self.username,
+                "password": self.password
+            }))
+            .send()
+            .map_err(|e| AuthError::TokenFetchFailed {
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            return Err(AuthError::TokenFetchFailed {
+                reason: format!("HTTP {}", response.status()),
+            });
+        }
+
+        let body: serde_json::Value = response.json().map_err(|e| {
+            AuthError::TokenFetchFailed {
+                reason: format!("Failed to parse response: {e}"),
+            }
+        })?;
+
+        body.get("token")
+            .and_then(|t: &serde_json::Value| t.as_str())
+            .map(String::from)
+            .ok_or_else(|| AuthError::TokenFetchFailed {
+                reason: "Response missing 'token' field".to_string(),
+            })
+    }
+
+    fn header_name(&self) -> &str {
+        &self.config.header_name
+    }
+
+    fn header_prefix(&self) -> &str {
+        &self.config.header_prefix
     }
 }
 

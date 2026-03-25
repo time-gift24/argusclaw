@@ -15,6 +15,7 @@ path = "../../examples/test_real_retry.rs"
 argus-protocol = { path = "../argus-protocol" }
 argus-test-support = { path = "../argus-test-support" }
 argus-crypto = { path = "../argus-crypto" }
+argus-auth = { path = "../argus-auth" }
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -32,3 +33,4 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+sqlx = { workspace = true, features = ["sqlite"] }
