@@ -3,6 +3,8 @@
 //! This module contains shared types used by both LLM providers and tools.
 //! It is consumed by argus-llm and argus-tool crates.
 
+use std::sync::Arc;
+
 pub mod provider_types;
 pub mod repository;
 
@@ -667,6 +669,80 @@ pub trait LlmProvider: Send + Sync {
     /// OpenAI would return `2` (50% off).
     fn cache_read_discount(&self) -> Decimal {
         Decimal::ONE
+    }
+}
+
+// Blanket impl for Arc<T: LlmProvider> to enable Arc<dyn LlmProvider> as inner type.
+#[async_trait]
+impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
+    fn model_name(&self) -> &str {
+        (**self).model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (**self).cost_per_token()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        (**self).capabilities()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        (**self).complete(request).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        (**self).complete_with_tools(request).await
+    }
+
+    async fn stream_complete(&self, request: CompletionRequest) -> Result<LlmEventStream, LlmError> {
+        (**self).stream_complete(request).await
+    }
+
+    async fn stream_complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        (**self).stream_complete_with_tools(request).await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        (**self).list_models().await
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        (**self).model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        (**self).effective_model_name(requested_model)
+    }
+
+    fn active_model_name(&self) -> String {
+        (**self).active_model_name()
+    }
+
+    fn context_window(&self) -> u32 {
+        (**self).context_window()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        (**self).set_model(model)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        (**self).calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        (**self).cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        (**self).cache_read_discount()
     }
 }
 
