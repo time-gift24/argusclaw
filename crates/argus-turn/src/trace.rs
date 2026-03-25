@@ -1,11 +1,15 @@
-//! Turn execution trace - iteration-level audit logging.
+//! Turn execution trace - append-only JSONL incremental logging.
 
-use std::fs::{self, File};
-use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
 
-use chrono::{DateTime, Utc};
-use serde::Serialize;
+use chrono::Utc;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
+use tokio_stream::Stream;
+
+use super::events::TurnLogEvent;
+use super::error::TurnLogError;
 
 /// Configuration for trace recording.
 #[derive(Debug, Clone)]
@@ -14,12 +18,18 @@ pub struct TraceConfig {
     pub enabled: bool,
     /// Directory where trace files are written.
     pub trace_dir: PathBuf,
+    /// Whether to record streaming deltas (llm_delta, tool_call_delta).
+    pub include_streaming_deltas: bool,
 }
 
 impl TraceConfig {
     /// Create a new TraceConfig.
     pub fn new(enabled: bool, trace_dir: PathBuf) -> Self {
-        Self { enabled, trace_dir }
+        Self {
+            enabled,
+            trace_dir,
+            include_streaming_deltas: true,
+        }
     }
 
     /// Create a disabled TraceConfig (no tracing).
@@ -27,6 +37,7 @@ impl TraceConfig {
         Self {
             enabled: false,
             trace_dir: PathBuf::new(),
+            include_streaming_deltas: true,
         }
     }
 }
@@ -37,153 +48,205 @@ impl Default for TraceConfig {
     }
 }
 
-/// LLM request captured for a single iteration.
-#[derive(Debug, Clone, Serialize)]
-pub struct LlmRequest {
-    pub messages: Vec<serde_json::Value>,
+/// Turn log state reconstructed from JSONL for replay/recovery.
+#[derive(Debug)]
+pub struct TurnLogState {
+    /// Thread ID.
+    pub thread_id: String,
+    /// Turn number.
+    pub turn_number: u32,
+    /// System prompt (from turn_start).
+    pub system_prompt: Option<String>,
+    /// Model name (from turn_start).
+    pub model: Option<String>,
+    /// Messages accumulated so far.
+    pub messages: Vec<argus_protocol::llm::ChatMessage>,
+    /// Tools available.
     pub tools: Vec<serde_json::Value>,
-}
-
-/// LLM response captured for a single iteration.
-#[derive(Debug, Clone, Serialize)]
-pub struct LlmResponse {
-    pub content: Option<String>,
-    pub reasoning_content: Option<String>,
-    pub tool_calls: Vec<serde_json::Value>,
-    pub finish_reason: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-}
-
-/// Single tool execution result.
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolExecution {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-    pub result: String,
-    pub duration_ms: u64,
+    /// Token usage (from turn_end).
+    pub token_usage: Option<argus_protocol::TokenUsage>,
+    /// Finish reason (from turn_end).
+    pub finish_reason: Option<String>,
+    /// Error message (from turn_error).
     pub error: Option<String>,
 }
 
-/// A single iteration's record (one LLM call + tool executions).
-#[derive(Debug, Clone, Serialize)]
-pub struct IterationRecord {
-    pub iteration: u32,
-    pub llm_request: LlmRequest,
-    pub llm_response: LlmResponse,
-    pub tools: Vec<ToolExecution>,
-}
-
-/// The final output of a turn.
-#[derive(Debug, Clone, Serialize)]
-pub struct FinalOutput {
-    pub token_usage: TokenUsageRecord,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TokenUsageRecord {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub total_tokens: u32,
-}
-
-/// The complete trace file structure.
-#[derive(Debug, Clone, Serialize)]
-pub struct TraceFile {
-    pub version: String,
-    pub thread_id: String,
-    pub turn_number: u32,
-    pub start_time: DateTime<Utc>,
-    pub end_time: Option<DateTime<Utc>>,
-    pub iterations: Vec<IterationRecord>,
-    pub final_output: Option<FinalOutput>,
-}
-
-/// Writer for trace files.
+/// Async writer for append-only JSONL trace files.
 pub struct TraceWriter {
-    file: BufWriter<File>,
+    file: BufStream<File>,
     thread_id: String,
     turn_number: u32,
-    start_time: DateTime<Utc>,
-    iterations: Vec<IterationRecord>,
 }
 
 impl TraceWriter {
     /// Create a new TraceWriter for the given thread and turn.
-    pub fn new(thread_id: &str, turn_number: u32, config: &TraceConfig) -> std::io::Result<Self> {
-        let dir = config.trace_dir.join(thread_id);
-        fs::create_dir_all(&dir)?;
+    /// Opens file in append mode, creates if not exists.
+    pub async fn new(
+        thread_id: &str,
+        turn_number: u32,
+        config: &TraceConfig,
+    ) -> std::io::Result<Self> {
+        let dir = config.trace_dir.join(thread_id).join("turns");
+        tokio::fs::create_dir_all(&dir).await?;
 
-        let file_path = dir.join(format!("{}.json", turn_number));
-        let file = File::create(file_path)?;
-        let writer = BufWriter::new(file);
+        let file_path = dir.join(format!("{}.jsonl", turn_number));
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .await?;
 
         Ok(Self {
-            file: writer,
+            file: BufStream::new(file),
             thread_id: thread_id.to_string(),
             turn_number,
-            start_time: Utc::now(),
-            iterations: Vec::new(),
         })
     }
 
-    /// Write an iteration record.
-    pub fn write_iteration(&mut self, iteration: IterationRecord) -> std::io::Result<()> {
-        self.iterations.push(iteration);
+    /// Write a single event to the JSONL file.
+    pub async fn write_event(&mut self, event: &TurnLogEvent) -> std::io::Result<()> {
+        let ts = Utc::now().to_rfc3339();
+        let json = serde_json::json!({
+            "v": "1",
+            "thread_id": self.thread_id,
+            "turn": self.turn_number,
+            "ts": ts,
+            "type": event.type_name(),
+            "data": event,
+        });
+        let line = serde_json::to_string(&json).unwrap();
+        self.file.write_all(line.as_bytes()).await?;
+        self.file.write_all(b"\n").await?;
+        self.file.flush().await?;
         Ok(())
     }
 
     /// Finalize the trace as a success with token usage.
-    pub fn finish_success(
+    pub async fn finish_success(
         mut self,
         token_usage: &argus_protocol::TokenUsage,
     ) -> std::io::Result<()> {
-        let trace = TraceFile {
-            version: "1.0".to_string(),
-            thread_id: self.thread_id,
-            turn_number: self.turn_number,
-            start_time: self.start_time,
-            end_time: Some(Utc::now()),
-            iterations: self.iterations,
-            final_output: Some(FinalOutput {
-                token_usage: TokenUsageRecord {
-                    input_tokens: token_usage.input_tokens,
-                    output_tokens: token_usage.output_tokens,
-                    total_tokens: token_usage.total_tokens,
-                },
-            }),
+        let event = TurnLogEvent::TurnEnd {
+            token_usage: token_usage.clone(),
+            finish_reason: "stop".into(),
         };
-
-        serde_json::to_writer(&mut self.file, &trace)?;
-        self.file.flush()?;
+        self.write_event(&event).await?;
+        self.file.flush().await?;
         Ok(())
     }
 
-    /// Finalize the trace as a failure (no final output).
-    #[allow(dead_code)]
-    pub fn finish_failure(mut self, error: &str) -> std::io::Result<()> {
-        let thread_id = self.thread_id.clone();
-        let turn_number = self.turn_number;
-
-        let trace = TraceFile {
-            version: "1.0".to_string(),
-            thread_id: self.thread_id,
-            turn_number: self.turn_number,
-            start_time: self.start_time,
-            end_time: Some(Utc::now()),
-            iterations: self.iterations,
-            final_output: None,
+    /// Finalize the trace as a failure.
+    pub async fn finish_failure(mut self, error: &str) -> std::io::Result<()> {
+        let event = TurnLogEvent::TurnError {
+            error: error.to_string(),
+            at_iteration: None,
         };
-
-        // Write the trace file with error context in stderr
-        eprintln!(
-            "[TRACE ERROR] thread_id={} turn={} error={}",
-            thread_id, turn_number, error
-        );
-
-        serde_json::to_writer(&mut self.file, &trace)?;
-        self.file.flush()?;
+        self.write_event(&event).await?;
+        self.file.flush().await?;
         Ok(())
     }
+}
+
+/// Read JSONL events from a turn file path.
+pub async fn read_jsonl_events(
+    path: &PathBuf,
+) -> Result<Vec<TurnLogEvent>, TurnLogError> {
+    let content = tokio::fs::read_to_string(path).await.map_err(|_e| {
+        TurnLogError::TurnNotFound(path.clone())
+    })?;
+
+    let mut events = Vec::new();
+    for (line_idx, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Try parsing as the full JSONL wrapper
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(data) = wrapper.get("data") {
+                if let Ok(event) = serde_json::from_value(data.clone()) {
+                    events.push(event);
+                    continue;
+                }
+            }
+        }
+        // Try direct parse (for bare TurnLogEvent lines)
+        match serde_json::from_str::<TurnLogEvent>(&line) {
+            Ok(event) => events.push(event),
+            Err(_) => {
+                tracing::warn!("Malformed JSONL line {}: skipped", line_idx + 1);
+            }
+        }
+    }
+    Ok(events)
+}
+
+/// Recover events from a turn JSONL file as a stream.
+pub async fn recover_turn_events(
+    trace_dir: &PathBuf,
+    session_id: &argus_protocol::SessionId,
+    thread_id: &argus_protocol::ThreadId,
+    from_turn: u32,
+) -> impl Stream<Item = Result<TurnLogEvent, TurnLogError>> {
+    let path = trace_dir
+        .join(session_id.inner().to_string())
+        .join(thread_id.inner().to_string())
+        .join("turns")
+        .join(format!("{}.jsonl", from_turn));
+
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => {
+            // Return a stream that immediately yields an error then completes
+            let err_path = path.clone();
+            return Box::pin(futures_util::stream::iter(
+                vec![Err(TurnLogError::TurnNotFound(err_path))]
+            )) as Pin<Box<dyn Stream<Item = Result<TurnLogEvent, TurnLogError>>>>;
+        }
+    };
+
+    let lines_stream = tokio_stream::wrappers::LinesStream::new(
+        tokio::io::BufReader::new(file).lines(),
+    );
+
+    Box::pin(tokio_stream::StreamExt::map(lines_stream, move |line: std::io::Result<String>| {
+        let line = match line {
+            Ok(l) => l.trim().to_string(),
+            Err(e) => {
+                return Err(TurnLogError::MalformedEvent {
+                    line: 0,
+                    reason: format!("IO error reading line: {}", e),
+                });
+            }
+        };
+        if line.is_empty() {
+            return Err(TurnLogError::MalformedEvent {
+                line: 0,
+                reason: "empty line".into(),
+            });
+        }
+        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(data) = wrapper.get("data") {
+                if let Ok(event) = serde_json::from_value(data.clone()) {
+                    return Ok(event);
+                }
+            }
+        }
+        match serde_json::from_str::<TurnLogEvent>(&line) {
+            Ok(event) => Ok(event),
+            Err(e) => {
+                if line.len() < 10 {
+                    Err(TurnLogError::TruncatedEvent {
+                        line: 0,
+                        reason: format!("incomplete JSON: {}", e),
+                    })
+                } else {
+                    Err(TurnLogError::MalformedEvent {
+                        line: 0,
+                        reason: e.to_string(),
+                    })
+                }
+            }
+        }
+    })) as Pin<Box<dyn Stream<Item = Result<TurnLogEvent, TurnLogError>>>>
 }

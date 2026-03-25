@@ -25,6 +25,7 @@ rust_decimal = "1"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 toml = "0.8"
+tokio-stream = { version = "0.1", features = ["io-util"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
