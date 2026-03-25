@@ -5,7 +5,7 @@ use argus_thread::Thread;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 /// Summary of a session for listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct ThreadSummary {
 pub struct Session {
     pub id: SessionId,
     pub name: String,
-    threads: DashMap<ThreadId, Arc<Mutex<Thread>>>,
+    threads: DashMap<ThreadId, Arc<RwLock<Thread>>>,
 }
 
 impl Session {
@@ -42,16 +42,16 @@ impl Session {
         }
     }
 
-    pub fn add_thread(&self, thread: Arc<Mutex<Thread>>) {
-        let thread_id = thread.try_lock().map(|t| t.id()).unwrap_or_default();
+    pub fn add_thread(&self, thread: Arc<RwLock<Thread>>) {
+        let thread_id = thread.try_read().map(|t| t.id()).unwrap_or_default();
         self.threads.insert(thread_id, thread);
     }
 
-    pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<Thread>>> {
+    pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
         self.threads.remove(thread_id).map(|pair| pair.1)
     }
 
-    pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<Thread>>> {
+    pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
         self.threads.get(thread_id).map(|r| r.value().clone())
     }
 
@@ -63,7 +63,7 @@ impl Session {
     pub fn broadcast(&self, event: ThreadEvent) {
         for entry in self.threads.iter() {
             let thread = entry.value();
-            if let Ok(t) = thread.try_lock() {
+            if let Ok(t) = thread.try_read() {
                 t.broadcast_to_self(event.clone());
             }
         }
@@ -73,7 +73,7 @@ impl Session {
         let mut summaries = Vec::new();
         for entry in self.threads.iter() {
             let thread = entry.value();
-            if let Ok(t) = thread.try_lock() {
+            if let Ok(t) = thread.try_read() {
                 summaries.push(ThreadSummary {
                     id: t.id(),
                     title: t.title().map(|s| s.to_string()),

@@ -13,7 +13,7 @@ use argus_tool::ToolManager;
 use argus_turn::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
 use dashmap::DashMap;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, RwLock};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -272,7 +272,7 @@ impl SessionManager {
                         }
                     }
 
-                    Arc::new(Mutex::new(t))
+                    Arc::new(RwLock::new(t))
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -288,13 +288,14 @@ impl SessionManager {
             // immediately (prevents send_message from racing).
             // Spawn run() orchestration loop. The loop holds the lock briefly for
             // event processing, then releases it while polling the broadcast channel.
-            // This allows list_threads() (which uses try_lock()) to succeed concurrently.
+            // list_threads() acquires a read lock, so it can run concurrently with
+            // the orchestrator even while a turn is executing.
             let thread_for_run = Arc::clone(&thread);
             tokio::spawn(async move {
                 // Create the broadcast receiver — acquire lock briefly to clone pipe_tx,
                 // then drop the guard (NOT the Arc) so the Arc stays alive for the loop.
                 let pipe_tx = {
-                    let guard = thread_for_run.lock().await;
+                    let guard = thread_for_run.read().await;
                     guard.pipe_tx().clone()
                 };
                 // guard is dropped here; Arc stays alive.
@@ -313,7 +314,7 @@ impl SessionManager {
                     };
 
                     // Re-acquire lock for event processing.
-                    let mut guard = thread_for_run.lock().await;
+                    let mut guard = thread_for_run.write().await;
                     use argus_protocol::ThreadEvent::{Idle, UserMessage};
 
                     match event {
@@ -551,8 +552,8 @@ impl SessionManager {
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        // Wrap in Arc<Mutex<>> for safe shared access
-        let thread_arc = Arc::new(Mutex::new(thread));
+        // Wrap in Arc<RwLock<>> for safe concurrent read access
+        let thread_arc = Arc::new(RwLock::new(thread));
 
         // Spawn run() orchestration loop. Same lock-release-while-polling pattern as load().
         let thread_for_run = Arc::clone(&thread_arc);
@@ -560,7 +561,7 @@ impl SessionManager {
             // Create the broadcast receiver — acquire lock briefly to clone pipe_tx,
             // then drop the guard (NOT the Arc) so the Arc stays alive for the loop.
             let pipe_tx = {
-                let guard = thread_for_run.lock().await;
+                let guard = thread_for_run.read().await;
                 guard.pipe_tx().clone()
             };
             // guard is dropped here; Arc stays alive.
@@ -577,7 +578,7 @@ impl SessionManager {
                     }
                 };
 
-                let mut guard = thread_for_run.lock().await;
+                let mut guard = thread_for_run.write().await;
                 use argus_protocol::ThreadEvent::{Idle, UserMessage};
 
                 match event {
@@ -760,9 +761,8 @@ impl SessionManager {
             .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
 
         // send_user_message writes to the broadcast pipe (Sender::send is &self).
-        // The pipe is owned by Thread, so we need the lock briefly.
         let result = thread
-            .lock()
+            .read()
             .await
             .send_user_message(message, None)
             .map_err(|e| ArgusError::LlmError {
@@ -865,7 +865,7 @@ impl SessionManager {
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
         let session = self.sessions.get(&session_id)?;
         let thread = session.get_thread(thread_id)?;
-        let thread = thread.lock().await;
+        let thread = thread.read().await;
         Some(thread.subscribe())
     }
 }
