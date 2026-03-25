@@ -47,6 +47,12 @@ test("agent selector uses the dialog trigger render prop expected by base-ui", (
   assert.doesNotMatch(agentSelectorSource, /<DialogTrigger asChild>/);
 });
 
+test("agent selector updates template choice without auto-creating a session", () => {
+  assert.match(agentSelectorSource, /const selectTemplate = useChatStore/);
+  assert.match(agentSelectorSource, /void selectTemplate\(templateId\)/);
+  assert.doesNotMatch(agentSelectorSource, /void activateSession\(templateId\)/);
+});
+
 test("dropdown menu trigger bridges radix-style asChild usage without leaking props to the DOM", () => {
   assert.match(providerSelectorSource, /<DropdownMenuTrigger asChild>/);
   assert.match(dropdownMenuSource, /asChild\?: boolean/);

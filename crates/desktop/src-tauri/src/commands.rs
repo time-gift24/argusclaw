@@ -323,7 +323,7 @@ pub async fn create_chat_session(
 
     // Create a new session for this chat
     let session_id = wing
-        .create_session(&format!("Chat-{}", template_id))
+        .create_session("")
         .await
         .map_err(|e| e.to_string())?;
 

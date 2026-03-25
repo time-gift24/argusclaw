@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 export function AgentSelector() {
   const templates = useChatStore((state) => state.templates);
   const selectedTemplateId = useChatStore((state) => state.selectedTemplateId);
-  const activateSession = useChatStore((state) => state.activateSession);
+  const selectTemplate = useChatStore((state) => state.selectTemplate);
   const [open, setOpen] = React.useState(false);
 
   if (templates.length === 0) return null;
@@ -27,7 +27,7 @@ export function AgentSelector() {
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId);
 
   const handleSelect = (templateId: number) => {
-    void activateSession(templateId);
+    void selectTemplate(templateId);
     setOpen(false);
   };
 

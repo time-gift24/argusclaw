@@ -70,6 +70,7 @@ export interface ChatStore {
   loadSessionList: () => Promise<void>;
   loadThreads: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
+  selectTemplate: (templateId: number) => void;
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
@@ -109,7 +110,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         agents.list(),
         providers.list(),
       ]);
-      set({ templates: templateList, providers: providerList, errorMessage: null });
+      set((state) => ({
+        templates: templateList,
+        providers: providerList,
+        errorMessage: null,
+        selectedTemplateId: state.selectedTemplateId ?? templateList[0]?.id ?? null,
+      }));
 
       if (templateList.length === 0) {
         set({ errorMessage: "当前没有可用的 Agent 模板。" });
@@ -124,15 +130,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   async activateSession(templateId: number) {
     const state = get();
-
-    // Reuse existing session by session_id key first
-    const existingById = Object.values(state.sessionsByKey).find(
-      (s) => s.sessionId === state.activeSessionKey,
-    );
-    if (existingById && existingById.templateId === templateId) {
-      set({ selectedTemplateId: templateId, errorMessage: null });
-      return;
-    }
 
     try {
       const session = await chat.createChatSession(
@@ -309,30 +306,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  selectTemplate(templateId: number) {
+    set({ selectedTemplateId: templateId, errorMessage: null });
+  },
+
   async selectProviderPreference(providerId: number | null) {
     set({ selectedProviderPreferenceId: providerId, errorMessage: null });
-
-    const state = get();
-    if (state.selectedTemplateId) {
-      try {
-        await get().activateSession(state.selectedTemplateId);
-      } catch {
-        // activateSession already populated the visible error state
-      }
-    }
   },
 
   async selectModelOverride(model: string | null) {
     set({ selectedModelOverride: model, errorMessage: null });
-
-    const state = get();
-    if (state.selectedTemplateId) {
-      try {
-        await get().activateSession(state.selectedTemplateId);
-      } catch {
-        // activateSession already populated the visible error state
-      }
-    }
   },
 
   async sendMessage(content: string) {
