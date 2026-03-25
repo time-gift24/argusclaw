@@ -1,6 +1,6 @@
 //! Turn execution trace - append-only JSONL incremental logging.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use chrono::Utc;
@@ -252,7 +252,7 @@ pub async fn read_jsonl_events(
 
 /// Recover events from a turn JSONL file as a stream.
 pub async fn recover_turn_events(
-    trace_dir: &PathBuf,
+    trace_dir: &Path,
     session_id: &argus_protocol::SessionId,
     thread_id: &argus_protocol::ThreadId,
     from_turn: u32,

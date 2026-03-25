@@ -333,7 +333,16 @@ impl SessionManager {
 
     /// Delete a session and all its threads.
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
-        // Delete from DB (threads will be cascade deleted)
+        // Delete threads belonging to this session (no CASCADE on session_id FK)
+        sqlx::query("DELETE FROM threads WHERE session_id = ?")
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
+        // Delete the session row
         sqlx::query("DELETE FROM sessions WHERE id = ?")
             .bind(session_id.to_string())
             .execute(&self.pool)
@@ -344,6 +353,14 @@ impl SessionManager {
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
+
+        // Clean up session trace directory
+        let session_dir = self.trace_dir.join(session_id.to_string());
+        if session_dir.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&session_dir).await {
+                tracing::warn!(session_id = %session_id, error = %e, "Failed to remove session trace directory");
+            }
+        }
 
         Ok(())
     }
