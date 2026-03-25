@@ -267,19 +267,16 @@ impl Thread {
                                         msg_override: msg_override.clone(),
                                     });
                                 }
-                            } else {
-                                if let Err(e) = self.spawn_turn(content, msg_override).await {
-                                    tracing::error!("turn failed: {}", e);
-                                }
+                            } else if let Err(e) = self.spawn_turn(content, msg_override).await {
+                                tracing::error!("turn failed: {}", e);
                             }
                         }
                         Idle { .. } => {
-                            if let Some(msg) = pending_user_message.take() {
-                                if let ThreadEvent::UserMessage { content, msg_override } = msg {
-                                    if let Err(e) = self.spawn_turn(content, msg_override).await {
-                                        tracing::error!("turn failed: {}", e);
-                                    }
-                                }
+                            if let Some(ThreadEvent::UserMessage { content, msg_override }) =
+                                pending_user_message.take()
+                                && let Err(e) = self.spawn_turn(content, msg_override).await
+                            {
+                                tracing::error!("turn failed: {}", e);
                             }
                         }
                         _ => {}
