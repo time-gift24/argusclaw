@@ -35,40 +35,6 @@ scripts/
 
 ### 1. Provider 管理
 
-**ProviderManager** 是 provider 查找和实例化的高层接口：
-
-```rust
-let manager = ProviderManager::new(repository);
-
-// 获取 provider（自动包装 retry）
-let provider = manager.get_provider("provider-id")?;
-let provider = manager.get_provider_with_model("provider-id", "gpt-4o")?;
-
-// 测试连接
-let result = manager.test_provider_connection("provider-id", "gpt-4o")?;
-```
-
-**关键特性**：
-- 所有 provider 自动包装 `RetryProvider`
-- 连接测试返回详细状态报告
-- 模型验证和错误映射
-
-### Token-Based Auth
-
-Provider 可使用 token-based auth 而非静态 API key。当 provider 有 `credential_id: Some(n)` 时，构建出的 provider 会自动被 `TokenLLMProvider` 包装：
-
-```
-RetryProvider
-  └─> TokenLLMProvider (获取并注入 auth token)
-        └─> OpenAiCompatibleProvider
-```
-
-`TokenContext` 通过 `ProviderManager::with_token_context()` 传入，包含 `AccountManager`（当前登录用户）、`CredentialStore`（存储的凭证）和 token endpoint 配置。
-
-**数据库**：`llm_providers.credential_id` 列引用 `credentials.id`。NULL = 静态 API key（向后兼容）。
-
-### 2. Retry 装饰器模式
-
 **RetryProvider** 实现**装饰器模式**：
 
 ```rust
@@ -357,7 +323,6 @@ WARN Retrying after transient error
 ### 上游依赖
 - `argus-protocol`：核心类型（`LlmProvider`、`LlmError`、`LlmStreamEvent`）
 - `argus-test-support`：Mock providers
-- `argus-auth`：TokenContext for token-based auth
 
 ### 下游消费者
 - `argus-repository`：Provider repository 实现

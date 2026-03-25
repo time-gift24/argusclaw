@@ -9,7 +9,6 @@ pub mod retry;
 pub mod test_utils;
 
 pub use manager::ProviderManager;
-pub use argus_auth::TokenContext;
 pub use providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
 };

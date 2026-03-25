@@ -34,7 +34,7 @@ export interface LlmProviderRecord {
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
-  credential_id: number | null;
+  meta_data: Record<string, string>;
 }
 
 interface ProviderFormDialogProps {
@@ -57,7 +57,7 @@ function createDefaultFormData(): LlmProviderRecord {
     is_default: false,
     extra_headers: {},
     secret_status: "ready",
-    credential_id: null,
+    meta_data: {},
   };
 }
 

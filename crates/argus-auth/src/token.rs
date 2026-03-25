@@ -3,17 +3,19 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use argus_crypto::Cipher;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
 use super::error::AuthError;
 
-/// Token endpoint configuration for UserCredentialTokenSource.
+/// Token endpoint configuration for token-based auth.
 #[derive(Clone)]
 pub struct TokenConfig {
     pub token_url: String,
@@ -41,11 +43,10 @@ impl TokenConfig {
 }
 
 /// Holds auth dependencies needed to construct token-wrapped LLM providers.
-/// Passed to ProviderManager via `with_token_context()`.
 #[derive(Clone)]
 pub struct TokenContext {
-    pub account_manager: Arc<super::account::AccountManager>,
-    pub credential_store: Arc<super::credential::CredentialStore>,
+    pub pool: Arc<SqlitePool>,
+    pub cipher: Arc<Cipher>,
     pub config: TokenConfig,
 }
 
@@ -116,28 +117,52 @@ impl TokenSource for SimpleTokenSource {
     }
 }
 
-/// Token source that fetches tokens from an endpoint using stored credentials.
-pub struct UserCredentialTokenSource {
-    config: TokenConfig,
-    username: String,
-    password: String,
+/// TokenSource that fetches credentials from the accounts table via SqlitePool.
+/// Token URL, header_name, header_prefix are hardcoded.
+pub struct AccountTokenSource {
+    pool: Arc<SqlitePool>,
+    cipher: Arc<Cipher>,
+    header_name: String,
+    header_prefix: String,
+    token_url: &'static str,
 }
 
-impl UserCredentialTokenSource {
+impl AccountTokenSource {
     #[must_use]
-    pub fn new(config: TokenConfig, username: String, password: String) -> Self {
-        Self { config, username, password }
+    pub fn new(pool: Arc<SqlitePool>, cipher: Arc<Cipher>) -> Self {
+        Self {
+            pool,
+            cipher,
+            header_name: "Authorization".to_string(),
+            header_prefix: "Bearer ".to_string(),
+            token_url: "https://auth.example.com/token",
+        }
     }
 }
 
-impl TokenSource for UserCredentialTokenSource {
-    fn fetch_token(&self, _: &str, _: &str) -> Result<String, AuthError> {
+impl TokenSource for AccountTokenSource {
+    fn fetch_token(&self, _username: &str, _password: &str) -> Result<String, AuthError> {
+        let row: Option<(String, Vec<u8>, Vec<u8>)> = futures::executor::block_on(
+            sqlx::query_as("SELECT username, password, nonce FROM accounts WHERE id = 1")
+                .fetch_optional(self.pool.as_ref()),
+        )?;
+
+        let (username, ciphertext, nonce) =
+            row.ok_or(AuthError::TokenNotAvailable)?;
+
+        let decrypted = self
+            .cipher
+            .decrypt(&nonce, &ciphertext)
+            .map_err(|e| AuthError::DecryptionFailed {
+                reason: e.to_string(),
+            })?;
+
         let client = reqwest::blocking::Client::new();
         let response = client
-            .post(&self.config.token_url)
+            .post(self.token_url)
             .json(&serde_json::json!({
-                "username": self.username,
-                "password": self.password
+                "username": username,
+                "password": decrypted.expose_secret()
             }))
             .send()
             .map_err(|e| AuthError::TokenFetchFailed {
@@ -150,11 +175,12 @@ impl TokenSource for UserCredentialTokenSource {
             });
         }
 
-        let body: serde_json::Value = response.json().map_err(|e| {
-            AuthError::TokenFetchFailed {
-                reason: format!("Failed to parse response: {e}"),
-            }
-        })?;
+        let body: serde_json::Value =
+            response
+                .json()
+                .map_err(|e| AuthError::TokenFetchFailed {
+                    reason: format!("Failed to parse response: {e}"),
+                })?;
 
         body.get("token")
             .and_then(|t: &serde_json::Value| t.as_str())
@@ -165,11 +191,11 @@ impl TokenSource for UserCredentialTokenSource {
     }
 
     fn header_name(&self) -> &str {
-        &self.config.header_name
+        &self.header_name
     }
 
     fn header_prefix(&self) -> &str {
-        &self.config.header_prefix
+        &self.header_prefix
     }
 }
 

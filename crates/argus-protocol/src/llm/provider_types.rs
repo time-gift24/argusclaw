@@ -146,6 +146,14 @@ pub enum ProviderSecretStatus {
 // Provider Records
 // ============================================================================
 
+/// Configuration for a specific model.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Maximum context window size in tokens.
+    #[serde(default)]
+    pub max_context_window: u32,
+}
+
 /// Full provider record including sensitive data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlmProviderRecord {
@@ -155,12 +163,13 @@ pub struct LlmProviderRecord {
     pub base_url: String,
     pub api_key: SecretString,
     pub models: Vec<String>,
+    pub model_config: HashMap<String, ModelConfig>,
     pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
-    /// Credential ID for token-based auth. None means static API key.
-    pub credential_id: Option<i64>,
+    /// Arbitrary metadata key-value pairs for provider-specific configuration.
+    pub meta_data: HashMap<String, String>,
 }
 
 // ============================================================================
@@ -179,11 +188,12 @@ pub struct LlmProviderRecordJson {
     pub base_url: String,
     pub api_key: String,
     pub models: Vec<String>,
+    pub model_config: HashMap<String, ModelConfig>,
     pub default_model: String,
     pub is_default: bool,
     pub extra_headers: HashMap<String, String>,
     pub secret_status: ProviderSecretStatus,
-    pub credential_id: Option<i64>,
+    pub meta_data: HashMap<String, String>,
 }
 
 impl From<LlmProviderRecord> for LlmProviderRecordJson {
@@ -195,11 +205,12 @@ impl From<LlmProviderRecord> for LlmProviderRecordJson {
             base_url: record.base_url,
             api_key: record.api_key.expose_secret().to_string(),
             models: record.models,
+            model_config: record.model_config,
             default_model: record.default_model,
             is_default: record.is_default,
             extra_headers: record.extra_headers,
             secret_status: record.secret_status,
-            credential_id: record.credential_id,
+            meta_data: record.meta_data,
         }
     }
 }
@@ -260,16 +271,18 @@ mod tests {
             base_url: "https://api.example.com/v1".to_string(),
             api_key: SecretString::new("sk-test"),
             models: vec!["gpt-4.1".to_string(), "gpt-4.1-mini".to_string()],
+            model_config: HashMap::new(),
             default_model: "gpt-4.1".to_string(),
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::Ready,
-            credential_id: Some(42),
+            meta_data: HashMap::new(),
         };
 
         assert_eq!(record.models.len(), 2);
         assert_eq!(record.default_model, "gpt-4.1");
-        assert_eq!(record.credential_id, Some(42));
+        assert!(record.meta_data.is_empty());
+        assert!(record.model_config.is_empty());
     }
 
     #[test]

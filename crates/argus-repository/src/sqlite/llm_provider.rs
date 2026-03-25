@@ -1,19 +1,24 @@
 //! LlmProviderRepository implementation for SQLite.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
-use crate::error::DbError;
-use argus_protocol::ArgusError;
-use argus_protocol::llm::{
-    LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    LlmProviderRepository, ProviderSecretStatus, SecretString,
-};
+use argus_protocol::llm::{LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord, LlmProviderRepository, ModelConfig, ProviderSecretStatus, SecretString};
 
-use super::ArgusSqlite;
+use crate::error::DbError;
+use crate::sqlite::ArgusSqlite;
+use argus_protocol::ArgusError;
 
 /// Map DbError to ArgusError for protocol trait compatibility.
 fn map_err(e: DbError) -> ArgusError {
     e.into()
+}
+
+fn serialize_json<T: serde::Serialize>(value: &T) -> Result<String, DbError> {
+    serde_json::to_string(value).map_err(|e| DbError::QueryFailed {
+        reason: format!("failed to serialize: {e}"),
+    })
 }
 
 #[async_trait]
@@ -44,14 +49,10 @@ impl LlmProviderRepository for ArgusSqlite {
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
-        let extra_headers_json =
-            serde_json::to_string(&record.extra_headers).map_err(|e| DbError::QueryFailed {
-                reason: format!("failed to serialize extra_headers: {e}"),
-            })?;
-        let models_json =
-            serde_json::to_string(&record.models).map_err(|e| DbError::QueryFailed {
-                reason: format!("failed to serialize models: {e}"),
-            })?;
+        let extra_headers_json = serialize_json(&record.extra_headers)?;
+        let models_json = serialize_json(&record.models)?;
+        let meta_data_json = serialize_json(&record.meta_data)?;
+        let model_config_json = serialize_json(&record.model_config)?;
 
         let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
@@ -67,19 +68,20 @@ impl LlmProviderRepository for ArgusSqlite {
 
         let provider_id = if record.id.into_inner() == 0 {
             sqlx::query(
-                "INSERT INTO llm_providers (kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, credential_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO llm_providers (kind, display_name, base_url, models, model_config, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, meta_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .bind(record.kind.as_str())
             .bind(&record.display_name)
             .bind(&record.base_url)
             .bind(&models_json)
+            .bind(&model_config_json)
             .bind(&record.default_model)
             .bind(&encrypted.ciphertext)
             .bind(&encrypted.nonce)
             .bind(i64::from(record.is_default))
             .bind(&extra_headers_json)
-            .bind(record.credential_id)
+            .bind(&meta_data_json)
             .execute(&mut *tx)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
@@ -94,19 +96,20 @@ impl LlmProviderRepository for ArgusSqlite {
             LlmProviderId::new(new_id)
         } else {
             sqlx::query(
-                "INSERT INTO llm_providers (id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, credential_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO llm_providers (id, kind, display_name, base_url, models, model_config, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, meta_data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                      kind = excluded.kind,
                      display_name = excluded.display_name,
                      base_url = excluded.base_url,
                      models = excluded.models,
+                     model_config = excluded.model_config,
                      default_model = excluded.default_model,
                      encrypted_api_key = excluded.encrypted_api_key,
                      api_key_nonce = excluded.api_key_nonce,
                      is_default = excluded.is_default,
                      extra_headers = excluded.extra_headers,
-                     credential_id = excluded.credential_id,
+                     meta_data = excluded.meta_data,
                      updated_at = CURRENT_TIMESTAMP",
             )
             .bind(record.id.into_inner())
@@ -114,12 +117,13 @@ impl LlmProviderRepository for ArgusSqlite {
             .bind(&record.display_name)
             .bind(&record.base_url)
             .bind(&models_json)
+            .bind(&model_config_json)
             .bind(&record.default_model)
             .bind(&encrypted.ciphertext)
             .bind(&encrypted.nonce)
             .bind(i64::from(record.is_default))
             .bind(&extra_headers_json)
-            .bind(record.credential_id)
+            .bind(&meta_data_json)
             .execute(&mut *tx)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
@@ -191,7 +195,7 @@ impl LlmProviderRepository for ArgusSqlite {
         id: &LlmProviderId,
     ) -> Result<Option<LlmProviderRecord>, ArgusError> {
         let row = sqlx::query(
-            "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, credential_id
+            "SELECT id, kind, display_name, base_url, models, model_config, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, meta_data
              FROM llm_providers WHERE id = ?1",
         )
         .bind(id.into_inner())
@@ -204,7 +208,7 @@ impl LlmProviderRepository for ArgusSqlite {
 
     async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, ArgusError> {
         let rows = sqlx::query(
-            "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, credential_id
+            "SELECT id, kind, display_name, base_url, models, model_config, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, meta_data
              FROM llm_providers ORDER BY display_name ASC",
         )
         .fetch_all(&self.pool)
@@ -216,7 +220,7 @@ impl LlmProviderRepository for ArgusSqlite {
 
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, ArgusError> {
         let row = sqlx::query(
-            "SELECT id, kind, display_name, base_url, models, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, credential_id
+            "SELECT id, kind, display_name, base_url, models, model_config, default_model, encrypted_api_key, api_key_nonce, is_default, extra_headers, meta_data
              FROM llm_providers WHERE is_default = 1 LIMIT 1",
         )
         .fetch_optional(&self.pool)
@@ -238,25 +242,41 @@ impl ArgusSqlite {
             String,
             String,
             Vec<String>,
+            HashMap<String, ModelConfig>,
             String,
             bool,
-            std::collections::HashMap<String, String>,
+            HashMap<String, String>,
+            HashMap<String, String>,
             Vec<u8>,
             Vec<u8>,
-            Option<i64>,
         ),
         ArgusError,
     > {
         let nonce: Vec<u8> = Self::get_column(&row, "api_key_nonce").map_err(map_err)?;
         let ciphertext: Vec<u8> = Self::get_column(&row, "encrypted_api_key").map_err(map_err)?;
-        let extra_headers: std::collections::HashMap<String, String> = serde_json::from_str(
-            &Self::get_column::<String>(&row, "extra_headers").map_err(map_err)?,
-        )
-        .map_err(|e| {
-            ArgusError::from(DbError::QueryFailed {
-                reason: format!("failed to parse extra_headers: {e}"),
-            })
-        })?;
+        let extra_headers: HashMap<String, String> =
+            serde_json::from_str(&Self::get_column::<String>(&row, "extra_headers").map_err(map_err)?)
+                .map_err(|e| {
+                    ArgusError::from(DbError::QueryFailed {
+                        reason: format!("failed to parse extra_headers: {e}"),
+                    })
+                })?;
+        let meta_data: HashMap<String, String> =
+            serde_json::from_str(&Self::get_column::<String>(&row, "meta_data").map_err(map_err)?)
+                .map_err(|e| {
+                    ArgusError::from(DbError::QueryFailed {
+                        reason: format!("failed to parse meta_data: {e}"),
+                    })
+                })?;
+        let model_config: HashMap<String, ModelConfig> =
+            serde_json::from_str(
+                &Self::get_column::<String>(&row, "model_config").map_err(map_err)?,
+            )
+            .map_err(|e| {
+                ArgusError::from(DbError::QueryFailed {
+                    reason: format!("failed to parse model_config: {e}"),
+                })
+            })?;
         // Try to parse models as Vec<String> (new format)
         // If that fails, try to parse as array of objects and extract the "id" or "name" field (old format)
         let models_raw: String = Self::get_column::<String>(&row, "models").map_err(map_err)?;
@@ -303,12 +323,13 @@ impl ArgusSqlite {
             Self::get_column(&row, "display_name").map_err(map_err)?,
             Self::get_column(&row, "base_url").map_err(map_err)?,
             models,
+            model_config,
             Self::get_column(&row, "default_model").map_err(map_err)?,
             Self::get_column::<i64>(&row, "is_default").map_err(map_err)? != 0,
             extra_headers,
+            meta_data,
             nonce,
             ciphertext,
-            Self::get_column::<Option<i64>>(&row, "credential_id").map_err(map_err)?,
         ))
     }
 
@@ -322,12 +343,13 @@ impl ArgusSqlite {
             display_name,
             base_url,
             models,
+            model_config,
             default_model,
             is_default,
             extra_headers,
+            meta_data,
             nonce,
             ciphertext,
-            credential_id,
         ) = Self::parse_llm_shared_fields(row)?;
 
         // Attempt decryption; if it fails, return record with empty api_key
@@ -347,11 +369,12 @@ impl ArgusSqlite {
             base_url,
             api_key,
             models,
+            model_config,
             default_model,
             is_default,
             extra_headers,
             secret_status,
-            credential_id,
+            meta_data,
         })
     }
 }

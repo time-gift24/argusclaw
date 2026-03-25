@@ -44,7 +44,6 @@ pub struct ArgusWing {
     job_manager: Arc<JobManager>,
     job_broadcaster: Arc<SseBroadcaster>,
     account_manager: Arc<AccountManager>,
-    credential_store: Arc<CredentialStore>,
 }
 ```
 

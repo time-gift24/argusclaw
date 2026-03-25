@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
+use argus_crypto::Cipher;
 use sqlx::SqlitePool;
 use subtle::ConstantTimeEq;
-
-use argus_crypto::Cipher;
 
 use super::error::AuthError;
 

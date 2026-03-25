@@ -272,6 +272,7 @@ pub struct OpenAiCompatibleConfig {
     pub model: String,
     pub timeout: Duration,
     pub extra_headers: HashMap<String, String>,
+    pub context_window: u32,
 }
 
 impl OpenAiCompatibleConfig {
@@ -287,6 +288,7 @@ impl OpenAiCompatibleConfig {
             model: model.into(),
             timeout: Duration::from_secs(60),
             extra_headers: HashMap::new(),
+            context_window: 128_000,
         }
     }
 
@@ -299,6 +301,12 @@ impl OpenAiCompatibleConfig {
     #[must_use]
     pub fn with_extra_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.extra_headers.insert(name.into(), value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_context_window(mut self, context_window: u32) -> Self {
+        self.context_window = context_window;
         self
     }
 }
@@ -341,6 +349,7 @@ pub struct OpenAiCompatibleProvider {
     stream_client: reqwest::Client,
     base_url: String,
     model: String,
+    context_window: u32,
 }
 
 impl OpenAiCompatibleProvider {
@@ -378,6 +387,7 @@ impl OpenAiCompatibleProvider {
             stream_client,
             base_url: config.base_url.trim_end_matches('/').to_string(),
             model: config.model,
+            context_window: config.context_window,
         })
     }
 
@@ -470,6 +480,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
         ProviderCapabilities {
             thinking: model_supports_thinking(&self.model),
         }
+    }
+
+    fn context_window(&self) -> u32 {
+        self.context_window
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
