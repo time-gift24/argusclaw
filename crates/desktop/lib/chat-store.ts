@@ -82,6 +82,8 @@ export interface ChatStore {
   _handleThreadEvent: (envelope: ThreadEventEnvelope) => void;
 }
 
+let threadEventListenerInitPromise: Promise<UnlistenFn> | null = null;
+
 export const useChatStore = create<ChatStore>((set, get) => ({
   selectedTemplateId: null,
   selectedProviderPreferenceId: null,
@@ -98,14 +100,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   _unlisten: null,
 
   async initialize() {
-    if (!get()._unlisten) {
-      const unlisten = await listen<ThreadEventEnvelope>("thread:event", (event) => {
-        get()._handleThreadEvent(event.payload);
-      });
-      set({ _unlisten: unlisten });
-    }
-
     try {
+      if (!get()._unlisten) {
+        threadEventListenerInitPromise ??= listen<ThreadEventEnvelope>(
+          "thread:event",
+          (event) => {
+            get()._handleThreadEvent(event.payload);
+          },
+        )
+          .then((unlisten) => {
+            set((state) => (state._unlisten ? {} : { _unlisten: unlisten }));
+            return unlisten;
+          })
+          .finally(() => {
+            threadEventListenerInitPromise = null;
+          });
+
+        await threadEventListenerInitPromise;
+      }
+
       const [templateList, providerList] = await Promise.all([
         agents.list(),
         providers.list(),
@@ -425,6 +438,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       unlisten();
       set({ _unlisten: null });
     }
+    threadEventListenerInitPromise = null;
   },
 
   _handleThreadEvent(envelope: ThreadEventEnvelope) {

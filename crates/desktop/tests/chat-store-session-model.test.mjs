@@ -10,7 +10,7 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
   assert.match(storeSource, /selectedProviderPreferenceId:\s*number \| null/);
   assert.match(storeSource, /refreshSnapshot:\s*\([\s\S]*sessionKey:\s*string/);
-  assert.match(storeSource, /listen.*"thread:event"/);
+  assert.match(storeSource, /listen[\s\S]*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
   assert.match(storeSource, /case "content_delta"/);
   assert.match(storeSource, /case "reasoning_delta"/);
@@ -23,6 +23,19 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /chat\.getThreadSnapshot\(/);
   assert.match(storeSource, /catch \(error\)/);
   assert.match(storeSource, /errorMessage:/);
+});
+
+test("chat store guards thread-event listener registration against concurrent initialize calls", () => {
+  assert.match(
+    storeSource,
+    /threadEventListenerInitPromise|listenerInitPromise|initializingThreadEventListener/,
+    "store should track an in-flight listener registration promise",
+  );
+  assert.match(
+    storeSource,
+    /if\s*\(!get\(\)\._unlisten\)\s*\{[\s\S]*?await\s+.*threadEvent.*Promise/i,
+    "initialize should await the shared listener registration instead of calling listen twice",
+  );
 });
 
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {
