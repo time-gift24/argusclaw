@@ -1,21 +1,15 @@
 //! dispatch_job tool implementation.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use argus_protocol::{NamedTool, RiskLevel, ToolDefinition, tool::ToolError, ToolExecutionContext};
+use argus_protocol::{
+    NamedTool, RiskLevel, ThreadEvent, ToolDefinition, ToolError, ToolExecutionContext,
+};
 use async_trait::async_trait;
-use tokio::time::sleep;
+use uuid::Uuid;
 
-use crate::error::JobError;
 use crate::job_manager::JobManager;
 use crate::types::JobDispatchArgs;
-
-/// Maximum number of retry attempts for dispatch.
-const MAX_RETRIES: u32 = 3;
-
-/// Base delay for exponential backoff (100ms).
-const BASE_DELAY_MS: u64 = 100;
 
 /// Tool for dispatching background jobs.
 #[derive(Debug)]
@@ -66,63 +60,54 @@ impl NamedTool for DispatchJobTool {
         RiskLevel::Medium
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError> {
-        // Parse the input
-        let args: JobDispatchArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: self.name().to_string(),
-                reason: format!("invalid input: {}", e),
-            })?;
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let args: JobDispatchArgs = serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
+            tool_name: self.name().to_string(),
+            reason: format!("invalid input: {}", e),
+        })?;
+
+        let job_id = Uuid::new_v4().to_string();
 
         tracing::info!(
-            "dispatch_job called with prompt length {} for agent {:?}",
+            "dispatch_job called: job_id={}, prompt_len={}, agent_id={:?}",
+            job_id,
             args.prompt.len(),
             args.agent_id
         );
 
-        // Retry loop with exponential backoff
-        let mut last_error = None;
-
-        for attempt in 0..=MAX_RETRIES {
-            match self.job_manager.dispatch(args.clone()).await {
-                Ok(result) => {
-                    if attempt > 0 {
-                        tracing::info!("dispatch_job succeeded after {} retries", attempt);
-                    }
-                    return serde_json::to_value(&result).map_err(|e| ToolError::ExecutionFailed {
-                        tool_name: self.name().to_string(),
-                        reason: e.to_string(),
-                    });
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    last_error = Some(e);
-                    if attempt == MAX_RETRIES {
-                        break;
-                    }
-                    let delay_ms = BASE_DELAY_MS * 2u64.pow(attempt);
-                    tracing::warn!(
-                        "dispatch_job attempt {} failed: {}, retrying in {}ms",
-                        attempt + 1,
-                        error_msg,
-                        delay_ms
-                    );
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
-            }
+        // Send JobDispatched into the pipe
+        let dispatch_event = ThreadEvent::JobDispatched {
+            job_id: job_id.clone(),
+            agent_id: args.agent_id,
+            prompt: args.prompt.clone(),
+            context: args.context.clone(),
+        };
+        if let Err(e) = ctx.pipe_tx.send(dispatch_event) {
+            tracing::warn!("failed to send JobDispatched event: {}", e);
         }
 
-        // All retries exhausted
-        let final_error = last_error
-            .unwrap_or_else(|| JobError::Internal("dispatch failed without error".to_string()));
-        tracing::error!(
-            "dispatch_job failed after {} retries: {}",
-            MAX_RETRIES,
-            final_error
-        );
-        Err(ToolError::ExecutionFailed {
-            tool_name: self.name().to_string(),
-            reason: JobError::RetryExhausted(final_error.to_string()).to_string(),
-        })
+        // Spawn background executor using the JobManager's spawn method
+        self.job_manager
+            .spawn_job_executor(
+                job_id.clone(),
+                args.agent_id,
+                args.prompt,
+                args.context,
+                ctx.pipe_tx.clone(),
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool_name: self.name().to_string(),
+                reason: e.to_string(),
+            })?;
+
+        Ok(serde_json::json!({
+            "job_id": job_id,
+            "status": "dispatched"
+        }))
     }
 }
