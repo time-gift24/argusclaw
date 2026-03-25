@@ -167,7 +167,7 @@ const Navbar = ({
   return (
     <>
       <header className='bg-background sticky top-0 z-50'>
-        <div className='mx-auto flex max-w-7xl items-center justify-between px-6 py-4'>
+        <div className='mx-auto flex max-w-screen-2xl items-center justify-between px-6 py-4'>
           <Link href='/'>
             <div className='flex items-center gap-3'>
               <LogoSvg className='size-8' />
@@ -271,7 +271,7 @@ const Navbar = ({
       {/* Sub navigation with breadcrumb */}
       {breadcrumbItems.length > 0 && (
         <div className="border-b bg-background">
-          <div className="mx-auto flex max-w-7xl items-center gap-2 px-6 py-2">
+          <div className="mx-auto flex max-w-screen-2xl items-center gap-2 px-6 py-2">
             {breadcrumbItems.length >= 3 && (
               <Button
                 variant="ghost"

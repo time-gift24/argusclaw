@@ -487,8 +487,8 @@ export const Thread: FC = () => {
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background overflow-hidden"
       style={{
-        ["--thread-max-width" as string]: "52rem",
-        ["--composer-max-width" as string]: "44rem",
+        ["--thread-max-width" as string]: "72rem",
+        ["--composer-max-width" as string]: "60rem",
       }}
     >
       <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-8 custom-scrollbar">

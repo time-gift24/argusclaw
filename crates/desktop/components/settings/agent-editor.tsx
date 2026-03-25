@@ -440,7 +440,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                 </TabsContent>
 
                 <TabsContent value="preview" className="m-0 p-0 bg-background min-h-[500px]">
-                  <div className="max-w-4xl mx-auto p-12">
+                  <div className="max-w-screen-2xl mx-auto p-12">
                     {formData.system_prompt ? (
                       <MessageProvider message={previewMessage} index={0} isLast>
                         <div className="prose prose-sm dark:prose-invert max-w-none">
