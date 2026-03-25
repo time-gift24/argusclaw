@@ -18,24 +18,32 @@
 - Modify: `crates/argus-protocol/src/tool.rs`
 - Modify: `crates/argus-protocol/src/lib.rs`
 
+> **Important:** `ToolDefinition` is defined in `llm/mod.rs:428` and re-exported through `crate::llm::ToolDefinition`. Do NOT redefine it. `ToolError` is an enum with variants `NotFound`, `ExecutionFailed`, `SecurityBlocked` — keep it as an enum, don't replace with a struct. The current `NamedTool::execute` uses parameter name `args` (not `input`).
+
 - [ ] **Step 1: Read current tool.rs**
 
 ```bash
 cat crates/argus-protocol/src/tool.rs
 ```
 
-- [ ] **Step 2: Add `ToolExecutionContext` struct and update `NamedTool::execute` signature**
+- [ ] **Step 2: Add `ToolExecutionContext` and update `NamedTool::execute` signature**
 
 Replace the entire `tool.rs` content with:
 
 ```rust
-//! Tool abstractions.
+//! Tool types for agent/LLM tool management.
+//!
+//! This module contains shared types for tools used by argus-tool crate.
 
-use crate::ThreadEvent;
+use async_trait::async_trait;
+
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use super::ids::ThreadId;
+use crate::llm::ToolDefinition;
+use crate::ids::ThreadId;
+use crate::RiskLevel;
+use crate::ThreadEvent;
 
 /// Context passed to tools at execution time.
 #[derive(Debug, Clone)]
@@ -47,42 +55,32 @@ pub struct ToolExecutionContext {
     pub pipe_tx: broadcast::Sender<ThreadEvent>,
 }
 
-/// Tool execution error.
-#[derive(Debug, Clone)]
-pub struct ToolError {
-    pub tool_name: String,
-    pub reason: String,
+/// Error type for tool operations.
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    /// Tool not found in registry.
+    #[error("Tool not found: {id}")]
+    NotFound { id: String },
+
+    /// Tool execution failed.
+    #[error("Tool '{tool_name}' execution failed: {reason}")]
+    ExecutionFailed { tool_name: String, reason: String },
+
+    /// Request blocked by security policy (e.g., SSRF protection).
+    #[error("HTTP request to '{url}' blocked: {reason}")]
+    SecurityBlocked { url: String, reason: String },
 }
 
-impl std::fmt::Display for ToolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Tool '{}' error: {}", self.tool_name, self.reason)
-    }
-}
-
-impl std::error::Error for ToolError {}
-
-/// Tool definition for LLM function-calling.
-#[derive(Debug, Clone)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
-
-/// Tool trait — implemented by all tools available to agents.
-#[async_trait::async_trait]
+/// Trait for defining tools that can be used by agents and LLMs.
+#[async_trait]
 pub trait NamedTool: Send + Sync {
-    /// Tool name (used as the function name in LLM calls).
+    /// Returns the unique name of the tool.
     fn name(&self) -> &str;
 
-    /// Tool description for the LLM.
+    /// Returns the tool definition for LLM consumption.
     fn definition(&self) -> ToolDefinition;
 
-    /// Risk level of this tool.
-    fn risk_level(&self) -> crate::RiskLevel;
-
-    /// Execute the tool with the given input.
+    /// Execute the tool with the provided arguments.
     ///
     /// `input` is the JSON arguments from the LLM.
     /// `ctx` provides execution context including the pipe for sending events.
@@ -91,14 +89,25 @@ pub trait NamedTool: Send + Sync {
         input: serde_json::Value,
         ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError>;
+
+    /// Returns the risk level of this tool for approval gating.
+    /// Default is `RiskLevel::Low` for read-only/safe operations.
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Low
+    }
 }
 ```
 
-- [ ] **Step 3: Export `ToolExecutionContext` from lib.rs**
+- [ ] **Step 3: Update lib.rs export**
 
-Read `crates/argus-protocol/src/lib.rs`, find the tool module exports, and add:
+Read `crates/argus-protocol/src/lib.rs`, find the tool exports (around line 72):
 ```rust
-pub use tool::{ToolError, ToolExecutionContext};
+pub use tool::{NamedTool, ToolError};
+```
+
+Replace with:
+```rust
+pub use tool::{NamedTool, ToolError, ToolExecutionContext};
 ```
 
 - [ ] **Step 4: Verify it compiles**
@@ -106,7 +115,7 @@ pub use tool::{ToolError, ToolExecutionContext};
 ```bash
 cargo check -p argus-protocol 2>&1 | tail -20
 ```
-Expected: Compiles successfully (may have errors in downstream crates — those will be fixed in later tasks)
+Expected: Compiles successfully
 
 - [ ] **Step 5: Commit**
 
@@ -216,16 +225,17 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 - Modify: `crates/argus-tool/src/read.rs`
 - Modify: `crates/argus-tool/src/shell.rs`
 - Modify: `crates/argus-turn/src/execution.rs`
+- Modify: `crates/argus-turn/src/bin/turn.rs` *(EchoTool implementation at line 149)*
 
 ### Task 3: Update each tool's execute signature
 
-For **each** of the 9 files above, the change is identical in pattern:
+For **each** of the 10 files above, the change is identical in pattern:
 
-- [ ] **Step: Update execute signature**
+- [ ] **Step 1: Update execute signature in each file**
 
 Find the line:
 ```rust
-async fn execute(&self, input: serde_json::Value) -> Result<serde_json::Value, ToolError>
+async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>
 ```
 
 Replace with:
@@ -233,19 +243,29 @@ Replace with:
 async fn execute(&self, input: serde_json::Value, _ctx: Arc<ToolExecutionContext>) -> Result<serde_json::Value, ToolError>
 ```
 
-The underscore prefix `_ctx` means the tool doesn't use the context — it just accepts the parameter to satisfy the trait.
+> **Note:** The parameter name changes from `args` to `input`. Update all internal usages of `args` → `input` within the execute body in each file.
 
-- [ ] **Step: Verify each tool compiles**
+Also add the import at the top of each file:
+```rust
+use std::sync::Arc;
+use argus_protocol::ToolExecutionContext;
+```
+
+- [ ] **Step 2: Verify each crate compiles**
 
 ```bash
-# Run after updating each file
 cargo check -p argus-job 2>&1 | grep -E "^error" | head -5
 cargo check -p argus-thread 2>&1 | grep -E "^error" | head -5
 cargo check -p argus-tool 2>&1 | grep -E "^error" | head -5
 cargo check -p argus-turn 2>&1 | grep -E "^error" | head -5
 ```
 
-- [ ] **Step: Commit after all 9 tools updated**
+Also verify argus-protocol still compiles (Step 3):
+```bash
+cargo check -p argus-protocol 2>&1 | tail -5
+```
+
+- [ ] **Step 3: Commit after all 10 tools updated**
 
 ```bash
 git add crates/argus-job/src/dispatch_tool.rs \
@@ -256,10 +276,12 @@ git add crates/argus-job/src/dispatch_tool.rs \
     crates/argus-tool/src/http.rs \
     crates/argus-tool/src/read.rs \
     crates/argus-tool/src/shell.rs \
-    crates/argus-turn/src/execution.rs
+    crates/argus-turn/src/execution.rs \
+    crates/argus-turn/src/bin/turn.rs
 git commit -m "refactor(tool): update execute signature to accept ToolExecutionContext
 
-All 9 tool implementations updated. Signature: execute(input, ctx) -> Result.
+All 10 tool implementations updated. Signature: execute(input, ctx) -> Result.
+Parameter renamed args -> input in all implementations.
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
@@ -525,23 +547,20 @@ use std::sync::Arc;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
-use argus_protocol::{AgentId, AgentRecord, ProviderResolver, ThreadEvent, ThreadEvent};
+use argus_protocol::{AgentId, ProviderResolver, ThreadEvent};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use argus_turn::{TurnBuilder, TurnConfig, TurnOutput};
-use sqlx::SqlitePool;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
 use crate::list_subagents_tool::ListSubagentsTool;
-use crate::sse_broadcaster::SseBroadcaster;
 use crate::types::{JobDispatchArgs, JobResult};
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
-    pool: SqlitePool,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
@@ -565,13 +584,11 @@ struct JobState {
 impl JobManager {
     /// Create a new JobManager.
     pub fn new(
-        pool: SqlitePool,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
         Self {
-            pool,
             template_manager,
             provider_resolver,
             tool_manager,
@@ -621,7 +638,6 @@ impl JobManager {
 
         // Capture clones for the background task
         let jobs = Arc::clone(&self.jobs);
-        let pool = self.pool.clone();
         let template_manager = Arc::clone(&self.template_manager);
         let provider_resolver = Arc::clone(&self.provider_resolver);
         let tool_manager = Arc::clone(&self.tool_manager);
@@ -734,7 +750,6 @@ impl JobManager {
             match output {
                 Ok(o) => {
                     let message = Self::summarize_output(&o);
-                    let _ = jobs.write().await;
                     if let Some(state) = jobs.write().await.get_mut(&job_id) {
                         state.status = "completed".to_string();
                         state.result = Some(JobResult {
@@ -1040,33 +1055,29 @@ Key areas:
 
 - [ ] **Step 2: Add `rx` field to Turn struct**
 
-Add this field inside the Turn struct (after `stream_tx`):
+Add this field inside the Turn struct (after `stream_tx`). Do NOT use `#[builder(default)]` — `broadcast::Receiver` does not implement `Default`:
+
 ```rust
 /// Receiver for the unified pipe (Thread-owned).
-/// Created at execute() start via thread_event_tx.subscribe().
-#[builder(default)]
+/// Initialized at execute() start via thread_event_tx.subscribe().
 rx: broadcast::Receiver<ThreadEvent>,
 ```
 
-- [ ] **Step 3: Update `execute()` to create the receiver**
+- [ ] **Step 3: Update `execute()` to subscribe and initialize rx**
 
-In the `execute()` method, after `self._forwarder_handle = Some(...)`, add:
+At the start of `execute()` (right after the trace writer setup), add:
+
 ```rust
 // Subscribe to the unified pipe for polling at iteration start.
 // Each Turn gets its own receiver via broadcast::Sender::subscribe().
 self.rx = self.thread_event_tx.subscribe();
 ```
 
-- [ ] **Step 4: Remove internal channel creation**
+- [ ] **Step 4: Clarify — no internal channel removal needed**
 
-Find where `stream_tx` is created internally with `broadcast::channel`. In `execute()`, find:
-```rust
-let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-```
+The `stream_tx` is passed into TurnBuilder from Thread's `execute_turn_streaming()`. It is NOT created internally in Turn's `execute()`. The internal event forwarder creates its own `stream_rx` by subscribing to `stream_tx` — that is correct and should NOT be changed.
 
-Replace with using the existing `stream_tx` field from the builder (it should already be set by the builder, but we need to create it if not set). Actually, looking at the current code, `stream_tx` is built via the builder. Check if the existing code creates it inside `execute()`. If yes, remove that internal creation since `stream_tx` comes from the builder.
-
-Looking at the current code, `stream_tx` is created in `Thread::execute_turn_streaming()` and passed to `TurnBuilder`. So the Turn struct should already have `stream_tx` from the builder. The `rx` subscription to `thread_event_tx` is the new part.
+Skip Step 4.
 
 - [ ] **Step 5: Update `execute_loop()` to poll the pipe at iteration start**
 
@@ -1130,6 +1141,8 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 Key sections:
 - Tool registration (lines 42-52)
 - `send_message()` method (around line 417)
+- `load()` method (around line 220)
+- `create_thread()` method (around line 340)
 
 - [ ] **Step 2: Remove get_job_result tool registration**
 
@@ -1138,6 +1151,18 @@ Find and delete:
 // Register the get_job_result tool for polling job status
 let get_result_tool = job_manager.clone().create_get_result_tool();
 tool_manager.register(Arc::new(get_result_tool));
+```
+
+Also in `crates/argus-job/src/job_manager.rs`, remove the `create_get_result_tool()` method and its import of `GetJobResultTool`:
+```rust
+// Delete:
+use crate::get_job_result_tool::GetJobResultTool;
+
+// Delete this method from JobManager impl:
+/// Create a GetJobResultTool for this manager.
+pub fn create_get_result_tool(self: Arc<Self>) -> GetJobResultTool {
+    GetJobResultTool::new(self)
+}
 ```
 
 - [ ] **Step 3: Update `send_message()` to use `send_user_message()`**
@@ -1170,10 +1195,12 @@ pub async fn send_message(
 }
 ```
 
-- [ ] **Step 4: Add thread.run() spawning when thread is created**
+- [ ] **Step 4: Add thread.run() spawning in two locations**
 
-Find where a Thread is created or loaded (look for `ThreadBuilder` usage or `session.add_thread`). Add the spawning of `run()`:
+There are two places where a Thread is added to a Session:
 
+**Location A — `load()` method (around line 226):**
+Find `session.add_thread(thread.clone());`. Before that line, add:
 ```rust
 // Spawn the thread's main orchestration loop
 let thread_clone = Arc::clone(&thread);
@@ -1181,9 +1208,13 @@ tokio::spawn(async move {
     let mut t = thread_clone.lock().await;
     t.run().await;
 });
+session.add_thread(thread.clone());
 ```
 
-The exact location depends on where Thread is created. Look for `session.add_thread(thread.clone())` and add the spawn before it.
+**Location B — `create_thread()` method (around line 348):**
+Same pattern — before `session.add_thread(thread.clone())`, add the spawn.
+
+Note: `add_thread` calls `thread.try_lock().map(|t| t.id())` to get the thread ID before inserting. Make sure the spawn is added after the Arc is created but before or after the lock attempt — the Arc keeps the thread alive for the spawned task.
 
 - [ ] **Step 5: Verify compiles**
 
@@ -1210,18 +1241,40 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ## Chunk 7: argus-wing + Desktop Changes
 
-### Task 11: Update argus-wing public API
+### Task 11: Update argus-wing — fix JobManager construction and remove broadcaster
 
 **Files:**
 - Modify: `crates/argus-wing/src/lib.rs`
 
-- [ ] **Step 1: Read the send_message method**
+> The `send_message` public API is unchanged — it flows through session_manager correctly. The actual changes are to `JobManager::new()` (pool arg removed) and removal of `broadcaster()` calls.
 
-Read `crates/argus-wing/src/lib.rs`, find the `send_message` method (around line 520).
+- [ ] **Step 1: Remove pool arg from both JobManager::new() calls**
 
-- [ ] **Step 2: Verify the method body**
+In `crates/argus-wing/src/lib.rs`, find both calls to `JobManager::new()`. At **each** call site, remove `pool.clone()` as the first argument:
 
-The method calls `session_manager.send_message()` which we updated in Task 10. The argus-wing public API stays the same (`send_message(session_id, thread_id, message)`). No changes needed here — the change propagates through the session manager.
+Find:
+```rust
+let job_manager = Arc::new(JobManager::new(
+    pool.clone(),
+    template_manager.clone(),
+    ...
+```
+
+Replace with:
+```rust
+let job_manager = Arc::new(JobManager::new(
+    template_manager.clone(),
+    ...
+```
+
+- [ ] **Step 2: Remove broadcaster() calls**
+
+In `crates/argus-wing/src/lib.rs`, find and delete:
+```rust
+let job_broadcaster = Arc::new(job_manager.broadcaster().clone());
+```
+
+This line appears twice (once per construction path). Delete both occurrences.
 
 - [ ] **Step 3: Verify compiles**
 
@@ -1229,9 +1282,14 @@ The method calls `session_manager.send_message()` which we updated in Task 10. T
 cargo check -p argus-wing 2>&1 | tail -10
 ```
 
-- [ ] **Step 4: Commit (if changes needed, otherwise skip)**
+- [ ] **Step 4: Commit**
 
-If no changes were needed, skip this task.
+```bash
+git add crates/argus-wing/src/lib.rs
+git commit -m "fix(wing): remove pool arg and broadcaster calls from JobManager
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+```
 
 ---
 
@@ -1269,12 +1327,23 @@ cargo check 2>&1 | tail -30
 ```
 
 Fix all compilation errors. Common issues:
-- Missing imports (add `use argus_protocol::ToolExecutionContext;`)
-- `broadcast` channel capacity conflicts (ensure consistent)
-- `serde_json::json!` usage in new code
-- `AgentId::new()` vs `AgentId::parse()` vs `args.agent_id`
+- Missing imports (`Arc`, `ToolExecutionContext`)
+- Tool implementations still using old `(args)` parameter name instead of `(input, ctx)`
+- `broadcast::Sender::send` return values not handled (use `.ok()` or `.is_err()`)
+- `job_manager.broadcaster()` calls (removed from JobManager) — delete these
+- `create_get_result_tool()` calls — delete these
+- `get_job_result` in tool registration
+- `JobDispatchResult` type usage (removed)
 
-- [ ] **Step 2: Run cargo test**
+- [ ] **Step 2: Run cargo check on downstream crates**
+
+Also check these crates individually since they may use tool-related types:
+```bash
+cargo check -p argus-repository 2>&1 | tail -10
+cargo check -p desktop 2>&1 | tail -10
+```
+
+- [ ] **Step 3: Run cargo test**
 
 ```bash
 cargo test 2>&1 | tail -20
@@ -1285,7 +1354,7 @@ Fix any test failures. Tests may fail because:
 - Tests expect `JobDispatchResult` type which was removed
 - Tests use `send_message()` directly instead of through the pipe
 
-- [ ] **Step 3: Run prek**
+- [ ] **Step 4: Run prek**
 
 ```bash
 prek 2>&1 | tail -20
@@ -1293,7 +1362,7 @@ prek 2>&1 | tail -20
 
 Fix any lint issues.
 
-- [ ] **Step 4: Commit verification**
+- [ ] **Step 5: Commit verification**
 
 ```bash
 git add -A && git commit -m "fix: resolve compilation and test errors
