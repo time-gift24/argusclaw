@@ -39,8 +39,9 @@ pub fn init_tracing() {
             Ok(()) => {
                 println!("Tracing initialized. Logs will be written to ./tmp/arguswing.log");
             }
-            Err(e) => {
-                eprintln!("Failed to initialize tracing: {}", e);
+            Err(_) => {
+                // Tracing already initialized by another caller (e.g. desktop app).
+                // Silently skip — the global dispatcher is already set.
             }
         }
     });
