@@ -3,12 +3,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use argus_crypto::Cipher;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
 use super::error::AuthError;
@@ -43,7 +45,8 @@ impl TokenConfig {
 /// Holds auth dependencies needed to construct token-wrapped LLM providers.
 #[derive(Clone)]
 pub struct TokenContext {
-    pub account_manager: Arc<super::account::AccountManager>,
+    pub pool: Arc<SqlitePool>,
+    pub cipher: Arc<Cipher>,
     pub config: TokenConfig,
 }
 
@@ -94,6 +97,88 @@ impl TokenSource for SimpleTokenSource {
             response
                 .json()
                 .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
+                    reason: format!("Failed to parse response: {e}"),
+                })?;
+
+        body.get("token")
+            .and_then(|t: &serde_json::Value| t.as_str())
+            .map(String::from)
+            .ok_or_else(|| AuthError::TokenFetchFailed {
+                reason: "Response missing 'token' field".to_string(),
+            })
+    }
+
+    fn header_name(&self) -> &str {
+        &self.header_name
+    }
+
+    fn header_prefix(&self) -> &str {
+        &self.header_prefix
+    }
+}
+
+/// TokenSource that fetches credentials from the accounts table via SqlitePool.
+/// Token URL, header_name, header_prefix are hardcoded.
+pub struct AccountTokenSource {
+    pool: Arc<SqlitePool>,
+    cipher: Arc<Cipher>,
+    header_name: String,
+    header_prefix: String,
+    token_url: &'static str,
+}
+
+impl AccountTokenSource {
+    #[must_use]
+    pub fn new(pool: Arc<SqlitePool>, cipher: Arc<Cipher>) -> Self {
+        Self {
+            pool,
+            cipher,
+            header_name: "Authorization".to_string(),
+            header_prefix: "Bearer ".to_string(),
+            token_url: "https://auth.example.com/token",
+        }
+    }
+}
+
+impl TokenSource for AccountTokenSource {
+    fn fetch_token(&self, _username: &str, _password: &str) -> Result<String, AuthError> {
+        let row: Option<(String, Vec<u8>, Vec<u8>)> = futures::executor::block_on(
+            sqlx::query_as("SELECT username, password, nonce FROM accounts WHERE id = 1")
+                .fetch_optional(self.pool.as_ref()),
+        )?;
+
+        let (username, ciphertext, nonce) =
+            row.ok_or(AuthError::TokenNotAvailable)?;
+
+        let decrypted = self
+            .cipher
+            .decrypt(&nonce, &ciphertext)
+            .map_err(|e| AuthError::DecryptionFailed {
+                reason: e.to_string(),
+            })?;
+
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .post(self.token_url)
+            .json(&serde_json::json!({
+                "username": username,
+                "password": decrypted.expose_secret()
+            }))
+            .send()
+            .map_err(|e| AuthError::TokenFetchFailed {
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            return Err(AuthError::TokenFetchFailed {
+                reason: format!("HTTP {}", response.status()),
+            });
+        }
+
+        let body: serde_json::Value =
+            response
+                .json()
+                .map_err(|e| AuthError::TokenFetchFailed {
                     reason: format!("Failed to parse response: {e}"),
                 })?;
 

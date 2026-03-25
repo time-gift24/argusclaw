@@ -6,4 +6,4 @@ pub mod token;
 
 pub use account::{AccountManager, UserInfo};
 pub use error::AuthError;
-pub use token::{SimpleTokenSource, TokenConfig, TokenContext, TokenLLMProvider, TokenSource};
+pub use token::{AccountTokenSource, SimpleTokenSource, TokenConfig, TokenContext, TokenLLMProvider, TokenSource};

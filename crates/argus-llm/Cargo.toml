@@ -15,16 +15,19 @@ path = "../../examples/test_real_retry.rs"
 argus-protocol = { path = "../argus-protocol" }
 argus-test-support = { path = "../argus-test-support" }
 argus-crypto = { path = "../argus-crypto" }
+argus-auth = { path = "../argus-auth" }
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+futures = "0.3"
 rand = "0.10.0"
 reqwest = { workspace = true, features = ["json", "stream"] }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio-rustls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"

@@ -109,7 +109,9 @@ impl ArgusWing {
 
         // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        let provider_manager = Arc::new(
+            ProviderManager::new(llm_repository).with_auth(Arc::new(pool.clone()), cipher.clone()),
+        );
 
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
@@ -202,7 +204,9 @@ impl ArgusWing {
 
         // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
+        let provider_manager = Arc::new(
+            ProviderManager::new(llm_repository).with_auth(Arc::new(pool.clone()), cipher.clone()),
+        );
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());

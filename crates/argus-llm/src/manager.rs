@@ -8,21 +8,24 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use argus_crypto::Cipher;
 use chrono::Utc;
 
 use argus_protocol::Result;
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
-    LlmProviderRecord, LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
+    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId, LlmProviderRecord,
+    LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
     ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition,
 };
 use futures_util::StreamExt;
+use sqlx::SqlitePool;
 
 use crate::providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
 };
 use crate::retry::{RetryConfig, RetryProvider};
+use argus_auth::{AccountTokenSource, TokenLLMProvider};
 
 /// Manager for LLM provider lookup and instantiation.
 ///
@@ -30,13 +33,23 @@ use crate::retry::{RetryConfig, RetryProvider};
 /// from stored configuration.
 pub struct ProviderManager {
     repository: Arc<dyn LlmProviderRepository>,
+    pool: Option<Arc<SqlitePool>>,
+    cipher: Option<Arc<Cipher>>,
 }
 
 impl ProviderManager {
     /// Create a new provider manager with the given repository.
     #[must_use]
     pub fn new(repository: Arc<dyn LlmProviderRepository>) -> Self {
-        Self { repository }
+        Self { repository, pool: None, cipher: None }
+    }
+
+    /// Set the pool and cipher for token-based auth providers.
+    #[must_use]
+    pub fn with_auth(mut self, pool: Arc<SqlitePool>, cipher: Arc<Cipher>) -> Self {
+        self.pool = Some(pool);
+        self.cipher = Some(cipher);
+        self
     }
 
     /// List all provider records.
@@ -216,27 +229,76 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        match record.kind {
-            LlmProviderKind::OpenAiCompatible => {
-                let mut config = OpenAiCompatibleConfig::new(
-                    record.base_url.clone(),
-                    record.api_key.expose_secret().to_string(),
-                    model.to_string(),
-                );
-
-                for (name, value) in &record.extra_headers {
-                    config = config.with_extra_header(name, value);
-                }
-
-                let factory_config = OpenAiCompatibleFactoryConfig::new(config);
-
-                create_openai_compatible_provider(factory_config).map_err(|e| {
-                    argus_protocol::ArgusError::LlmError {
-                        reason: e.to_string(),
-                    }
-                })
-            }
+        if record.meta_data.get("account_token_source") == Some(&"true".to_string()) {
+            return self.build_account_token_llm_provider(record, model);
         }
+        self.build_base_openai_compatible_provider(record, model)
+    }
+
+    fn build_account_token_llm_provider(
+        &self,
+        record: &LlmProviderRecord,
+        model: &str,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        let pool = self.pool.as_ref().ok_or_else(|| {
+            argus_protocol::ArgusError::LlmError {
+                reason: "account_token_source requires SqlitePool".to_string(),
+            }
+        })?;
+        let cipher = self.cipher.as_ref().ok_or_else(|| {
+            argus_protocol::ArgusError::LlmError {
+                reason: "account_token_source requires Cipher".to_string(),
+            }
+        })?;
+
+        let base = self.build_base_openai_compatible_provider(record, model)?;
+
+        let token_source = Arc::new(AccountTokenSource::new(pool.clone(), cipher.clone()));
+
+        // Query credentials to derive cache key (username/password stored for cache invalidation).
+        let creds: (String, String) = futures::executor::block_on(
+            sqlx::query_as::<_, (String, Vec<u8>, Vec<u8>)>(
+                "SELECT username, password, nonce FROM accounts WHERE id = 1",
+            )
+            .fetch_optional(pool.as_ref()),
+        )
+        .map_err(|e| argus_protocol::ArgusError::LlmError { reason: e.to_string() })?
+        .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+            reason: "No stored credentials for token auth".to_string(),
+        })
+        .map(|(username, _, _)| (username, String::new()))?;
+
+        let wrapped = TokenLLMProvider::new(
+            base,
+            token_source,
+            creds.0,
+            creds.1,
+            Duration::from_secs(300),
+        );
+
+        Ok(Arc::new(wrapped))
+    }
+
+    fn build_base_openai_compatible_provider(
+        &self,
+        record: &LlmProviderRecord,
+        model: &str,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        let mut config = OpenAiCompatibleConfig::new(
+            record.base_url.clone(),
+            record.api_key.expose_secret().to_string(),
+            model.to_string(),
+        );
+
+        for (name, value) in &record.extra_headers {
+            config = config.with_extra_header(name, value);
+        }
+
+        let factory_config = OpenAiCompatibleFactoryConfig::new(config);
+
+        create_openai_compatible_provider(factory_config).map_err(|e| {
+            argus_protocol::ArgusError::LlmError { reason: e.to_string() }
+        })
     }
 }
 
@@ -710,6 +772,32 @@ mod tests {
                 reason: "boom".to_string(),
             }),
             ProviderTestStatus::RequestFailed
+        );
+    }
+
+    #[test]
+    fn build_base_provider_checks_account_token_source_flag() {
+        // Verify that build_base_provider checks for the account_token_source flag
+        // by ensuring the meta_data field is consulted.
+        // This is a structural test: we check that the flag is recognized.
+        let mut record = make_record();
+        record.meta_data.insert(
+            "account_token_source".to_string(),
+            "true".to_string(),
+        );
+
+        // Without pool/cipher, it should return an error mentioning SqlitePool
+        let repo = Arc::new(MockProviderRepository {
+            record: record.clone(),
+        });
+        let manager = ProviderManager::new(repo);
+
+        let result = futures::executor::block_on(manager.build_provider_with_model(record, "gpt-4"));
+        assert!(result.is_err(), "should fail without SqlitePool");
+        let err = result.err().expect("already checked");
+        assert!(
+            err.to_string().contains("SqlitePool"),
+            "error should mention SqlitePool: {err}"
         );
     }
 }
