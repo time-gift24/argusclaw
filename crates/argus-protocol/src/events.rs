@@ -2,6 +2,8 @@
 //!
 //! These events are emitted during thread processing and consumed by subscribers (CLI, Tauri).
 
+use crate::ids::AgentId;
+use crate::message_override::MessageOverride;
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::llm::LlmStreamEvent;
@@ -92,15 +94,38 @@ pub enum ThreadEvent {
         /// The approval response.
         response: ApprovalResponse,
     },
-    /// A dispatched job completed (success, failure, or stuck).
-    JobCompleted {
+    /// A job was dispatched by the dispatch_job tool.
+    JobDispatched {
         /// Job ID.
         job_id: String,
-        /// Job status: "completed", "failed", or "stuck".
-        status: String,
-        /// Optional session ID.
-        session_id: Option<String>,
-        /// Optional result message.
-        message: Option<String>,
+        /// Agent ID for this job.
+        agent_id: AgentId,
+        /// Prompt/task description for the job.
+        prompt: String,
+        /// Optional context JSON for the job.
+        context: Option<serde_json::Value>,
+    },
+    /// A dispatched job produced a result.
+    JobResult {
+        /// Job ID.
+        job_id: String,
+        /// Whether the job succeeded.
+        success: bool,
+        /// Output or error message.
+        message: String,
+        /// Token usage if available.
+        token_usage: Option<TokenUsage>,
+    },
+    /// User wants to interrupt or redirect the current turn.
+    UserInterrupt {
+        /// Interrupt content (e.g. "stop", "cancel", or a new instruction).
+        content: String,
+    },
+    /// A new user message to process.
+    UserMessage {
+        /// Message content.
+        content: String,
+        /// Optional per-message overrides (temperature, max_tokens, etc.).
+        msg_override: Option<MessageOverride>,
     },
 }
