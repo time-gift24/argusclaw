@@ -46,6 +46,7 @@ export interface ProviderInput {
   is_default: boolean;
   extra_headers: Record<string, string>;
   secret_status: ProviderSecretStatus;
+  meta_data: Record<string, string>;
 }
 
 export type ProviderTestStatus =

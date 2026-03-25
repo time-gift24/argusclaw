@@ -127,6 +127,7 @@ pub async fn test_provider_input(
         base_url: record.base_url,
         api_key: SecretString::new(record.api_key),
         models: record.models,
+        model_config: record.model_config,
         default_model: record.default_model,
         is_default: record.is_default,
         extra_headers: record.extra_headers,

@@ -147,6 +147,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         is_default: formData.is_default,
         extra_headers: formData.extra_headers,
         secret_status: formData.secret_status,
+        meta_data: formData.meta_data,
       }
       await providers.upsert(input)
       addToast("success", isEditing ? "提供者已更新" : "提供者已创建")
@@ -207,6 +208,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         ...formData,
         models: models,
         default_model: formData.default_model || model,
+        meta_data: formData.meta_data,
       }
       const result = formData.id > 0
         ? await providers.testConnection(formData.id, model)
@@ -407,7 +409,16 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                            <span className="text-xs text-muted-foreground">待测试</span>}
                         </div>
                         <div className="flex items-center gap-2">
-                          {result && <CollapsibleTrigger asChild><Button variant="ghost" size="sm" className="h-8 text-xs">查看报文</Button></CollapsibleTrigger>}
+                          {result && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 text-xs"
+                              render={<CollapsibleTrigger />}
+                            >
+                              查看报文
+                            </Button>
+                          )}
                           <Button variant="ghost" size="sm" className="h-8 text-xs hover:bg-primary/5 hover:text-primary" onClick={() => testModel(model, formData.models)} disabled={isTesting || !formData.api_key.trim()}>重新测试</Button>
                         </div>
                       </div>

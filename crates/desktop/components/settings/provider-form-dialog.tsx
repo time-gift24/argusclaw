@@ -30,6 +30,7 @@ export interface LlmProviderRecord {
   base_url: string;
   api_key: string;
   models: string[];
+  model_config: Record<string, { max_context_window: number }>;
   default_model: string;
   is_default: boolean;
   extra_headers: Record<string, string>;
@@ -53,6 +54,7 @@ function createDefaultFormData(): LlmProviderRecord {
     base_url: "",
     api_key: "",
     models: [],
+    model_config: {},
     default_model: "",
     is_default: false,
     extra_headers: {},
@@ -198,10 +200,12 @@ export function ProviderFormDialog({
     display_name: formData.display_name || "未命名 Provider",
     base_url: formData.base_url,
     models: formData.models,
+    model_config: formData.model_config,
     default_model: formData.default_model,
     is_default: formData.is_default,
     extra_headers: formData.extra_headers,
     secret_status: formData.secret_status,
+    meta_data: formData.meta_data,
   };
 
   return (

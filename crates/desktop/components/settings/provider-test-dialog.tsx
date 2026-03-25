@@ -194,12 +194,14 @@ export function ProviderTestDialog({
           {result && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-2">
               <Collapsible className="group">
-                <CollapsibleTrigger asChild>
-                  <Button variant="outline" className="w-full justify-between h-9 text-xs rounded-xl border-muted/60 bg-background hover:bg-muted transition-all">
-                    <span className="flex items-center gap-2 font-bold uppercase tracking-wider text-[10px] text-muted-foreground">Request Payload</span>
-                    <Terminal className="h-3 w-3 opacity-40 group-data-[state=open]:rotate-90 transition-transform" />
-                  </Button>
-                </CollapsibleTrigger>
+                <Button
+                  variant="outline"
+                  className="w-full justify-between h-9 text-xs rounded-xl border-muted/60 bg-background hover:bg-muted transition-all"
+                  render={<CollapsibleTrigger />}
+                >
+                  <span className="flex items-center gap-2 font-bold uppercase tracking-wider text-[10px] text-muted-foreground">Request Payload</span>
+                  <Terminal className="h-3 w-3 opacity-40 group-data-[state=open]:rotate-90 transition-transform" />
+                </Button>
                 <CollapsibleContent className="animate-in fade-in slide-in-from-top-1 duration-200">
                   <pre className="mt-2 p-4 rounded-2xl bg-muted/30 border border-muted/60 font-mono text-[10px] overflow-auto max-h-64 leading-relaxed custom-scrollbar">
                     {(() => {
@@ -214,12 +216,14 @@ export function ProviderTestDialog({
               </Collapsible>
 
               <Collapsible className="group">
-                <CollapsibleTrigger asChild>
-                  <Button variant="outline" className="w-full justify-between h-9 text-xs rounded-xl border-muted/60 bg-background hover:bg-muted transition-all">
-                    <span className="flex items-center gap-2 font-bold uppercase tracking-wider text-[10px] text-muted-foreground">Response Body</span>
-                    <Terminal className="h-3 w-3 opacity-40 group-data-[state=open]:rotate-90 transition-transform" />
-                  </Button>
-                </CollapsibleTrigger>
+                <Button
+                  variant="outline"
+                  className="w-full justify-between h-9 text-xs rounded-xl border-muted/60 bg-background hover:bg-muted transition-all"
+                  render={<CollapsibleTrigger />}
+                >
+                  <span className="flex items-center gap-2 font-bold uppercase tracking-wider text-[10px] text-muted-foreground">Response Body</span>
+                  <Terminal className="h-3 w-3 opacity-40 group-data-[state=open]:rotate-90 transition-transform" />
+                </Button>
                 <CollapsibleContent className="animate-in fade-in slide-in-from-top-1 duration-200">
                   <pre className="mt-2 p-4 rounded-2xl bg-muted/30 border border-muted/60 font-mono text-[10px] overflow-auto max-h-64 leading-relaxed custom-scrollbar">
                     {result.response || "(空响应)"}
