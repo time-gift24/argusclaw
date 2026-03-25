@@ -58,7 +58,7 @@ fn build_provider_reentry_record(record: LlmProviderRecord) -> LlmProviderRecord
         is_default: record.is_default,
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
-        credential_id: record.credential_id,
+        meta_data: record.meta_data,
     }
 }
 
@@ -78,7 +78,7 @@ pub async fn upsert_provider(
         is_default: record.is_default,
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
-        credential_id: record.credential_id,
+        meta_data: record.meta_data,
     };
     let id = wing
         .upsert_provider(record)
@@ -129,7 +129,7 @@ pub async fn test_provider_input(
         is_default: record.is_default,
         extra_headers: record.extra_headers,
         secret_status: record.secret_status,
-        credential_id: record.credential_id,
+        meta_data: record.meta_data,
     };
     wing.test_provider_record(record, &model)
         .await
@@ -492,95 +492,6 @@ pub async fn logout(wing: State<'_, Arc<ArgusWing>>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-// ============================================================================
-// Credential Commands
-// ============================================================================
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CredentialSummaryPayload {
-    pub id: i64,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct CredentialRecordPayload {
-    pub id: i64,
-    pub name: String,
-    pub username: String,
-    pub password: String,
-}
-
-#[tauri::command]
-pub async fn list_credentials(
-    wing: State<'_, Arc<ArgusWing>>,
-) -> Result<Vec<CredentialSummaryPayload>, String> {
-    wing.credential_store()
-        .list()
-        .await
-        .map(|list| {
-            list.into_iter()
-                .map(|c| CredentialSummaryPayload {
-                    id: c.id,
-                    name: c.name,
-                })
-                .collect()
-        })
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_credential(
-    wing: State<'_, Arc<ArgusWing>>,
-    id: i64,
-) -> Result<Option<CredentialRecordPayload>, String> {
-    wing.credential_store()
-        .get(id)
-        .await
-        .map(|opt| {
-            opt.map(|c| CredentialRecordPayload {
-                id: c.id,
-                name: c.name,
-                username: c.username,
-                password: c.password,
-            })
-        })
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn add_credential(
-    wing: State<'_, Arc<ArgusWing>>,
-    name: String,
-    username: String,
-    password: String,
-) -> Result<i64, String> {
-    wing.credential_store()
-        .add(&name, &username, &password)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn update_credential(
-    wing: State<'_, Arc<ArgusWing>>,
-    id: i64,
-    username: Option<String>,
-    password: Option<String>,
-) -> Result<(), String> {
-    wing.credential_store()
-        .update(id, username.as_deref(), password.as_deref())
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn delete_credential(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
-    wing.credential_store()
-        .delete(id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
 #[tauri::command]
 pub async fn get_provider_context_window(
     wing: State<'_, Arc<ArgusWing>>,
@@ -622,7 +533,7 @@ mod tests {
             is_default: false,
             extra_headers: HashMap::new(),
             secret_status: ProviderSecretStatus::RequiresReentry,
-            credential_id: Some(5),
+            meta_data: HashMap::new(),
         });
 
         assert_eq!(record.id, 2);

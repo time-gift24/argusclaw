@@ -53,12 +53,6 @@ pub fn run() {
             commands::setup_account,
             commands::login,
             commands::logout,
-            // Credential commands
-            commands::list_credentials,
-            commands::get_credential,
-            commands::add_credential,
-            commands::update_credential,
-            commands::delete_credential,
             commands::get_provider_context_window,
         ])
         .run(tauri::generate_context!())

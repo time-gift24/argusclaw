@@ -71,27 +71,6 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_seq ON messages(thread_id, seq);
 
--- Approval Requests (agent_id 改为 INTEGER)
-CREATE TABLE IF NOT EXISTS approval_requests (
-    id TEXT PRIMARY KEY NOT NULL,
-    agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
-    tool_name TEXT NOT NULL,
-    action TEXT NOT NULL,
-    risk_level TEXT NOT NULL DEFAULT 'low',
-    requested_at TEXT NOT NULL,
-    timeout_secs INTEGER NOT NULL DEFAULT 60
-);
-
-CREATE INDEX IF NOT EXISTS idx_approval_requests_agent_id ON approval_requests(agent_id);
-CREATE INDEX IF NOT EXISTS idx_approval_requests_tool_name ON approval_requests(tool_name);
-
-CREATE TABLE IF NOT EXISTS approval_responses (
-    request_id TEXT PRIMARY KEY NOT NULL,
-    decision TEXT NOT NULL,
-    decided_at TEXT NOT NULL,
-    decided_by TEXT
-);
-
 -- Workflows (保持 TEXT ID)
 CREATE TABLE IF NOT EXISTS workflows (
     id TEXT PRIMARY KEY NOT NULL,
@@ -167,24 +146,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_display_name_unique
 ON agents(display_name);
 
 -- ============================================================
--- 4. ACCOUNTS & CREDENTIALS (from 20260320010000_add_accounts_and_credentials.sql)
+-- 4. ACCOUNTS (from 20260320010000_add_accounts_and_credentials.sql)
 -- ============================================================
 
 -- Create accounts table (single-user)
 CREATE TABLE IF NOT EXISTS accounts (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     username    TEXT NOT NULL,
-    password    BLOB NOT NULL,
-    nonce       BLOB NOT NULL,
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create credentials table
-CREATE TABLE IF NOT EXISTS credentials (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
-    username    BLOB NOT NULL,
     password    BLOB NOT NULL,
     nonce       BLOB NOT NULL,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,

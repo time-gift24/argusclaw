@@ -33,7 +33,7 @@ export interface LlmProviderRecord {
   is_default: boolean
   extra_headers: Record<string, string>
   secret_status: ProviderSecretStatus
-  credential_id: number | null
+  meta_data: Record<string, string>
 }
 
 interface ProviderEditorProps {
@@ -52,7 +52,7 @@ function createDefaultFormData(): LlmProviderRecord {
     is_default: false,
     extra_headers: {},
     secret_status: "ready",
-    credential_id: null,
+    meta_data: {},
   }
 }
 
@@ -94,7 +94,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
               is_default: provider.is_default,
               extra_headers: provider.extra_headers,
               secret_status: provider.secret_status,
-              credential_id: provider.credential_id ?? null,
+              meta_data: provider.meta_data ?? {},
             })
           }
         } catch (error) {

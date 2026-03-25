@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use chrono::Utc;
 
-use argus_auth::{TokenContext, TokenLLMProvider, TokenSource, UserCredentialTokenSource};
 use argus_protocol::Result;
 use argus_protocol::llm::{
     ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId, LlmProviderKind,
@@ -31,26 +30,13 @@ use crate::retry::{RetryConfig, RetryProvider};
 /// from stored configuration.
 pub struct ProviderManager {
     repository: Arc<dyn LlmProviderRepository>,
-    token_context: Option<Arc<TokenContext>>,
 }
 
 impl ProviderManager {
-    /// Create a new provider manager with the given repository (no token auth support).
+    /// Create a new provider manager with the given repository.
     #[must_use]
     pub fn new(repository: Arc<dyn LlmProviderRepository>) -> Self {
-        Self { repository, token_context: None }
-    }
-
-    /// Create a new provider manager with token context (supports token-based auth).
-    #[must_use]
-    pub fn with_token_context(
-        repository: Arc<dyn LlmProviderRepository>,
-        token_context: Arc<TokenContext>,
-    ) -> Self {
-        Self {
-            repository,
-            token_context: Some(token_context),
-        }
+        Self { repository }
     }
 
     /// List all provider records.
@@ -222,22 +208,7 @@ impl ProviderManager {
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
         let base = self.build_base_provider(&record, model)?;
-
-        let provider = if let (Some(credential_id), Some(ctx)) =
-            (record.credential_id, &self.token_context)
-        {
-            match self.build_token_provider(ctx, credential_id, base.clone()).await {
-                Ok(wrapped) => wrapped,
-                Err(e) => {
-                    tracing::warn!(%credential_id, "failed to build token provider, falling back to base: {}", e);
-                    base
-                }
-            }
-        } else {
-            base
-        };
-
-        Ok(Arc::new(RetryProvider::new(provider, RetryConfig::default())))
+        Ok(Arc::new(RetryProvider::new(base, RetryConfig::default())))
     }
 
     fn build_base_provider(
@@ -266,40 +237,6 @@ impl ProviderManager {
                 })
             }
         }
-    }
-
-    async fn build_token_provider(
-        &self,
-        ctx: &TokenContext,
-        credential_id: i64,
-        inner: Arc<dyn LlmProvider>,
-    ) -> std::result::Result<Arc<dyn LlmProvider>, argus_protocol::ArgusError> {
-        let cred = ctx
-            .credential_store
-            .get(credential_id)
-            .await
-            .map_err(|e| argus_protocol::ArgusError::LlmError {
-                reason: e.to_string(),
-            })?
-            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
-                reason: format!("credential {} not found", credential_id),
-            })?;
-
-        let token_source: Arc<dyn TokenSource> = Arc::new(UserCredentialTokenSource::new(
-            ctx.config.clone(),
-            cred.username.clone(),
-            cred.password.clone(),
-        ));
-
-        let wrapped = TokenLLMProvider::new(
-            inner,
-            token_source,
-            cred.username,
-            cred.password,
-            ctx.config.refresh_interval,
-        );
-
-        Ok(Arc::new(wrapped))
     }
 }
 
@@ -655,16 +592,10 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use argus_auth::AccountManager;
-    use argus_auth::credential::CredentialStore;
-    use argus_auth::{TokenConfig, TokenContext};
-    use argus_crypto::Cipher;
-    use argus_crypto::StaticKeySource;
     use argus_protocol::llm::{
         LlmError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
         ProviderTestStatus, SecretString,
     };
-    use sqlx::SqlitePool;
 
     use super::{duration_to_millis, map_llm_error_to_test_status, ProviderManager};
 
@@ -709,7 +640,7 @@ mod tests {
         }
     }
 
-    fn make_record(credential_id: Option<i64>) -> LlmProviderRecord {
+    fn make_record() -> LlmProviderRecord {
         LlmProviderRecord {
             id: LlmProviderId::new(1),
             kind: LlmProviderKind::OpenAiCompatible,
@@ -721,75 +652,19 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: argus_protocol::ProviderSecretStatus::Ready,
-            credential_id,
+            meta_data: HashMap::new(),
         }
     }
 
     #[tokio::test]
-    async fn with_token_context_creates_manager_with_token_support() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let cipher = Arc::new(Cipher::new(StaticKeySource::new(vec![0u8; 32])));
-        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
-        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool), cipher));
-
-        let token_context = Arc::new(TokenContext {
-            account_manager,
-            credential_store,
-            config: TokenConfig::new(
-                "https://auth.example.com/token".to_string(),
-                "Authorization".to_string(),
-                "Bearer ".to_string(),
-            ),
-        });
-
+    async fn build_provider_with_model_static_key() {
         let repo = Arc::new(MockProviderRepository {
-            record: make_record(None),
-        });
-        let manager = ProviderManager::with_token_context(repo, token_context);
-        assert!(manager.token_context.is_some());
-    }
-
-    #[tokio::test]
-    async fn build_provider_with_model_static_key_no_token_context() {
-        let repo = Arc::new(MockProviderRepository {
-            record: make_record(None),
+            record: make_record(),
         });
         let manager = ProviderManager::new(repo);
 
-        let result = manager.build_provider_with_model(make_record(None), "gpt-4").await;
-        assert!(result.is_ok(), "static API key should build without token context");
-    }
-
-    #[tokio::test]
-    async fn build_provider_with_model_with_credential_falls_back_when_not_found() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let cipher = Arc::new(Cipher::new(StaticKeySource::new(vec![0u8; 32])));
-        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
-        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool), cipher));
-
-        let token_context = Arc::new(TokenContext {
-            account_manager,
-            credential_store,
-            config: TokenConfig::new(
-                "https://auth.example.com/token".to_string(),
-                "Authorization".to_string(),
-                "Bearer ".to_string(),
-            ),
-        });
-
-        let repo = Arc::new(MockProviderRepository {
-            record: make_record(Some(999)), // non-existent credential
-        });
-        let manager = ProviderManager::with_token_context(repo, token_context);
-
-        // Credential 999 doesn't exist, so it should fall back to base provider
-        let result = manager
-            .build_provider_with_model(make_record(Some(999)), "gpt-4")
-            .await;
-        assert!(
-            result.is_ok(),
-            "should fall back to base provider when credential not found"
-        );
+        let result = manager.build_provider_with_model(make_record(), "gpt-4").await;
+        assert!(result.is_ok(), "static API key should build provider");
     }
 
     #[test]

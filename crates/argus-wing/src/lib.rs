@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
 use argus_approval::{ApprovalManager, ApprovalPolicy};
-use argus_auth::{AccountManager, CredentialStore, TokenConfig, TokenContext};
+use argus_auth::{AccountManager};
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::{JobManager, SseBroadcaster};
 use argus_llm::ProviderManager;
@@ -76,7 +76,6 @@ pub struct ArgusWing {
     #[allow(dead_code)]
     job_broadcaster: Arc<SseBroadcaster>,
     pub account_manager: Arc<AccountManager>,
-    pub credential_store: Arc<CredentialStore>,
 }
 
 impl ArgusWing {
@@ -104,29 +103,13 @@ impl ArgusWing {
         }?;
         migrate(&pool).await?;
 
-        // Create auth components first (needed for TokenContext)
+        // Create auth components first (needed for account management)
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
-        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher.clone()));
 
-        // Create token config and context for token-based auth
-        let token_config = TokenConfig::new(
-            "https://auth.example.com/oauth/token".to_string(),
-            "Authorization".to_string(),
-            "Bearer ".to_string(),
-        )
-        .with_refresh_interval(std::time::Duration::from_secs(300));
-
-        let token_context = Arc::new(TokenContext {
-            account_manager: account_manager.clone(),
-            credential_store: credential_store.clone(),
-            config: token_config,
-        });
-
-        // Create LLM provider repository and manager with token context
+        // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager =
-            Arc::new(ProviderManager::with_token_context(llm_repository, token_context));
+        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
 
         // Create template manager
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
@@ -207,7 +190,6 @@ impl ArgusWing {
             job_manager,
             job_broadcaster,
             account_manager,
-            credential_store,
         }))
     }
 
@@ -217,26 +199,10 @@ impl ArgusWing {
         // Create auth components first
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
         let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
-        let credential_store = Arc::new(CredentialStore::new(Arc::new(pool.clone()), cipher.clone()));
-
-        // Create token config and context
-        let token_config = TokenConfig::new(
-            "https://auth.example.com/oauth/token".to_string(),
-            "Authorization".to_string(),
-            "Bearer ".to_string(),
-        )
-        .with_refresh_interval(std::time::Duration::from_secs(300));
-
-        let token_context = Arc::new(TokenContext {
-            account_manager: account_manager.clone(),
-            credential_store: credential_store.clone(),
-            config: token_config,
-        });
 
         // Create LLM provider repository and manager
         let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
-        let provider_manager =
-            Arc::new(ProviderManager::with_token_context(llm_repository, token_context));
+        let provider_manager = Arc::new(ProviderManager::new(llm_repository));
         let template_manager = Arc::new(TemplateManager::new(pool.clone()));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
@@ -275,7 +241,6 @@ impl ArgusWing {
             job_manager,
             job_broadcaster,
             account_manager,
-            credential_store,
         })
     }
 
@@ -312,12 +277,6 @@ impl ArgusWing {
     #[must_use]
     pub fn account_manager(&self) -> &Arc<AccountManager> {
         &self.account_manager
-    }
-
-    /// Get a reference to the credential store.
-    #[must_use]
-    pub fn credential_store(&self) -> &Arc<CredentialStore> {
-        &self.credential_store
     }
 
     // =========================================================================
@@ -790,7 +749,7 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: argus_protocol::ProviderSecretStatus::Ready,
-            credential_id: None,
+            meta_data: HashMap::new(),
         };
 
         let provider_id = wing
@@ -868,7 +827,7 @@ mod tests {
             is_default: true,
             extra_headers: HashMap::new(),
             secret_status: argus_protocol::ProviderSecretStatus::Ready,
-            credential_id: None,
+            meta_data: HashMap::new(),
         };
 
         let provider_id = wing
