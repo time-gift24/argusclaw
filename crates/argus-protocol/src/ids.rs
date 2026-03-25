@@ -20,9 +20,9 @@ impl SessionId {
 pub struct ThreadId(pub Uuid);
 
 impl ThreadId {
-    /// Create a new unique ThreadId.
+    /// Create a new ThreadId using UUIDv7 (time-sortable).
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(Uuid::now_v7())
     }
 
     /// Parse a ThreadId from a string representation.
