@@ -39,6 +39,14 @@ pub enum ToolError {
     /// Request blocked by security policy (e.g., SSRF protection).
     #[error("HTTP request to '{url}' blocked: {reason}")]
     SecurityBlocked { url: String, reason: String },
+
+    /// Operation not authorized.
+    #[error("Operation not authorized: {0}")]
+    NotAuthorized(String),
+
+    /// Command timed out.
+    #[error("Command timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 /// Trait for defining tools that can be used by agents and LLMs.

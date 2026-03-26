@@ -16,14 +16,21 @@ pub use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 pub mod glob;
 pub mod grep;
 pub mod http;
+pub mod list;
+pub mod path_utils;
+pub mod patch;
 pub mod read;
 pub mod shell;
+pub mod write;
 
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::HttpTool;
+pub use list::ListDirTool;
+pub use patch::ApplyPatchTool;
 pub use read::ReadTool;
 pub use shell::ShellTool;
+pub use write::WriteFileTool;
 
 /// Registry for tools with concurrent access support.
 pub struct ToolManager {
