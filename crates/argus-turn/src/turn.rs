@@ -30,7 +30,7 @@ use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
 /// Cancellation primitive used to stop an active turn.
 ///
-/// This token is clonable so the runtime can hold a handle to cancel the active
+/// This token is cloneable so the runtime can hold a handle to cancel the active
 /// turn while the turn itself periodically checks for cancellation.
 #[derive(Clone, Debug)]
 pub struct TurnCancellation {

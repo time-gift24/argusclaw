@@ -361,6 +361,7 @@ mod tests {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 async fn process_runtime_action(
     thread: Arc<RwLock<Thread>>,
     runtime_handle: &mut ThreadHandle,
@@ -414,6 +415,7 @@ async fn process_runtime_action(
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 async fn start_turn_task(
     thread: Arc<RwLock<Thread>>,
     content: String,

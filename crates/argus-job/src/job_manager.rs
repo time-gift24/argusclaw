@@ -145,6 +145,7 @@ impl JobManager {
     ///
     /// Resolves the agent, builds a Turn, executes it, and sends
     /// ThreadEvent::JobResult into the pipe when done.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_job_executor(
         &self,
         originating_thread_id: ThreadId,
@@ -211,6 +212,7 @@ impl JobManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_job(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,

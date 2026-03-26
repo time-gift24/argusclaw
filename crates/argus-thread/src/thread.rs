@@ -1175,9 +1175,9 @@ mod tests {
             .expect("thread should build");
         thread.hydrate_from_persisted_state(
             vec![
-                ChatMessage::user(&"a".repeat(40)),
-                ChatMessage::user(&"b".repeat(40)),
-                ChatMessage::user(&"c".repeat(40)),
+                ChatMessage::user("a".repeat(40)),
+                ChatMessage::user("b".repeat(40)),
+                ChatMessage::user("c".repeat(40)),
             ],
             30,
             0,
@@ -1221,7 +1221,7 @@ mod tests {
             .build()
             .expect("thread should build");
         thread.hydrate_from_persisted_state(
-            vec![ChatMessage::user(&"a".repeat(40))],
+            vec![ChatMessage::user("a".repeat(40))],
             10,
             0,
             Utc::now(),
@@ -1253,8 +1253,8 @@ mod tests {
             .expect("thread should build");
         thread.hydrate_from_persisted_state(
             vec![
-                ChatMessage::user(&"a".repeat(40)),
-                ChatMessage::user(&"b".repeat(40)),
+                ChatMessage::user("a".repeat(40)),
+                ChatMessage::user("b".repeat(40)),
             ],
             20,
             0,

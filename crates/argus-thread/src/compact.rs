@@ -430,9 +430,9 @@ mod tests {
         });
         let mut token_count = 30;
         let mut messages = vec![
-            ChatMessage::user(&"a".repeat(40)),
-            ChatMessage::user(&"b".repeat(40)),
-            ChatMessage::user(&"c".repeat(40)),
+            ChatMessage::user("a".repeat(40)),
+            ChatMessage::user("b".repeat(40)),
+            ChatMessage::user("c".repeat(40)),
         ];
         let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
             .with_threshold_ratio_override(0.2);
@@ -454,9 +454,9 @@ mod tests {
         });
         let mut token_count = 30;
         let mut messages = vec![
-            ChatMessage::user(&"a".repeat(40)),
-            ChatMessage::user(&"b".repeat(40)),
-            ChatMessage::user(&"c".repeat(40)),
+            ChatMessage::user("a".repeat(40)),
+            ChatMessage::user("b".repeat(40)),
+            ChatMessage::user("c".repeat(40)),
         ];
         let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
             .with_threshold_ratio_override(0.2);
