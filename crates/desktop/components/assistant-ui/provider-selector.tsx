@@ -1,24 +1,24 @@
 "use client";
 
 import * as React from "react";
-import { Cloud, Check, ChevronRight, Cpu, Zap, Globe } from "lucide-react";
+import { Check, ChevronRight, Cpu, Zap, Globe } from "lucide-react";
 import { useChatStore } from "@/lib/chat-store";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 export function ProviderSelector() {
   const providers = useChatStore((state) => state.providers);
   const activeSession = useChatStore((state) =>
-    state.activeSessionKey ? state.sessionsByKey[state.activeSessionKey] ?? null : null,
+    state.activeSessionKey
+      ? (state.sessionsByKey[state.activeSessionKey] ?? null)
+      : null,
   );
   const selectedProviderPreferenceId = useChatStore(
     (state) => state.selectedProviderPreferenceId,
@@ -26,12 +26,7 @@ export function ProviderSelector() {
   const selectedModelOverride = useChatStore(
     (state) => state.selectedModelOverride,
   );
-  const selectProviderPreference = useChatStore(
-    (state) => state.selectProviderPreference,
-  );
-  const selectModelOverride = useChatStore(
-    (state) => state.selectModelOverride,
-  );
+  const selectModel = useChatStore((state) => state.selectModel);
 
   // Find the current provider and model
   const currentProviderId =
@@ -41,20 +36,17 @@ export function ProviderSelector() {
     : providers.find((p) => p.is_default);
 
   const currentModel = activeSession
-    ? activeSession.effectiveModel ?? currentProvider?.default_model ?? "未知模型"
-    : selectedModelOverride ?? currentProvider?.default_model ?? "未知模型";
+    ? (activeSession.effectiveModel ??
+      currentProvider?.default_model ??
+      "未知模型")
+    : (selectedModelOverride ?? currentProvider?.default_model ?? "未知模型");
   const activeSessionEffectiveModel = activeSession
-    ? activeSession.effectiveModel ?? currentProvider?.default_model ?? null
+    ? (activeSession.effectiveModel ?? currentProvider?.default_model ?? null)
     : null;
 
   // Handle selecting a model
   const handleSelectModel = (providerId: number, model: string) => {
-    const provider = providers.find((p) => p.id === providerId);
-    if (!provider) return;
-
-    void selectProviderPreference(providerId);
-    // If it's the default model, we don't need an override
-    void selectModelOverride(model === provider.default_model ? null : model);
+    void selectModel(providerId, model);
   };
 
   const trigger = (
@@ -82,28 +74,35 @@ export function ProviderSelector() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        {trigger}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64 p-2 rounded-[24px] shadow-2xl border-none bg-background/95 backdrop-blur-xl">
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="w-64 p-2 rounded-[24px] shadow-2xl border-none bg-background/95 backdrop-blur-xl"
+      >
         <div className="px-3 py-2 mb-1">
           <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest opacity-60">
             Available AI Models
           </p>
         </div>
-        
+
         <div className="max-h-[400px] overflow-y-auto custom-scrollbar pr-1">
           {providers.map((provider, providerIndex) => (
             <div key={provider.id}>
-              {providerIndex > 0 && <DropdownMenuSeparator className="my-2 opacity-50" />}
-              
+              {providerIndex > 0 && (
+                <DropdownMenuSeparator className="my-2 opacity-50" />
+              )}
+
               <div className="px-3 py-1.5 flex items-center gap-2">
                 <div className="p-1 rounded-md bg-muted text-muted-foreground">
                   <Globe className="size-3" />
                 </div>
-                <span className="text-[11px] font-bold truncate flex-1">{provider.display_name}</span>
+                <span className="text-[11px] font-bold truncate flex-1">
+                  {provider.display_name}
+                </span>
                 {provider.is_default && (
-                  <Badge className="text-[8px] h-3.5 px-1 bg-primary/10 text-primary border-none font-bold uppercase">Default</Badge>
+                  <Badge className="text-[8px] h-3.5 px-1 bg-primary/10 text-primary border-none font-bold uppercase">
+                    Default
+                  </Badge>
                 )}
               </div>
 
@@ -113,8 +112,10 @@ export function ProviderSelector() {
                     currentProviderId === provider.id &&
                     (activeSession
                       ? model === activeSessionEffectiveModel
-                      : selectedModelOverride === model || (selectedModelOverride === null && model === provider.default_model));
-                  
+                      : selectedModelOverride === model ||
+                        (selectedModelOverride === null &&
+                          model === provider.default_model));
+
                   // Special case: if nothing selected, use default provider's default model
                   const isEffectivelySelected =
                     currentProviderId == null &&
@@ -129,17 +130,21 @@ export function ProviderSelector() {
                       onClick={() => handleSelectModel(provider.id, model)}
                       className={cn(
                         "flex items-center gap-2 px-3 py-2 rounded-xl cursor-pointer transition-all",
-                        active ? "bg-primary/5 text-primary" : "hover:bg-muted"
+                        active ? "bg-primary/5 text-primary" : "hover:bg-muted",
                       )}
                     >
-                      <div className={cn(
-                        "size-1.5 rounded-full shrink-0",
-                        active ? "bg-primary" : "bg-muted-foreground/30"
-                      )} />
-                      <span className={cn(
-                        "flex-1 truncate text-xs font-medium",
-                        active ? "font-bold" : ""
-                      )}>
+                      <div
+                        className={cn(
+                          "size-1.5 rounded-full shrink-0",
+                          active ? "bg-primary" : "bg-muted-foreground/30",
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          "flex-1 truncate text-xs font-medium",
+                          active ? "font-bold" : "",
+                        )}
+                      >
                         {model}
                       </span>
                       {model === provider.default_model && (

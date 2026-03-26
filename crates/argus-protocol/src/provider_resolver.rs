@@ -21,5 +21,6 @@ pub trait ProviderResolver: Send + Sync {
     async fn default_provider(&self) -> Result<Arc<dyn LlmProvider>>;
 
     /// Resolve a provider by its ID and use a specific model.
-    async fn resolve_with_model(&self, id: ProviderId, model: &str) -> Result<Arc<dyn LlmProvider>>;
+    async fn resolve_with_model(&self, id: ProviderId, model: &str)
+    -> Result<Arc<dyn LlmProvider>>;
 }

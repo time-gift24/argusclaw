@@ -4,6 +4,8 @@
 
 use std::collections::VecDeque;
 
+use tokio::sync::oneshot;
+
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::ids::{AgentId, ThreadId};
@@ -49,7 +51,7 @@ pub enum ThreadRuntimeState {
 }
 
 /// Legacy compatibility control event surface for pre-runtime callers.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ThreadControlEvent {
     /// A new user message entered the thread control plane.
     ///
@@ -80,6 +82,15 @@ pub enum ThreadControlEvent {
     /// enqueues the job result (FIFO) for a subsequent turn. Frontends typically render
     /// this as "queued" work.
     JobResult(ThreadJobResult),
+    /// Claim a queued job result by job ID so it is not replayed as a future turn.
+    ///
+    /// This is an internal runtime-actor query path used by `get_job_result(consume=true)`.
+    ClaimQueuedJobResult {
+        /// Job ID to remove from the runtime inbox.
+        job_id: String,
+        /// One-shot reply channel containing the removed queued result, if any.
+        reply_tx: oneshot::Sender<Option<ThreadJobResult>>,
+    },
 }
 
 /// Routed job result metadata shared by the control plane and public event stream.
@@ -184,6 +195,19 @@ impl ThreadInbox {
         self.items.push_back(ThreadInboxItem::JobResult(result));
     }
 
+    /// Remove a queued job result by job ID while preserving FIFO order for remaining items.
+    pub fn claim_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
+        let index = self.items.iter().position(|item| match item {
+            ThreadInboxItem::JobResult(result) => result.job_id == job_id,
+            ThreadInboxItem::UserMessage(_) => false,
+        })?;
+
+        match self.items.remove(index) {
+            Some(ThreadInboxItem::JobResult(result)) => Some(result),
+            Some(ThreadInboxItem::UserMessage(_)) | None => None,
+        }
+    }
+
     /// Drain items for a running turn.
     ///
     /// Ordering is global FIFO across queued user messages and job results.
@@ -252,8 +276,13 @@ impl ThreadMailbox {
                 content,
                 msg_override,
             } => self.inbox.enqueue_user_message(content, msg_override),
-            ThreadControlEvent::UserInterrupt { content } => self.user_interrupts.push_back(content),
+            ThreadControlEvent::UserInterrupt { content } => {
+                self.user_interrupts.push_back(content)
+            }
             ThreadControlEvent::JobResult(result) => self.inbox.deliver_job_result(result),
+            ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } => {
+                let _ = reply_tx.send(None);
+            }
         }
     }
 
@@ -429,4 +458,46 @@ pub enum ThreadEvent {
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job_result(job_id: &str) -> ThreadJobResult {
+        ThreadJobResult {
+            job_id: job_id.to_string(),
+            success: true,
+            message: format!("result for {job_id}"),
+            token_usage: None,
+            agent_id: AgentId::new(7),
+            agent_display_name: "Worker".to_string(),
+            agent_description: "Background worker".to_string(),
+        }
+    }
+
+    #[test]
+    fn thread_inbox_claim_job_result_removes_only_matching_job() {
+        let mut inbox = ThreadInbox::default();
+        inbox.enqueue_user_message("first".to_string(), None);
+        inbox.deliver_job_result(job_result("job-1"));
+        inbox.deliver_job_result(job_result("job-2"));
+
+        let claimed = inbox.claim_job_result("job-1");
+        assert_eq!(
+            claimed.as_ref().map(|result| result.job_id.as_str()),
+            Some("job-1")
+        );
+
+        let remaining = inbox.drain_for_turn();
+        assert_eq!(remaining.len(), 2);
+        assert!(matches!(
+            &remaining[0],
+            TurnControlInput::UserMessage { content, .. } if content == "first"
+        ));
+        assert!(matches!(
+            &remaining[1],
+            TurnControlInput::JobResult(result) if result.job_id == "job-2"
+        ));
+    }
 }

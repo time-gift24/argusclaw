@@ -1,6 +1,6 @@
 //! Thread handle actor façade.
 
-use argus_protocol::{ThreadCommand, ThreadRuntimeState};
+use argus_protocol::{ThreadCommand, ThreadJobResult, ThreadRuntimeState};
 
 use crate::command::ThreadRuntimeSnapshot;
 use crate::runtime::{ThreadRuntime, ThreadRuntimeAction};
@@ -32,6 +32,11 @@ impl ThreadHandle {
     /// Mark the active turn finished so runtime can pick queued work.
     pub(crate) fn finish_active_turn(&mut self) -> ThreadRuntimeAction {
         self.runtime.finish_active_turn()
+    }
+
+    /// Claim a queued job result from the runtime inbox.
+    pub(crate) fn claim_queued_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
+        self.runtime.claim_queued_job_result(job_id)
     }
 
     /// Read runtime snapshot for diagnostics/testing.

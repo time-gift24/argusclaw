@@ -13,8 +13,8 @@ use argus_protocol::{
     ThreadEvent, ThreadId, ThreadMailbox,
 };
 use argus_tool::ToolManager;
-use argus_turn::{TurnBuilder, TurnOutput};
 use argus_turn::turn::TurnCancellation;
+use argus_turn::{TurnBuilder, TurnOutput};
 
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
@@ -299,6 +299,16 @@ impl Thread {
     /// Get the LLM provider.
     pub fn provider(&self) -> &Arc<dyn LlmProvider> {
         &self.provider
+    }
+
+    /// Replace the bound LLM provider for subsequent turns.
+    pub fn set_provider(&mut self, provider: Arc<dyn LlmProvider>) {
+        let model_name = provider.model_name().to_string();
+        self.provider = provider;
+        if let Some(trace_config) = self.config.turn_config.trace_config.as_mut() {
+            trace_config.model = Some(model_name);
+        }
+        self.updated_at = Utc::now();
     }
 
     /// Get mutable access to messages (for Compactor).

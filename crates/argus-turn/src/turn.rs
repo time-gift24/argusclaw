@@ -418,22 +418,32 @@ impl Turn {
         // Write TurnStart event if tracing is enabled
         if let Some(config) = self.trace_config.as_ref()
             && config.enabled
-                && let Some(writer) = trace_writer.as_mut() {
-                    if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
-                        let _ = writer.write_event(&TurnLogEvent::TurnStart {
-                            system_prompt: sp.clone(),
-                            model: model.clone(),
-                        }).await;
-                    }
-                    for msg in self.messages.iter() {
-                        if let ChatMessage { role: argus_protocol::llm::Role::User, content, .. } = msg {
-                            let _ = writer.write_event(&TurnLogEvent::UserInput {
-                                content: content.clone(),
-                                role: "user".to_string(),
-                            }).await;
-                        }
-                    }
+            && let Some(writer) = trace_writer.as_mut()
+        {
+            if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
+                let _ = writer
+                    .write_event(&TurnLogEvent::TurnStart {
+                        system_prompt: sp.clone(),
+                        model: model.clone(),
+                    })
+                    .await;
+            }
+            for msg in self.messages.iter() {
+                if let ChatMessage {
+                    role: argus_protocol::llm::Role::User,
+                    content,
+                    ..
+                } = msg
+                {
+                    let _ = writer
+                        .write_event(&TurnLogEvent::UserInput {
+                            content: content.clone(),
+                            role: "user".to_string(),
+                        })
+                        .await;
                 }
+            }
+        }
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -770,7 +780,14 @@ impl Turn {
             if let Some(writer) = trace_writer.as_mut() {
                 let llm_req_event = TurnLogEvent::LlmRequest {
                     messages: messages.clone(),
-                    tools: tools.iter().map(|t| serde_json::to_value(t).ok().unwrap_or(serde_json::Value::Null)).collect(),
+                    tools: tools
+                        .iter()
+                        .map(|t| {
+                            serde_json::to_value(t)
+                                .ok()
+                                .unwrap_or(serde_json::Value::Null)
+                        })
+                        .collect(),
                 };
                 let _ = writer.write_event(&llm_req_event).await;
             }
@@ -1135,7 +1152,9 @@ impl Turn {
     ) -> Vec<ToolExecutionResult> {
         let futures: Vec<_> = tool_calls
             .into_iter()
-            .map(|tool_call| self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone()))
+            .map(|tool_call| {
+                self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone())
+            })
             .collect();
 
         join_all(futures).await
@@ -1156,11 +1175,13 @@ impl Turn {
         {
             let mut guard = trace_writer.lock().await;
             if let Some(writer) = guard.as_mut() {
-                let _ = writer.write_event(&TurnLogEvent::ToolCallStart {
-                    id: tool_call_id.clone(),
-                    name: tool_name.clone(),
-                    arguments: tool_input.clone(),
-                }).await;
+                let _ = writer
+                    .write_event(&TurnLogEvent::ToolCallStart {
+                        id: tool_call_id.clone(),
+                        name: tool_name.clone(),
+                        arguments: tool_input.clone(),
+                    })
+                    .await;
             }
         }
 
@@ -1194,13 +1215,15 @@ impl Turn {
             {
                 let mut guard = trace_writer.lock().await;
                 if let Some(writer) = guard.as_mut() {
-                    let _ = writer.write_event(&TurnLogEvent::ToolResult {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        result: content.clone(),
-                        duration_ms,
-                        error: Some(reason.clone()),
-                    }).await;
+                    let _ = writer
+                        .write_event(&TurnLogEvent::ToolResult {
+                            id: tool_call_id.clone(),
+                            name: tool_name.clone(),
+                            result: content.clone(),
+                            duration_ms,
+                            error: Some(reason.clone()),
+                        })
+                        .await;
                 }
             }
 
@@ -1392,13 +1415,15 @@ impl Turn {
                     Ok(_) => None,
                     Err(e) => Some(e.clone()),
                 };
-                let _ = writer.write_event(&TurnLogEvent::ToolResult {
-                    id: tool_call_id.clone(),
-                    name: tool_name.clone(),
-                    result: content.clone(),
-                    duration_ms,
-                    error: error_str,
-                }).await;
+                let _ = writer
+                    .write_event(&TurnLogEvent::ToolResult {
+                        id: tool_call_id.clone(),
+                        name: tool_name.clone(),
+                        result: content.clone(),
+                        duration_ms,
+                        error: error_str,
+                    })
+                    .await;
             }
         }
 

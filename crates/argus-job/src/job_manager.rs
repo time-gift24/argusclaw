@@ -4,10 +4,11 @@
 //! Results are sent back through the unified pipe as ThreadEvent::JobResult.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::tool::NamedTool;
@@ -23,13 +24,41 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
+use crate::get_job_result_tool::GetJobResultTool;
 use crate::list_subagents_tool::ListSubagentsTool;
+
+#[derive(Debug, Clone)]
+enum TrackedJobState {
+    Pending,
+    Completed(ThreadJobResult),
+    Consumed(ThreadJobResult),
+}
+
+#[derive(Debug, Clone)]
+struct TrackedJob {
+    thread_id: ThreadId,
+    state: TrackedJobState,
+}
+
+/// Result of looking up a background job for a specific thread.
+#[derive(Debug, Clone)]
+pub enum JobLookup {
+    /// Job was never seen for this thread.
+    NotFound,
+    /// Job was dispatched but has not completed yet.
+    Pending,
+    /// Job completed and the result is still available for consumption.
+    Completed(ThreadJobResult),
+    /// Job result was already consumed proactively.
+    Consumed(ThreadJobResult),
+}
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
+    tracked_jobs: Arc<StdMutex<HashMap<String, TrackedJob>>>,
 }
 
 impl fmt::Debug for JobManager {
@@ -51,6 +80,7 @@ impl JobManager {
             template_manager,
             provider_resolver,
             tool_manager,
+            tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -62,6 +92,53 @@ impl JobManager {
     /// Create a ListSubagentsTool for this manager.
     pub fn create_list_subagents_tool(self: Arc<Self>) -> ListSubagentsTool {
         ListSubagentsTool::new(Arc::clone(&self.template_manager))
+    }
+
+    /// Create a GetJobResultTool for this manager.
+    pub fn create_get_job_result_tool(self: Arc<Self>) -> GetJobResultTool {
+        GetJobResultTool::new(self)
+    }
+
+    /// Record that a job was dispatched for a thread.
+    pub fn record_dispatched_job(&self, thread_id: ThreadId, job_id: String) {
+        Self::record_dispatched_job_in_store(&self.tracked_jobs, thread_id, job_id);
+    }
+
+    /// Record the completed result for a job.
+    pub fn record_completed_job_result(&self, thread_id: ThreadId, result: ThreadJobResult) {
+        Self::record_completed_job_result_in_store(&self.tracked_jobs, thread_id, result);
+    }
+
+    /// Get the current tracked status for a job scoped to its originating thread.
+    pub fn get_job_result_status(
+        &self,
+        thread_id: ThreadId,
+        job_id: &str,
+        consume: bool,
+    ) -> JobLookup {
+        let mut tracked_jobs = self
+            .tracked_jobs
+            .lock()
+            .expect("job tracking mutex poisoned");
+        let Some(tracked_job) = tracked_jobs.get_mut(job_id) else {
+            return JobLookup::NotFound;
+        };
+
+        if tracked_job.thread_id != thread_id {
+            return JobLookup::NotFound;
+        }
+
+        match &tracked_job.state {
+            TrackedJobState::Pending => JobLookup::Pending,
+            TrackedJobState::Completed(result) => {
+                let result = result.clone();
+                if consume {
+                    tracked_job.state = TrackedJobState::Consumed(result.clone());
+                }
+                JobLookup::Completed(result)
+            }
+            TrackedJobState::Consumed(result) => JobLookup::Consumed(result.clone()),
+        }
     }
 
     /// Spawn a background job executor.
@@ -84,10 +161,13 @@ impl JobManager {
             ));
         }
 
+        self.record_dispatched_job(originating_thread_id, job_id.clone());
+
         // ThreadId is Copy — captured into async block directly
         let template_manager = Arc::clone(&self.template_manager);
         let provider_resolver = Arc::clone(&self.provider_resolver);
         let tool_manager = Arc::clone(&self.tool_manager);
+        let tracked_jobs = Arc::clone(&self.tracked_jobs);
         let pipe_tx_clone = pipe_tx.clone();
         let control_tx_clone = control_tx.clone();
 
@@ -119,12 +199,13 @@ impl JobManager {
                 ),
             };
 
-            Self::emit_job_result(
-                &pipe_tx_clone,
-                &control_tx_clone,
+            Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
+            Self::record_completed_job_result_in_store(
+                &tracked_jobs,
                 originating_thread_id,
-                result,
+                result.clone(),
             );
+            Self::broadcast_job_result(&pipe_tx_clone, originating_thread_id, result);
         });
 
         Ok(())
@@ -261,9 +342,10 @@ impl JobManager {
                 content,
                 ..
             } = msg
-                && !content.is_empty() {
-                    return Self::truncate_summary(content);
-                }
+                && !content.is_empty()
+            {
+                return Self::truncate_summary(content);
+            }
         }
         format!("job completed, {} messages in turn", output.messages.len())
     }
@@ -309,32 +391,110 @@ impl JobManager {
         format!("job executor panicked: {detail}")
     }
 
-    fn emit_job_result(
-        pipe_tx: &broadcast::Sender<ThreadEvent>,
+    fn record_dispatched_job_in_store(
+        tracked_jobs: &Arc<StdMutex<HashMap<String, TrackedJob>>>,
+        thread_id: ThreadId,
+        job_id: String,
+    ) {
+        tracked_jobs
+            .lock()
+            .expect("job tracking mutex poisoned")
+            .insert(
+                job_id,
+                TrackedJob {
+                    thread_id,
+                    state: TrackedJobState::Pending,
+                },
+            );
+    }
+
+    fn record_completed_job_result_in_store(
+        tracked_jobs: &Arc<StdMutex<HashMap<String, TrackedJob>>>,
+        thread_id: ThreadId,
+        result: ThreadJobResult,
+    ) {
+        tracked_jobs
+            .lock()
+            .expect("job tracking mutex poisoned")
+            .insert(
+                result.job_id.clone(),
+                TrackedJob {
+                    thread_id,
+                    state: TrackedJobState::Completed(result),
+                },
+            );
+    }
+
+    fn forward_job_result_to_runtime(
         control_tx: &mpsc::UnboundedSender<ThreadControlEvent>,
+        result: ThreadJobResult,
+    ) {
+        let _ = control_tx.send(ThreadControlEvent::JobResult(result));
+    }
+
+    fn broadcast_job_result(
+        pipe_tx: &broadcast::Sender<ThreadEvent>,
         originating_thread_id: ThreadId,
         result: ThreadJobResult,
     ) {
-        let public_result = result.clone();
         let _ = pipe_tx.send(ThreadEvent::JobResult {
             thread_id: originating_thread_id,
-            job_id: public_result.job_id,
-            success: public_result.success,
-            message: public_result.message,
-            token_usage: public_result.token_usage,
-            agent_id: public_result.agent_id,
-            agent_display_name: public_result.agent_display_name,
-            agent_description: public_result.agent_description,
+            job_id: result.job_id,
+            success: result.success,
+            message: result.message,
+            token_usage: result.token_usage,
+            agent_id: result.agent_id,
+            agent_display_name: result.agent_display_name,
+            agent_description: result.agent_description,
         });
-        let _ = control_tx.send(ThreadControlEvent::JobResult(result));
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use argus_protocol::{LlmProvider, ProviderId};
+    use argus_template::TemplateManager;
+    use async_trait::async_trait;
+    use sqlx::SqlitePool;
+
     use argus_protocol::TokenUsage;
+    use argus_tool::ToolManager;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct DummyProviderResolver;
+
+    #[async_trait]
+    impl ProviderResolver for DummyProviderResolver {
+        async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            unreachable!("resolver should not be called in tracking tests");
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            unreachable!("resolver should not be called in tracking tests");
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            unreachable!("resolver should not be called in tracking tests");
+        }
+    }
+
+    fn test_job_manager() -> JobManager {
+        let pool = SqlitePool::connect_lazy("sqlite::memory:")
+            .expect("lazy sqlite pool should build for tests");
+        JobManager::new(
+            Arc::new(TemplateManager::new(pool)),
+            Arc::new(DummyProviderResolver),
+            Arc::new(ToolManager::new()),
+        )
+    }
 
     fn assistant_output(content: &str) -> TurnOutput {
         TurnOutput {
@@ -350,7 +510,10 @@ mod tests {
         let summary = JobManager::summarize_output(&assistant_output(&content));
 
         assert!(summary.ends_with("..."));
-        assert_eq!(summary.chars().count(), JobManager::JOB_RESULT_SUMMARY_CHAR_LIMIT + 3);
+        assert_eq!(
+            summary.chars().count(),
+            JobManager::JOB_RESULT_SUMMARY_CHAR_LIMIT + 3
+        );
         assert!(summary.contains('数'));
     }
 
@@ -361,5 +524,42 @@ mod tests {
         let summary = JobManager::summarize_output(&assistant_output(&content));
 
         assert_eq!(summary, content);
+    }
+
+    #[tokio::test]
+    async fn tracked_job_status_moves_from_pending_to_completed_to_consumed() {
+        let manager = test_job_manager();
+        let thread_id = ThreadId::new();
+        let result = ThreadJobResult {
+            job_id: "job-42".to_string(),
+            success: true,
+            message: "all done".to_string(),
+            token_usage: None,
+            agent_id: AgentId::new(9),
+            agent_display_name: "Researcher".to_string(),
+            agent_description: "Looks things up".to_string(),
+        };
+
+        manager.record_dispatched_job(thread_id, result.job_id.clone());
+        assert!(matches!(
+            manager.get_job_result_status(thread_id, &result.job_id, false),
+            JobLookup::Pending
+        ));
+
+        manager.record_completed_job_result(thread_id, result.clone());
+        assert!(matches!(
+            manager.get_job_result_status(thread_id, &result.job_id, false),
+            JobLookup::Completed(found) if found.job_id == result.job_id
+        ));
+
+        assert!(matches!(
+            manager.get_job_result_status(thread_id, &result.job_id, true),
+            JobLookup::Completed(found) if found.job_id == result.job_id
+        ));
+
+        assert!(matches!(
+            manager.get_job_result_status(thread_id, &result.job_id, false),
+            JobLookup::Consumed(found) if found.job_id == result.job_id
+        ));
     }
 }

@@ -6,11 +6,7 @@ pub struct TemplateManager {
     pool: SqlitePool,
 }
 
-fn format_delete_blocked_reason(
-    id: AgentId,
-    thread_count: i64,
-    job_count: i64,
-) -> String {
+fn format_delete_blocked_reason(id: AgentId, thread_count: i64, job_count: i64) -> String {
     let mut blockers = Vec::new();
 
     if thread_count > 0 {
@@ -419,7 +415,7 @@ impl TemplateManager {
     pub async fn find_by_display_name(&self, display_name: &str) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+            SELECT id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents WHERE display_name = ?
             "#,
         )
@@ -461,11 +457,7 @@ impl TemplateManager {
 
         if thread_count > 0 || job_count > 0 {
             return Err(ArgusError::DatabaseError {
-                reason: format_delete_blocked_reason(
-                    id,
-                    thread_count,
-                    job_count,
-                ),
+                reason: format_delete_blocked_reason(id, thread_count, job_count),
             });
         }
 
@@ -558,11 +550,11 @@ impl TemplateManager {
                     reason: e.to_string(),
                 })?;
 
-        let model_id: Option<String> = row
-            .try_get("model_id")
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+        let model_id: Option<String> =
+            row.try_get("model_id")
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
 
         let max_tokens: Option<u32> = row
             .try_get::<Option<i64>, _>("max_tokens")

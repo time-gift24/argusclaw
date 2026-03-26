@@ -4,8 +4,8 @@ use std::sync::Arc;
 use argus_job::JobManager;
 use argus_protocol::{
     llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream,
-        ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse,
     },
     AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
 };
@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{broadcast, RwLock};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -119,6 +119,10 @@ impl SessionManager {
         // Register the list_subagents tool for querying subagents
         let list_subagents_tool = job_manager.clone().create_list_subagents_tool();
         tool_manager.register(Arc::new(list_subagents_tool));
+
+        // Register the get_job_result tool for proactive job polling
+        let get_job_result_tool = job_manager.clone().create_get_job_result_tool();
+        tool_manager.register(Arc::new(get_job_result_tool));
 
         Self {
             pool,
@@ -232,9 +236,36 @@ impl SessionManager {
             let turn_count: i64 = thread_row.get("turn_count");
             let model_override: Option<String> = thread_row.get("model_override");
 
-            // Resolve provider (apply model_override if set, fallback to provider default model)
+            // Get agent record (template)
+            let agent_record = match self.template_manager.get(AgentId::new(template_id)).await {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    tracing::warn!(
+                        thread_id = %thread_id_str,
+                        template_id = %template_id,
+                        "Template not found for thread, skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id = %thread_id_str,
+                        template_id = %template_id,
+                        error = %e,
+                        "Failed to get template for thread, skipping"
+                    );
+                    continue;
+                }
+            };
+
             let provider_id = ProviderId::new(provider_id_val);
-            let provider = match model_override.as_deref() {
+            let requested_model = model_override
+                .as_deref()
+                .or(agent_record.model_id.as_deref());
+
+            // Resolve provider using the persisted thread model when available,
+            // otherwise fall back to the agent's configured default model.
+            let provider = match requested_model {
                 Some(model) => match self
                     .provider_resolver
                     .resolve_with_model(provider_id, model)
@@ -275,28 +306,6 @@ impl SessionManager {
                         continue;
                     }
                 },
-            };
-
-            // Get agent record (template)
-            let agent_record = match self.template_manager.get(AgentId::new(template_id)).await {
-                Ok(Some(record)) => record,
-                Ok(None) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        template_id = %template_id,
-                        "Template not found for thread, skipping"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        template_id = %template_id,
-                        error = %e,
-                        "Failed to get template for thread, skipping"
-                    );
-                    continue;
-                }
             };
 
             // Get compactor
@@ -525,12 +534,12 @@ impl SessionManager {
             .ok_or(ArgusError::TemplateNotFound(template_id.inner()))?;
 
         // Model resolution: explicit override > agent default model > provider default
-        let effective_model = model_override.or(agent_record.model_id.as_deref());
+        let requested_model = model_override.or(agent_record.model_id.as_deref());
 
         // Resolve provider using priority: explicit > agent_record > default
         let (provider_id, provider) = match explicit_provider_id.or(agent_record.provider_id) {
             Some(provider_id) => {
-                let provider = match effective_model {
+                let provider = match requested_model {
                     Some(model) => {
                         self.provider_resolver
                             .resolve_with_model(provider_id, model)
@@ -552,7 +561,7 @@ impl SessionManager {
                 .map(ProviderId::new)
                 .ok_or(ArgusError::DefaultProviderNotConfigured)?;
 
-                let provider = match effective_model {
+                let provider = match requested_model {
                     Some(model) => match self
                         .provider_resolver
                         .resolve_with_model(default_provider_id, model)
@@ -585,6 +594,8 @@ impl SessionManager {
                 (default_provider_id, provider)
             }
         };
+
+        let effective_model = provider.model_name().to_string();
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
@@ -646,7 +657,7 @@ impl SessionManager {
         .bind(session_id.to_string())
         .bind(template_id.inner())
         .bind(provider_id.inner())
-        .bind(model_override)
+        .bind(Some(effective_model.as_str()))
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -743,6 +754,52 @@ impl SessionManager {
         }
 
         Ok(())
+    }
+
+    /// Update the bound provider/model for an existing thread.
+    pub async fn update_thread_model(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+        provider_id: ProviderId,
+        model: &str,
+    ) -> Result<(ProviderId, String)> {
+        let session = self.load(session_id).await?;
+        let thread = session
+            .get_thread(thread_id)
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+
+        let provider = self
+            .provider_resolver
+            .resolve_with_model(provider_id, model)
+            .await?;
+        let effective_model = provider.model_name().to_string();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE threads
+            SET provider_id = ?, model_override = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND session_id = ?
+            "#,
+        )
+        .bind(provider_id.inner())
+        .bind(&effective_model)
+        .bind(thread_id.inner().to_string())
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+
+        let mut thread = thread.write().await;
+        thread.set_provider(provider);
+
+        Ok((provider_id, effective_model))
     }
 
     /// Get threads for a session (metadata only, from DB).
@@ -866,7 +923,6 @@ impl SessionManager {
         let provider_id = Some(ProviderId::new(row.get::<i64, _>("provider_id")));
         let token_count = row.get::<i64, _>("token_count").max(0) as u32;
         let turn_count = row.get::<i64, _>("turn_count").max(0) as u32;
-        let model_override: Option<String> = row.get("model_override");
         let updated_at = {
             let updated_at_str: String = row.get("updated_at");
             chrono::DateTime::parse_from_rfc3339(&updated_at_str)
@@ -881,7 +937,8 @@ impl SessionManager {
 
         let mut thread = thread.write().await;
         if !thread.history().is_empty() {
-            return Ok((template_id, provider_id, model_override));
+            let effective_model = Some(thread.provider().model_name().to_string());
+            return Ok((template_id, provider_id, effective_model));
         }
 
         let recovered = recover_thread_state_from_trace(
@@ -892,7 +949,8 @@ impl SessionManager {
         )
         .await?;
         if recovered.turn_count == 0 {
-            return Ok((template_id, provider_id, model_override));
+            let effective_model = Some(thread.provider().model_name().to_string());
+            return Ok((template_id, provider_id, effective_model));
         }
 
         thread.hydrate_from_persisted_state(
@@ -902,7 +960,8 @@ impl SessionManager {
             updated_at,
         );
 
-        Ok((template_id, provider_id, model_override))
+        let effective_model = Some(thread.provider().model_name().to_string());
+        Ok((template_id, provider_id, effective_model))
     }
 
     /// Subscribe to thread events.

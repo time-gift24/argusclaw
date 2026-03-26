@@ -96,12 +96,13 @@ impl TokenSource for SimpleTokenSource {
             });
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
-                reason: format!("Failed to parse response: {e}"),
-            })?;
+        let body: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
+                    reason: format!("Failed to parse response: {e}"),
+                })?;
 
         body.get("token")
             .and_then(|t: &serde_json::Value| t.as_str())
@@ -146,20 +147,19 @@ impl AccountTokenSource {
 #[async_trait]
 impl TokenSource for AccountTokenSource {
     async fn fetch_token(&self, _username: &str, _password: &str) -> Result<String, AuthError> {
-        let row: Option<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
-            "SELECT username, password, nonce FROM accounts WHERE id = 1",
-        )
-        .fetch_optional(self.pool.as_ref())
-        .await?;
+        let row: Option<(String, Vec<u8>, Vec<u8>)> =
+            sqlx::query_as("SELECT username, password, nonce FROM accounts WHERE id = 1")
+                .fetch_optional(self.pool.as_ref())
+                .await?;
 
         let (username, ciphertext, nonce) = row.ok_or(AuthError::TokenNotAvailable)?;
 
-        let decrypted = self
-            .cipher
-            .decrypt(&nonce, &ciphertext)
-            .map_err(|e| AuthError::DecryptionFailed {
-                reason: e.to_string(),
-            })?;
+        let decrypted =
+            self.cipher
+                .decrypt(&nonce, &ciphertext)
+                .map_err(|e| AuthError::DecryptionFailed {
+                    reason: e.to_string(),
+                })?;
 
         let client = reqwest::Client::new();
         let response = client
@@ -180,12 +180,13 @@ impl TokenSource for AccountTokenSource {
             });
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
-                reason: format!("Failed to parse response: {e}"),
-            })?;
+        let body: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
+                    reason: format!("Failed to parse response: {e}"),
+                })?;
 
         body.get("token")
             .and_then(|t: &serde_json::Value| t.as_str())
@@ -343,7 +344,10 @@ impl<T> TokenLLMProvider<T> {
     async fn get_auth_header(&self) -> Result<(String, String), AuthError> {
         let mut cache = self.cache.write().await;
         if cache.needs_refresh() {
-            let token = self.provider.fetch_token(&self.username, &self.password).await?;
+            let token = self
+                .provider
+                .fetch_token(&self.username, &self.password)
+                .await?;
             cache.update(token);
         }
 

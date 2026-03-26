@@ -274,7 +274,11 @@ async fn test_turn_trace_file_created_on_success() {
     assert!(output.messages.len() >= 2);
 
     // Verify trace file exists
-    let trace_path = temp_dir.path().join("test-thread").join("turns").join("1.jsonl");
+    let trace_path = temp_dir
+        .path()
+        .join("test-thread")
+        .join("turns")
+        .join("1.jsonl");
     assert!(
         trace_path.exists(),
         "Trace file should exist at {:?}",
@@ -350,7 +354,11 @@ async fn test_turn_trace_contains_tool_execution() {
     assert!(output.messages.len() >= 3);
 
     // Verify trace file exists
-    let trace_path = temp_dir.path().join("test-thread-tools").join("turns").join("1.jsonl");
+    let trace_path = temp_dir
+        .path()
+        .join("test-thread-tools")
+        .join("turns")
+        .join("1.jsonl");
     assert!(
         trace_path.exists(),
         "Trace file should exist at {:?}",
@@ -437,7 +445,11 @@ async fn test_full_jsonl_event_sequence() {
     assert!(output.messages.len() >= 3);
 
     // Read JSONL file
-    let trace_path = temp_dir.path().join("test-thread-seq").join("turns").join("1.jsonl");
+    let trace_path = temp_dir
+        .path()
+        .join("test-thread-seq")
+        .join("turns")
+        .join("1.jsonl");
     assert!(trace_path.exists());
     let content = fs::read_to_string(&trace_path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
@@ -459,8 +471,14 @@ async fn test_full_jsonl_event_sequence() {
     // user_input (from turn start), llm_req (iteration 1), tool_call_start, tool_result,
     // llm_response (iteration 1 completion), llm_req (iteration 2), llm_response (stop), turn_end
     let expected_sequence = vec![
-        "user_input", "llm_req", "tool_call_start", "tool_result", "llm_response",
-        "llm_req", "llm_response", "turn_end",
+        "user_input",
+        "llm_req",
+        "tool_call_start",
+        "tool_result",
+        "llm_response",
+        "llm_req",
+        "llm_response",
+        "turn_end",
     ];
     assert_eq!(event_types, expected_sequence, "Event sequence mismatch");
 

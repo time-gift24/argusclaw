@@ -46,10 +46,9 @@ impl NamedTool for ApplyPatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "apply_patch".to_string(),
-            description:
-                "Apply targeted edits to a file using search/replace. Finds the exact \
+            description: "Apply targeted edits to a file using search/replace. Finds the exact \
                  'old_string' and replaces it with 'new_string'. Use for surgical changes."
-                    .to_string(),
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -91,20 +90,20 @@ impl NamedTool for ApplyPatchTool {
             }
         })?;
 
-        let old_string =
-            input.get("old_string").and_then(|v| v.as_str()).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool_name: "apply_patch".to_string(),
-                    reason: "Missing required parameter: old_string".to_string(),
-                }
+        let old_string = input
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool_name: "apply_patch".to_string(),
+                reason: "Missing required parameter: old_string".to_string(),
             })?;
 
-        let new_string =
-            input.get("new_string").and_then(|v| v.as_str()).ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    tool_name: "apply_patch".to_string(),
-                    reason: "Missing required parameter: new_string".to_string(),
-                }
+        let new_string = input
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                tool_name: "apply_patch".to_string(),
+                reason: "Missing required parameter: new_string".to_string(),
             })?;
 
         let replace_all = input

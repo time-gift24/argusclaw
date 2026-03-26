@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use argus_protocol::{
     MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadInbox,
-    ThreadRuntimeState,
+    ThreadJobResult, ThreadRuntimeState,
 };
 use argus_turn::turn::TurnCancellation;
 use tokio::sync::{RwLock, mpsc};
@@ -111,6 +111,14 @@ impl ThreadRuntime {
         self.state
     }
 
+    pub(crate) fn claim_queued_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
+        let claimed = self.inbox.claim_job_result(job_id);
+        if claimed.is_some() {
+            self.queue_depth = self.queue_depth.saturating_sub(1);
+        }
+        claimed
+    }
+
     fn try_start_next_turn(&mut self) -> ThreadRuntimeAction {
         if !matches!(self.state, ThreadRuntimeState::Idle) {
             return ThreadRuntimeAction::Noop;
@@ -197,6 +205,11 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                             let _ = content;
                             runtime_handle.dispatch(ThreadCommand::CancelActiveTurn)
                         }
+                        ThreadControlEvent::ClaimQueuedJobResult { job_id, reply_tx } => {
+                            let claimed = runtime_handle.claim_queued_job_result(&job_id);
+                            let _ = reply_tx.send(claimed);
+                            ThreadRuntimeAction::Noop
+                        }
                     };
 
                     process_runtime_action(
@@ -243,6 +256,19 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::{AgentId, ThreadJobResult};
+
+    fn queued_job_result(job_id: &str) -> ThreadJobResult {
+        ThreadJobResult {
+            job_id: job_id.to_string(),
+            success: true,
+            message: format!("result for {job_id}"),
+            token_usage: None,
+            agent_id: AgentId::new(7),
+            agent_display_name: "Worker".to_string(),
+            agent_description: "Background worker".to_string(),
+        }
+    }
 
     #[test]
     fn runtime_turn_numbering_starts_after_seeded_turn_count() {
@@ -293,6 +319,46 @@ mod tests {
             ThreadRuntimeAction::StartTurn { turn_number: 2, .. }
         ));
     }
+
+    #[test]
+    fn claiming_queued_job_result_removes_it_and_preserves_other_work() {
+        let mut runtime = ThreadRuntime::default();
+
+        let first = runtime.apply_command(ThreadCommand::EnqueueUserMessage {
+            content: "first".to_string(),
+            msg_override: None,
+        });
+        assert!(matches!(
+            first,
+            ThreadRuntimeAction::StartTurn { turn_number: 1, .. }
+        ));
+
+        assert!(matches!(
+            runtime.apply_command(ThreadCommand::DeliverJobResult(queued_job_result("job-1"))),
+            ThreadRuntimeAction::Noop
+        ));
+        assert!(matches!(
+            runtime.apply_command(ThreadCommand::EnqueueUserMessage {
+                content: "follow-up".to_string(),
+                msg_override: None,
+            }),
+            ThreadRuntimeAction::Noop
+        ));
+        assert_eq!(runtime.snapshot().queue_depth, 2);
+
+        let claimed = runtime.claim_queued_job_result("job-1");
+        assert_eq!(
+            claimed.as_ref().map(|result| result.job_id.as_str()),
+            Some("job-1")
+        );
+        assert_eq!(runtime.snapshot().queue_depth, 1);
+
+        let next = runtime.finish_active_turn();
+        assert!(matches!(
+            next,
+            ThreadRuntimeAction::StartTurn { content, .. } if content == "follow-up"
+        ));
+    }
 }
 
 async fn process_runtime_action(
@@ -316,7 +382,8 @@ async fn process_runtime_action(
                     msg_override,
                     turn_done_tx.clone(),
                 )
-                .await {
+                .await
+                {
                     Ok(cancellation) => {
                         *active_turn_cancellation = Some(cancellation);
                     }

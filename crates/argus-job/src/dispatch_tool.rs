@@ -33,7 +33,7 @@ impl NamedTool for DispatchJobTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Dispatch a background job to a subagent. The job runs asynchronously and you will be notified when it completes.".to_string(),
+            description: "Dispatch a background job to a subagent. The job runs asynchronously; use get_job_result(job_id, consume=true) if you want to proactively check for completion and consume the result before it is replayed as a later queued message.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -65,10 +65,11 @@ impl NamedTool for DispatchJobTool {
         input: serde_json::Value,
         ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: JobDispatchArgs = serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-            tool_name: self.name().to_string(),
-            reason: format!("invalid input: {}", e),
-        })?;
+        let args: JobDispatchArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
+                tool_name: self.name().to_string(),
+                reason: format!("invalid input: {}", e),
+            })?;
 
         let job_id = Uuid::new_v4().to_string();
 

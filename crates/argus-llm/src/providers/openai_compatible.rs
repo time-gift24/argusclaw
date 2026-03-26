@@ -1048,10 +1048,10 @@ fn classify_http_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
-    use std::fmt;
     use futures_util::stream;
     use reqwest::header::HeaderMap;
+    use std::error::Error;
+    use std::fmt;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
 
