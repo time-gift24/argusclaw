@@ -8,7 +8,9 @@ use tokio::sync::broadcast;
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
 use argus_protocol::ToolExecutionContext;
-use argus_protocol::events::{ThreadControlEvent, ThreadEvent, ThreadJobResult, ThreadMailbox};
+use argus_protocol::events::{
+    ThreadControlEvent, ThreadEvent, ThreadInbox, ThreadJobResult, ThreadMailbox, TurnControlInput,
+};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -16,6 +18,7 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_protocol::{AgentId, MessageOverride, ThreadId};
+use argus_turn::turn::TurnCancellation;
 use argus_turn::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -354,6 +357,147 @@ async fn test_turn_integration_simple() {
     assert_eq!(output.messages[1].content, "Hello, world!");
 }
 
+struct HangingStreamingProvider;
+
+#[async_trait]
+impl LlmProvider for HangingStreamingProvider {
+    fn model_name(&self) -> &str {
+        "hanging"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: "hanging".to_string(),
+            capability: "complete".to_string(),
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: "hanging".to_string(),
+            capability: "complete_with_tools".to_string(),
+        })
+    }
+
+    async fn stream_complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        let stream = futures_util::stream::unfold(0usize, |state| async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Some((
+                Ok(LlmStreamEvent::ContentDelta {
+                    delta: format!("tick-{}", state),
+                }),
+                state.saturating_add(1),
+            ))
+        });
+
+        Ok(Box::pin(stream))
+    }
+}
+
+#[tokio::test]
+async fn turn_cancel_returns_cancelled_instead_of_error() {
+    let provider = Arc::new(HangingStreamingProvider);
+    let cancellation = TurnCancellation::new();
+
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .cancellation(cancellation.clone())
+        .build()
+        .unwrap();
+
+    let handle = tokio::spawn(async move { turn.execute().await });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    cancellation.cancel();
+
+    let result = tokio::time::timeout(Duration::from_millis(300), handle)
+        .await
+        .expect("turn should terminate quickly after cancellation")
+        .expect("turn task should not panic");
+
+    assert!(matches!(result, Err(argus_turn::TurnError::Cancelled)));
+}
+
+#[tokio::test]
+async fn turn_cancel_does_not_emit_turn_failed_event() {
+    let provider = Arc::new(HangingStreamingProvider);
+    let cancellation = TurnCancellation::new();
+
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .cancellation(cancellation.clone())
+        .build()
+        .unwrap();
+
+    let handle = tokio::spawn(async move { turn.execute().await });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    cancellation.cancel();
+
+    let result = tokio::time::timeout(Duration::from_millis(300), handle)
+        .await
+        .expect("turn should terminate quickly after cancellation")
+        .expect("turn task should not panic");
+    assert!(matches!(result, Err(argus_turn::TurnError::Cancelled)));
+
+    let mut saw_idle = false;
+    let mut saw_failed = false;
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(250) {
+        match tokio::time::timeout(Duration::from_millis(50), thread_event_rx.recv()).await {
+            Ok(Ok(ThreadEvent::Idle { .. })) => {
+                saw_idle = true;
+                break;
+            }
+            Ok(Ok(ThreadEvent::TurnFailed { .. })) => {
+                saw_failed = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+            Ok(Err(broadcast::error::RecvError::Closed)) => break,
+            Err(_) => {}
+        }
+    }
+
+    assert!(saw_idle, "cancellation should still emit Idle");
+    assert!(!saw_failed, "cancellation must not emit TurnFailed");
+}
+
 #[tokio::test]
 async fn test_turn_integration_with_tool_call() {
     // Create a provider with two responses:
@@ -521,10 +665,10 @@ async fn test_turn_streams_retry_events() {
 }
 
 #[test]
-fn thread_mailbox_drains_interrupts_then_user_messages_then_job_results() {
-    let mut mailbox = ThreadMailbox::default();
+fn thread_inbox_drains_items_in_global_fifo_order() {
+    let mut inbox = ThreadInbox::default();
 
-    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+    inbox.deliver_job_result(ThreadJobResult {
         job_id: "job-1".to_string(),
         success: true,
         message: "first result".to_string(),
@@ -532,15 +676,12 @@ fn thread_mailbox_drains_interrupts_then_user_messages_then_job_results() {
         agent_id: AgentId::new(7),
         agent_display_name: "Researcher".to_string(),
         agent_description: "Finds background answers".to_string(),
-    }));
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "queued user follow-up".to_string(),
-        msg_override: Some(MessageOverride::default()),
     });
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "stop current path".to_string(),
-    });
-    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+    inbox.enqueue_user_message(
+        "queued user follow-up".to_string(),
+        Some(MessageOverride::default()),
+    );
+    inbox.deliver_job_result(ThreadJobResult {
         job_id: "job-2".to_string(),
         success: false,
         message: "second result".to_string(),
@@ -548,6 +689,51 @@ fn thread_mailbox_drains_interrupts_then_user_messages_then_job_results() {
         agent_id: AgentId::new(8),
         agent_display_name: "Builder".to_string(),
         agent_description: "Builds things".to_string(),
+    });
+
+    let drained = inbox.drain_for_turn();
+    let rendered = drained
+        .iter()
+        .cloned()
+        .map(TurnControlInput::into_message_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered.len(), 3);
+    assert!(rendered[0].contains("Job: job-1"));
+    assert_eq!(rendered[1], "queued user follow-up");
+    assert!(rendered[0].contains("Subagent: Researcher"));
+    assert!(rendered[2].contains("Job: job-2"));
+    let msg_override = match &drained[1] {
+        TurnControlInput::UserMessage { msg_override, .. } => msg_override.clone(),
+        _ => panic!("second drained item should be a user message"),
+    };
+    assert!(
+        msg_override.is_some(),
+        "msg_override should survive inbox queueing",
+    );
+    assert!(inbox.is_empty());
+}
+
+#[test]
+fn thread_mailbox_preserves_fifo_user_messages() {
+    let mut mailbox = ThreadMailbox::default();
+
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "first user message".to_string(),
+        msg_override: None,
+    });
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "second user message".to_string(),
+        msg_override: Some(MessageOverride::default()),
+    });
+    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+        job_id: "job-3".to_string(),
+        success: true,
+        message: "job result".to_string(),
+        token_usage: None,
+        agent_id: AgentId::new(9),
+        agent_display_name: "Verifier".to_string(),
+        agent_description: "Validates state transitions".to_string(),
     }));
 
     let drained = mailbox.drain_for_turn();
@@ -556,12 +742,129 @@ fn thread_mailbox_drains_interrupts_then_user_messages_then_job_results() {
         .map(|item| item.into_message_text())
         .collect::<Vec<_>>();
 
-    assert_eq!(rendered[0], "stop current path");
-    assert_eq!(rendered[1], "queued user follow-up");
-    assert!(rendered[2].contains("Job: job-1"));
-    assert!(rendered[2].contains("Subagent: Researcher"));
-    assert!(rendered[3].contains("Job: job-2"));
-    assert!(mailbox.is_empty());
+    assert_eq!(rendered.len(), 3);
+    assert_eq!(rendered[0], "first user message");
+    assert_eq!(rendered[1], "second user message");
+    assert!(rendered[2].contains("Job: job-3"));
+}
+
+#[test]
+fn thread_mailbox_take_next_turn_message_clears_interrupts_and_preserves_fifo_and_override() {
+    let mut mailbox = ThreadMailbox::default();
+
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "interrupt-before-idle".to_string(),
+    });
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "first-user".to_string(),
+        msg_override: Some(MessageOverride::default()),
+    });
+    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+        job_id: "job-handoff-mailbox".to_string(),
+        success: true,
+        message: "job-second".to_string(),
+        token_usage: None,
+        agent_id: AgentId::new(12),
+        agent_display_name: "MailboxHandoff".to_string(),
+        agent_description: "Covers legacy idle handoff".to_string(),
+    }));
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "interrupt-after-work".to_string(),
+    });
+
+    let first = mailbox
+        .take_next_turn_message()
+        .expect("first handoff item should exist");
+    let second = mailbox
+        .take_next_turn_message()
+        .expect("second handoff item should exist");
+
+    assert_eq!(first.content, "first-user");
+    assert!(
+        first.msg_override.is_some(),
+        "compatibility path should preserve msg_override",
+    );
+    assert!(
+        second.content.contains("Job: job-handoff-mailbox"),
+        "queued work should preserve FIFO order for idle handoff",
+    );
+    assert!(
+        second.msg_override.is_none(),
+        "job handoff should not carry user msg_override",
+    );
+    assert!(mailbox.take_next_turn_message().is_none());
+    assert!(
+        mailbox.drain_for_turn().is_empty(),
+        "interrupts should be cleared when idling into handoff",
+    );
+}
+
+#[test]
+fn thread_mailbox_legacy_interrupts_are_drained_before_inbox_items() {
+    let mut mailbox = ThreadMailbox::default();
+
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "follow-up".to_string(),
+        msg_override: None,
+    });
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "interrupt now".to_string(),
+    });
+    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+        job_id: "job-legacy".to_string(),
+        success: true,
+        message: "legacy job".to_string(),
+        token_usage: None,
+        agent_id: AgentId::new(10),
+        agent_display_name: "Legacy".to_string(),
+        agent_description: "Legacy caller path".to_string(),
+    }));
+
+    let drained = mailbox
+        .drain_for_turn()
+        .into_iter()
+        .map(TurnControlInput::into_message_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(drained.len(), 3);
+    assert_eq!(drained[0], "interrupt now");
+    assert_eq!(drained[1], "follow-up");
+    assert!(drained[2].contains("Job: job-legacy"));
+}
+
+#[test]
+fn thread_inbox_take_next_turn_message_follows_global_fifo_handoff() {
+    let mut inbox = ThreadInbox::default();
+
+    inbox.deliver_job_result(ThreadJobResult {
+        job_id: "job-handoff".to_string(),
+        success: true,
+        message: "job-first".to_string(),
+        token_usage: None,
+        agent_id: AgentId::new(11),
+        agent_display_name: "Handoff".to_string(),
+        agent_description: "Idle handoff ordering".to_string(),
+    });
+    inbox.enqueue_user_message("user-second".to_string(), Some(MessageOverride::default()));
+
+    let first = inbox
+        .take_next_turn_message()
+        .expect("first handoff item should exist");
+    let second = inbox
+        .take_next_turn_message()
+        .expect("second handoff item should exist");
+
+    assert!(
+        first.content.contains("Job: job-handoff"),
+        "job result should be handed off first in global FIFO",
+    );
+    assert!(first.msg_override.is_none());
+    assert_eq!(second.content, "user-second");
+    assert!(
+        second.msg_override.is_some(),
+        "msg_override should survive idle handoff",
+    );
+    assert!(inbox.take_next_turn_message().is_none());
 }
 
 #[tokio::test]

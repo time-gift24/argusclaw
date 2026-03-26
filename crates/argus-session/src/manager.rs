@@ -4,11 +4,10 @@ use std::sync::Arc;
 use argus_job::JobManager;
 use argus_protocol::{
     llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
-        ToolCompletionRequest, ToolCompletionResponse,
+        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream,
+        ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     },
-    AgentId, ArgusError, ProviderId, QueuedUserMessage, Result, SessionId, ThreadControlEvent,
-    ThreadEvent, ThreadId,
+    AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
 };
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
@@ -19,7 +18,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -138,117 +137,6 @@ impl SessionManager {
         for session in self.sessions.iter() {
             session.value().broadcast(event.clone());
         }
-    }
-
-    fn spawn_thread_orchestrator(thread: Arc<RwLock<argus_thread::Thread>>) {
-        tokio::spawn(async move {
-            let (mut control_rx, mailbox) = {
-                let mut guard = thread.write().await;
-                let control_rx = match guard.take_control_rx() {
-                    Some(rx) => rx,
-                    None => {
-                        tracing::warn!("thread control receiver already taken");
-                        return;
-                    }
-                };
-                (control_rx, guard.mailbox())
-            };
-
-            let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
-
-            loop {
-                tokio::select! {
-                    Some(control_event) = control_rx.recv() => {
-                        let thread_running = {
-                            let guard = thread.read().await;
-                            guard.is_turn_running()
-                        };
-
-                        if thread_running {
-                            mailbox.lock().await.push(control_event);
-                            continue;
-                        }
-
-                        match control_event {
-                            ThreadControlEvent::UserMessage { content, msg_override } => {
-                                if let Err(error) = Self::start_turn_task(
-                                    Arc::clone(&thread),
-                                    content,
-                                    msg_override,
-                                    turn_done_tx.clone(),
-                                ).await {
-                                    tracing::error!("failed to start queued user turn: {}", error);
-                                }
-                            }
-                            ThreadControlEvent::JobResult(result) => {
-                                if let Err(error) = Self::start_turn_task(
-                                    Arc::clone(&thread),
-                                    result.into_message_text(),
-                                    None,
-                                    turn_done_tx.clone(),
-                                ).await {
-                                    tracing::error!("failed to start job-result turn: {}", error);
-                                }
-                            }
-                            ThreadControlEvent::UserInterrupt { .. } => {}
-                        }
-                    }
-                    Some(result) = turn_done_rx.recv() => {
-                        let finish_result = {
-                            let mut guard = thread.write().await;
-                            guard.finish_turn(result)
-                        };
-
-                        if let Err(error) = finish_result {
-                            tracing::error!("turn failed: {}", error);
-                        }
-
-                        let next_message = {
-                            let mut mailbox = mailbox.lock().await;
-                            mailbox.take_next_turn_message()
-                        };
-
-                        if let Some(QueuedUserMessage { content, msg_override }) = next_message {
-                            if let Err(error) = Self::start_turn_task(
-                                Arc::clone(&thread),
-                                content,
-                                msg_override,
-                                turn_done_tx.clone(),
-                            )
-                            .await
-                            {
-                                tracing::error!("failed to start follow-up turn: {}", error);
-                            }
-                        }
-                    }
-                    else => break,
-                }
-            }
-        });
-    }
-
-    async fn start_turn_task(
-        thread: Arc<RwLock<argus_thread::Thread>>,
-        content: String,
-        msg_override: Option<argus_protocol::MessageOverride>,
-        turn_done_tx: mpsc::UnboundedSender<
-            std::result::Result<argus_turn::TurnOutput, argus_thread::ThreadError>,
-        >,
-    ) -> std::result::Result<(), argus_thread::ThreadError> {
-        let turn = {
-            let mut guard = thread.write().await;
-            guard.begin_turn(content, msg_override).await?
-        };
-
-        tokio::spawn(async move {
-            let result = turn
-                .execute()
-                .await
-                .map_err(argus_thread::ThreadError::TurnFailed);
-            let _ = turn_done_tx.send(result);
-        });
-
-        Ok(())
     }
 
     /// List all sessions (from DB).
@@ -488,7 +376,7 @@ impl SessionManager {
                 }
             };
 
-            Self::spawn_thread_orchestrator(Arc::clone(&thread));
+            argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
             session.add_thread(thread);
         }
 
@@ -766,7 +654,7 @@ impl SessionManager {
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
 
-        Self::spawn_thread_orchestrator(Arc::clone(&thread_arc));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread_arc));
 
         // Add to in-memory session
         session.add_thread(thread_arc);
@@ -1218,9 +1106,7 @@ mod tests {
     use rust_decimal::Decimal;
     use tokio::time::{sleep, timeout};
 
-    use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
-    };
+    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session};
 
     #[derive(Debug)]
     struct CapturingProvider {
@@ -1301,6 +1187,7 @@ mod tests {
             description: "Main orchestration agent".to_string(),
             version: "1.0.0".to_string(),
             provider_id: Some(ProviderId::new(1)),
+            model_id: None,
             system_prompt: "You are a test orchestrator.".to_string(),
             tool_names: vec![],
             max_tokens: None,
@@ -1538,7 +1425,7 @@ mod tests {
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
-        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
         session.add_thread(Arc::clone(&thread));
 
         {
@@ -1566,7 +1453,7 @@ mod tests {
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
-        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -1602,7 +1489,7 @@ mod tests {
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
-        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
