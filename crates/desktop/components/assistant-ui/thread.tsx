@@ -339,15 +339,17 @@ const JobStatusArtifacts: FC = () => {
                       </span>
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
-                      {job.agent_description || "后台子 agent 任务"}
+                      <span className="line-clamp-2 break-words">
+                        {job.agent_description || "后台子 agent 任务"}
+                      </span>
                     </div>
                     {job.prompt && (
-                      <div className="mt-2 line-clamp-2 text-xs text-foreground/80">
+                      <div className="mt-2 line-clamp-2 break-words text-xs text-foreground/80">
                         {job.prompt}
                       </div>
                     )}
                     {job.message && (
-                      <div className="mt-2 rounded-lg bg-muted/40 px-2 py-1.5 text-xs text-foreground/80">
+                      <div className="mt-2 line-clamp-6 whitespace-pre-wrap break-words rounded-lg bg-muted/40 px-2 py-1.5 text-xs text-foreground/80">
                         {job.message}
                       </div>
                     )}

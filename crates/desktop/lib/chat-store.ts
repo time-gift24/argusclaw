@@ -27,6 +27,41 @@ const toSessionKey = (templateId: number, providerPreferenceId: number | null) =
 const toErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
+const JOB_STATUS_DISPLAY_NAME_LIMIT = 80;
+const JOB_STATUS_DESCRIPTION_LIMIT = 240;
+const JOB_STATUS_PROMPT_LIMIT = 600;
+const JOB_STATUS_MESSAGE_LIMIT = 1600;
+
+const truncateDisplayText = (value: string, maxChars: number) => {
+  const chars = Array.from(value);
+  if (chars.length <= maxChars) return value;
+  return `${chars.slice(0, maxChars).join("")}…`;
+};
+
+const truncateOptionalDisplayText = (
+  value: string | null | undefined,
+  maxChars: number,
+) => {
+  if (!value) return value ?? null;
+  return truncateDisplayText(value, maxChars);
+};
+
+const normalizeJobStatusPayload = (
+  payload: JobStatusPayload,
+): JobStatusPayload => ({
+  ...payload,
+  prompt: truncateDisplayText(payload.prompt, JOB_STATUS_PROMPT_LIMIT),
+  message: truncateOptionalDisplayText(payload.message, JOB_STATUS_MESSAGE_LIMIT),
+  agent_display_name: truncateOptionalDisplayText(
+    payload.agent_display_name,
+    JOB_STATUS_DISPLAY_NAME_LIMIT,
+  ),
+  agent_description: truncateOptionalDisplayText(
+    payload.agent_description,
+    JOB_STATUS_DESCRIPTION_LIMIT,
+  ),
+});
+
 export interface ChatSessionState {
   sessionKey: string;
   sessionId: string;
@@ -634,6 +669,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
           if (!session) return {};
+          const nextJobStatus = normalizeJobStatusPayload({
+            job_id: payload.job_id,
+            agent_id: payload.agent_id,
+            prompt: payload.prompt,
+            status: "running",
+            message: null,
+            agent_display_name:
+              session.jobStatuses[payload.job_id]?.agent_display_name ?? null,
+            agent_description:
+              session.jobStatuses[payload.job_id]?.agent_description ?? null,
+          });
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
@@ -641,17 +687,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 ...session,
                 jobStatuses: {
                   ...session.jobStatuses,
-                  [payload.job_id]: {
-                    job_id: payload.job_id,
-                    agent_id: payload.agent_id,
-                    prompt: payload.prompt,
-                    status: "running",
-                    message: null,
-                    agent_display_name:
-                      session.jobStatuses[payload.job_id]?.agent_display_name ?? null,
-                    agent_description:
-                      session.jobStatuses[payload.job_id]?.agent_description ?? null,
-                  },
+                  [payload.job_id]: nextJobStatus,
                 },
               },
             },
@@ -664,6 +700,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const session = state.sessionsByKey[sessionKey];
           if (!session) return {};
           const existing = session.jobStatuses[payload.job_id];
+          const nextJobStatus = normalizeJobStatusPayload({
+            job_id: payload.job_id,
+            agent_id: payload.agent_id,
+            prompt: existing?.prompt ?? "",
+            status: payload.success ? "completed" : "failed",
+            message: payload.message,
+            agent_display_name: payload.agent_display_name,
+            agent_description: payload.agent_description,
+          });
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
@@ -671,15 +716,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 ...session,
                 jobStatuses: {
                   ...session.jobStatuses,
-                  [payload.job_id]: {
-                    job_id: payload.job_id,
-                    agent_id: payload.agent_id,
-                    prompt: existing?.prompt ?? "",
-                    status: payload.success ? "completed" : "failed",
-                    message: payload.message,
-                    agent_display_name: payload.agent_display_name,
-                    agent_description: payload.agent_description,
-                  },
+                  [payload.job_id]: nextJobStatus,
                 },
               },
             },

@@ -67,6 +67,21 @@ test("chat store tracks ephemeral job status outside the transcript", () => {
     /case "job_result":[\s\S]*status:\s*payload\.success\s*\?\s*"completed"\s*:\s*"failed"/,
     "job_result should only update job status instead of appending transcript text",
   );
+  assert.match(
+    storeSource,
+    /const normalizeJobStatusPayload = \(\s*payload: JobStatusPayload,\s*\): JobStatusPayload => \(\{/,
+    "job status payloads should be normalized before entering store state",
+  );
+  assert.match(
+    storeSource,
+    /case "job_dispatched":[\s\S]*normalizeJobStatusPayload\(/,
+    "job_dispatched should clamp oversized subagent payloads before storing them",
+  );
+  assert.match(
+    storeSource,
+    /case "job_result":[\s\S]*normalizeJobStatusPayload\(/,
+    "job_result should clamp oversized subagent payloads before storing them",
+  );
 });
 
 test("chat store waits for idle before refreshing the persisted snapshot", () => {
