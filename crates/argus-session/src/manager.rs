@@ -636,10 +636,13 @@ impl SessionManager {
             .await?
             .ok_or(ArgusError::TemplateNotFound(template_id.inner()))?;
 
+        // Model resolution: explicit override > agent default model > provider default
+        let effective_model = model_override.or(agent_record.model_id.as_deref());
+
         // Resolve provider using priority: explicit > agent_record > default
         let (provider_id, provider) = match explicit_provider_id.or(agent_record.provider_id) {
             Some(provider_id) => {
-                let provider = match model_override {
+                let provider = match effective_model {
                     Some(model) => {
                         self.provider_resolver
                             .resolve_with_model(provider_id, model)
@@ -661,7 +664,7 @@ impl SessionManager {
                 .map(ProviderId::new)
                 .ok_or(ArgusError::DefaultProviderNotConfigured)?;
 
-                let provider = match model_override {
+                let provider = match effective_model {
                     Some(model) => match self
                         .provider_resolver
                         .resolve_with_model(default_provider_id, model)

@@ -89,6 +89,7 @@ export interface AgentRecord {
   description: string;
   version: string;
   provider_id: number | null;
+  model_id?: string | null;
   system_prompt: string;
   tool_names: string[];
   parent_agent_id?: number;
