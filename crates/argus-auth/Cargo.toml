@@ -8,8 +8,7 @@ license = "MIT OR Apache-2.0"
 argus-crypto = { path = "../argus-crypto" }
 argus-protocol = { path = "../argus-protocol" }
 async-trait = "0.1"
-futures = "0.3"
-reqwest = { workspace = true, features = ["json", "blocking"] }
+reqwest = { workspace = true, features = ["json"] }
 rust_decimal = "1"
 secrecy = "0.8"
 serde = { version = "1", features = ["derive"] }

@@ -220,22 +220,22 @@ impl ProviderManager {
         record: LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let base = self.build_base_provider(&record, model)?;
+        let base = self.build_base_provider(&record, model).await?;
         Ok(Arc::new(RetryProvider::new(base, RetryConfig::default())))
     }
 
-    fn build_base_provider(
+    async fn build_base_provider(
         &self,
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
         if record.meta_data.get("account_token_source") == Some(&"true".to_string()) {
-            return self.build_account_token_llm_provider(record, model);
+            return self.build_account_token_llm_provider(record, model).await;
         }
         self.build_base_openai_compatible_provider(record, model)
     }
 
-    fn build_account_token_llm_provider(
+    async fn build_account_token_llm_provider(
         &self,
         record: &LlmProviderRecord,
         model: &str,
@@ -256,12 +256,11 @@ impl ProviderManager {
         let token_source = Arc::new(AccountTokenSource::new(pool.clone(), cipher.clone()));
 
         // Query credentials to derive cache key (username/password stored for cache invalidation).
-        let creds: (String, String) = futures::executor::block_on(
-            sqlx::query_as::<_, (String, Vec<u8>, Vec<u8>)>(
-                "SELECT username, password, nonce FROM accounts WHERE id = 1",
-            )
-            .fetch_optional(pool.as_ref()),
+        let creds: (String, String) = sqlx::query_as::<_, (String, Vec<u8>, Vec<u8>)>(
+            "SELECT username, password, nonce FROM accounts WHERE id = 1",
         )
+        .fetch_optional(pool.as_ref())
+        .await
         .map_err(|e| argus_protocol::ArgusError::LlmError { reason: e.to_string() })?
         .ok_or_else(|| argus_protocol::ArgusError::LlmError {
             reason: "No stored credentials for token auth".to_string(),
@@ -783,8 +782,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_base_provider_checks_account_token_source_flag() {
+    #[tokio::test]
+    async fn build_base_provider_checks_account_token_source_flag() {
         // Verify that build_base_provider checks for the account_token_source flag
         // by ensuring the meta_data field is consulted.
         // This is a structural test: we check that the flag is recognized.
@@ -800,7 +799,7 @@ mod tests {
         });
         let manager = ProviderManager::new(repo);
 
-        let result = futures::executor::block_on(manager.build_provider_with_model(record, "gpt-4"));
+        let result = manager.build_provider_with_model(record, "gpt-4").await;
         assert!(result.is_err(), "should fail without SqlitePool");
         let err = result.err().expect("already checked");
         assert!(
