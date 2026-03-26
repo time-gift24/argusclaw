@@ -53,6 +53,31 @@ test("agent selector updates template choice without auto-creating a session", (
   assert.doesNotMatch(agentSelectorSource, /void activateSession\(templateId\)/);
 });
 
+test("agent selector prefers the active session template for display", () => {
+  assert.match(agentSelectorSource, /const activeSession = useChatStore/);
+  assert.match(
+    agentSelectorSource,
+    /const currentTemplateId = activeSession\?\.templateId \?\? selectedTemplateId/,
+  );
+  assert.match(
+    agentSelectorSource,
+    /templates\.find\(\(t\) => t\.id === currentTemplateId\)/,
+  );
+});
+
+test("agent selector confirms before creating a new session for another agent", () => {
+  assert.match(agentSelectorSource, /const activateSession = useChatStore/);
+  assert.match(agentSelectorSource, /const \[pendingTemplateId, setPendingTemplateId\]/);
+  assert.match(
+    agentSelectorSource,
+    /if \(activeSession && activeSession\.templateId !== templateId\)/,
+  );
+  assert.match(agentSelectorSource, /setPendingTemplateId\(templateId\)/);
+  assert.match(agentSelectorSource, /需要新建会话才能生效/);
+  assert.match(agentSelectorSource, /void activateSession\(pendingTemplateId\)/);
+  assert.match(agentSelectorSource, /void selectTemplate\(activeSession\.templateId\)/);
+});
+
 test("dropdown menu trigger bridges radix-style asChild usage without leaking props to the DOM", () => {
   assert.match(providerSelectorSource, /<DropdownMenuTrigger asChild>/);
   assert.match(dropdownMenuSource, /asChild\?: boolean/);

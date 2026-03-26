@@ -9,6 +9,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -18,15 +19,45 @@ import { cn } from "@/lib/utils";
 
 export function AgentSelector() {
   const templates = useChatStore((state) => state.templates);
+  const activeSession = useChatStore((state) =>
+    state.activeSessionKey ? state.sessionsByKey[state.activeSessionKey] ?? null : null,
+  );
   const selectedTemplateId = useChatStore((state) => state.selectedTemplateId);
   const selectTemplate = useChatStore((state) => state.selectTemplate);
+  const activateSession = useChatStore((state) => state.activateSession);
   const [open, setOpen] = React.useState(false);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [pendingTemplateId, setPendingTemplateId] = React.useState<number | null>(null);
 
   if (templates.length === 0) return null;
 
-  const selectedTemplate = templates.find((t) => t.id === selectedTemplateId);
+  const currentTemplateId = activeSession?.templateId ?? selectedTemplateId;
+  const selectedTemplate = templates.find((t) => t.id === currentTemplateId);
+  const pendingTemplate = templates.find((t) => t.id === pendingTemplateId);
+
+  const handleCancelPendingSwitch = React.useCallback(() => {
+    if (activeSession) {
+      void selectTemplate(activeSession.templateId);
+    }
+    setPendingTemplateId(null);
+    setConfirmOpen(false);
+  }, [activeSession, selectTemplate]);
+
+  const handleConfirmPendingSwitch = React.useCallback(() => {
+    if (pendingTemplateId == null) return;
+    setConfirmOpen(false);
+    void activateSession(pendingTemplateId);
+    setPendingTemplateId(null);
+  }, [activateSession, pendingTemplateId]);
 
   const handleSelect = (templateId: number) => {
+    if (activeSession && activeSession.templateId !== templateId) {
+      setPendingTemplateId(templateId);
+      setOpen(false);
+      setConfirmOpen(true);
+      return;
+    }
+
     void selectTemplate(templateId);
     setOpen(false);
   };
@@ -77,14 +108,14 @@ export function AgentSelector() {
                   onClick={() => handleSelect(parent.id)}
                   className={cn(
                     "w-full group flex items-center gap-4 rounded-2xl border p-4 text-left transition-all",
-                    selectedTemplateId === parent.id 
+                    currentTemplateId === parent.id 
                       ? "border-primary bg-primary/5 shadow-sm" 
                       : "border-muted/60 hover:border-primary/30 hover:bg-muted/30"
                   )}
                 >
                   <div className={cn(
                     "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors",
-                    selectedTemplateId === parent.id ? "bg-primary text-primary-foreground" : "bg-muted text-primary group-hover:bg-primary group-hover:text-primary-foreground"
+                    currentTemplateId === parent.id ? "bg-primary text-primary-foreground" : "bg-muted text-primary group-hover:bg-primary group-hover:text-primary-foreground"
                   )}>
                     <Bot className="size-5" />
                   </div>
@@ -93,7 +124,7 @@ export function AgentSelector() {
                       <span className="font-bold text-sm tracking-tight">{parent.display_name}</span>
                       <div className="flex items-center gap-2">
                         <Badge variant="outline" className="text-[9px] h-4 px-1 opacity-50 font-mono">v{parent.version}</Badge>
-                        {selectedTemplateId === parent.id && <Check className="size-4 text-primary" />}
+                        {currentTemplateId === parent.id && <Check className="size-4 text-primary" />}
                       </div>
                     </div>
                     {parent.description && (
@@ -115,7 +146,7 @@ export function AgentSelector() {
                           onClick={() => handleSelect(sub.id)}
                           className={cn(
                             "w-full group flex items-center gap-3 rounded-xl border p-3 text-left transition-all relative",
-                            selectedTemplateId === sub.id 
+                            currentTemplateId === sub.id 
                               ? "border-primary/40 bg-primary/5 shadow-inner" 
                               : "border-muted/40 hover:border-primary/20 hover:bg-muted/20"
                           )}
@@ -123,14 +154,14 @@ export function AgentSelector() {
                           <div className="absolute -left-[18px] top-1/2 w-2 h-[2px] bg-primary/10" />
                           <div className={cn(
                             "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors",
-                            selectedTemplateId === sub.id ? "bg-primary/20 text-primary" : "bg-muted/50 text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary"
+                            currentTemplateId === sub.id ? "bg-primary/20 text-primary" : "bg-muted/50 text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary"
                           )}>
                             <Layers className="size-3.5" />
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between gap-2">
                               <span className="font-semibold text-xs tracking-tight">{sub.display_name}</span>
-                              {selectedTemplateId === sub.id && <Check className="size-3 text-primary" />}
+                              {currentTemplateId === sub.id && <Check className="size-3 text-primary" />}
                             </div>
                             {sub.description && (
                               <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1 opacity-70">
@@ -153,6 +184,36 @@ export function AgentSelector() {
           </p>
         </div>
       </DialogContent>
+      <Dialog open={confirmOpen} onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          handleCancelPendingSwitch();
+          return;
+        }
+        setConfirmOpen(true);
+      }}>
+        <DialogContent
+          showCloseButton={false}
+          className="sm:max-w-md rounded-[24px] border-none bg-background p-6 shadow-2xl"
+        >
+          <DialogHeader className="space-y-2">
+            <DialogTitle className="text-base font-bold tracking-tight">
+              切换智能体需要新建会话
+            </DialogTitle>
+            <DialogDescription>
+              已选择 {pendingTemplate?.display_name ?? "新的智能体"}。当前会话仍在使用{" "}
+              {selectedTemplate?.display_name ?? "当前智能体"}，需要新建会话才能生效。是否立即新建？
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button variant="ghost" onClick={handleCancelPendingSwitch}>
+              继续当前会话
+            </Button>
+            <Button onClick={handleConfirmPendingSwitch}>
+              新建会话
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }
