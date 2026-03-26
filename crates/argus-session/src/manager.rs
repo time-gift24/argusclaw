@@ -316,7 +316,7 @@ impl SessionManager {
         // Load threads metadata from DB
         let thread_rows = sqlx::query(
             r#"
-            SELECT id, template_id, provider_id, title, token_count, turn_count, created_at, updated_at
+            SELECT id, template_id, provider_id, title, token_count, turn_count, created_at, updated_at, model_override
             FROM threads WHERE session_id = ?
             "#,
         )
@@ -334,20 +334,36 @@ impl SessionManager {
             let provider_id_val: i64 = thread_row.get("provider_id");
             let token_count: i64 = thread_row.get("token_count");
             let turn_count: i64 = thread_row.get("turn_count");
+            let model_override: Option<String> = thread_row.get("model_override");
 
-            // Resolve provider
+            // Resolve provider (apply model_override if set)
             let provider_id = ProviderId::new(provider_id_val);
-            let provider = match self.provider_resolver.resolve(provider_id).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        provider_id = %provider_id_val,
-                        error = %e,
-                        "Failed to resolve provider for thread, skipping"
-                    );
-                    continue;
-                }
+            let provider = match model_override {
+                Some(ref model) => match self.provider_resolver.resolve_with_model(provider_id, model).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %thread_id_str,
+                            provider_id = %provider_id_val,
+                            model_override = %model,
+                            error = %e,
+                            "Failed to resolve provider with model override, skipping"
+                        );
+                        continue;
+                    }
+                },
+                None => match self.provider_resolver.resolve(provider_id).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %thread_id_str,
+                            provider_id = %provider_id_val,
+                            error = %e,
+                            "Failed to resolve provider for thread, skipping"
+                        );
+                        continue;
+                    }
+                },
             };
 
             // Get agent record (template)
@@ -612,9 +628,12 @@ impl SessionManager {
                 .map(ProviderId::new)
                 .ok_or(ArgusError::DefaultProviderNotConfigured)?;
 
-                let provider = match self.provider_resolver.resolve(default_provider_id).await {
-                    Ok(provider) => provider,
-                    Err(error) => Arc::new(UnconfiguredProvider::new(error.to_string())),
+                let provider = match model_override {
+                    Some(model) => self.provider_resolver.resolve_with_model(default_provider_id, model).await?,
+                    None => match self.provider_resolver.resolve(default_provider_id).await {
+                        Ok(provider) => provider,
+                        Err(error) => Arc::new(UnconfiguredProvider::new(error.to_string())),
+                    },
                 };
 
                 (default_provider_id, provider)

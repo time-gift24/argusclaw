@@ -255,7 +255,8 @@ pub struct ChatSessionPayload {
     /// The effective provider ID bound to this session.
     /// `None` if no provider is configured (session will fail on first LLM call).
     pub effective_provider_id: Option<i64>,
-    /// The effective model bound to this session (override or provider default).
+    /// The effective model override bound to this session, or `None` for provider default.
+    #[serde(default)]
     pub effective_model: Option<String>,
 }
 
@@ -730,6 +731,7 @@ mod tests {
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: Some(1),
+            effective_model: None,
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
@@ -748,6 +750,7 @@ mod tests {
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: None,
+            effective_model: None,
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
