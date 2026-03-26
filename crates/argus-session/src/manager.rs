@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use argus_job::JobManager;
 use argus_protocol::{
-    llm::{ChatMessage, ToolCall},
+    llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream,
+        ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    },
     AgentId, ArgusError, ProviderId, QueuedUserMessage, Result, SessionId, ThreadControlEvent,
     ThreadEvent, ThreadId,
 };
@@ -12,7 +15,9 @@ use argus_thread::config::ThreadConfigBuilder;
 use argus_thread::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_tool::ToolManager;
 use argus_turn::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
+use async_trait::async_trait;
 use dashmap::DashMap;
+use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{RwLock, broadcast, mpsc};
 
@@ -24,6 +29,60 @@ struct RecoveredThreadState {
     messages: Vec<ChatMessage>,
     turn_count: u32,
     token_count: u32,
+}
+
+#[derive(Debug)]
+struct UnconfiguredProvider {
+    reason: String,
+}
+
+impl UnconfiguredProvider {
+    fn new(reason: String) -> Self {
+        Self { reason }
+    }
+
+    fn llm_error(&self) -> LlmError {
+        LlmError::RequestFailed {
+            provider: "unconfigured-default".to_string(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl argus_protocol::LlmProvider for UnconfiguredProvider {
+    fn model_name(&self) -> &str {
+        "unconfigured-default"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> std::result::Result<CompletionResponse, LlmError> {
+        Err(self.llm_error())
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> std::result::Result<ToolCompletionResponse, LlmError> {
+        Err(self.llm_error())
+    }
+
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> std::result::Result<LlmEventStream, LlmError> {
+        Err(self.llm_error())
+    }
+
+    async fn stream_complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> std::result::Result<LlmEventStream, LlmError> {
+        Err(self.llm_error())
+    }
 }
 
 /// Manages sessions and their threads.
@@ -532,11 +591,31 @@ impl SessionManager {
             .ok_or(ArgusError::TemplateNotFound(template_id.inner()))?;
 
         // Resolve provider using priority: explicit > agent_record > default
-        let provider_id = explicit_provider_id
-            .or(agent_record.provider_id)
-            .ok_or(ArgusError::DefaultProviderNotConfigured)?;
+        let (provider_id, provider) = match explicit_provider_id.or(agent_record.provider_id) {
+            Some(provider_id) => {
+                let provider = self.provider_resolver.resolve(provider_id).await?;
+                (provider_id, provider)
+            }
+            None => {
+                let default_provider_id = sqlx::query_scalar::<_, i64>(
+                    "SELECT id FROM llm_providers WHERE is_default = 1 LIMIT 1",
+                )
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: error.to_string(),
+                })?
+                .map(ProviderId::new)
+                .ok_or(ArgusError::DefaultProviderNotConfigured)?;
 
-        let provider = self.provider_resolver.resolve(provider_id).await?;
+                let provider = match self.provider_resolver.resolve(default_provider_id).await {
+                    Ok(provider) => provider,
+                    Err(error) => Arc::new(UnconfiguredProvider::new(error.to_string())),
+                };
+
+                (default_provider_id, provider)
+            }
+        };
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();

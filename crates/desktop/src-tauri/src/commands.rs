@@ -344,8 +344,16 @@ pub async fn create_chat_session(
     // Determine the effective provider ID:
     // 1. Use the explicitly provided provider preference
     // 2. Fall back to the template's configured provider
-    // 3. Return None if no provider is configured (frontend should handle this case)
-    let effective_provider_id = provider_id.or(template.provider_id).map(|p| p.inner());
+    // 3. Fall back to the current default provider
+    // 4. Return None if no provider is configured (frontend should handle this case)
+    let effective_provider_id = match provider_id.or(template.provider_id) {
+        Some(provider_id) => Some(provider_id.inner()),
+        None => wing
+            .get_default_provider_record()
+            .await
+            .ok()
+            .map(|provider| provider.id.into_inner()),
+    };
 
     let session_key = format!(
         "{}::{}",

@@ -29,8 +29,6 @@ export function AgentSelector() {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [pendingTemplateId, setPendingTemplateId] = React.useState<number | null>(null);
 
-  if (templates.length === 0) return null;
-
   const currentTemplateId = activeSession?.templateId ?? selectedTemplateId;
   const selectedTemplate = templates.find((t) => t.id === currentTemplateId);
   const pendingTemplate = templates.find((t) => t.id === pendingTemplateId);
@@ -49,6 +47,8 @@ export function AgentSelector() {
     void activateSession(pendingTemplateId);
     setPendingTemplateId(null);
   }, [activateSession, pendingTemplateId]);
+
+  if (templates.length === 0) return null;
 
   const handleSelect = (templateId: number) => {
     if (activeSession && activeSession.templateId !== templateId) {

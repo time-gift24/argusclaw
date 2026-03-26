@@ -881,4 +881,41 @@ mod tests {
             .expect("should list threads");
         assert_eq!(threads.len(), 1);
     }
+
+    #[tokio::test]
+    async fn create_thread_uses_default_provider_when_template_has_none() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "No Provider Agent".to_string(),
+                description: "Used to verify default provider fallback".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                system_prompt: "You are a fallback agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("fallback-provider-session")
+            .await
+            .expect("session should create");
+
+        wing.create_thread(session_id, template_id, None)
+            .await
+            .expect("thread should create using the default provider fallback");
+    }
 }

@@ -78,6 +78,30 @@ test("agent selector confirms before creating a new session for another agent", 
   assert.match(agentSelectorSource, /void selectTemplate\(activeSession\.templateId\)/);
 });
 
+test("agent selector declares callback hooks before any empty-template early return", () => {
+  const earlyReturnIndex = agentSelectorSource.indexOf(
+    "if (templates.length === 0) return null;",
+  );
+  const cancelCallbackIndex = agentSelectorSource.indexOf(
+    "const handleCancelPendingSwitch = React.useCallback",
+  );
+  const confirmCallbackIndex = agentSelectorSource.indexOf(
+    "const handleConfirmPendingSwitch = React.useCallback",
+  );
+
+  assert.ok(earlyReturnIndex >= 0, "empty-template guard should exist");
+  assert.ok(cancelCallbackIndex >= 0, "cancel callback hook should exist");
+  assert.ok(confirmCallbackIndex >= 0, "confirm callback hook should exist");
+  assert.ok(
+    cancelCallbackIndex < earlyReturnIndex,
+    "callback hooks must be declared before the early return to keep hook order stable",
+  );
+  assert.ok(
+    confirmCallbackIndex < earlyReturnIndex,
+    "all callback hooks must be declared before the early return to keep hook order stable",
+  );
+});
+
 test("dropdown menu trigger bridges radix-style asChild usage without leaking props to the DOM", () => {
   assert.match(providerSelectorSource, /<DropdownMenuTrigger asChild>/);
   assert.match(dropdownMenuSource, /asChild\?: boolean/);
