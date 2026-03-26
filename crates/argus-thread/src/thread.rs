@@ -409,12 +409,26 @@ impl Thread {
         // Compactor decides internally whether to compact
         // Clone the Arc first to avoid borrow conflicts
         let compactor = self.compactor.clone();
+        let pre_token_count = self.token_count;
+        let pre_message_count = self.messages.len();
 
-        // Create CompactContext for compaction
-        {
+        // Create CompactContext for compaction. This remains a pre-turn behavior.
+        let compact_result = {
             let mut context =
-                CompactContext::new(&self.provider, &mut self.token_count, &mut self.messages);
-            if let Err(e) = compactor.compact(&mut context).await {
+                CompactContext::new(&self.provider, &mut self.token_count, &mut self.messages)
+                    .with_threshold_ratio_override(self.config.compact_threshold_ratio);
+            compactor.compact(&mut context).await
+        };
+        match compact_result {
+            Ok(()) => {
+                if self.token_count != pre_token_count || self.messages.len() != pre_message_count {
+                    self.broadcast_to_self(ThreadEvent::Compacted {
+                        thread_id: self.id.to_string(),
+                        new_token_count: self.token_count,
+                    });
+                }
+            }
+            Err(e) => {
                 tracing::warn!("Compact failed: {}", e);
             }
         }
@@ -548,6 +562,8 @@ mod tests {
 
     use super::*;
     use crate::compact::KeepRecentCompactor;
+    use crate::config::ThreadConfigBuilder;
+    use crate::error::CompactError;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
     use argus_protocol::llm::{
@@ -593,6 +609,60 @@ mod tests {
         }
     }
 
+    struct SmallContextProvider {
+        context_window: u32,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SmallContextProvider {
+        fn model_name(&self) -> &str {
+            "small-context"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "small-context".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "small-context".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
+    }
+
+    struct FailingCompactor;
+
+    #[async_trait]
+    impl Compactor for FailingCompactor {
+        async fn compact(&self, _context: &mut CompactContext<'_>) -> Result<(), CompactError> {
+            Err(CompactError::Failed {
+                reason: "boom".to_string(),
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+    }
+
     fn test_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
             id: AgentId::new(1),
@@ -608,6 +678,13 @@ mod tests {
             thinking_config: None,
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+        })
+    }
+
+    fn test_agent_record_without_system_prompt() -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
+            system_prompt: String::new(),
+            ..(*test_agent_record()).clone()
         })
     }
 
@@ -1076,6 +1153,124 @@ mod tests {
         assert_eq!(
             captured[1], "second queued",
             "late interrupt should be cleared on idle handoff",
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_turn_broadcasts_compacted_event_when_pre_turn_compaction_changes_history() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
+        let config = ThreadConfigBuilder::default()
+            .compact_threshold_ratio(0.2)
+            .build()
+            .expect("thread config should build");
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 100,
+            }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .config(config)
+            .build()
+            .expect("thread should build");
+        thread.hydrate_from_persisted_state(
+            vec![
+                ChatMessage::user(&"a".repeat(40)),
+                ChatMessage::user(&"b".repeat(40)),
+                ChatMessage::user(&"c".repeat(40)),
+            ],
+            30,
+            0,
+            Utc::now(),
+        );
+
+        let mut rx = thread.subscribe();
+        let _turn = thread
+            .begin_turn("next".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build after compaction");
+
+        let event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("thread should emit compacted event")
+            .expect("event should be readable");
+        assert!(matches!(
+            event,
+            ThreadEvent::Compacted {
+                new_token_count: 10,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn begin_turn_does_not_broadcast_compacted_event_when_history_is_unchanged() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
+        let config = ThreadConfigBuilder::default()
+            .compact_threshold_ratio(0.8)
+            .build()
+            .expect("thread config should build");
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 100,
+            }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .config(config)
+            .build()
+            .expect("thread should build");
+        thread.hydrate_from_persisted_state(
+            vec![ChatMessage::user(&"a".repeat(40))],
+            10,
+            0,
+            Utc::now(),
+        );
+
+        let mut rx = thread.subscribe();
+        let _turn = thread
+            .begin_turn("next".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build without compaction");
+
+        let no_event = timeout(Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "unchanged history should not emit compacted event",
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_turn_ignores_compaction_failure_and_does_not_emit_compacted_event() {
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 100,
+            }))
+            .compactor(Arc::new(FailingCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        thread.hydrate_from_persisted_state(
+            vec![
+                ChatMessage::user(&"a".repeat(40)),
+                ChatMessage::user(&"b".repeat(40)),
+            ],
+            20,
+            0,
+            Utc::now(),
+        );
+
+        let mut rx = thread.subscribe();
+        let _turn = thread
+            .begin_turn("next".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should still build after compact failure");
+
+        let no_event = timeout(Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "failed compaction should not emit compacted event",
         );
     }
 }

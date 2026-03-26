@@ -834,6 +834,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }));
         break;
 
+      case "compacted":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              tokenCount: payload.new_token_count,
+            },
+          },
+        }));
+        break;
+
       case "turn_failed":
         set((store) => ({
           errorMessage: payload.error,

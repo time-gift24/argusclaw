@@ -7,8 +7,8 @@ use argus_turn::TurnConfig;
 /// Thread configuration.
 #[derive(Debug, Clone, Builder)]
 pub struct ThreadConfig {
-    /// Token threshold ratio to trigger compact (e.g., 0.8 = 80% of context window).
-    /// This is used by Compactor implementations to determine when to compact.
+    /// Token threshold ratio to trigger pre-turn compaction (e.g., 0.8 = 80% of context window).
+    /// This currently acts as a thread-level threshold override for the built-in compactors.
     #[builder(default = 0.8)]
     pub compact_threshold_ratio: f32,
 
