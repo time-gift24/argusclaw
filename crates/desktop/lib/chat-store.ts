@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { agents, chat, providers, sessions } from "@/lib/tauri";
 import type {
   ApprovalRequestPayload,
+  JobStatusPayload,
   ThreadEventEnvelope,
   ThreadEventPayload,
   ThreadSnapshotPayload,
@@ -26,6 +27,41 @@ const toSessionKey = (templateId: number, providerPreferenceId: number | null) =
 const toErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
+const JOB_STATUS_DISPLAY_NAME_LIMIT = 80;
+const JOB_STATUS_DESCRIPTION_LIMIT = 240;
+const JOB_STATUS_PROMPT_LIMIT = 600;
+const JOB_STATUS_MESSAGE_LIMIT = 1600;
+
+const truncateDisplayText = (value: string, maxChars: number) => {
+  const chars = Array.from(value);
+  if (chars.length <= maxChars) return value;
+  return `${chars.slice(0, maxChars).join("")}…`;
+};
+
+const truncateOptionalDisplayText = (
+  value: string | null | undefined,
+  maxChars: number,
+) => {
+  if (!value) return value ?? null;
+  return truncateDisplayText(value, maxChars);
+};
+
+const normalizeJobStatusPayload = (
+  payload: JobStatusPayload,
+): JobStatusPayload => ({
+  ...payload,
+  prompt: truncateDisplayText(payload.prompt, JOB_STATUS_PROMPT_LIMIT),
+  message: truncateOptionalDisplayText(payload.message, JOB_STATUS_MESSAGE_LIMIT),
+  agent_display_name: truncateOptionalDisplayText(
+    payload.agent_display_name,
+    JOB_STATUS_DISPLAY_NAME_LIMIT,
+  ),
+  agent_description: truncateOptionalDisplayText(
+    payload.agent_description,
+    JOB_STATUS_DESCRIPTION_LIMIT,
+  ),
+});
+
 export interface ChatSessionState {
   sessionKey: string;
   sessionId: string;
@@ -43,6 +79,7 @@ export interface ChatSessionState {
     requested_at: string;
     timeout_secs: number;
   } | null;
+  jobStatuses: Record<string, JobStatusPayload>;
   error: string | null;
   tokenCount: number;
   contextWindow: number | null;
@@ -82,6 +119,8 @@ export interface ChatStore {
   _handleThreadEvent: (envelope: ThreadEventEnvelope) => void;
 }
 
+let threadEventListenerInitPromise: Promise<UnlistenFn> | null = null;
+
 export const useChatStore = create<ChatStore>((set, get) => ({
   selectedTemplateId: null,
   selectedProviderPreferenceId: null,
@@ -98,14 +137,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   _unlisten: null,
 
   async initialize() {
-    if (!get()._unlisten) {
-      const unlisten = await listen<ThreadEventEnvelope>("thread:event", (event) => {
-        get()._handleThreadEvent(event.payload);
-      });
-      set({ _unlisten: unlisten });
-    }
-
     try {
+      if (!get()._unlisten) {
+        threadEventListenerInitPromise ??= listen<ThreadEventEnvelope>(
+          "thread:event",
+          (event) => {
+            get()._handleThreadEvent(event.payload);
+          },
+        )
+          .then((unlisten) => {
+            set((state) => (state._unlisten ? {} : { _unlisten: unlisten }));
+            return unlisten;
+          })
+          .finally(() => {
+            threadEventListenerInitPromise = null;
+          });
+
+        await threadEventListenerInitPromise;
+      }
+
       const [templateList, providerList] = await Promise.all([
         agents.list(),
         providers.list(),
@@ -151,6 +201,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
+        jobStatuses: {},
         error: null,
         tokenCount: 0,
         contextWindow: null,
@@ -221,6 +272,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
+        jobStatuses: existingSession?.jobStatuses ?? {},
         error: null,
         tokenCount: snapshot.token_count,
         contextWindow: existingSession?.contextWindow ?? null,
@@ -399,6 +451,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             status: options?.preserveError ? "error" : "idle",
             error: options?.preserveError ? state.sessionsByKey[sessionKey].error : null,
             tokenCount: snapshot.token_count,
+            jobStatuses: state.sessionsByKey[sessionKey].jobStatuses,
           },
         },
       }));
@@ -425,6 +478,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       unlisten();
       set({ _unlisten: null });
     }
+    threadEventListenerInitPromise = null;
   },
 
   _handleThreadEvent(envelope: ThreadEventEnvelope) {
@@ -610,6 +664,65 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         });
         break;
       }
+
+      case "job_dispatched":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session) return {};
+          const nextJobStatus = normalizeJobStatusPayload({
+            job_id: payload.job_id,
+            agent_id: payload.agent_id,
+            prompt: payload.prompt,
+            status: "running",
+            message: null,
+            agent_display_name:
+              session.jobStatuses[payload.job_id]?.agent_display_name ?? null,
+            agent_description:
+              session.jobStatuses[payload.job_id]?.agent_description ?? null,
+          });
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                jobStatuses: {
+                  ...session.jobStatuses,
+                  [payload.job_id]: nextJobStatus,
+                },
+              },
+            },
+          };
+        });
+        break;
+
+      case "job_result":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session) return {};
+          const existing = session.jobStatuses[payload.job_id];
+          const nextJobStatus = normalizeJobStatusPayload({
+            job_id: payload.job_id,
+            agent_id: payload.agent_id,
+            prompt: existing?.prompt ?? "",
+            status: payload.success ? "completed" : "failed",
+            message: payload.message,
+            agent_display_name: payload.agent_display_name,
+            agent_description: payload.agent_description,
+          });
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                jobStatuses: {
+                  ...session.jobStatuses,
+                  [payload.job_id]: nextJobStatus,
+                },
+              },
+            },
+          };
+        });
+        break;
 
       case "turn_completed":
         set((state) => ({

@@ -11,7 +11,7 @@ use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 
 // Re-export from argus_protocol
-pub use argus_protocol::{NamedTool, ToolError};
+pub use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 pub mod glob;
 pub mod grep;
@@ -65,11 +65,12 @@ impl ToolManager {
         &self,
         name: &str,
         args: serde_json::Value,
+        ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
         let tool = self.get(name).ok_or_else(|| ToolError::NotFound {
             id: name.to_string(),
         })?;
-        tool.execute(args).await
+        tool.execute(args, ctx).await
     }
 
     /// Get the risk level for a tool by name.
@@ -121,8 +122,12 @@ mod tests {
             }
         }
 
-        async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-            Ok(args)
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(input)
         }
     }
 
@@ -143,7 +148,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Err(ToolError::ExecutionFailed {
                 tool_name: "failing".to_string(),
                 reason: "intentional failure".to_string(),
@@ -168,8 +177,12 @@ mod tests {
             }
         }
 
-        async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-            Ok(serde_json::json!({"processed": args}))
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({"processed": input}))
         }
     }
 
@@ -193,7 +206,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({"value": self.value}))
         }
     }
@@ -218,7 +235,11 @@ mod tests {
             }
         }
 
-        async fn execute(&self, _args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
             Ok(serde_json::json!({}))
         }
 
@@ -256,7 +277,14 @@ mod tests {
 
         // Execute to verify we got the new version
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(retrieved.unwrap().execute(serde_json::json!({})));
+        let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = Arc::new(ToolExecutionContext {
+            thread_id: argus_protocol::ids::ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        });
+        let result = rt.block_on(retrieved.unwrap().execute(serde_json::json!({}), ctx));
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["value"], 2);
     }
@@ -292,7 +320,14 @@ mod tests {
         manager.register(Arc::new(EchoTool));
 
         let args = serde_json::json!({"message": "hello"});
-        let result = manager.execute("echo", args.clone()).await;
+        let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = Arc::new(ToolExecutionContext {
+            thread_id: argus_protocol::ids::ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        });
+        let result = manager.execute("echo", args.clone(), ctx).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), args);
@@ -301,8 +336,17 @@ mod tests {
     #[tokio::test]
     async fn execute_error_not_found() {
         let manager = ToolManager::new();
+        let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = Arc::new(ToolExecutionContext {
+            thread_id: argus_protocol::ids::ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        });
 
-        let result = manager.execute("nonexistent", serde_json::json!({})).await;
+        let result = manager
+            .execute("nonexistent", serde_json::json!({}), ctx)
+            .await;
 
         assert!(result.is_err());
         match result {
@@ -315,8 +359,15 @@ mod tests {
     async fn execute_error_execution_failed() {
         let manager = ToolManager::new();
         manager.register(Arc::new(FailingTool));
+        let (tx, _rx) = tokio::sync::broadcast::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = Arc::new(ToolExecutionContext {
+            thread_id: argus_protocol::ids::ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        });
 
-        let result = manager.execute("failing", serde_json::json!({})).await;
+        let result = manager.execute("failing", serde_json::json!({}), ctx).await;
 
         assert!(result.is_err());
         match result {

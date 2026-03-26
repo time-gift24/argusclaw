@@ -13,10 +13,11 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::Path;
+use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
-use argus_protocol::{NamedTool, ToolError};
+use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 /// Read tool implementation - reads file contents with risk level High.
 pub struct ReadTool;
@@ -70,9 +71,13 @@ impl NamedTool for ReadTool {
         RiskLevel::High
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse path argument (required)
-        let path = args.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+        let path = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
             ToolError::ExecutionFailed {
                 tool_name: "read".to_string(),
                 reason: "Missing required parameter: path".to_string(),
@@ -80,14 +85,14 @@ impl NamedTool for ReadTool {
         })?;
 
         // Parse offset (optional, 1-indexed, default 1)
-        let offset = args
+        let offset = input
             .get("offset")
             .and_then(|v| v.as_u64())
             .unwrap_or(1)
             .max(1) as usize;
 
         // Parse limit (optional, default 2000)
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
 
         let path = Path::new(path);
 
@@ -140,8 +145,20 @@ impl NamedTool for ReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ids::ThreadId;
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use tokio::sync::broadcast;
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (tx, _) = broadcast::channel(16);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        })
+    }
 
     #[test]
     fn test_read_tool_name() {
@@ -177,7 +194,7 @@ mod tests {
 
         let tool = ReadTool::new();
         let result = tool
-            .execute(json!({"path": file.path().to_str().unwrap()}))
+            .execute(json!({"path": file.path().to_str().unwrap()}), make_ctx())
             .await
             .unwrap();
 
@@ -196,11 +213,14 @@ mod tests {
 
         let tool = ReadTool::new();
         let result = tool
-            .execute(json!({
-                "path": file.path().to_str().unwrap(),
-                "offset": 2,
-                "limit": 2
-            }))
+            .execute(
+                json!({
+                    "path": file.path().to_str().unwrap(),
+                    "offset": 2,
+                    "limit": 2
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -217,7 +237,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_tool_file_not_found() {
         let tool = ReadTool::new();
-        let result = tool.execute(json!({"path": "/nonexistent/path"})).await;
+        let result = tool
+            .execute(json!({"path": "/nonexistent/path"}), make_ctx())
+            .await;
 
         assert!(result.is_err());
         match result {

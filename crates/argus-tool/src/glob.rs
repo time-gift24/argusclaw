@@ -11,10 +11,11 @@
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
-use argus_protocol::{NamedTool, ToolError};
+use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 /// Maximum number of results to return.
 const MAX_RESULTS: usize = 1000;
@@ -68,9 +69,13 @@ impl NamedTool for GlobTool {
         RiskLevel::High
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse pattern argument (required)
-        let pattern = args
+        let pattern = input
             .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed {
@@ -79,7 +84,7 @@ impl NamedTool for GlobTool {
             })?;
 
         // Parse path (optional, default current directory)
-        let base_path = args
+        let base_path = input
             .get("path")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from)
@@ -140,8 +145,20 @@ impl NamedTool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ids::ThreadId;
     use std::fs;
     use tempfile::tempdir;
+    use tokio::sync::broadcast;
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (tx, _) = broadcast::channel(16);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        })
+    }
 
     #[test]
     fn test_glob_tool_name() {
@@ -177,10 +194,13 @@ mod tests {
 
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "*.rs",
-                "path": dir.path().to_str().unwrap()
-            }))
+            .execute(
+                json!({
+                    "pattern": "*.rs",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -207,10 +227,13 @@ mod tests {
 
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "**/*.rs",
-                "path": dir.path().to_str().unwrap()
-            }))
+            .execute(
+                json!({
+                    "pattern": "**/*.rs",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -223,10 +246,13 @@ mod tests {
 
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "*.nonexistent",
-                "path": dir.path().to_str().unwrap()
-            }))
+            .execute(
+                json!({
+                    "pattern": "*.nonexistent",
+                    "path": dir.path().to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -237,10 +263,13 @@ mod tests {
     async fn test_glob_tool_invalid_pattern() {
         let tool = GlobTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "[invalid",
-                "path": "."
-            }))
+            .execute(
+                json!({
+                    "pattern": "[invalid",
+                    "path": "."
+                }),
+                make_ctx(),
+            )
             .await;
 
         assert!(result.is_err());

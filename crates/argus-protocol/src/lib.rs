@@ -18,7 +18,10 @@ pub mod tool;
 pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};
-pub use events::ThreadEvent;
+pub use events::{
+    QueuedUserMessage, ThreadControlEvent, ThreadEvent, ThreadJobResult, ThreadMailbox,
+    TurnControlInput,
+};
 pub use hooks::{
     BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,
     HookRegistry, ToolHookContext,
@@ -69,7 +72,7 @@ pub use ssrf::{
     MAX_RESPONSE_SIZE, MAX_TIMEOUT_SECS, is_blocked_ip, is_blocked_ip_v4, is_blocked_ip_v6,
     validate_url,
 };
-pub use tool::{NamedTool, ToolError};
+pub use tool::{NamedTool, ToolError, ToolExecutionContext};
 
 pub mod provider_resolver;
 pub use provider_resolver::ProviderResolver;

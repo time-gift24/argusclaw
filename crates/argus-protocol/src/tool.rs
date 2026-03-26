@@ -1,11 +1,29 @@
 //! Tool types for agent/LLM tool management.
 //!
-//! This module contains shared types for tools used by argus-tool crate.
+//! This module defines the `NamedTool` trait and tool execution types
+//! used across argus-* crates.
 
 use async_trait::async_trait;
 
-use crate::RiskLevel;
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc};
+
+use crate::{ThreadControlEvent, ThreadEvent};
+use crate::ids::ThreadId;
 use crate::llm::ToolDefinition;
+use crate::risk_level::RiskLevel;
+
+/// Context passed to tools at execution time.
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    /// The thread ID in which the tool is executing.
+    pub thread_id: ThreadId,
+    /// The pipe sender for this thread. Tools can send ThreadEvent variants
+    /// into this pipe. Failures are logged as warnings and do not block execution.
+    pub pipe_tx: broadcast::Sender<ThreadEvent>,
+    /// Internal control sender for routing low-volume control-plane events.
+    pub control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+}
 
 /// Error type for tool operations.
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +51,14 @@ pub trait NamedTool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
     /// Execute the tool with the provided arguments.
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError>;
+    ///
+    /// `input` is the JSON arguments from the LLM.
+    /// `ctx` provides execution context including the pipe for sending events.
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError>;
 
     /// Returns the risk level of this tool for approval gating.
     /// Default is `RiskLevel::Low` for read-only/safe operations.

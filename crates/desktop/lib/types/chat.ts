@@ -47,6 +47,16 @@ export interface ChatSessionPayload {
   effective_provider_id: number | null;
 }
 
+export interface JobStatusPayload {
+  job_id: string;
+  agent_id: number;
+  prompt: string;
+  status: "running" | "completed" | "failed";
+  message?: string | null;
+  agent_display_name?: string | null;
+  agent_description?: string | null;
+}
+
 export type ThreadEventPayload =
   | { type: "reasoning_delta"; delta: string }
   | { type: "content_delta"; delta: string }
@@ -70,6 +80,18 @@ export type ThreadEventPayload =
   | { type: "turn_failed"; error: string }
   | { type: "idle" }
   | { type: "compacted"; new_token_count: number }
+  | { type: "job_dispatched"; job_id: string; agent_id: number; prompt: string; context?: unknown | null }
+  | {
+      type: "job_result";
+      job_id: string;
+      success: boolean;
+      message: string;
+      input_tokens?: number | null;
+      output_tokens?: number | null;
+      agent_id: number;
+      agent_display_name: string;
+      agent_description: string;
+    }
   | { type: "waiting_for_approval"; request: ApprovalRequestPayload }
   | { type: "approval_resolved"; response: ApprovalResponsePayload };
 

@@ -14,24 +14,9 @@ pub struct JobDispatchArgs {
     /// Optional context JSON for the job.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
-    /// Whether to wait for the result synchronously.
-    #[serde(default)]
-    pub wait_for_result: bool,
 }
 
-/// Result of a job dispatch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobDispatchResult {
-    /// The job ID.
-    pub job_id: String,
-    /// Status: "submitted" or "completed".
-    pub status: String,
-    /// Result data if wait_for_result was true.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<JobResult>,
-}
-
-/// Result of a completed job.
+/// Result of a completed job (serialized into tool responses).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobResult {
     /// Whether the job succeeded.
@@ -41,19 +26,10 @@ pub struct JobResult {
     /// Token usage if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<argus_protocol::TokenUsage>,
-}
-
-/// Job status for SSE events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobStatusEvent {
-    /// The job ID.
-    pub job_id: String,
-    /// Status: "completed", "failed", "stuck".
-    pub status: String,
-    /// Optional session ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    /// Result message.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    /// Agent ID that handled the subagent work.
+    pub agent_id: AgentId,
+    /// Human-readable subagent name.
+    pub agent_display_name: String,
+    /// Subagent description.
+    pub agent_description: String,
 }

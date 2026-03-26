@@ -15,10 +15,11 @@ use async_trait::async_trait;
 use regex::RegexBuilder;
 use serde_json::json;
 use std::path::Path;
+use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
-use argus_protocol::{NamedTool, ToolError};
+use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 /// Maximum number of matches to return.
 const MAX_MATCHES: usize = 100;
@@ -79,9 +80,13 @@ impl NamedTool for GrepTool {
         RiskLevel::High
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse pattern argument (required)
-        let pattern = args
+        let pattern = input
             .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed {
@@ -90,17 +95,17 @@ impl NamedTool for GrepTool {
             })?;
 
         // Parse path (optional, default current directory)
-        let path = args
+        let path = input
             .get("path")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // Parse glob pattern (optional, default "*")
-        let glob_pattern = args.get("glob").and_then(|v| v.as_str()).unwrap_or("*");
+        let glob_pattern = input.get("glob").and_then(|v| v.as_str()).unwrap_or("*");
 
         // Parse ignore_case (optional, default false)
-        let ignore_case = args
+        let ignore_case = input
             .get("ignore_case")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -220,7 +225,19 @@ impl GrepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ids::ThreadId;
     use tempfile::tempdir;
+    use tokio::sync::broadcast;
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (tx, _) = broadcast::channel(16);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        })
+    }
 
     #[test]
     fn test_grep_tool_name() {
@@ -257,10 +274,13 @@ mod tests {
 
         let tool = GrepTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "hello",
-                "path": file_path.to_str().unwrap()
-            }))
+            .execute(
+                json!({
+                    "pattern": "hello",
+                    "path": file_path.to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -279,11 +299,14 @@ mod tests {
 
         let tool = GrepTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "hello",
-                "path": file_path.to_str().unwrap(),
-                "ignore_case": true
-            }))
+            .execute(
+                json!({
+                    "pattern": "hello",
+                    "path": file_path.to_str().unwrap(),
+                    "ignore_case": true
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -300,10 +323,13 @@ mod tests {
 
         let tool = GrepTool::new();
         let result = tool
-            .execute(json!({
-                "pattern": "nonexistent",
-                "path": file_path.to_str().unwrap()
-            }))
+            .execute(
+                json!({
+                    "pattern": "nonexistent",
+                    "path": file_path.to_str().unwrap()
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap();
 
@@ -313,7 +339,9 @@ mod tests {
     #[tokio::test]
     async fn test_grep_tool_invalid_regex() {
         let tool = GrepTool::new();
-        let result = tool.execute(json!({"pattern": "[invalid"})).await;
+        let result = tool
+            .execute(json!({"pattern": "[invalid"}), make_ctx())
+            .await;
 
         assert!(result.is_err());
         match result {

@@ -276,6 +276,94 @@ const PendingAssistantArtifacts: FC = () => {
   );
 };
 
+const JobStatusArtifacts: FC = () => {
+  const session = useActiveChatSession();
+  const jobStatuses = Object.values(session?.jobStatuses ?? {});
+
+  if (jobStatuses.length === 0) return null;
+
+  const sorted = [...jobStatuses].sort((left, right) => {
+    if (left.status === right.status) return left.job_id.localeCompare(right.job_id);
+    if (left.status === "running") return -1;
+    if (right.status === "running") return 1;
+    if (left.status === "failed") return -1;
+    if (right.status === "failed") return 1;
+    return 0;
+  });
+
+  return (
+    <div className="mx-auto w-full max-w-(--thread-max-width) px-4 pb-2">
+      <details className="group/jobs w-full" open>
+        <summary className="flex w-full cursor-pointer list-none items-center gap-2.5 rounded-xl border border-muted/40 bg-muted/20 px-3 py-2 text-muted-foreground transition-all hover:bg-muted/40 [&::-webkit-details-marker]:hidden">
+          <div className="rounded-lg bg-primary/10 p-1.5 text-primary">
+            <Bot className="size-3.5" />
+          </div>
+          <span className="text-[11px] font-bold uppercase tracking-widest">
+            后台任务 {sorted.length} 个
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            {sorted.some((job) => job.status === "running") && (
+              <Loader2 className="size-3 animate-spin text-primary" />
+            )}
+            <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/jobs:rotate-180" />
+          </div>
+        </summary>
+
+        <div className="mt-3 flex flex-col gap-2">
+          {sorted.map((job) => {
+            const isRunning = job.status === "running";
+            const isFailed = job.status === "failed";
+
+            return (
+              <div
+                key={job.job_id}
+                className="rounded-xl border border-muted/40 bg-background/80 px-3 py-3 text-sm shadow-sm"
+              >
+                <div className="flex items-start gap-2">
+                  <div className="mt-0.5">
+                    {isRunning ? (
+                      <Loader2 className="size-4 animate-spin text-primary" />
+                    ) : isFailed ? (
+                      <CircleAlert className="size-4 text-destructive" />
+                    ) : (
+                      <CheckIcon className="size-4 text-emerald-600" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-semibold text-foreground">
+                        {job.agent_display_name ?? `Agent ${job.agent_id}`}
+                      </span>
+                      <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                        {job.status}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      <span className="line-clamp-2 break-words">
+                        {job.agent_description || "后台子 agent 任务"}
+                      </span>
+                    </div>
+                    {job.prompt && (
+                      <div className="mt-2 line-clamp-2 break-words text-xs text-foreground/80">
+                        {job.prompt}
+                      </div>
+                    )}
+                    {job.message && (
+                      <div className="mt-2 line-clamp-6 whitespace-pre-wrap break-words rounded-lg bg-muted/40 px-2 py-1.5 text-xs text-foreground/80">
+                        {job.message}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </details>
+    </div>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   return (
     <ActionBarPrimitive.Root
@@ -522,6 +610,7 @@ export const Thread: FC = () => {
       {/* Floating bottom composer - Truly detached from scroll */}
       <div className="z-50 pointer-events-none flex justify-center pb-8 pt-4">
         <div className="w-full max-w-(--composer-max-width) px-4 pointer-events-auto flex flex-col gap-3">
+          <JobStatusArtifacts />
           <PendingAssistantArtifacts />
           <ChatStatusBanner />
           <ApprovalPrompt />

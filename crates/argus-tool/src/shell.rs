@@ -29,11 +29,12 @@
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 use tokio::process::Command;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
-use argus_protocol::{NamedTool, ToolError};
+use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 /// Default timeout for shell commands in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -100,9 +101,13 @@ impl NamedTool for ShellTool {
         RiskLevel::Critical
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         // Parse command argument (required)
-        let command = args
+        let command = input
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed {
@@ -111,13 +116,13 @@ impl NamedTool for ShellTool {
             })?;
 
         // Parse timeout (optional)
-        let timeout_secs = args
+        let timeout_secs = input
             .get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.timeout_secs);
 
         // Parse working directory (optional)
-        let cwd = args
+        let cwd = input
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from);
@@ -169,6 +174,18 @@ impl NamedTool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_protocol::ids::ThreadId;
+    use tokio::sync::broadcast;
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (tx, _) = broadcast::channel(16);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new(),
+            pipe_tx: tx,
+            control_tx,
+        })
+    }
 
     #[test]
     fn test_shell_tool_name() {
@@ -199,7 +216,7 @@ mod tests {
     async fn test_shell_tool_echo() {
         let tool = ShellTool::new();
         let result = tool
-            .execute(json!({"command": "echo 'test'"}))
+            .execute(json!({"command": "echo 'test'"}), make_ctx())
             .await
             .unwrap();
 
@@ -210,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn test_shell_tool_missing_command() {
         let tool = ShellTool::new();
-        let result = tool.execute(json!({})).await;
+        let result = tool.execute(json!({}), make_ctx()).await;
 
         assert!(result.is_err());
         match result {

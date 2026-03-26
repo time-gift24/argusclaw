@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::error::Error;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,6 +23,7 @@ use argus_protocol::llm::{
 use crate::retry::{RetryConfig, RetryProvider};
 
 const DEFAULT_RAW_STREAM_TAIL_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_OPENAI_COMPATIBLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 struct RawStreamCapture {
@@ -58,19 +60,69 @@ impl RawStreamCapture {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReqwestErrorDiagnostics {
+    is_timeout: bool,
+    is_connect: bool,
+    is_body: bool,
+    is_decode: bool,
+    is_request: bool,
+    is_builder: bool,
+    is_status: bool,
+    status_code: Option<u16>,
+    url: Option<String>,
+    source_chain: String,
+}
+
+fn error_source_chain(err: &(dyn Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut source = err.source();
+    while let Some(next) = source {
+        parts.push(next.to_string());
+        source = next.source();
+    }
+    parts.join(" <- ")
+}
+
+fn reqwest_error_diagnostics(err: &reqwest::Error) -> ReqwestErrorDiagnostics {
+    ReqwestErrorDiagnostics {
+        is_timeout: err.is_timeout(),
+        is_connect: err.is_connect(),
+        is_body: err.is_body(),
+        is_decode: err.is_decode(),
+        is_request: err.is_request(),
+        is_builder: err.is_builder(),
+        is_status: err.is_status(),
+        status_code: err.status().map(|status| status.as_u16()),
+        url: err.url().map(ToString::to_string),
+        source_chain: error_source_chain(err),
+    }
+}
+
 fn log_stream_transport_error(
     stage: &str,
-    err: &impl std::fmt::Display,
+    err: &reqwest::Error,
     raw_stream_capture: &Arc<Mutex<RawStreamCapture>>,
 ) {
     let capture = raw_stream_capture
         .lock()
         .expect("raw stream capture mutex poisoned");
     let raw_stream_tail = capture.preview();
+    let diagnostics = reqwest_error_diagnostics(err);
 
     tracing::error!(
         stage,
         error = %err,
+        is_timeout = diagnostics.is_timeout,
+        is_connect = diagnostics.is_connect,
+        is_body = diagnostics.is_body,
+        is_decode = diagnostics.is_decode,
+        is_request = diagnostics.is_request,
+        is_builder = diagnostics.is_builder,
+        is_status = diagnostics.is_status,
+        status_code = diagnostics.status_code,
+        url = diagnostics.url.as_deref().unwrap_or(""),
+        source_chain = %diagnostics.source_chain,
         raw_stream_tail_bytes = capture.len(),
         raw_stream_tail = %raw_stream_tail,
         "stream transport failed; dumping recent raw response bytes"
@@ -286,7 +338,7 @@ impl OpenAiCompatibleConfig {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            timeout: Duration::from_secs(60),
+            timeout: DEFAULT_OPENAI_COMPATIBLE_TIMEOUT,
             extra_headers: HashMap::new(),
             context_window: 128_000,
         }
@@ -996,7 +1048,40 @@ fn classify_http_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+    use std::fmt;
     use futures_util::stream;
+    use reqwest::header::HeaderMap;
+    use tokio::net::TcpListener;
+    use tokio::time::sleep;
+
+    #[derive(Debug)]
+    struct OuterError {
+        source: InnerError,
+    }
+
+    #[derive(Debug)]
+    struct InnerError;
+
+    impl fmt::Display for OuterError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "outer")
+        }
+    }
+
+    impl Error for OuterError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    impl fmt::Display for InnerError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "inner")
+        }
+    }
+
+    impl Error for InnerError {}
 
     #[test]
     fn chat_completions_request_serializes_thinking() {
@@ -1175,6 +1260,13 @@ mod tests {
     }
 
     #[test]
+    fn config_defaults_to_120_second_timeout() {
+        let config = OpenAiCompatibleConfig::new("https://example.com/v1", "key", "model");
+
+        assert_eq!(config.timeout, Duration::from_secs(120));
+    }
+
+    #[test]
     fn config_builder_applies_header() {
         let config = OpenAiCompatibleConfig::new("https://example.com/v1", "key", "model")
             .with_extra_header("x-test", "1");
@@ -1203,6 +1295,47 @@ mod tests {
         capture.push(b"-world");
 
         assert_eq!(capture.preview(), "lo-world");
+    }
+
+    #[test]
+    fn error_source_chain_collects_nested_causes() {
+        let error = OuterError { source: InnerError };
+
+        assert_eq!(error_source_chain(&error), "outer <- inner");
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_diagnostics_marks_timeout_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept connection");
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let client = build_http_client(
+            &HeaderMap::new(),
+            None,
+            Some(Duration::from_millis(50)),
+            Some(Duration::from_millis(50)),
+        )
+        .expect("build timeout client");
+
+        let error = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .expect_err("request should time out");
+
+        let diagnostics = reqwest_error_diagnostics(&error);
+        assert!(diagnostics.is_timeout);
+        assert!(
+            diagnostics.source_chain.contains("timed out")
+                || diagnostics.source_chain.contains("timeout")
+        );
     }
 
     #[test]

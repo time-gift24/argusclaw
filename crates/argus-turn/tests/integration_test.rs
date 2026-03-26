@@ -7,13 +7,15 @@ use tokio::sync::broadcast;
 
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
-use argus_protocol::events::ThreadEvent;
+use argus_protocol::ToolExecutionContext;
+use argus_protocol::events::{ThreadControlEvent, ThreadEvent, ThreadJobResult, ThreadMailbox};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
+use argus_protocol::{AgentId, MessageOverride, ThreadId};
 use argus_turn::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -154,7 +156,11 @@ impl NamedTool for EchoTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
         let message = args
             .get("message")
             .and_then(|v| v.as_str())
@@ -166,6 +172,38 @@ impl NamedTool for EchoTool {
         Ok(serde_json::json!({
             "echoed": message
         }))
+    }
+}
+
+struct CaptureThreadIdTool {
+    seen_thread_id: Arc<Mutex<Option<ThreadId>>>,
+}
+
+#[async_trait]
+impl NamedTool for CaptureThreadIdTool {
+    fn name(&self) -> &str {
+        "capture_thread_id"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "capture_thread_id".to_string(),
+            description: "Capture the routing thread id from the tool execution context"
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        }
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
+        *self.seen_thread_id.lock().unwrap() = Some(ctx.thread_id);
+        Ok(serde_json::json!({ "ok": true }))
     }
 }
 
@@ -479,5 +517,99 @@ async fn test_turn_streams_retry_events() {
     assert_eq!(
         max_retries_seen, 3,
         "should report max_retries=3 from RetryConfig::default()"
+    );
+}
+
+#[test]
+fn thread_mailbox_drains_interrupts_then_user_messages_then_job_results() {
+    let mut mailbox = ThreadMailbox::default();
+
+    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+        job_id: "job-1".to_string(),
+        success: true,
+        message: "first result".to_string(),
+        token_usage: None,
+        agent_id: AgentId::new(7),
+        agent_display_name: "Researcher".to_string(),
+        agent_description: "Finds background answers".to_string(),
+    }));
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "queued user follow-up".to_string(),
+        msg_override: Some(MessageOverride::default()),
+    });
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "stop current path".to_string(),
+    });
+    mailbox.push(ThreadControlEvent::JobResult(ThreadJobResult {
+        job_id: "job-2".to_string(),
+        success: false,
+        message: "second result".to_string(),
+        token_usage: None,
+        agent_id: AgentId::new(8),
+        agent_display_name: "Builder".to_string(),
+        agent_description: "Builds things".to_string(),
+    }));
+
+    let drained = mailbox.drain_for_turn();
+    let rendered = drained
+        .into_iter()
+        .map(|item| item.into_message_text())
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered[0], "stop current path");
+    assert_eq!(rendered[1], "queued user follow-up");
+    assert!(rendered[2].contains("Job: job-1"));
+    assert!(rendered[2].contains("Subagent: Researcher"));
+    assert!(rendered[3].contains("Job: job-2"));
+    assert!(mailbox.is_empty());
+}
+
+#[tokio::test]
+async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch() {
+    let originating_thread_id = ThreadId::new();
+    let seen_thread_id = Arc::new(Mutex::new(None));
+    let tool = Arc::new(CaptureThreadIdTool {
+        seen_thread_id: Arc::clone(&seen_thread_id),
+    });
+
+    let provider = Arc::new(MockProvider::with_responses(vec![
+        (
+            String::new(),
+            vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "capture_thread_id".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+        ),
+        ("done".to_string(), Vec::new()),
+    ]));
+
+    let (stream_tx, _) = broadcast::channel(32);
+    let (thread_event_tx, _) = broadcast::channel(32);
+    let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("job-non-uuid".to_string())
+        .originating_thread_id(originating_thread_id)
+        .messages(vec![ChatMessage::user("run nested dispatch")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![tool])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .control_tx(control_tx)
+        .mailbox(Arc::new(tokio::sync::Mutex::new(ThreadMailbox::default())))
+        .build()
+        .unwrap();
+
+    let result = turn.execute().await;
+    assert!(result.is_ok(), "turn should complete");
+    assert_eq!(
+        *seen_thread_id.lock().unwrap(),
+        Some(originating_thread_id),
+        "tool context should preserve the originating thread route",
     );
 }

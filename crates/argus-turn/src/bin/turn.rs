@@ -18,7 +18,7 @@ use argus_llm::providers::{
 };
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role, ToolDefinition};
-use argus_protocol::tool::{NamedTool, ToolError};
+use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
 use argus_turn::{TurnBuilder, TurnConfig, TurnStreamEvent};
 
 /// Configuration file structure.
@@ -146,8 +146,12 @@ impl NamedTool for EchoTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        let message = args
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let message = input
             .get("message")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::ExecutionFailed {
