@@ -363,7 +363,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   selectTemplate(templateId: number) {
-    set({ selectedTemplateId: templateId, errorMessage: null });
+    const state = get();
+    const agent = state.templates.find((t) => t.id === templateId);
+    set({
+      selectedTemplateId: templateId,
+      // Apply the agent's per-agent default model (model_id) as the effective override.
+      // This takes precedence over the agent's provider default_model but is lower priority
+      // than a manual model selection via selectModelOverride.
+      selectedModelOverride: agent?.model_id ?? null,
+      errorMessage: null,
+    });
   },
 
   async selectProviderPreference(providerId: number | null) {
