@@ -4,8 +4,8 @@ use std::sync::Arc;
 use argus_job::JobManager;
 use argus_protocol::{
     llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream,
-        ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse,
     },
     AgentId, ArgusError, ProviderId, QueuedUserMessage, Result, SessionId, ThreadControlEvent,
     ThreadEvent, ThreadId,
@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -59,7 +59,10 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> std::result::Result<CompletionResponse, LlmError> {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> std::result::Result<CompletionResponse, LlmError> {
         Err(self.llm_error())
     }
 
@@ -228,7 +231,9 @@ impl SessionManager {
         thread: Arc<RwLock<argus_thread::Thread>>,
         content: String,
         msg_override: Option<argus_protocol::MessageOverride>,
-        turn_done_tx: mpsc::UnboundedSender<std::result::Result<argus_turn::TurnOutput, argus_thread::ThreadError>>,
+        turn_done_tx: mpsc::UnboundedSender<
+            std::result::Result<argus_turn::TurnOutput, argus_thread::ThreadError>,
+        >,
     ) -> std::result::Result<(), argus_thread::ThreadError> {
         let turn = {
             let mut guard = thread.write().await;
@@ -236,7 +241,10 @@ impl SessionManager {
         };
 
         tokio::spawn(async move {
-            let result = turn.execute().await.map_err(argus_thread::ThreadError::TurnFailed);
+            let result = turn
+                .execute()
+                .await
+                .map_err(argus_thread::ThreadError::TurnFailed);
             let _ = turn_done_tx.send(result);
         });
 
@@ -336,20 +344,35 @@ impl SessionManager {
             let turn_count: i64 = thread_row.get("turn_count");
             let model_override: Option<String> = thread_row.get("model_override");
 
-            // Resolve provider (apply model_override if set)
+            // Resolve provider (apply model_override if set, fallback to provider default model)
             let provider_id = ProviderId::new(provider_id_val);
-            let provider = match model_override {
-                Some(ref model) => match self.provider_resolver.resolve_with_model(provider_id, model).await {
-                    Ok(p) => p,
-                    Err(e) => {
+            let provider = match model_override.as_deref() {
+                Some(model) => match self
+                    .provider_resolver
+                    .resolve_with_model(provider_id, model)
+                    .await
+                {
+                    Ok(provider) => provider,
+                    Err(model_error) => {
                         tracing::warn!(
                             thread_id = %thread_id_str,
                             provider_id = %provider_id_val,
                             model_override = %model,
-                            error = %e,
-                            "Failed to resolve provider with model override, skipping"
+                            error = %model_error,
+                            "Failed to resolve provider with model override, falling back to provider default model"
                         );
-                        continue;
+                        match self.provider_resolver.resolve(provider_id).await {
+                            Ok(provider) => provider,
+                            Err(resolve_error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id_str,
+                                    provider_id = %provider_id_val,
+                                    error = %resolve_error,
+                                    "Failed to resolve provider for thread, skipping"
+                                );
+                                continue;
+                            }
+                        }
                     }
                 },
                 None => match self.provider_resolver.resolve(provider_id).await {
@@ -399,13 +422,12 @@ impl SessionManager {
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now())
             };
-            let trace_cfg =
-                TraceConfig::new(true, self.trace_dir.clone())
-                    .with_session_id(session_id)
-                    .with_turn_start(
-                        Some(agent_record.system_prompt.clone()),
-                        Some(provider.model_name().to_string()),
-                    );
+            let trace_cfg = TraceConfig::new(true, self.trace_dir.clone())
+                .with_session_id(session_id)
+                .with_turn_start(
+                    Some(agent_record.system_prompt.clone()),
+                    Some(provider.model_name().to_string()),
+                );
             let on_turn_complete = {
                 let sm = sm.clone();
                 Arc::new(move |sid: argus_protocol::SessionId, turn_num: u32| {
@@ -437,12 +459,12 @@ impl SessionManager {
                     let turn_count = turn_count.max(0) as u32;
                     let token_count = token_count.max(0) as u32;
                     if let Ok(recovered) = recover_thread_state_from_trace(
-                            &self.trace_dir,
-                            &session_id,
-                            &thread_id,
-                            (turn_count > 0).then_some(turn_count),
-                        )
-                        .await
+                        &self.trace_dir,
+                        &session_id,
+                        &thread_id,
+                        (turn_count > 0).then_some(turn_count),
+                    )
+                    .await
                     {
                         if recovered.turn_count > 0 {
                             t.hydrate_from_persisted_state(
@@ -522,8 +544,15 @@ impl SessionManager {
     }
 
     /// Update the current_turn in meta.json after a turn completes.
-    pub async fn update_session_turn(&self, session_id: SessionId, turn_number: u32) -> std::io::Result<()> {
-        let meta_path = self.trace_dir.join(session_id.to_string()).join("meta.json");
+    pub async fn update_session_turn(
+        &self,
+        session_id: SessionId,
+        turn_number: u32,
+    ) -> std::io::Result<()> {
+        let meta_path = self
+            .trace_dir
+            .join(session_id.to_string())
+            .join("meta.json");
 
         let meta = if meta_path.exists() {
             let content = tokio::fs::read_to_string(&meta_path).await?;
@@ -611,7 +640,11 @@ impl SessionManager {
         let (provider_id, provider) = match explicit_provider_id.or(agent_record.provider_id) {
             Some(provider_id) => {
                 let provider = match model_override {
-                    Some(model) => self.provider_resolver.resolve_with_model(provider_id, model).await?,
+                    Some(model) => {
+                        self.provider_resolver
+                            .resolve_with_model(provider_id, model)
+                            .await?
+                    }
                     None => self.provider_resolver.resolve(provider_id).await?,
                 };
                 (provider_id, provider)
@@ -629,7 +662,29 @@ impl SessionManager {
                 .ok_or(ArgusError::DefaultProviderNotConfigured)?;
 
                 let provider = match model_override {
-                    Some(model) => self.provider_resolver.resolve_with_model(default_provider_id, model).await?,
+                    Some(model) => match self
+                        .provider_resolver
+                        .resolve_with_model(default_provider_id, model)
+                        .await
+                    {
+                        Ok(provider) => provider,
+                        Err(model_error) => {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                template_id = %template_id,
+                                provider_id = %default_provider_id,
+                                model_override = %model,
+                                error = %model_error,
+                                "Failed to resolve default provider with model override, falling back to default model"
+                            );
+                            match self.provider_resolver.resolve(default_provider_id).await {
+                                Ok(provider) => provider,
+                                Err(error) => {
+                                    Arc::new(UnconfiguredProvider::new(error.to_string()))
+                                }
+                            }
+                        }
+                    },
                     None => match self.provider_resolver.resolve(default_provider_id).await {
                         Ok(provider) => provider,
                         Err(error) => Arc::new(UnconfiguredProvider::new(error.to_string())),
@@ -806,8 +861,6 @@ impl SessionManager {
             return Ok(session.list_threads().await);
         }
 
-
-
         // Otherwise, load from DB
         let rows = sqlx::query(
             r#"
@@ -980,9 +1033,11 @@ async fn recover_messages_from_trace(
     thread_id: &ThreadId,
     turn_count: u32,
 ) -> Result<Vec<ChatMessage>> {
-    Ok(recover_thread_state_from_trace(trace_dir, session_id, thread_id, Some(turn_count))
-        .await?
-        .messages)
+    Ok(
+        recover_thread_state_from_trace(trace_dir, session_id, thread_id, Some(turn_count))
+            .await?
+            .messages,
+    )
 }
 
 async fn recover_thread_state_from_trace(
@@ -1001,9 +1056,13 @@ async fn recover_thread_state_from_trace(
 
     for turn_number in &turn_numbers {
         let path = turns_dir.join(format!("{turn_number}.jsonl"));
-        let events = read_jsonl_events(&path).await.map_err(|error| ArgusError::DatabaseError {
-            reason: format!("failed to recover turn {turn_number} for thread {thread_id}: {error}"),
-        })?;
+        let events = read_jsonl_events(&path)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: format!(
+                    "failed to recover turn {turn_number} for thread {thread_id}: {error}"
+                ),
+            })?;
 
         for event in events {
             match event {
@@ -1019,7 +1078,9 @@ async fn recover_thread_state_from_trace(
                     ..
                 } => {
                     if tool_calls.is_empty() {
-                        if !content.trim().is_empty() || !reasoning_content.as_deref().unwrap_or("").trim().is_empty() {
+                        if !content.trim().is_empty()
+                            || !reasoning_content.as_deref().unwrap_or("").trim().is_empty()
+                        {
                             messages.push(ChatMessage::assistant_with_reasoning(
                                 content,
                                 reasoning_content,
@@ -1081,19 +1142,27 @@ async fn resolve_turn_numbers(
         return Ok((1..=turn_count).collect());
     }
 
-    let mut entries = tokio::fs::read_dir(turns_dir)
-        .await
-        .map_err(|error| ArgusError::DatabaseError {
-            reason: format!("failed to inspect trace turns directory {}: {error}", turns_dir.display()),
-        })?;
+    let mut entries =
+        tokio::fs::read_dir(turns_dir)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: format!(
+                    "failed to inspect trace turns directory {}: {error}",
+                    turns_dir.display()
+                ),
+            })?;
     let mut turn_numbers = Vec::new();
 
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|error| ArgusError::DatabaseError {
-            reason: format!("failed to inspect trace turns directory {}: {error}", turns_dir.display()),
-        })?
+    while let Some(entry) =
+        entries
+            .next_entry()
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: format!(
+                    "failed to inspect trace turns directory {}: {error}",
+                    turns_dir.display()
+                ),
+            })?
     {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
@@ -1103,12 +1172,14 @@ async fn resolve_turn_numbers(
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        let turn_number = stem.parse::<u32>().map_err(|error| ArgusError::DatabaseError {
-            reason: format!(
-                "failed to parse turn trace filename {}: {error}",
-                path.display()
-            ),
-        })?;
+        let turn_number = stem
+            .parse::<u32>()
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: format!(
+                    "failed to parse turn trace filename {}: {error}",
+                    path.display()
+                ),
+            })?;
         turn_numbers.push(turn_number);
     }
 
@@ -1144,7 +1215,9 @@ mod tests {
     use rust_decimal::Decimal;
     use tokio::time::{sleep, timeout};
 
-    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager};
+    use super::{
+        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
+    };
 
     #[derive(Debug)]
     struct CapturingProvider {
@@ -1326,21 +1399,19 @@ mod tests {
         fs::write(turns_dir.join("1.jsonl"), turn_one).expect("turn one should write");
         fs::write(turns_dir.join("2.jsonl"), turn_two).expect("turn two should write");
 
-        let messages = recover_messages_from_trace(
-            temp_dir.path(),
-            &session_id,
-            &thread_id,
-            2,
-        )
-        .await
-        .expect("trace recovery should succeed");
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
+            .await
+            .expect("trace recovery should succeed");
 
         assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[0].content, "用户问题一");
         assert_eq!(messages[1].role, Role::Assistant);
         assert_eq!(messages[1].content, "让我查一下");
-        assert_eq!(messages[1].reasoning_content.as_deref(), Some("先分析再调用工具"));
+        assert_eq!(
+            messages[1].reasoning_content.as_deref(),
+            Some("先分析再调用工具")
+        );
         assert_eq!(messages[1].tool_calls.as_ref().map(Vec::len), Some(1));
         assert_eq!(messages[2].role, Role::Tool);
         assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
@@ -1444,14 +1515,10 @@ mod tests {
         )
         .expect("turn two should write");
 
-        let recovered = recover_thread_state_from_trace(
-            temp_dir.path(),
-            &session_id,
-            &thread_id,
-            None,
-        )
-        .await
-        .expect("trace recovery should succeed");
+        let recovered =
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
+                .await
+                .expect("trace recovery should succeed");
 
         assert_eq!(recovered.turn_count, 2);
         assert_eq!(recovered.token_count, 28);
@@ -1464,10 +1531,7 @@ mod tests {
     async fn busy_thread_remains_visible_while_orchestrator_runs_turn() {
         let session_id = SessionId::new();
         let session = Arc::new(Session::new(session_id, "Test".to_string()));
-        let provider = Arc::new(CapturingProvider::new(
-            "done",
-            Duration::from_millis(150),
-        ));
+        let provider = Arc::new(CapturingProvider::new("done", Duration::from_millis(150)));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
@@ -1493,7 +1557,10 @@ mod tests {
     #[tokio::test]
     async fn idle_job_result_triggers_new_turn_with_synthetic_user_message() {
         let session_id = SessionId::new();
-        let provider = Arc::new(CapturingProvider::new("job consumed", Duration::from_millis(10)));
+        let provider = Arc::new(CapturingProvider::new(
+            "job consumed",
+            Duration::from_millis(10),
+        ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
         SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));

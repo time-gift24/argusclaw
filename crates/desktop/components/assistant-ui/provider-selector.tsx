@@ -43,6 +43,9 @@ export function ProviderSelector() {
   const currentModel = activeSession
     ? activeSession.effectiveModel ?? currentProvider?.default_model ?? "未知模型"
     : selectedModelOverride ?? currentProvider?.default_model ?? "未知模型";
+  const activeSessionEffectiveModel = activeSession
+    ? activeSession.effectiveModel ?? currentProvider?.default_model ?? null
+    : null;
 
   // Handle selecting a model
   const handleSelectModel = (providerId: number, model: string) => {
@@ -109,7 +112,7 @@ export function ProviderSelector() {
                   const isModelSelected =
                     currentProviderId === provider.id &&
                     (activeSession
-                      ? model === activeSession.effectiveModel
+                      ? model === activeSessionEffectiveModel
                       : selectedModelOverride === model || (selectedModelOverride === null && model === provider.default_model));
                   
                   // Special case: if nothing selected, use default provider's default model
