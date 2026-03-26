@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::{ThreadControlEvent, ThreadEvent};
 use crate::ids::ThreadId;
 use crate::llm::ToolDefinition;
 use crate::risk_level::RiskLevel;
+use crate::{ThreadControlEvent, ThreadEvent};
 
 /// Context passed to tools at execution time.
 #[derive(Debug, Clone)]

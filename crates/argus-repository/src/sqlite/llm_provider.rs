@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 
-use argus_protocol::llm::{LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord, LlmProviderRepository, ModelConfig, ProviderSecretStatus, SecretString};
+use argus_protocol::llm::{
+    LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
+    LlmProviderRepository, ModelConfig, ProviderSecretStatus, SecretString,
+};
 
 use crate::error::DbError;
 use crate::sqlite::ArgusSqlite;
@@ -254,13 +257,14 @@ impl ArgusSqlite {
     > {
         let nonce: Vec<u8> = Self::get_column(&row, "api_key_nonce").map_err(map_err)?;
         let ciphertext: Vec<u8> = Self::get_column(&row, "encrypted_api_key").map_err(map_err)?;
-        let extra_headers: HashMap<String, String> =
-            serde_json::from_str(&Self::get_column::<String>(&row, "extra_headers").map_err(map_err)?)
-                .map_err(|e| {
-                    ArgusError::from(DbError::QueryFailed {
-                        reason: format!("failed to parse extra_headers: {e}"),
-                    })
-                })?;
+        let extra_headers: HashMap<String, String> = serde_json::from_str(
+            &Self::get_column::<String>(&row, "extra_headers").map_err(map_err)?,
+        )
+        .map_err(|e| {
+            ArgusError::from(DbError::QueryFailed {
+                reason: format!("failed to parse extra_headers: {e}"),
+            })
+        })?;
         let meta_data: HashMap<String, String> =
             serde_json::from_str(&Self::get_column::<String>(&row, "meta_data").map_err(map_err)?)
                 .map_err(|e| {
@@ -268,15 +272,14 @@ impl ArgusSqlite {
                         reason: format!("failed to parse meta_data: {e}"),
                     })
                 })?;
-        let model_config: HashMap<String, ModelConfig> =
-            serde_json::from_str(
-                &Self::get_column::<String>(&row, "model_config").map_err(map_err)?,
-            )
-            .map_err(|e| {
-                ArgusError::from(DbError::QueryFailed {
-                    reason: format!("failed to parse model_config: {e}"),
-                })
-            })?;
+        let model_config: HashMap<String, ModelConfig> = serde_json::from_str(
+            &Self::get_column::<String>(&row, "model_config").map_err(map_err)?,
+        )
+        .map_err(|e| {
+            ArgusError::from(DbError::QueryFailed {
+                reason: format!("failed to parse model_config: {e}"),
+            })
+        })?;
         // Try to parse models as Vec<String> (new format)
         // If that fails, try to parse as array of objects and extract the "id" or "name" field (old format)
         let models_raw: String = Self::get_column::<String>(&row, "models").map_err(map_err)?;

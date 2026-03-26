@@ -255,7 +255,7 @@ pub struct ChatSessionPayload {
     /// The effective provider ID bound to this session.
     /// `None` if no provider is configured (session will fail on first LLM call).
     pub effective_provider_id: Option<i64>,
-    /// The effective model override bound to this session, or `None` for provider default.
+    /// The effective model currently bound to this session's thread.
     #[serde(default)]
     pub effective_model: Option<String>,
 }
@@ -327,37 +327,23 @@ pub async fn create_chat_session(
         .transpose()?;
 
     // Create a new session for this chat
-    let session_id = wing
-        .create_session("")
-        .await
-        .map_err(|e| e.to_string())?;
+    let session_id = wing.create_session("").await.map_err(|e| e.to_string())?;
 
     // Create thread with template, provider, and optional model override
     let thread_id = wing
-        .create_thread(session_id, AgentId::new(template_id_i64), provider_id, model.as_deref())
+        .create_thread(
+            session_id,
+            AgentId::new(template_id_i64),
+            provider_id,
+            model.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
-    // Get effective provider from the template or use the provided one
-    let template = wing
-        .get_template(AgentId::new(template_id_i64))
+    let (effective_template_id, effective_provider_id, effective_model) = wing
+        .activate_thread(session_id, thread_id)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Template not found".to_string())?;
-
-    // Determine the effective provider ID:
-    // 1. Use the explicitly provided provider preference
-    // 2. Fall back to the template's configured provider
-    // 3. Fall back to the current default provider
-    // 4. Return None if no provider is configured (frontend should handle this case)
-    let effective_provider_id = match provider_id.or(template.provider_id) {
-        Some(provider_id) => Some(provider_id.inner()),
-        None => wing
-            .get_default_provider_record()
-            .await
-            .ok()
-            .map(|provider| provider.id.into_inner()),
-    };
+        .map_err(|e| e.to_string())?;
 
     let session_key = format!(
         "{}::{}",
@@ -380,10 +366,10 @@ pub async fn create_chat_session(
     Ok(ChatSessionPayload {
         session_key,
         session_id: session_id.to_string(),
-        template_id: template_id_i64,
+        template_id: effective_template_id.into_inner(),
         thread_id: thread_id.to_string(),
-        effective_provider_id,
-        effective_model: model,
+        effective_provider_id: effective_provider_id.map(|id| id.inner()),
+        effective_model,
     })
 }
 
@@ -398,7 +384,7 @@ pub async fn activate_existing_thread(
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
 
-    let (template_id, provider_id, model_override) = wing
+    let (template_id, provider_id, effective_model) = wing
         .activate_thread(session_id, thread_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -420,7 +406,41 @@ pub async fn activate_existing_thread(
         template_id: template_id.into_inner(),
         thread_id: thread_id.to_string(),
         effective_provider_id: provider_id.map(|id| id.inner()),
-        effective_model: model_override,
+        effective_model,
+    })
+}
+
+#[tauri::command]
+pub async fn update_thread_model(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+    thread_id: String,
+    provider_preference_id: String,
+    model: String,
+) -> Result<ChatSessionPayload, String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    let provider_id = provider_preference_id
+        .parse::<i64>()
+        .map(ProviderId::new)
+        .map_err(|e| format!("Invalid provider id: {}", e))?;
+
+    wing.update_thread_model(session_id, thread_id, provider_id, &model)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (template_id, effective_provider_id, effective_model) = wing
+        .activate_thread(session_id, thread_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(ChatSessionPayload {
+        session_key: session_id.to_string(),
+        session_id: session_id.to_string(),
+        template_id: template_id.into_inner(),
+        thread_id: thread_id.to_string(),
+        effective_provider_id: effective_provider_id.map(|id| id.inner()),
+        effective_model,
     })
 }
 
@@ -507,7 +527,9 @@ pub struct ThreadSummaryPayload {
 }
 
 #[tauri::command]
-pub async fn list_sessions(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<SessionSummaryPayload>, String> {
+pub async fn list_sessions(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<SessionSummaryPayload>, String> {
     wing.list_sessions()
         .await
         .map_err(|e| e.to_string())
@@ -525,7 +547,10 @@ pub async fn list_sessions(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<Sessio
 }
 
 #[tauri::command]
-pub async fn delete_session(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<(), String> {
+pub async fn delete_session(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+) -> Result<(), String> {
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     wing.delete_session(session_id)
         .await
@@ -545,7 +570,10 @@ pub async fn rename_session(
 }
 
 #[tauri::command]
-pub async fn list_threads(wing: State<'_, Arc<ArgusWing>>, session_id: String) -> Result<Vec<ThreadSummaryPayload>, String> {
+pub async fn list_threads(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+) -> Result<Vec<ThreadSummaryPayload>, String> {
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     wing.list_threads(session_id)
         .await

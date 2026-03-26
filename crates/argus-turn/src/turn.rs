@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
@@ -27,6 +27,60 @@ use super::events::TurnLogEvent;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
 use super::trace::{TraceConfig, TraceWriter};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
+
+/// Cancellation primitive used to stop an active turn.
+///
+/// This token is clonable so the runtime can hold a handle to cancel the active
+/// turn while the turn itself periodically checks for cancellation.
+#[derive(Clone, Debug)]
+pub struct TurnCancellation {
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
+}
+
+impl TurnCancellation {
+    #[must_use]
+    pub fn new() -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self { tx, rx }
+    }
+
+    pub fn cancel(&self) {
+        let _ = self.tx.send(true);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow()
+    }
+
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.rx.clone()
+    }
+
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+
+        let mut rx = self.subscribe();
+        loop {
+            if rx.changed().await.is_err() {
+                return;
+            }
+            if *rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+impl Default for TurnCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Turn identifier generator (simple counter for now).
 fn generate_turn_id(thread_id: &str, turn_number: u32) -> String {
@@ -250,8 +304,16 @@ pub struct Turn {
     control_tx: mpsc::UnboundedSender<argus_protocol::ThreadControlEvent>,
 
     /// Shared thread mailbox consulted before each loop iteration.
+    ///
+    /// Note: this mailbox is a legacy compatibility path for in-turn injected control
+    /// inputs (e.g. interrupts). The primary production queue model for user messages
+    /// and job results is the thread runtime actor's FIFO inbox.
     #[builder(default = "default_mailbox()")]
     mailbox: Arc<Mutex<ThreadMailbox>>,
+
+    /// Cancellation primitive used to stop this turn.
+    #[builder(default)]
+    cancellation: TurnCancellation,
 
     /// Event forwarder task handle (cleaned up on drop).
     #[builder(default)]
@@ -356,22 +418,32 @@ impl Turn {
         // Write TurnStart event if tracing is enabled
         if let Some(config) = self.trace_config.as_ref()
             && config.enabled
-                && let Some(writer) = trace_writer.as_mut() {
-                    if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
-                        let _ = writer.write_event(&TurnLogEvent::TurnStart {
-                            system_prompt: sp.clone(),
-                            model: model.clone(),
-                        }).await;
-                    }
-                    for msg in self.messages.iter() {
-                        if let ChatMessage { role: argus_protocol::llm::Role::User, content, .. } = msg {
-                            let _ = writer.write_event(&TurnLogEvent::UserInput {
-                                content: content.clone(),
-                                role: "user".to_string(),
-                            }).await;
-                        }
-                    }
+            && let Some(writer) = trace_writer.as_mut()
+        {
+            if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
+                let _ = writer
+                    .write_event(&TurnLogEvent::TurnStart {
+                        system_prompt: sp.clone(),
+                        model: model.clone(),
+                    })
+                    .await;
+            }
+            for msg in self.messages.iter() {
+                if let ChatMessage {
+                    role: argus_protocol::llm::Role::User,
+                    content,
+                    ..
+                } = msg
+                {
+                    let _ = writer
+                        .write_event(&TurnLogEvent::UserInput {
+                            content: content.clone(),
+                            role: "user".to_string(),
+                        })
+                        .await;
                 }
+            }
+        }
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -395,9 +467,12 @@ impl Turn {
             "Turn execution completed"
         );
 
+        let cancelled = matches!(result, Err(TurnError::Cancelled));
+
         // Invoke on_turn_complete callback if configured
-        if let (Some(callback), Some(session_id)) =
-            (&self.config.on_turn_complete, &self.session_id)
+        if !cancelled
+            && let (Some(callback), Some(session_id)) =
+                (&self.config.on_turn_complete, &self.session_id)
         {
             callback(*session_id, self.turn_number);
         }
@@ -440,6 +515,10 @@ impl Turn {
                         "Failed to send TurnCompleted event"
                     );
                 }
+            }
+            Err(TurnError::Cancelled) => {
+                // Cancellation is an expected control-path outcome. Do not emit TurnFailed;
+                // callers will still observe ThreadEvent::Idle.
             }
             Err(error) => {
                 if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnFailed {
@@ -626,6 +705,10 @@ impl Turn {
         }
 
         for iteration in 0..max_iterations {
+            if self.cancellation.is_cancelled() {
+                return Err(TurnError::Cancelled);
+            }
+
             let pending_inputs = {
                 let mut mailbox = self.mailbox.lock().await;
                 mailbox.drain_for_turn()
@@ -697,7 +780,14 @@ impl Turn {
             if let Some(writer) = trace_writer.as_mut() {
                 let llm_req_event = TurnLogEvent::LlmRequest {
                     messages: messages.clone(),
-                    tools: tools.iter().map(|t| serde_json::to_value(t).ok().unwrap_or(serde_json::Value::Null)).collect(),
+                    tools: tools
+                        .iter()
+                        .map(|t| {
+                            serde_json::to_value(t)
+                                .ok()
+                                .unwrap_or(serde_json::Value::Null)
+                        })
+                        .collect(),
                 };
                 let _ = writer.write_event(&llm_req_event).await;
             }
@@ -783,9 +873,12 @@ impl Turn {
 
                     // Execute tools in parallel
                     let trace_writer_arc = Arc::new(Mutex::new(trace_writer.take()));
-                    let tool_results = self
-                        .execute_tools_parallel(tool_calls, tool_timeout_secs, trace_writer_arc.clone())
-                        .await;
+                    let tool_results = tokio::select! {
+                        _ = self.cancellation.cancelled() => {
+                            return Err(TurnError::Cancelled);
+                        }
+                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs, trace_writer_arc.clone()) => tool_results,
+                    };
                     // Restore trace_writer from Arc after all writes complete
                     if let Ok(mutex) = Arc::try_unwrap(trace_writer_arc) {
                         trace_writer = mutex.into_inner();
@@ -871,6 +964,10 @@ impl Turn {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, TurnError> {
+        if self.cancellation.is_cancelled() {
+            return Err(TurnError::Cancelled);
+        }
+
         match self
             .provider
             .stream_complete_with_tools(request.clone())
@@ -882,14 +979,28 @@ impl Turn {
                     turn_number = %self.turn_number,
                     "LLM stream started"
                 );
+                let mut cancel_rx = self.cancellation.subscribe();
                 let mut accumulator = StreamingAccumulator::new();
-                while let Some(event_result) = stream.next().await {
-                    let event = event_result.map_err(TurnError::LlmFailed)?;
-                    // Forward to stream_tx
-                    let _ = self
-                        .stream_tx
-                        .send(TurnStreamEvent::LlmEvent(event.clone()));
-                    accumulator.process(event);
+                loop {
+                    tokio::select! {
+                        change = cancel_rx.changed() => {
+                            if change.is_ok() && *cancel_rx.borrow() {
+                                return Err(TurnError::Cancelled);
+                            }
+                        }
+                        event_result = stream.next() => {
+                            let Some(event_result) = event_result else {
+                                break;
+                            };
+
+                            let event = event_result.map_err(TurnError::LlmFailed)?;
+                            // Forward to stream_tx
+                            let _ = self
+                                .stream_tx
+                                .send(TurnStreamEvent::LlmEvent(event.clone()));
+                            accumulator.process(event);
+                        }
+                    }
                 }
                 let response = accumulator.into_response();
                 tracing::debug!(
@@ -904,10 +1015,10 @@ impl Turn {
             Err(argus_protocol::llm::LlmError::UnsupportedCapability { .. }) => {
                 // Fallback to non-streaming
                 tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
-                self.provider
-                    .complete_with_tools(request)
-                    .await
-                    .map_err(TurnError::LlmFailed)
+                tokio::select! {
+                    _ = self.cancellation.cancelled() => Err(TurnError::Cancelled),
+                    result = self.provider.complete_with_tools(request) => result.map_err(TurnError::LlmFailed),
+                }
             }
             Err(e) => Err(TurnError::LlmFailed(e)),
         }
@@ -1041,7 +1152,9 @@ impl Turn {
     ) -> Vec<ToolExecutionResult> {
         let futures: Vec<_> = tool_calls
             .into_iter()
-            .map(|tool_call| self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone()))
+            .map(|tool_call| {
+                self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone())
+            })
             .collect();
 
         join_all(futures).await
@@ -1062,11 +1175,13 @@ impl Turn {
         {
             let mut guard = trace_writer.lock().await;
             if let Some(writer) = guard.as_mut() {
-                let _ = writer.write_event(&TurnLogEvent::ToolCallStart {
-                    id: tool_call_id.clone(),
-                    name: tool_name.clone(),
-                    arguments: tool_input.clone(),
-                }).await;
+                let _ = writer
+                    .write_event(&TurnLogEvent::ToolCallStart {
+                        id: tool_call_id.clone(),
+                        name: tool_name.clone(),
+                        arguments: tool_input.clone(),
+                    })
+                    .await;
             }
         }
 
@@ -1100,13 +1215,15 @@ impl Turn {
             {
                 let mut guard = trace_writer.lock().await;
                 if let Some(writer) = guard.as_mut() {
-                    let _ = writer.write_event(&TurnLogEvent::ToolResult {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        result: content.clone(),
-                        duration_ms,
-                        error: Some(reason.clone()),
-                    }).await;
+                    let _ = writer
+                        .write_event(&TurnLogEvent::ToolResult {
+                            id: tool_call_id.clone(),
+                            name: tool_name.clone(),
+                            result: content.clone(),
+                            duration_ms,
+                            error: Some(reason.clone()),
+                        })
+                        .await;
                 }
             }
 
@@ -1298,13 +1415,15 @@ impl Turn {
                     Ok(_) => None,
                     Err(e) => Some(e.clone()),
                 };
-                let _ = writer.write_event(&TurnLogEvent::ToolResult {
-                    id: tool_call_id.clone(),
-                    name: tool_name.clone(),
-                    result: content.clone(),
-                    duration_ms,
-                    error: error_str,
-                }).await;
+                let _ = writer
+                    .write_event(&TurnLogEvent::ToolResult {
+                        id: tool_call_id.clone(),
+                        name: tool_name.clone(),
+                        result: content.clone(),
+                        duration_ms,
+                        error: error_str,
+                    })
+                    .await;
             }
         }
 

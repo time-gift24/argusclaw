@@ -9,6 +9,10 @@ use argus_protocol::llm::LlmError;
 /// Errors that can occur during Turn execution.
 #[derive(Debug, Error)]
 pub enum TurnError {
+    /// Turn was cancelled.
+    #[error("Turn cancelled")]
+    Cancelled,
+
     /// LLM call failed.
     #[error("LLM call failed: {0}")]
     LlmFailed(#[from] LlmError),

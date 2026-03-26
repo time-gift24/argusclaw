@@ -11,8 +11,8 @@ pub mod repository;
 // Re-export provider types for convenience
 pub use provider_types::{
     LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
-    LlmProviderRecordJson, ModelConfig, ProviderSecretStatus, ProviderTestResult, ProviderTestStatus,
-    SecretString,
+    LlmProviderRecordJson, ModelConfig, ProviderSecretStatus, ProviderTestResult,
+    ProviderTestStatus, SecretString,
 };
 
 pub use repository::LlmProviderRepository;
@@ -698,7 +698,10 @@ impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
         (**self).complete_with_tools(request).await
     }
 
-    async fn stream_complete(&self, request: CompletionRequest) -> Result<LlmEventStream, LlmError> {
+    async fn stream_complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
         (**self).stream_complete(request).await
     }
 

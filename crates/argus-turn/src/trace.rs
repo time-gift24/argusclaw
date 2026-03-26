@@ -8,8 +8,8 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 use tokio_stream::Stream;
 
-use super::events::TurnLogEvent;
 use super::error::TurnLogError;
+use super::events::TurnLogEvent;
 
 /// Configuration for trace recording.
 #[derive(Debug, Clone)]
@@ -126,7 +126,11 @@ impl TraceWriter {
 
         Ok(Self {
             file: BufStream::new(file),
-            thread_id: base_dir.file_name().and_then(|s| s.to_str()).unwrap_or("unknown").to_string(),
+            thread_id: base_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
             turn_number,
             include_streaming_deltas: config.include_streaming_deltas,
         })
@@ -158,13 +162,20 @@ impl TraceWriter {
             "ts": ts,
         });
         if let Some(obj) = wrapper.as_object_mut() {
-            obj.insert("type".to_string(), event_value.get("type").cloned().unwrap_or(serde_json::Value::String(event.type_name().to_string())));
+            obj.insert(
+                "type".to_string(),
+                event_value
+                    .get("type")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::String(event.type_name().to_string())),
+            );
             if let Some(data) = event_value.get("data")
-                && let Some(fields) = data.as_object() {
-                    for (k, v) in fields {
-                        obj.insert(k.clone(), v.clone());
-                    }
+                && let Some(fields) = data.as_object()
+            {
+                for (k, v) in fields {
+                    obj.insert(k.clone(), v.clone());
                 }
+            }
         }
         let line = serde_json::to_string(&wrapper)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -201,9 +212,7 @@ impl TraceWriter {
 }
 
 /// Read JSONL events from a turn file path.
-pub async fn read_jsonl_events(
-    path: &PathBuf,
-) -> Result<Vec<TurnLogEvent>, TurnLogError> {
+pub async fn read_jsonl_events(path: &PathBuf) -> Result<Vec<TurnLogEvent>, TurnLogError> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|_e| TurnLogError::TurnNotFound(path.clone()))?;
@@ -268,38 +277,41 @@ pub async fn recover_turn_events(
         Err(_) => {
             // Return a stream that immediately yields an error then completes
             let err_path = path.clone();
-            return Box::pin(futures_util::stream::iter(
-                vec![Err(TurnLogError::TurnNotFound(err_path))]
-            )) as Pin<Box<dyn Stream<Item = Result<TurnLogEvent, TurnLogError>>>>;
+            return Box::pin(futures_util::stream::iter(vec![Err(
+                TurnLogError::TurnNotFound(err_path),
+            )]))
+                as Pin<Box<dyn Stream<Item = Result<TurnLogEvent, TurnLogError>>>>;
         }
     };
 
     use std::cell::Cell;
     let line_num = Cell::new(0usize);
 
-    let lines_stream = tokio_stream::wrappers::LinesStream::new(
-        tokio::io::BufReader::new(file).lines(),
-    );
+    let lines_stream =
+        tokio_stream::wrappers::LinesStream::new(tokio::io::BufReader::new(file).lines());
 
-    Box::pin(tokio_stream::StreamExt::map(lines_stream, move |line_result: std::io::Result<String>| {
-        line_num.set(line_num.get() + 1);
-        let line = match line_result {
-            Ok(l) => l.trim().to_string(),
-            Err(e) => {
+    Box::pin(tokio_stream::StreamExt::map(
+        lines_stream,
+        move |line_result: std::io::Result<String>| {
+            line_num.set(line_num.get() + 1);
+            let line = match line_result {
+                Ok(l) => l.trim().to_string(),
+                Err(e) => {
+                    return Err(TurnLogError::MalformedEvent {
+                        line: line_num.get(),
+                        reason: format!("IO error reading line: {}", e),
+                    });
+                }
+            };
+            if line.is_empty() {
                 return Err(TurnLogError::MalformedEvent {
                     line: line_num.get(),
-                    reason: format!("IO error reading line: {}", e),
+                    reason: "empty line".into(),
                 });
             }
-        };
-        if line.is_empty() {
-            return Err(TurnLogError::MalformedEvent {
-                line: line_num.get(),
-                reason: "empty line".into(),
-            });
-        }
-        if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line)
-            && let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str()) {
+            if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&line)
+                && let Some(type_str) = wrapper.get("type").and_then(|t| t.as_str())
+            {
                 let mut event_data = serde_json::Map::new();
                 for (k, v) in wrapper.as_object().unwrap_or(&serde_json::Map::new()) {
                     if !["v", "thread_id", "turn", "ts", "type"].contains(&k.as_str()) {
@@ -314,21 +326,22 @@ pub async fn recover_turn_events(
                     return Ok(event);
                 }
             }
-        match serde_json::from_str::<TurnLogEvent>(&line) {
-            Ok(event) => Ok(event),
-            Err(e) => {
-                if line.len() < 10 {
-                    Err(TurnLogError::TruncatedEvent {
-                        line: line_num.get(),
-                        reason: format!("incomplete JSON: {}", e),
-                    })
-                } else {
-                    Err(TurnLogError::MalformedEvent {
-                        line: line_num.get(),
-                        reason: e.to_string(),
-                    })
+            match serde_json::from_str::<TurnLogEvent>(&line) {
+                Ok(event) => Ok(event),
+                Err(e) => {
+                    if line.len() < 10 {
+                        Err(TurnLogError::TruncatedEvent {
+                            line: line_num.get(),
+                            reason: format!("incomplete JSON: {}", e),
+                        })
+                    } else {
+                        Err(TurnLogError::MalformedEvent {
+                            line: line_num.get(),
+                            reason: e.to_string(),
+                        })
+                    }
                 }
             }
-        }
-    })) as Pin<Box<dyn Stream<Item = Result<TurnLogEvent, TurnLogError>>>>
+        },
+    )) as Pin<Box<dyn Stream<Item = Result<TurnLogEvent, TurnLogError>>>>
 }

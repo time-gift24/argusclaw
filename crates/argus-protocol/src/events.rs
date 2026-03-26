@@ -4,6 +4,8 @@
 
 use std::collections::VecDeque;
 
+use tokio::sync::oneshot;
+
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::ids::{AgentId, ThreadId};
@@ -12,21 +14,83 @@ use crate::message_override::MessageOverride;
 
 /// Internal control-plane event for thread orchestration.
 #[derive(Debug, Clone)]
+pub enum ThreadCommand {
+    /// Queue a user message for the runtime inbox.
+    EnqueueUserMessage {
+        /// Message content.
+        content: String,
+        /// Optional per-message overrides (temperature, max_tokens, etc.).
+        msg_override: Option<MessageOverride>,
+    },
+    /// Deliver a completed job result back to the thread runtime.
+    DeliverJobResult(ThreadJobResult),
+    /// Request cancellation of the currently active turn.
+    CancelActiveTurn,
+}
+
+/// High-level state for the thread runtime actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadRuntimeState {
+    /// Runtime is idle and ready for work.
+    Idle,
+    /// Runtime is executing a turn.
+    Running {
+        /// Active turn number.
+        turn_number: u32,
+    },
+    /// Runtime is stopping an active turn.
+    Stopping {
+        /// Active turn number being stopped.
+        turn_number: u32,
+    },
+    /// Runtime is paused waiting for an approval decision.
+    WaitingForApproval {
+        /// Turn number blocked on approval.
+        turn_number: u32,
+    },
+}
+
+/// Legacy compatibility control event surface for pre-runtime callers.
+#[derive(Debug)]
 pub enum ThreadControlEvent {
     /// A new user message entered the thread control plane.
+    ///
+    /// Production semantics: if a turn is currently running, the thread runtime actor
+    /// enqueues the message (FIFO) for a subsequent turn. Frontends typically render
+    /// this as "queued" work.
     UserMessage {
         /// Message content.
         content: String,
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
-    /// A user interrupt that should be surfaced before the next LLM round.
+    /// A user interrupt control signal.
+    ///
+    /// Production semantics: this is treated as an immediate "stop active turn" signal
+    /// (CancelActiveTurn). The `content` is not currently used as redirect text.
+    ///
+    /// Legacy semantics: callers may still inject interrupts into a running turn via
+    /// [`ThreadMailbox`] / [`TurnControlInput`], but this is considered a compatibility
+    /// path and not the primary production model.
     UserInterrupt {
         /// Interrupt content (e.g. "stop", "cancel", or a new instruction).
         content: String,
     },
     /// A background job produced a result.
+    ///
+    /// Production semantics: if a turn is currently running, the thread runtime actor
+    /// enqueues the job result (FIFO) for a subsequent turn. Frontends typically render
+    /// this as "queued" work.
     JobResult(ThreadJobResult),
+    /// Claim a queued job result by job ID so it is not replayed as a future turn.
+    ///
+    /// This is an internal runtime-actor query path used by `get_job_result(consume=true)`.
+    ClaimQueuedJobResult {
+        /// Job ID to remove from the runtime inbox.
+        job_id: String,
+        /// One-shot reply channel containing the removed queued result, if any.
+        reply_tx: oneshot::Sender<Option<ThreadJobResult>>,
+    },
 }
 
 /// Routed job result metadata shared by the control plane and public event stream.
@@ -81,7 +145,12 @@ pub enum TurnControlInput {
     /// User interrupt content.
     UserInterrupt { content: String },
     /// User follow-up content.
-    UserMessage { content: String },
+    UserMessage {
+        /// Message content.
+        content: String,
+        /// Optional per-message overrides (temperature, max_tokens, etc.).
+        msg_override: Option<MessageOverride>,
+    },
     /// Background job result.
     JobResult(ThreadJobResult),
 }
@@ -92,48 +161,134 @@ impl TurnControlInput {
     #[must_use]
     pub fn into_message_text(self) -> String {
         match self {
-            Self::UserInterrupt { content } | Self::UserMessage { content } => content,
+            Self::UserInterrupt { content } => content,
+            Self::UserMessage { content, .. } => content,
             Self::JobResult(result) => result.into_message_text(),
         }
     }
 }
 
-/// Thread-level mailbox shared between the orchestrator and active turns.
+/// Thread-level inbox shared between the orchestrator and active turns.
 #[derive(Debug, Default)]
-pub struct ThreadMailbox {
-    user_interrupts: VecDeque<String>,
-    queued_user_message: Option<QueuedUserMessage>,
-    job_results: VecDeque<ThreadJobResult>,
+pub struct ThreadInbox {
+    items: VecDeque<ThreadInboxItem>,
 }
 
-impl ThreadMailbox {
-    /// Push a control event into the mailbox.
-    pub fn push(&mut self, event: ThreadControlEvent) {
-        match event {
-            ThreadControlEvent::UserInterrupt { content } => {
-                self.user_interrupts.push_back(content);
-            }
-            ThreadControlEvent::UserMessage {
+#[derive(Debug)]
+enum ThreadInboxItem {
+    UserMessage(QueuedUserMessage),
+    JobResult(ThreadJobResult),
+}
+
+impl ThreadInbox {
+    /// Queue a user message.
+    pub fn enqueue_user_message(&mut self, content: String, msg_override: Option<MessageOverride>) {
+        self.items
+            .push_back(ThreadInboxItem::UserMessage(QueuedUserMessage {
                 content,
                 msg_override,
-            } => {
-                self.queued_user_message = Some(QueuedUserMessage {
-                    content,
-                    msg_override,
-                });
-            }
-            ThreadControlEvent::JobResult(result) => {
-                self.job_results.push_back(result);
-            }
+            }));
+    }
+
+    /// Queue a job result.
+    pub fn deliver_job_result(&mut self, result: ThreadJobResult) {
+        self.items.push_back(ThreadInboxItem::JobResult(result));
+    }
+
+    /// Remove a queued job result by job ID while preserving FIFO order for remaining items.
+    pub fn claim_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
+        let index = self.items.iter().position(|item| match item {
+            ThreadInboxItem::JobResult(result) => result.job_id == job_id,
+            ThreadInboxItem::UserMessage(_) => false,
+        })?;
+
+        match self.items.remove(index) {
+            Some(ThreadInboxItem::JobResult(result)) => Some(result),
+            Some(ThreadInboxItem::UserMessage(_)) | None => None,
         }
     }
 
     /// Drain items for a running turn.
     ///
-    /// Ordering is fixed:
-    /// 1. user interrupts (FIFO)
-    /// 2. queued user message (single-slot)
-    /// 3. job results (FIFO)
+    /// Ordering is global FIFO across queued user messages and job results.
+    #[must_use]
+    pub fn drain_for_turn(&mut self) -> Vec<TurnControlInput> {
+        let mut drained = Vec::new();
+
+        while let Some(item) = self.items.pop_front() {
+            match item {
+                ThreadInboxItem::UserMessage(message) => {
+                    drained.push(TurnControlInput::UserMessage {
+                        content: message.content,
+                        msg_override: message.msg_override,
+                    });
+                }
+                ThreadInboxItem::JobResult(result) => {
+                    drained.push(TurnControlInput::JobResult(result));
+                }
+            }
+        }
+
+        drained
+    }
+
+    /// Determine which queued work should start the next idle turn.
+    ///
+    /// Ordering is global FIFO across queued user messages and job results.
+    pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
+        match self.items.pop_front() {
+            Some(ThreadInboxItem::UserMessage(message)) => Some(message),
+            Some(ThreadInboxItem::JobResult(result)) => Some(QueuedUserMessage {
+                content: result.into_message_text(),
+                msg_override: None,
+            }),
+            None => None,
+        }
+    }
+
+    /// Returns true when no pending control items remain.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+/// Legacy mailbox compatibility layer.
+///
+/// This preserves interrupt behavior for callers still sending
+/// [`ThreadControlEvent`] while using [`ThreadInbox`] for queue storage.
+///
+/// In production, [`ThreadInbox`] is the primary queue model for user messages and
+/// job results, coordinated by the thread runtime actor. [`ThreadMailbox`] should be
+/// treated as a compatibility surface for legacy interrupt injection, not as the
+/// primary queue.
+#[derive(Debug, Default)]
+pub struct ThreadMailbox {
+    user_interrupts: VecDeque<String>,
+    inbox: ThreadInbox,
+}
+
+impl ThreadMailbox {
+    /// Push a legacy control event into the mailbox.
+    pub fn push(&mut self, event: ThreadControlEvent) {
+        match event {
+            ThreadControlEvent::UserMessage {
+                content,
+                msg_override,
+            } => self.inbox.enqueue_user_message(content, msg_override),
+            ThreadControlEvent::UserInterrupt { content } => {
+                self.user_interrupts.push_back(content)
+            }
+            ThreadControlEvent::JobResult(result) => self.inbox.deliver_job_result(result),
+            ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } => {
+                let _ = reply_tx.send(None);
+            }
+        }
+    }
+
+    /// Drain control inputs for a running turn.
+    ///
+    /// Legacy interrupt behavior is preserved by draining interrupts first.
     #[must_use]
     pub fn drain_for_turn(&mut self) -> Vec<TurnControlInput> {
         let mut drained = Vec::new();
@@ -142,42 +297,31 @@ impl ThreadMailbox {
             drained.push(TurnControlInput::UserInterrupt { content });
         }
 
-        if let Some(message) = self.queued_user_message.take() {
-            drained.push(TurnControlInput::UserMessage {
-                content: message.content,
-            });
-        }
-
-        while let Some(result) = self.job_results.pop_front() {
-            drained.push(TurnControlInput::JobResult(result));
-        }
-
+        drained.extend(self.inbox.drain_for_turn());
         drained
     }
 
     /// Determine which queued work should start the next idle turn.
     ///
-    /// Interrupts are only meaningful while a turn is running, so they are
-    /// discarded here before looking at queued user messages and job results.
+    /// Interrupts are cleared on idle handoff, matching legacy behavior.
     pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
         self.user_interrupts.clear();
+        self.inbox.take_next_turn_message()
+    }
 
-        if let Some(message) = self.queued_user_message.take() {
-            return Some(message);
-        }
-
-        self.job_results.pop_front().map(|result| QueuedUserMessage {
-            content: result.into_message_text(),
-            msg_override: None,
-        })
+    /// Clear legacy interrupts without disturbing queued inbox work.
+    ///
+    /// This matches the legacy "idle handoff" behavior where any interrupts
+    /// that arrived for a now-completed turn are discarded before the next turn
+    /// begins.
+    pub fn clear_interrupts_for_idle_handoff(&mut self) {
+        self.user_interrupts.clear();
     }
 
     /// Returns true when no pending control items remain.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.user_interrupts.is_empty()
-            && self.queued_user_message.is_none()
-            && self.job_results.is_empty()
+        self.user_interrupts.is_empty() && self.inbox.is_empty()
     }
 }
 
@@ -299,7 +443,10 @@ pub enum ThreadEvent {
         /// Subagent description.
         agent_description: String,
     },
-    /// User wants to interrupt or redirect the current turn.
+    /// User wants to interrupt the current turn.
+    ///
+    /// Production semantics: this is an immediate stop signal. Redirect-style
+    /// reuse of `content` is not currently supported on the runtime path.
     UserInterrupt {
         /// Interrupt content (e.g. "stop", "cancel", or a new instruction).
         content: String,
@@ -311,4 +458,46 @@ pub enum ThreadEvent {
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job_result(job_id: &str) -> ThreadJobResult {
+        ThreadJobResult {
+            job_id: job_id.to_string(),
+            success: true,
+            message: format!("result for {job_id}"),
+            token_usage: None,
+            agent_id: AgentId::new(7),
+            agent_display_name: "Worker".to_string(),
+            agent_description: "Background worker".to_string(),
+        }
+    }
+
+    #[test]
+    fn thread_inbox_claim_job_result_removes_only_matching_job() {
+        let mut inbox = ThreadInbox::default();
+        inbox.enqueue_user_message("first".to_string(), None);
+        inbox.deliver_job_result(job_result("job-1"));
+        inbox.deliver_job_result(job_result("job-2"));
+
+        let claimed = inbox.claim_job_result("job-1");
+        assert_eq!(
+            claimed.as_ref().map(|result| result.job_id.as_str()),
+            Some("job-1")
+        );
+
+        let remaining = inbox.drain_for_turn();
+        assert_eq!(remaining.len(), 2);
+        assert!(matches!(
+            &remaining[0],
+            TurnControlInput::UserMessage { content, .. } if content == "first"
+        ));
+        assert!(matches!(
+            &remaining[1],
+            TurnControlInput::JobResult(result) if result.job_id == "job-2"
+        ));
+    }
 }

@@ -1,22 +1,41 @@
 //! Turn log events - incremental JSONL event types.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use argus_protocol::llm::ChatMessage;
 use argus_protocol::token_usage::TokenUsage;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Single event in a turn's JSONL log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum TurnLogEvent {
-    TurnStart { system_prompt: String, model: String },
-    UserInput { content: String, role: String },
+    TurnStart {
+        system_prompt: String,
+        model: String,
+    },
+    UserInput {
+        content: String,
+        role: String,
+    },
     #[serde(rename = "llm_req")]
-    LlmRequest { messages: Vec<ChatMessage>, tools: Vec<Value> },
-    LlmDelta { delta: String, is_complete: bool },
-    ToolCallStart { id: String, name: String, arguments: Value },
-    ToolCallDelta { id: String, delta: Value },
+    LlmRequest {
+        messages: Vec<ChatMessage>,
+        tools: Vec<Value>,
+    },
+    LlmDelta {
+        delta: String,
+        is_complete: bool,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+        arguments: Value,
+    },
+    ToolCallDelta {
+        id: String,
+        delta: Value,
+    },
     ToolResult {
         id: String,
         name: String,
@@ -30,8 +49,14 @@ pub enum TurnLogEvent {
         tool_calls: Vec<Value>,
         finish_reason: String,
     },
-    TurnEnd { token_usage: TokenUsage, finish_reason: String },
-    TurnError { error: String, at_iteration: Option<u32> },
+    TurnEnd {
+        token_usage: TokenUsage,
+        finish_reason: String,
+    },
+    TurnError {
+        error: String,
+        at_iteration: Option<u32>,
+    },
 }
 
 impl TurnLogEvent {

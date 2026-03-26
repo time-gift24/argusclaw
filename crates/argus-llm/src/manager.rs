@@ -14,9 +14,8 @@ use chrono::Utc;
 use argus_protocol::Result;
 use argus_protocol::llm::{
     ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId, LlmProviderRecord,
-    LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
-    ProviderTestResult, ProviderTestStatus, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus, ProviderTestResult,
+    ProviderTestStatus, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use futures_util::StreamExt;
 use sqlx::SqlitePool;
@@ -44,7 +43,11 @@ impl ProviderManager {
     /// Create a new provider manager with the given repository.
     #[must_use]
     pub fn new(repository: Arc<dyn LlmProviderRepository>) -> Self {
-        Self { repository, pool: None, cipher: None }
+        Self {
+            repository,
+            pool: None,
+            cipher: None,
+        }
     }
 
     /// Set the pool and cipher for token-based auth providers.
@@ -243,16 +246,18 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            argus_protocol::ArgusError::LlmError {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
                 reason: "account_token_source requires SqlitePool".to_string(),
-            }
-        })?;
-        let cipher = self.cipher.as_ref().ok_or_else(|| {
-            argus_protocol::ArgusError::LlmError {
+            })?;
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
                 reason: "account_token_source requires Cipher".to_string(),
-            }
-        })?;
+            })?;
 
         let base = self.build_base_openai_compatible_provider(record, model)?;
 
@@ -264,7 +269,9 @@ impl ProviderManager {
         )
         .fetch_optional(pool.as_ref())
         .await
-        .map_err(|e| argus_protocol::ArgusError::LlmError { reason: e.to_string() })?
+        .map_err(|e| argus_protocol::ArgusError::LlmError {
+            reason: e.to_string(),
+        })?
         .ok_or_else(|| argus_protocol::ArgusError::LlmError {
             reason: "No stored credentials for token auth".to_string(),
         })
@@ -307,7 +314,9 @@ impl ProviderManager {
         let factory_config = OpenAiCompatibleFactoryConfig::new(config);
 
         create_openai_compatible_provider(factory_config).map_err(|e| {
-            argus_protocol::ArgusError::LlmError { reason: e.to_string() }
+            argus_protocol::ArgusError::LlmError {
+                reason: e.to_string(),
+            }
         })
     }
 }
@@ -683,13 +692,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
     use argus_protocol::llm::{
         LlmError, LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository,
         ProviderTestStatus, SecretString,
     };
+    use async_trait::async_trait;
 
-    use super::{ProviderManager, duration_to_millis, map_llm_error_to_test_status, provider_timeout};
+    use super::{
+        ProviderManager, duration_to_millis, map_llm_error_to_test_status, provider_timeout,
+    };
 
     // Mock LlmProviderRepository for testing
     struct MockProviderRepository {
@@ -712,7 +723,10 @@ mod tests {
             todo!()
         }
 
-        async fn set_default_provider(&self, _id: &LlmProviderId) -> Result<(), argus_protocol::ArgusError> {
+        async fn set_default_provider(
+            &self,
+            _id: &LlmProviderId,
+        ) -> Result<(), argus_protocol::ArgusError> {
             todo!()
         }
 
@@ -723,11 +737,15 @@ mod tests {
             Ok(Some(self.record.clone()))
         }
 
-        async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, argus_protocol::ArgusError> {
+        async fn list_providers(
+            &self,
+        ) -> Result<Vec<LlmProviderRecord>, argus_protocol::ArgusError> {
             Ok(vec![self.record.clone()])
         }
 
-        async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>, argus_protocol::ArgusError> {
+        async fn get_default_provider(
+            &self,
+        ) -> Result<Option<LlmProviderRecord>, argus_protocol::ArgusError> {
             Ok(Some(self.record.clone()))
         }
     }
@@ -756,7 +774,9 @@ mod tests {
         });
         let manager = ProviderManager::new(repo);
 
-        let result = manager.build_provider_with_model(make_record(), "gpt-4").await;
+        let result = manager
+            .build_provider_with_model(make_record(), "gpt-4")
+            .await;
         assert!(result.is_ok(), "static API key should build provider");
     }
 
@@ -812,10 +832,9 @@ mod tests {
         // by ensuring the meta_data field is consulted.
         // This is a structural test: we check that the flag is recognized.
         let mut record = make_record();
-        record.meta_data.insert(
-            "account_token_source".to_string(),
-            "true".to_string(),
-        );
+        record
+            .meta_data
+            .insert("account_token_source".to_string(), "true".to_string());
 
         // Without pool/cipher, it should return an error mentioning SqlitePool
         let repo = Arc::new(MockProviderRepository {

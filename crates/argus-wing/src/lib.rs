@@ -31,7 +31,7 @@ use std::sync::Arc;
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
 use argus_approval::{ApprovalManager, ApprovalPolicy};
-use argus_auth::{AccountManager};
+use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
@@ -433,7 +433,9 @@ impl ArgusWing {
         }
 
         // Create thread
-        let thread_id = self.create_thread(session_id, template.id, None, None).await?;
+        let thread_id = self
+            .create_thread(session_id, template.id, None, None)
+            .await?;
 
         Ok((session_id, thread_id))
     }
@@ -494,6 +496,19 @@ impl ArgusWing {
             .await
     }
 
+    /// Update the bound provider/model for an existing thread.
+    pub async fn update_thread_model(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        provider_id: ProviderId,
+        model: &str,
+    ) -> Result<(ProviderId, String)> {
+        self.session_manager
+            .update_thread_model(session_id, &thread_id, provider_id, model)
+            .await
+    }
+
     // =========================================================================
     // Messaging API
     // =========================================================================
@@ -527,7 +542,9 @@ impl ArgusWing {
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<(AgentId, Option<ProviderId>, Option<String>)> {
-        self.session_manager.activate_thread(session_id, &thread_id).await
+        self.session_manager
+            .activate_thread(session_id, &thread_id)
+            .await
     }
 
     /// Subscribe to thread events.
@@ -633,6 +650,7 @@ mod tests {
             description: "Default assistant for ArgusWing".to_string(),
             version: "0.1.0".to_string(),
             provider_id: None,
+            model_id: None,
             system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
@@ -673,6 +691,7 @@ mod tests {
             description: "Should receive a database-generated id".to_string(),
             version: "1.0.0".to_string(),
             provider_id: None,
+            model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
             max_tokens: None,
@@ -777,6 +796,7 @@ mod tests {
                 description: "Used by an existing thread".to_string(),
                 version: "1.0.0".to_string(),
                 provider_id: Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+                model_id: None,
                 system_prompt: "You are a test agent.".to_string(),
                 tool_names: vec![],
                 max_tokens: None,
@@ -861,6 +881,7 @@ mod tests {
             description: "Default assistant for ArgusWing".to_string(),
             version: "0.1.0".to_string(),
             provider_id: Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+            model_id: None,
             system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
             tool_names: vec!["shell".to_string(), "read".to_string()],
             max_tokens: None,
@@ -906,6 +927,7 @@ mod tests {
                 description: "Used to verify default provider fallback".to_string(),
                 version: "1.0.0".to_string(),
                 provider_id: None,
+                model_id: None,
                 system_prompt: "You are a fallback agent.".to_string(),
                 tool_names: vec![],
                 max_tokens: None,
@@ -925,5 +947,186 @@ mod tests {
         wing.create_thread(session_id, template_id, None, None)
             .await
             .expect("thread should create using the default provider fallback");
+    }
+
+    #[tokio::test]
+    async fn create_thread_pins_agent_default_model_for_later_activation() {
+        use argus_protocol::LlmProviderRecord;
+        use std::collections::HashMap;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let provider_record = LlmProviderRecord {
+            id: argus_protocol::LlmProviderId::new(1),
+            display_name: "test-provider".to_string(),
+            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key: argus_protocol::SecretString::new("test-key"),
+            models: vec!["gpt-4o-mini".to_string(), "gpt-5".to_string()],
+            model_config: HashMap::new(),
+            default_model: "gpt-4o-mini".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: argus_protocol::ProviderSecretStatus::Ready,
+            meta_data: HashMap::new(),
+        };
+
+        let provider_id = wing
+            .upsert_provider(provider_record)
+            .await
+            .expect("provider should upsert");
+
+        wing.set_default_provider(provider_id)
+            .await
+            .expect("should set default provider");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Pinned Model Agent".to_string(),
+                description: "Uses a non-default model".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+                model_id: Some("gpt-5".to_string()),
+                system_prompt: "You are a pinned-model agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("pinned-model-session")
+            .await
+            .expect("session should create");
+
+        let thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        let (activated_template_id, effective_provider_id, effective_model) = wing
+            .activate_thread(session_id, thread_id)
+            .await
+            .expect("thread should activate");
+
+        assert_eq!(activated_template_id, template_id);
+        assert_eq!(
+            effective_provider_id,
+            Some(argus_protocol::ProviderId::new(provider_id.into_inner()))
+        );
+        assert_eq!(effective_model.as_deref(), Some("gpt-5"));
+    }
+
+    #[tokio::test]
+    async fn update_thread_model_rebinds_existing_thread() {
+        use argus_protocol::LlmProviderRecord;
+        use std::collections::HashMap;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let provider_record = LlmProviderRecord {
+            id: argus_protocol::LlmProviderId::new(1),
+            display_name: "test-provider".to_string(),
+            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key: argus_protocol::SecretString::new("test-key"),
+            models: vec!["gpt-4o-mini".to_string(), "gpt-5".to_string()],
+            model_config: HashMap::new(),
+            default_model: "gpt-4o-mini".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: argus_protocol::ProviderSecretStatus::Ready,
+            meta_data: HashMap::new(),
+        };
+
+        let provider_id = wing
+            .upsert_provider(provider_record)
+            .await
+            .expect("provider should upsert");
+
+        wing.set_default_provider(provider_id)
+            .await
+            .expect("should set default provider");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Mutable Model Agent".to_string(),
+                description: "Lets a running thread swap models".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+                model_id: None,
+                system_prompt: "You are a mutable-model agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("update-model-session")
+            .await
+            .expect("session should create");
+
+        let thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        let (initial_template_id, initial_provider_id, initial_model) = wing
+            .activate_thread(session_id, thread_id)
+            .await
+            .expect("thread should activate");
+        assert_eq!(initial_template_id, template_id);
+        assert_eq!(
+            initial_provider_id,
+            Some(argus_protocol::ProviderId::new(provider_id.into_inner()))
+        );
+        assert_eq!(initial_model.as_deref(), Some("gpt-4o-mini"));
+
+        let (updated_provider_id, updated_model) = wing
+            .update_thread_model(
+                session_id,
+                thread_id,
+                argus_protocol::ProviderId::new(provider_id.into_inner()),
+                "gpt-5",
+            )
+            .await
+            .expect("thread model should update");
+
+        assert_eq!(
+            updated_provider_id,
+            argus_protocol::ProviderId::new(provider_id.into_inner())
+        );
+        assert_eq!(updated_model, "gpt-5");
+
+        let session = wing
+            .load_session(session_id)
+            .await
+            .expect("session should load");
+        let thread = session
+            .get_thread(&thread_id)
+            .expect("thread should stay loaded");
+        let thread = thread.read().await;
+        assert_eq!(thread.provider().model_name(), "gpt-5");
     }
 }

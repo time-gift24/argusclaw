@@ -62,8 +62,9 @@ pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf,
             let mut tail_parts: Vec<&std::ffi::OsStr> = Vec::new();
             loop {
                 if ancestor.exists() {
-                    let canonical_ancestor =
-                        ancestor.canonicalize().unwrap_or_else(|_| ancestor.to_path_buf());
+                    let canonical_ancestor = ancestor
+                        .canonicalize()
+                        .unwrap_or_else(|_| ancestor.to_path_buf());
                     let mut result = canonical_ancestor;
                     for part in tail_parts.into_iter().rev() {
                         result = result.join(part);
@@ -111,13 +112,22 @@ mod tests {
 
     #[test]
     fn test_normalize_lexical_basic() {
-        assert_eq!(normalize_lexical(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
+        assert_eq!(
+            normalize_lexical(Path::new("/a/b/../c")),
+            PathBuf::from("/a/c")
+        );
         assert_eq!(
             normalize_lexical(Path::new("/a/b/c/../../d")),
             PathBuf::from("/a/d")
         );
-        assert_eq!(normalize_lexical(Path::new("/a/./b/./c")), PathBuf::from("/a/b/c"));
-        assert_eq!(normalize_lexical(Path::new("/a/../../..")), PathBuf::from("/"));
+        assert_eq!(
+            normalize_lexical(Path::new("/a/./b/./c")),
+            PathBuf::from("/a/b/c")
+        );
+        assert_eq!(
+            normalize_lexical(Path::new("/a/../../..")),
+            PathBuf::from("/")
+        );
     }
 
     #[test]

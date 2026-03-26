@@ -90,20 +90,14 @@ impl NamedTool for ListDirTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let path_str = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let recursive = input
             .get("recursive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let max_depth = input
-            .get("max_depth")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(3) as usize;
+        let max_depth = input.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
 
         // Validate path (sandboxing)
         let path = validate_path(path_str, None)?;
@@ -163,10 +157,14 @@ async fn list_dir_inner(
             reason: format!("Failed to read directory: {}", e),
         })?;
 
-    while let Some(entry) = dir.next_entry().await.map_err(|e| ToolError::ExecutionFailed {
-        tool_name: "list_dir".to_string(),
-        reason: format!("Failed to read entry: {}", e),
-    })? {
+    while let Some(entry) = dir
+        .next_entry()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            tool_name: "list_dir".to_string(),
+            reason: format!("Failed to read entry: {}", e),
+        })?
+    {
         if entries.len() >= MAX_DIR_ENTRIES {
             break;
         }
@@ -179,9 +177,7 @@ async fn list_dir_inner(
             .to_string();
 
         let metadata = entry.metadata().await.ok();
-        let is_dir = metadata
-            .as_ref()
-            .is_some_and(|m| m.is_dir());
+        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
 
         let display = if is_dir {
             format!("{}/", relative)
@@ -282,9 +278,21 @@ mod tests {
             .unwrap();
 
         let entries = result["entries"].as_array().unwrap();
-        assert!(entries.iter().any(|e| e.as_str().unwrap().contains("root.txt")));
-        assert!(entries.iter().any(|e| e.as_str().unwrap().contains("subdir/")));
-        assert!(entries.iter().any(|e| e.as_str().unwrap().contains("nested.txt")));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.as_str().unwrap().contains("root.txt"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.as_str().unwrap().contains("subdir/"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.as_str().unwrap().contains("nested.txt"))
+        );
     }
 
     #[tokio::test]
@@ -309,9 +317,16 @@ mod tests {
 
         let entries = result["entries"].as_array().unwrap();
         // main.rs should be present
-        assert!(entries.iter().any(|e| e.as_str().unwrap().contains("main.rs")));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.as_str().unwrap().contains("main.rs"))
+        );
         // node_modules, target, .git nested content should NOT appear
-        let joined = entries.iter().map(|e| e.as_str().unwrap()).collect::<String>();
+        let joined = entries
+            .iter()
+            .map(|e| e.as_str().unwrap())
+            .collect::<String>();
         assert!(!joined.contains("node_modules/foo"));
         assert!(!joined.contains("target/bar"));
         assert!(!joined.contains(".git/objects"));

@@ -7,8 +7,7 @@ use argus_protocol::{
         ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
         ToolCompletionRequest, ToolCompletionResponse,
     },
-    AgentId, ArgusError, ProviderId, QueuedUserMessage, Result, SessionId, ThreadControlEvent,
-    ThreadEvent, ThreadId,
+    AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
 };
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
@@ -19,7 +18,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, RwLock};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -121,6 +120,10 @@ impl SessionManager {
         let list_subagents_tool = job_manager.clone().create_list_subagents_tool();
         tool_manager.register(Arc::new(list_subagents_tool));
 
+        // Register the get_job_result tool for proactive job polling
+        let get_job_result_tool = job_manager.clone().create_get_job_result_tool();
+        tool_manager.register(Arc::new(get_job_result_tool));
+
         Self {
             pool,
             sessions: DashMap::new(),
@@ -138,117 +141,6 @@ impl SessionManager {
         for session in self.sessions.iter() {
             session.value().broadcast(event.clone());
         }
-    }
-
-    fn spawn_thread_orchestrator(thread: Arc<RwLock<argus_thread::Thread>>) {
-        tokio::spawn(async move {
-            let (mut control_rx, mailbox) = {
-                let mut guard = thread.write().await;
-                let control_rx = match guard.take_control_rx() {
-                    Some(rx) => rx,
-                    None => {
-                        tracing::warn!("thread control receiver already taken");
-                        return;
-                    }
-                };
-                (control_rx, guard.mailbox())
-            };
-
-            let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
-
-            loop {
-                tokio::select! {
-                    Some(control_event) = control_rx.recv() => {
-                        let thread_running = {
-                            let guard = thread.read().await;
-                            guard.is_turn_running()
-                        };
-
-                        if thread_running {
-                            mailbox.lock().await.push(control_event);
-                            continue;
-                        }
-
-                        match control_event {
-                            ThreadControlEvent::UserMessage { content, msg_override } => {
-                                if let Err(error) = Self::start_turn_task(
-                                    Arc::clone(&thread),
-                                    content,
-                                    msg_override,
-                                    turn_done_tx.clone(),
-                                ).await {
-                                    tracing::error!("failed to start queued user turn: {}", error);
-                                }
-                            }
-                            ThreadControlEvent::JobResult(result) => {
-                                if let Err(error) = Self::start_turn_task(
-                                    Arc::clone(&thread),
-                                    result.into_message_text(),
-                                    None,
-                                    turn_done_tx.clone(),
-                                ).await {
-                                    tracing::error!("failed to start job-result turn: {}", error);
-                                }
-                            }
-                            ThreadControlEvent::UserInterrupt { .. } => {}
-                        }
-                    }
-                    Some(result) = turn_done_rx.recv() => {
-                        let finish_result = {
-                            let mut guard = thread.write().await;
-                            guard.finish_turn(result)
-                        };
-
-                        if let Err(error) = finish_result {
-                            tracing::error!("turn failed: {}", error);
-                        }
-
-                        let next_message = {
-                            let mut mailbox = mailbox.lock().await;
-                            mailbox.take_next_turn_message()
-                        };
-
-                        if let Some(QueuedUserMessage { content, msg_override }) = next_message {
-                            if let Err(error) = Self::start_turn_task(
-                                Arc::clone(&thread),
-                                content,
-                                msg_override,
-                                turn_done_tx.clone(),
-                            )
-                            .await
-                            {
-                                tracing::error!("failed to start follow-up turn: {}", error);
-                            }
-                        }
-                    }
-                    else => break,
-                }
-            }
-        });
-    }
-
-    async fn start_turn_task(
-        thread: Arc<RwLock<argus_thread::Thread>>,
-        content: String,
-        msg_override: Option<argus_protocol::MessageOverride>,
-        turn_done_tx: mpsc::UnboundedSender<
-            std::result::Result<argus_turn::TurnOutput, argus_thread::ThreadError>,
-        >,
-    ) -> std::result::Result<(), argus_thread::ThreadError> {
-        let turn = {
-            let mut guard = thread.write().await;
-            guard.begin_turn(content, msg_override).await?
-        };
-
-        tokio::spawn(async move {
-            let result = turn
-                .execute()
-                .await
-                .map_err(argus_thread::ThreadError::TurnFailed);
-            let _ = turn_done_tx.send(result);
-        });
-
-        Ok(())
     }
 
     /// List all sessions (from DB).
@@ -344,9 +236,36 @@ impl SessionManager {
             let turn_count: i64 = thread_row.get("turn_count");
             let model_override: Option<String> = thread_row.get("model_override");
 
-            // Resolve provider (apply model_override if set, fallback to provider default model)
+            // Get agent record (template)
+            let agent_record = match self.template_manager.get(AgentId::new(template_id)).await {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    tracing::warn!(
+                        thread_id = %thread_id_str,
+                        template_id = %template_id,
+                        "Template not found for thread, skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id = %thread_id_str,
+                        template_id = %template_id,
+                        error = %e,
+                        "Failed to get template for thread, skipping"
+                    );
+                    continue;
+                }
+            };
+
             let provider_id = ProviderId::new(provider_id_val);
-            let provider = match model_override.as_deref() {
+            let requested_model = model_override
+                .as_deref()
+                .or(agent_record.model_id.as_deref());
+
+            // Resolve provider using the persisted thread model when available,
+            // otherwise fall back to the agent's configured default model.
+            let provider = match requested_model {
                 Some(model) => match self
                     .provider_resolver
                     .resolve_with_model(provider_id, model)
@@ -387,28 +306,6 @@ impl SessionManager {
                         continue;
                     }
                 },
-            };
-
-            // Get agent record (template)
-            let agent_record = match self.template_manager.get(AgentId::new(template_id)).await {
-                Ok(Some(record)) => record,
-                Ok(None) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        template_id = %template_id,
-                        "Template not found for thread, skipping"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        template_id = %template_id,
-                        error = %e,
-                        "Failed to get template for thread, skipping"
-                    );
-                    continue;
-                }
             };
 
             // Get compactor
@@ -488,7 +385,7 @@ impl SessionManager {
                 }
             };
 
-            Self::spawn_thread_orchestrator(Arc::clone(&thread));
+            argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
             session.add_thread(thread);
         }
 
@@ -637,12 +534,12 @@ impl SessionManager {
             .ok_or(ArgusError::TemplateNotFound(template_id.inner()))?;
 
         // Model resolution: explicit override > agent default model > provider default
-        let effective_model = model_override.or(agent_record.model_id.as_deref());
+        let requested_model = model_override.or(agent_record.model_id.as_deref());
 
         // Resolve provider using priority: explicit > agent_record > default
         let (provider_id, provider) = match explicit_provider_id.or(agent_record.provider_id) {
             Some(provider_id) => {
-                let provider = match effective_model {
+                let provider = match requested_model {
                     Some(model) => {
                         self.provider_resolver
                             .resolve_with_model(provider_id, model)
@@ -664,7 +561,7 @@ impl SessionManager {
                 .map(ProviderId::new)
                 .ok_or(ArgusError::DefaultProviderNotConfigured)?;
 
-                let provider = match effective_model {
+                let provider = match requested_model {
                     Some(model) => match self
                         .provider_resolver
                         .resolve_with_model(default_provider_id, model)
@@ -697,6 +594,8 @@ impl SessionManager {
                 (default_provider_id, provider)
             }
         };
+
+        let effective_model = provider.model_name().to_string();
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
@@ -758,7 +657,7 @@ impl SessionManager {
         .bind(session_id.to_string())
         .bind(template_id.inner())
         .bind(provider_id.inner())
-        .bind(model_override)
+        .bind(Some(effective_model.as_str()))
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -766,7 +665,7 @@ impl SessionManager {
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
 
-        Self::spawn_thread_orchestrator(Arc::clone(&thread_arc));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread_arc));
 
         // Add to in-memory session
         session.add_thread(thread_arc);
@@ -855,6 +754,52 @@ impl SessionManager {
         }
 
         Ok(())
+    }
+
+    /// Update the bound provider/model for an existing thread.
+    pub async fn update_thread_model(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+        provider_id: ProviderId,
+        model: &str,
+    ) -> Result<(ProviderId, String)> {
+        let session = self.load(session_id).await?;
+        let thread = session
+            .get_thread(thread_id)
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+
+        let provider = self
+            .provider_resolver
+            .resolve_with_model(provider_id, model)
+            .await?;
+        let effective_model = provider.model_name().to_string();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE threads
+            SET provider_id = ?, model_override = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND session_id = ?
+            "#,
+        )
+        .bind(provider_id.inner())
+        .bind(&effective_model)
+        .bind(thread_id.inner().to_string())
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArgusError::DatabaseError {
+            reason: e.to_string(),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+
+        let mut thread = thread.write().await;
+        thread.set_provider(provider);
+
+        Ok((provider_id, effective_model))
     }
 
     /// Get threads for a session (metadata only, from DB).
@@ -978,7 +923,6 @@ impl SessionManager {
         let provider_id = Some(ProviderId::new(row.get::<i64, _>("provider_id")));
         let token_count = row.get::<i64, _>("token_count").max(0) as u32;
         let turn_count = row.get::<i64, _>("turn_count").max(0) as u32;
-        let model_override: Option<String> = row.get("model_override");
         let updated_at = {
             let updated_at_str: String = row.get("updated_at");
             chrono::DateTime::parse_from_rfc3339(&updated_at_str)
@@ -993,7 +937,8 @@ impl SessionManager {
 
         let mut thread = thread.write().await;
         if !thread.history().is_empty() {
-            return Ok((template_id, provider_id, model_override));
+            let effective_model = Some(thread.provider().model_name().to_string());
+            return Ok((template_id, provider_id, effective_model));
         }
 
         let recovered = recover_thread_state_from_trace(
@@ -1004,7 +949,8 @@ impl SessionManager {
         )
         .await?;
         if recovered.turn_count == 0 {
-            return Ok((template_id, provider_id, model_override));
+            let effective_model = Some(thread.provider().model_name().to_string());
+            return Ok((template_id, provider_id, effective_model));
         }
 
         thread.hydrate_from_persisted_state(
@@ -1014,7 +960,8 @@ impl SessionManager {
             updated_at,
         );
 
-        Ok((template_id, provider_id, model_override))
+        let effective_model = Some(thread.provider().model_name().to_string());
+        Ok((template_id, provider_id, effective_model))
     }
 
     /// Subscribe to thread events.
@@ -1218,9 +1165,7 @@ mod tests {
     use rust_decimal::Decimal;
     use tokio::time::{sleep, timeout};
 
-    use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
-    };
+    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session};
 
     #[derive(Debug)]
     struct CapturingProvider {
@@ -1301,6 +1246,7 @@ mod tests {
             description: "Main orchestration agent".to_string(),
             version: "1.0.0".to_string(),
             provider_id: Some(ProviderId::new(1)),
+            model_id: None,
             system_prompt: "You are a test orchestrator.".to_string(),
             tool_names: vec![],
             max_tokens: None,
@@ -1538,7 +1484,7 @@ mod tests {
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
-        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
         session.add_thread(Arc::clone(&thread));
 
         {
@@ -1566,7 +1512,7 @@ mod tests {
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
-        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -1602,7 +1548,7 @@ mod tests {
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
-        SessionManager::spawn_thread_orchestrator(Arc::clone(&thread));
+        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;

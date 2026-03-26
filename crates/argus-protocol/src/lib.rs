@@ -19,8 +19,8 @@ pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};
 pub use events::{
-    QueuedUserMessage, ThreadControlEvent, ThreadEvent, ThreadJobResult, ThreadMailbox,
-    TurnControlInput,
+    QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadInbox,
+    ThreadJobResult, ThreadMailbox, ThreadRuntimeState, TurnControlInput,
 };
 pub use hooks::{
     BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,

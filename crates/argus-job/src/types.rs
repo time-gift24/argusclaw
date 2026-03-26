@@ -16,6 +16,16 @@ pub struct JobDispatchArgs {
     pub context: Option<serde_json::Value>,
 }
 
+/// Arguments for proactively checking a dispatched job result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetJobResultArgs {
+    /// The job ID returned by `dispatch_job`.
+    pub job_id: String,
+    /// Whether to consume the completed result and prevent future auto-replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consume: Option<bool>,
+}
+
 /// Result of a completed job (serialized into tool responses).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobResult {

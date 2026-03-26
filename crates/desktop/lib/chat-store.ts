@@ -6,7 +6,6 @@ import type {
   ApprovalRequestPayload,
   JobStatusPayload,
   ThreadEventEnvelope,
-  ThreadEventPayload,
   ThreadSnapshotPayload,
 } from "@/lib/types/chat";
 import type { PlanItem } from "@/lib/types/plan";
@@ -20,9 +19,6 @@ export interface PendingToolCall {
   is_error: boolean;
   status: "streaming" | "running" | "completed";
 }
-
-const toSessionKey = (templateId: number, providerPreferenceId: number | null) =>
-  `${templateId}::${providerPreferenceId ?? "__default__"}`;
 
 const toErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -51,7 +47,10 @@ const normalizeJobStatusPayload = (
 ): JobStatusPayload => ({
   ...payload,
   prompt: truncateDisplayText(payload.prompt, JOB_STATUS_PROMPT_LIMIT),
-  message: truncateOptionalDisplayText(payload.message, JOB_STATUS_MESSAGE_LIMIT),
+  message: truncateOptionalDisplayText(
+    payload.message,
+    JOB_STATUS_MESSAGE_LIMIT,
+  ),
   agent_display_name: truncateOptionalDisplayText(
     payload.agent_display_name,
     JOB_STATUS_DISPLAY_NAME_LIMIT,
@@ -71,7 +70,12 @@ export interface ChatSessionState {
   effectiveModel: string | null;
   status: "idle" | "running" | "error";
   messages: ThreadSnapshotPayload["messages"];
-  pendingAssistant: { content: string; reasoning: string; toolCalls: PendingToolCall[]; plan: PlanItem[] | null } | null;
+  pendingAssistant: {
+    content: string;
+    reasoning: string;
+    toolCalls: PendingToolCall[];
+    plan: PlanItem[] | null;
+  } | null;
   pendingApprovalRequest: {
     id: string;
     tool_name: string;
@@ -109,6 +113,7 @@ export interface ChatStore {
   loadThreads: (sessionId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   selectTemplate: (templateId: number) => void;
+  selectModel: (providerId: number, model: string) => Promise<void>;
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
@@ -165,7 +170,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         templates: templateList,
         providers: providerList,
         errorMessage: null,
-        selectedTemplateId: state.selectedTemplateId ?? templateList[0]?.id ?? null,
+        selectedTemplateId:
+          state.selectedTemplateId ?? templateList[0]?.id ?? null,
       }));
 
       if (templateList.length === 0) {
@@ -354,7 +360,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           threadListBySessionId: newThreadLists,
           threadListLoadingBySessionId: newThreadLoading,
           activeSessionKey:
-            state.activeSessionKey === sessionId ? null : state.activeSessionKey,
+            state.activeSessionKey === sessionId
+              ? null
+              : state.activeSessionKey,
         };
       });
     } catch (error) {
@@ -367,12 +375,64 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const agent = state.templates.find((t) => t.id === templateId);
     set({
       selectedTemplateId: templateId,
-      // Apply the agent's per-agent default model (model_id) as the effective override.
-      // This takes precedence over the agent's provider default_model but is lower priority
-      // than a manual model selection via selectModelOverride.
+      selectedProviderPreferenceId: agent?.provider_id ?? null,
+      // Apply the agent's configured provider/model as the next-session draft selection.
       selectedModelOverride: agent?.model_id ?? null,
       errorMessage: null,
     });
+  },
+
+  async selectModel(providerId: number, model: string) {
+    const state = get();
+    const provider = state.providers.find((entry) => entry.id === providerId);
+    if (!provider) {
+      const errorMessage = `Provider not found: ${providerId}`;
+      set({ errorMessage });
+      throw new Error(errorMessage);
+    }
+
+    const normalizedOverride = model === provider.default_model ? null : model;
+    const activeSessionKey = state.activeSessionKey;
+    const activeSession = activeSessionKey
+      ? (state.sessionsByKey[activeSessionKey] ?? null)
+      : null;
+
+    if (!activeSession || !activeSessionKey) {
+      set({
+        selectedProviderPreferenceId: providerId,
+        selectedModelOverride: normalizedOverride,
+        errorMessage: null,
+      });
+      return;
+    }
+
+    try {
+      const updated = await chat.updateThreadModel(
+        activeSession.sessionId,
+        activeSession.threadId,
+        providerId,
+        model,
+      );
+
+      set((currentState) => ({
+        selectedProviderPreferenceId: providerId,
+        selectedModelOverride: normalizedOverride,
+        errorMessage: null,
+        sessionsByKey: {
+          ...currentState.sessionsByKey,
+          [activeSessionKey]: {
+            ...currentState.sessionsByKey[activeSessionKey],
+            effectiveProviderId: updated.effective_provider_id,
+            effectiveModel: updated.effective_model,
+            error: null,
+          },
+        },
+      }));
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      set({ errorMessage });
+      throw error;
+    }
   },
 
   async selectProviderPreference(providerId: number | null) {
@@ -389,7 +449,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     let state = get();
     if (!state.activeSessionKey) {
-      const fallbackTemplateId = state.selectedTemplateId ?? state.templates[0]?.id ?? null;
+      const fallbackTemplateId =
+        state.selectedTemplateId ?? state.templates[0]?.id ?? null;
       if (!fallbackTemplateId) {
         set({ errorMessage: "当前没有可用的聊天会话。" });
         return;
@@ -422,14 +483,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         [state.activeSessionKey!]: {
           ...session,
           status: "running",
-          pendingAssistant: { content: "", reasoning: "", toolCalls: [], plan: null },
+          pendingAssistant: {
+            content: "",
+            reasoning: "",
+            toolCalls: [],
+            plan: null,
+          },
           error: null,
         },
       },
     }));
 
     try {
-      await chat.sendMessage(session.sessionId, session.threadId, trimmedContent);
+      await chat.sendMessage(
+        session.sessionId,
+        session.threadId,
+        trimmedContent,
+      );
     } catch (error) {
       const errorMessage = toErrorMessage(error);
       set((store) => ({
@@ -447,12 +517,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async refreshSnapshot(sessionKey: string, options?: { preserveError?: boolean }) {
+  async refreshSnapshot(
+    sessionKey: string,
+    options?: { preserveError?: boolean },
+  ) {
     const session = get().sessionsByKey[sessionKey];
     if (!session) return;
 
     try {
-      const snapshot = await chat.getThreadSnapshot(session.sessionId, session.threadId);
+      const snapshot = await chat.getThreadSnapshot(
+        session.sessionId,
+        session.threadId,
+      );
       set((state) => ({
         errorMessage: options?.preserveError ? state.errorMessage : null,
         sessionsByKey: {
@@ -462,7 +538,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: snapshot.messages,
             pendingAssistant: null,
             status: options?.preserveError ? "error" : "idle",
-            error: options?.preserveError ? state.sessionsByKey[sessionKey].error : null,
+            error: options?.preserveError
+              ? state.sessionsByKey[sessionKey].error
+              : null,
             tokenCount: snapshot.token_count,
             jobStatuses: state.sessionsByKey[sessionKey].jobStatuses,
           },
@@ -566,7 +644,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (payload.name !== undefined && payload.name !== null) {
             tc.tool_name = payload.name;
           }
-          if (payload.arguments_delta !== undefined && payload.arguments_delta !== null) {
+          if (
+            payload.arguments_delta !== undefined &&
+            payload.arguments_delta !== null
+          ) {
             tc.arguments_text += payload.arguments_delta;
           }
           toolCalls[payload.index] = tc;
@@ -662,7 +743,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const result = payload.result as { plan?: PlanItem[] } | null;
             updates.pendingAssistant = {
               ...updates.pendingAssistant!,
-              plan: payload.is_error ? null : Array.isArray(result?.plan) ? result.plan : null,
+              plan: payload.is_error
+                ? null
+                : Array.isArray(result?.plan)
+                  ? result.plan
+                  : null,
             };
           }
           return {
@@ -744,6 +829,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
               tokenCount: payload.total_tokens,
+            },
+          },
+        }));
+        break;
+
+      case "compacted":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              tokenCount: payload.new_token_count,
             },
           },
         }));

@@ -23,15 +23,19 @@
 //! thread.send_message("Hello!".to_string()).await.unwrap();
 //! ```
 
+mod command;
 pub mod compact;
 pub mod config;
 pub mod error;
 pub mod plan_store;
 pub mod plan_tool;
+mod runtime;
 pub mod thread;
+mod thread_handle;
 pub mod types;
 
 // Re-export main types
+pub use command::ThreadRuntimeSnapshot;
 pub use compact::{
     CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
     estimate_tokens,
@@ -40,6 +44,7 @@ pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
 pub use plan_store::FilePlanStore;
 pub use thread::{Thread, ThreadBuilder};
+pub use thread_handle::ThreadHandle;
 pub use types::{ThreadInfo, ThreadState};
 
 // Re-export TurnConfig for convenience

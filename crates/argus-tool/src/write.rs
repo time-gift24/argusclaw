@@ -87,12 +87,13 @@ impl NamedTool for WriteFileTool {
             }
         })?;
 
-        let content = input.get("content").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::ExecutionFailed {
+        let content = input
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed {
                 tool_name: "write_file".to_string(),
                 reason: "Missing required parameter: content".to_string(),
-            }
-        })?;
+            })?;
 
         // Check content size
         if content.len() > MAX_WRITE_SIZE {
@@ -111,17 +112,21 @@ impl NamedTool for WriteFileTool {
 
         // Create parent directories
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "write_file".to_string(),
-                reason: format!("Failed to create directories: {}", e),
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    tool_name: "write_file".to_string(),
+                    reason: format!("Failed to create directories: {}", e),
+                })?;
         }
 
         // Write file
-        tokio::fs::write(&path, content).await.map_err(|e| ToolError::ExecutionFailed {
-            tool_name: "write_file".to_string(),
-            reason: format!("Failed to write file: {}", e),
-        })?;
+        tokio::fs::write(&path, content)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                tool_name: "write_file".to_string(),
+                reason: format!("Failed to write file: {}", e),
+            })?;
 
         Ok(json!({
             "path": path.to_string_lossy(),
@@ -186,7 +191,11 @@ mod tests {
     #[tokio::test]
     async fn test_write_file_creates_parents() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let path = temp_dir.path().join("subdir").join("nested").join("file.txt");
+        let path = temp_dir
+            .path()
+            .join("subdir")
+            .join("nested")
+            .join("file.txt");
 
         let tool = WriteFileTool::new();
         let result = tool

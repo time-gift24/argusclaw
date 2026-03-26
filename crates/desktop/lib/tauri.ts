@@ -106,7 +106,9 @@ export const providers = {
   get: (id: number) => invoke<LlmProviderRecord | null>("get_provider", { id }),
 
   upsert: (record: ProviderInput) =>
-    invoke<string>("upsert_provider", { record }).then((id) => parseInt(id, 10)),
+    invoke<string>("upsert_provider", { record }).then((id) =>
+      parseInt(id, 10),
+    ),
 
   delete: (id: number) => invoke<boolean>("delete_provider", { id }),
 
@@ -132,7 +134,8 @@ export const agents = {
     invoke<string>("upsert_agent_template", {
       record: {
         ...record,
-        provider_id: record.provider_id != null ? Number(record.provider_id) : null,
+        provider_id:
+          record.provider_id != null ? Number(record.provider_id) : null,
       },
     }).then((id) => parseInt(id, 10)),
 
@@ -224,6 +227,19 @@ export const chat = {
     invoke<ChatSessionPayload>("activate_existing_thread", {
       sessionId,
       threadId,
+    }),
+
+  updateThreadModel: (
+    sessionId: string,
+    threadId: string,
+    providerPreferenceId: number,
+    model: string,
+  ) =>
+    invoke<ChatSessionPayload>("update_thread_model", {
+      sessionId,
+      threadId,
+      providerPreferenceId: providerPreferenceId.toString(),
+      model,
     }),
 
   sendMessage: (sessionId: string, threadId: string, content: string) =>

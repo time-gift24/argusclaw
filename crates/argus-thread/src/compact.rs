@@ -17,7 +17,9 @@ use super::error::CompactError;
 /// Context for compaction operations.
 ///
 /// This struct holds all the data needed for compaction without requiring
-/// a reference to the full Thread type.
+/// a reference to the full Thread type. Thread-level threshold overrides are
+/// exposed here so built-in compactors can honor per-thread configuration
+/// without changing the `Compactor` trait.
 pub struct CompactContext<'a> {
     /// LLM provider for context window info.
     pub provider: &'a Arc<dyn LlmProvider>,
@@ -25,6 +27,8 @@ pub struct CompactContext<'a> {
     pub token_count: &'a mut u32,
     /// Messages to compact.
     pub messages: &'a mut Vec<ChatMessage>,
+    /// Optional thread-level threshold ratio override for built-in compactors.
+    threshold_ratio_override: Option<f32>,
 }
 
 impl<'a> CompactContext<'a> {
@@ -38,7 +42,21 @@ impl<'a> CompactContext<'a> {
             provider,
             token_count,
             messages,
+            threshold_ratio_override: None,
         }
+    }
+
+    /// Apply a thread-level threshold ratio override for built-in compactors.
+    #[must_use]
+    pub fn with_threshold_ratio_override(mut self, threshold_ratio_override: f32) -> Self {
+        self.threshold_ratio_override = Some(threshold_ratio_override.clamp(0.1, 0.95));
+        self
+    }
+
+    /// Read the optional thread-level threshold override.
+    #[must_use]
+    pub fn threshold_ratio_override(&self) -> Option<f32> {
+        self.threshold_ratio_override
     }
 
     /// Recalculate token count from messages.
@@ -114,7 +132,10 @@ impl KeepRecentCompactor {
 impl Compactor for KeepRecentCompactor {
     async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError> {
         let context_window = context.provider.context_window();
-        let threshold = (context_window as f32 * self.threshold_ratio) as u32;
+        let threshold_ratio = context
+            .threshold_ratio_override()
+            .unwrap_or(self.threshold_ratio);
+        let threshold = (context_window as f32 * threshold_ratio) as u32;
 
         // Check if compaction is needed
         if *context.token_count < threshold {
@@ -198,7 +219,10 @@ impl KeepTokensCompactor {
 impl Compactor for KeepTokensCompactor {
     async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError> {
         let context_window = context.provider.context_window();
-        let threshold = (context_window as f32 * self.threshold_ratio) as u32;
+        let threshold_ratio = context
+            .threshold_ratio_override()
+            .unwrap_or(self.threshold_ratio);
+        let threshold = (context_window as f32 * threshold_ratio) as u32;
 
         // Check if compaction is needed
         if *context.token_count < threshold {
@@ -318,7 +342,56 @@ impl std::fmt::Debug for CompactorManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use argus_protocol::LlmProvider;
+    use argus_protocol::llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
     use super::*;
+
+    struct FixedContextProvider {
+        context_window: u32,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FixedContextProvider {
+        fn model_name(&self) -> &str {
+            "fixed-context"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "fixed-context".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "fixed-context".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
+    }
 
     #[test]
     fn keep_recent_compactor_new_clamps_values() {
@@ -348,5 +421,54 @@ mod tests {
         assert!(manager.get("tokens").is_some());
         assert_eq!(manager.get("tokens").unwrap().name(), "keep_tokens");
         assert!(manager.get("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn keep_recent_compactor_uses_context_threshold_override() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedContextProvider {
+            context_window: 100,
+        });
+        let mut token_count = 30;
+        let mut messages = vec![
+            ChatMessage::user(&"a".repeat(40)),
+            ChatMessage::user(&"b".repeat(40)),
+            ChatMessage::user(&"c".repeat(40)),
+        ];
+        let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
+            .with_threshold_ratio_override(0.2);
+
+        KeepRecentCompactor::new(0.8, 1)
+            .compact(&mut context)
+            .await
+            .expect("override should force compaction");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "c".repeat(40));
+        assert_eq!(token_count, 10);
+    }
+
+    #[tokio::test]
+    async fn keep_tokens_compactor_uses_context_threshold_override() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(FixedContextProvider {
+            context_window: 100,
+        });
+        let mut token_count = 30;
+        let mut messages = vec![
+            ChatMessage::user(&"a".repeat(40)),
+            ChatMessage::user(&"b".repeat(40)),
+            ChatMessage::user(&"c".repeat(40)),
+        ];
+        let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
+            .with_threshold_ratio_override(0.2);
+
+        KeepTokensCompactor::new(0.8, 0.2)
+            .compact(&mut context)
+            .await
+            .expect("override should force compaction");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "b".repeat(40));
+        assert_eq!(messages[1].content, "c".repeat(40));
+        assert_eq!(token_count, 20);
     }
 }

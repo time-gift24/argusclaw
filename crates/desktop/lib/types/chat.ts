@@ -45,6 +45,7 @@ export interface ChatSessionPayload {
   session_id: string;
   thread_id: string;
   effective_provider_id: number | null;
+  effective_model: string | null;
 }
 
 export interface JobStatusPayload {
@@ -68,7 +69,12 @@ export type ThreadEventPayload =
       arguments_delta?: string | null;
     }
   | { type: "llm_usage"; input_tokens: number; output_tokens: number }
-  | { type: "tool_started"; tool_call_id: string; tool_name: string; arguments: unknown }
+  | {
+      type: "tool_started";
+      tool_call_id: string;
+      tool_name: string;
+      arguments: unknown;
+    }
   | {
       type: "tool_completed";
       tool_call_id: string;
@@ -76,11 +82,22 @@ export type ThreadEventPayload =
       result: unknown;
       is_error: boolean;
     }
-  | { type: "turn_completed"; input_tokens: number; output_tokens: number; total_tokens: number }
+  | {
+      type: "turn_completed";
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+    }
   | { type: "turn_failed"; error: string }
   | { type: "idle" }
   | { type: "compacted"; new_token_count: number }
-  | { type: "job_dispatched"; job_id: string; agent_id: number; prompt: string; context?: unknown | null }
+  | {
+      type: "job_dispatched";
+      job_id: string;
+      agent_id: number;
+      prompt: string;
+      context?: unknown | null;
+    }
   | {
       type: "job_result";
       job_id: string;

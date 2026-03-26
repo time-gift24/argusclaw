@@ -44,6 +44,7 @@ pub fn run() {
             commands::remove_subagent,
             commands::create_chat_session,
             commands::activate_existing_thread,
+            commands::update_thread_model,
             commands::send_message,
             commands::get_thread_snapshot,
             commands::resolve_approval,

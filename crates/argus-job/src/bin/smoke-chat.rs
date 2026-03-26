@@ -49,7 +49,10 @@ fn resolve_database_target(
         return Ok(DatabaseTarget::Url(configured));
     }
 
-    Ok(DatabaseTarget::Path(expand_home_path(&configured, home_dir)?))
+    Ok(DatabaseTarget::Path(expand_home_path(
+        &configured,
+        home_dir,
+    )?))
 }
 
 fn extract_last_assistant_message(messages: &[ChatMessage]) -> Option<String> {
@@ -163,9 +166,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     println!(
         "Using provider {} ({}) with model {}",
-        provider_record.display_name,
-        provider_record.id,
-        provider_record.default_model
+        provider_record.display_name, provider_record.id, provider_record.default_model
     );
 
     let (stream_tx, _stream_rx) = broadcast::channel(256);

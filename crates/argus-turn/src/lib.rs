@@ -64,7 +64,7 @@ pub use config::{
 pub use error::{TurnError, TurnLogError};
 pub use events::TurnLogEvent;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
-pub use trace::{read_jsonl_events, recover_turn_events, TraceConfig, TraceWriter, TurnLogState};
+pub use trace::{TraceConfig, TraceWriter, TurnLogState, read_jsonl_events, recover_turn_events};
 pub use turn::{Turn, TurnBuilder};
 
 // Re-export hook types from argus-protocol for convenience
