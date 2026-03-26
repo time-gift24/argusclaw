@@ -22,10 +22,13 @@ use futures_util::StreamExt;
 use sqlx::SqlitePool;
 
 use crate::providers::{
-    OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
+    DEFAULT_OPENAI_COMPATIBLE_TIMEOUT, OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig,
+    create_openai_compatible_provider,
 };
 use crate::retry::{RetryConfig, RetryProvider};
 use argus_auth::{AccountTokenSource, TokenLLMProvider};
+
+const PROVIDER_TIMEOUT_META_KEY: &str = "timeout_secs";
 
 /// Manager for LLM provider lookup and instantiation.
 ///
@@ -294,7 +297,8 @@ impl ProviderManager {
             record.api_key.expose_secret().to_string(),
             model.to_string(),
         )
-        .with_context_window(context_window);
+        .with_context_window(context_window)
+        .with_timeout(provider_timeout(record));
 
         for (name, value) in &record.extra_headers {
             config = config.with_extra_header(name, value);
@@ -305,6 +309,26 @@ impl ProviderManager {
         create_openai_compatible_provider(factory_config).map_err(|e| {
             argus_protocol::ArgusError::LlmError { reason: e.to_string() }
         })
+    }
+}
+
+fn provider_timeout(record: &LlmProviderRecord) -> Duration {
+    let Some(raw_timeout) = record.meta_data.get(PROVIDER_TIMEOUT_META_KEY) else {
+        return DEFAULT_OPENAI_COMPATIBLE_TIMEOUT;
+    };
+
+    match raw_timeout.parse::<u64>() {
+        Ok(0) | Err(_) => {
+            tracing::warn!(
+                provider_id = %record.id,
+                display_name = %record.display_name,
+                timeout_secs = %raw_timeout,
+                default_timeout_secs = DEFAULT_OPENAI_COMPATIBLE_TIMEOUT.as_secs(),
+                "invalid provider timeout metadata, falling back to default timeout"
+            );
+            DEFAULT_OPENAI_COMPATIBLE_TIMEOUT
+        }
+        Ok(timeout_secs) => Duration::from_secs(timeout_secs),
     }
 }
 
@@ -665,7 +689,7 @@ mod tests {
         ProviderTestStatus, SecretString,
     };
 
-    use super::{duration_to_millis, map_llm_error_to_test_status, ProviderManager};
+    use super::{ProviderManager, duration_to_millis, map_llm_error_to_test_status, provider_timeout};
 
     // Mock LlmProviderRepository for testing
     struct MockProviderRepository {
@@ -806,5 +830,32 @@ mod tests {
             err.to_string().contains("SqlitePool"),
             "error should mention SqlitePool: {err}"
         );
+    }
+
+    #[test]
+    fn provider_timeout_defaults_to_120_seconds() {
+        let record = make_record();
+
+        assert_eq!(provider_timeout(&record), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn provider_timeout_respects_timeout_secs_metadata() {
+        let mut record = make_record();
+        record
+            .meta_data
+            .insert("timeout_secs".to_string(), "180".to_string());
+
+        assert_eq!(provider_timeout(&record), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn provider_timeout_falls_back_when_metadata_is_invalid() {
+        let mut record = make_record();
+        record
+            .meta_data
+            .insert("timeout_secs".to_string(), "abc".to_string());
+
+        assert_eq!(provider_timeout(&record), Duration::from_secs(120));
     }
 }
