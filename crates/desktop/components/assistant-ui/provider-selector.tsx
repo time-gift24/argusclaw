@@ -41,7 +41,7 @@ export function ProviderSelector() {
     : providers.find((p) => p.is_default);
 
   const currentModel = activeSession
-    ? currentProvider?.default_model ?? "未知模型"
+    ? activeSession.effectiveModel ?? currentProvider?.default_model ?? "未知模型"
     : selectedModelOverride ?? currentProvider?.default_model ?? "未知模型";
 
   // Handle selecting a model
@@ -106,10 +106,10 @@ export function ProviderSelector() {
 
               <div className="grid gap-0.5 mt-1">
                 {provider.models.map((model) => {
-                  const isModelSelected = 
-                    currentProviderId === provider.id && 
+                  const isModelSelected =
+                    currentProviderId === provider.id &&
                     (activeSession
-                      ? model === currentProvider?.default_model
+                      ? model === activeSession.effectiveModel
                       : selectedModelOverride === model || (selectedModelOverride === null && model === provider.default_model));
                   
                   // Special case: if nothing selected, use default provider's default model

@@ -187,6 +187,7 @@ export interface ChatSessionPayload {
   template_id: number;
   thread_id: string;
   effective_provider_id: number | null;
+  effective_model: string | null;
 }
 
 export interface ThreadSnapshotPayload {
@@ -210,10 +211,12 @@ export const chat = {
   createChatSession: (
     templateId: number,
     providerPreferenceId: number | null,
+    model: string | null,
   ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
       templateId: templateId.toString(),
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
+      model,
     }),
 
   activateExistingThread: (sessionId: string, threadId: string) =>

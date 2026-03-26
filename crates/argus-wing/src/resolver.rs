@@ -30,4 +30,9 @@ impl ProviderResolver for ProviderManagerResolver {
     async fn default_provider(&self) -> Result<Arc<dyn LlmProvider>> {
         self.provider_manager.get_default_provider().await
     }
+
+    async fn resolve_with_model(&self, id: ProviderId, model: &str) -> Result<Arc<dyn LlmProvider>> {
+        let provider_id = LlmProviderId::new(id.inner());
+        self.provider_manager.get_provider_with_model(&provider_id, model).await
+    }
 }

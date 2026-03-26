@@ -579,6 +579,7 @@ impl SessionManager {
         session_id: SessionId,
         template_id: AgentId,
         explicit_provider_id: Option<ProviderId>,
+        model_override: Option<&str>,
     ) -> Result<ThreadId> {
         // Ensure session is loaded
         let session = self.load(session_id).await?;
@@ -593,7 +594,10 @@ impl SessionManager {
         // Resolve provider using priority: explicit > agent_record > default
         let (provider_id, provider) = match explicit_provider_id.or(agent_record.provider_id) {
             Some(provider_id) => {
-                let provider = self.provider_resolver.resolve(provider_id).await?;
+                let provider = match model_override {
+                    Some(model) => self.provider_resolver.resolve_with_model(provider_id, model).await?,
+                    None => self.provider_resolver.resolve(provider_id).await?,
+                };
                 (provider_id, provider)
             }
             None => {
@@ -669,14 +673,15 @@ impl SessionManager {
         // Insert into DB
         sqlx::query(
             r#"
-            INSERT INTO threads (id, session_id, template_id, provider_id, token_count, turn_count, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 0, 0, datetime('now'), datetime('now'))
+            INSERT INTO threads (id, session_id, template_id, provider_id, token_count, turn_count, model_override, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 0, 0, ?, datetime('now'), datetime('now'))
             "#,
         )
         .bind(thread_id.inner().to_string())
         .bind(session_id.to_string())
         .bind(template_id.inner())
         .bind(provider_id.inner())
+        .bind(model_override)
         .execute(&self.pool)
         .await
         .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
@@ -878,10 +883,10 @@ impl SessionManager {
         &self,
         session_id: SessionId,
         thread_id: &ThreadId,
-    ) -> Result<(AgentId, Option<ProviderId>)> {
+    ) -> Result<(AgentId, Option<ProviderId>, Option<String>)> {
         let row = sqlx::query(
             r#"
-            SELECT template_id, provider_id, token_count, turn_count, updated_at
+            SELECT template_id, provider_id, token_count, turn_count, updated_at, model_override
             FROM threads WHERE session_id = ? AND id = ?
             "#,
         )
@@ -898,6 +903,7 @@ impl SessionManager {
         let provider_id = Some(ProviderId::new(row.get::<i64, _>("provider_id")));
         let token_count = row.get::<i64, _>("token_count").max(0) as u32;
         let turn_count = row.get::<i64, _>("turn_count").max(0) as u32;
+        let model_override: Option<String> = row.get("model_override");
         let updated_at = {
             let updated_at_str: String = row.get("updated_at");
             chrono::DateTime::parse_from_rfc3339(&updated_at_str)
@@ -912,7 +918,7 @@ impl SessionManager {
 
         let mut thread = thread.write().await;
         if !thread.history().is_empty() {
-            return Ok((template_id, provider_id));
+            return Ok((template_id, provider_id, model_override));
         }
 
         let recovered = recover_thread_state_from_trace(
@@ -923,7 +929,7 @@ impl SessionManager {
         )
         .await?;
         if recovered.turn_count == 0 {
-            return Ok((template_id, provider_id));
+            return Ok((template_id, provider_id, model_override));
         }
 
         thread.hydrate_from_persisted_state(
@@ -933,7 +939,7 @@ impl SessionManager {
             updated_at,
         );
 
-        Ok((template_id, provider_id))
+        Ok((template_id, provider_id, model_override))
     }
 
     /// Subscribe to thread events.

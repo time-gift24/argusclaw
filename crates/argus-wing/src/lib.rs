@@ -427,7 +427,7 @@ impl ArgusWing {
         }
 
         // Create thread
-        let thread_id = self.create_thread(session_id, template.id, None).await?;
+        let thread_id = self.create_thread(session_id, template.id, None, None).await?;
 
         Ok((session_id, thread_id))
     }
@@ -452,9 +452,10 @@ impl ArgusWing {
         session_id: SessionId,
         template_id: AgentId,
         provider_id: Option<ProviderId>,
+        model_override: Option<&str>,
     ) -> Result<ThreadId> {
         self.session_manager
-            .create_thread(session_id, template_id, provider_id)
+            .create_thread(session_id, template_id, provider_id, model_override)
             .await
     }
 
@@ -519,7 +520,7 @@ impl ArgusWing {
         &self,
         session_id: SessionId,
         thread_id: ThreadId,
-    ) -> Result<(AgentId, Option<ProviderId>)> {
+    ) -> Result<(AgentId, Option<ProviderId>, Option<String>)> {
         self.session_manager.activate_thread(session_id, &thread_id).await
     }
 
@@ -790,6 +791,7 @@ mod tests {
             session_id,
             template_id,
             Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
+            None,
         )
         .await
         .expect("thread should create");
@@ -914,7 +916,7 @@ mod tests {
             .await
             .expect("session should create");
 
-        wing.create_thread(session_id, template_id, None)
+        wing.create_thread(session_id, template_id, None, None)
             .await
             .expect("thread should create using the default provider fallback");
     }
