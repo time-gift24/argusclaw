@@ -27,6 +27,7 @@ impl TomlAgentDef {
             description: self.description.clone(),
             version: self.version.clone(),
             provider_id: None,
+            model_id: None,
             system_prompt: self.system_prompt.clone(),
             tool_names: self.tool_names.clone(),
             max_tokens: self.max_tokens,

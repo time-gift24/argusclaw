@@ -32,6 +32,7 @@ function createDefaultFormData(providers: LlmProviderSummary[]): AgentRecord {
     description: "",
     version: "1.0.0",
     provider_id: defaultProvider?.id ?? null,
+    model_id: null,
     system_prompt: "",
     tool_names: [],
     max_tokens: undefined,
@@ -50,6 +51,11 @@ export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFo
     }
     return createDefaultFormData(providers)
   })
+
+  const selectedProvider = React.useMemo(
+    () => providers.find((p) => p.id === formData.provider_id) ?? null,
+    [formData.provider_id, providers],
+  )
 
   React.useEffect(() => {
     if (agent) {
@@ -120,7 +126,13 @@ export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFo
             <select
               id="provider_id"
               value={formData.provider_id ?? ""}
-              onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
+              onChange={(e) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  provider_id: e.target.value ? parseInt(e.target.value) : null,
+                  model_id: null,
+                }))
+              }
               className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <option value="">No provider</option>
@@ -131,6 +143,29 @@ export function AgentFormDialog({ agent, providers, onSubmit, trigger }: AgentFo
               ))}
             </select>
           </div>
+          {selectedProvider && selectedProvider.models && selectedProvider.models.length > 0 && (
+            <div className="space-y-2">
+              <Label htmlFor="model_id">Model</Label>
+              <select
+                id="model_id"
+                value={formData.model_id ?? ""}
+                onChange={(e) =>
+                  setFormData((prev) => ({
+                    ...prev,
+                    model_id: e.target.value === selectedProvider.default_model ? null : e.target.value || null,
+                  }))
+                }
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="">Default ({selectedProvider.default_model})</option>
+                {selectedProvider.models.map((model) => (
+                  <option key={model} value={model}>
+                    {model} {model === selectedProvider.default_model ? "(Default)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="system_prompt">System Prompt</Label>
             <Textarea

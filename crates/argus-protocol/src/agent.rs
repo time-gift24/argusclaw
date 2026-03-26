@@ -36,6 +36,10 @@ pub struct AgentRecord {
     pub version: String,
     /// Optional associated provider ID.
     pub provider_id: Option<ProviderId>,
+    /// Optional default model override for this agent.
+    /// If set, this model is used instead of the provider's default_model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     /// System prompt for the agent.
     pub system_prompt: String,
     /// List of tool names enabled for this agent.
@@ -63,6 +67,7 @@ impl Default for AgentRecord {
             description: String::new(),
             version: String::new(),
             provider_id: None,
+            model_id: None,
             system_prompt: String::new(),
             tool_names: Vec::new(),
             max_tokens: None,
@@ -84,6 +89,7 @@ impl AgentRecord {
             description: "A test agent".to_string(),
             version: "1.0.0".to_string(),
             provider_id: Some(ProviderId::new(provider_id)),
+            model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
             max_tokens: None,

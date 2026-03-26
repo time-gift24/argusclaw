@@ -255,6 +255,9 @@ pub struct ChatSessionPayload {
     /// The effective provider ID bound to this session.
     /// `None` if no provider is configured (session will fail on first LLM call).
     pub effective_provider_id: Option<i64>,
+    /// The effective model override bound to this session, or `None` for provider default.
+    #[serde(default)]
+    pub effective_model: Option<String>,
 }
 
 /// Session summary for listing.
@@ -308,6 +311,7 @@ pub async fn create_chat_session(
     app: tauri::AppHandle,
     template_id: String,
     provider_preference_id: Option<String>,
+    model: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
     let template_id_i64: i64 = template_id
         .parse()
@@ -328,9 +332,9 @@ pub async fn create_chat_session(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Create thread with template and provider
+    // Create thread with template, provider, and optional model override
     let thread_id = wing
-        .create_thread(session_id, AgentId::new(template_id_i64), provider_id)
+        .create_thread(session_id, AgentId::new(template_id_i64), provider_id, model.as_deref())
         .await
         .map_err(|e| e.to_string())?;
 
@@ -379,6 +383,7 @@ pub async fn create_chat_session(
         template_id: template_id_i64,
         thread_id: thread_id.to_string(),
         effective_provider_id,
+        effective_model: model,
     })
 }
 
@@ -393,7 +398,7 @@ pub async fn activate_existing_thread(
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
 
-    let (template_id, provider_id) = wing
+    let (template_id, provider_id, model_override) = wing
         .activate_thread(session_id, thread_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -415,6 +420,7 @@ pub async fn activate_existing_thread(
         template_id: template_id.into_inner(),
         thread_id: thread_id.to_string(),
         effective_provider_id: provider_id.map(|id| id.inner()),
+        effective_model: model_override,
     })
 }
 
@@ -725,6 +731,7 @@ mod tests {
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: Some(1),
+            effective_model: None,
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");
@@ -743,6 +750,7 @@ mod tests {
             template_id: 1,
             thread_id: ThreadId::new().to_string(),
             effective_provider_id: None,
+            effective_model: None,
         };
 
         let value = serde_json::to_value(payload).expect("payload should serialize");

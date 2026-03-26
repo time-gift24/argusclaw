@@ -36,6 +36,7 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
     description: "",
     version: "1.0.0",
     provider_id: preferredProviderId,
+    model_id: null,
     system_prompt: "",
     tool_names: [],
     max_tokens: undefined,
@@ -264,7 +265,13 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                   <select
                     id="provider_id"
                     value={formData.provider_id ?? ""}
-                    onChange={(e) => setFormData({ ...formData, provider_id: e.target.value ? parseInt(e.target.value) : null })}
+                    onChange={(e) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        provider_id: e.target.value ? parseInt(e.target.value) : null,
+                        model_id: null,
+                      }))
+                    }
                     className="flex h-10 w-full rounded-md border border-muted/60 bg-background px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/20 appearance-none"
                   >
                     <option value="">自动选择默认模型</option>
@@ -279,6 +286,31 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                     ))}
                   </select>
                 </div>
+                {selectedProvider && selectedProvider.models && selectedProvider.models.length > 0 && (
+                  <div className="space-y-2">
+                    <Label htmlFor="model_id" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">
+                      指定模型
+                    </Label>
+                    <select
+                      id="model_id"
+                      value={formData.model_id ?? ""}
+                      onChange={(e) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          model_id: e.target.value === selectedProvider.default_model ? null : e.target.value || null,
+                        }))
+                      }
+                      className="flex h-10 w-full rounded-md border border-muted/60 bg-background px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/20 appearance-none"
+                    >
+                      <option value="">使用默认模型 ({selectedProvider.default_model})</option>
+                      {selectedProvider.models.map((model) => (
+                        <option key={model} value={model}>
+                          {model} {model === selectedProvider.default_model ? "(默认)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="max_tokens" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">最大 Token</Label>

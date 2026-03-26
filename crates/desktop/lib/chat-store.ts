@@ -68,6 +68,7 @@ export interface ChatSessionState {
   templateId: number;
   threadId: string;
   effectiveProviderId: number | null;
+  effectiveModel: string | null;
   status: "idle" | "running" | "error";
   messages: ThreadSnapshotPayload["messages"];
   pendingAssistant: { content: string; reasoning: string; toolCalls: PendingToolCall[]; plan: PlanItem[] | null } | null;
@@ -185,6 +186,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const session = await chat.createChatSession(
         templateId,
         state.selectedProviderPreferenceId,
+        state.selectedModelOverride,
       );
       const snapshot = await chat.getThreadSnapshot(
         session.session_id,
@@ -197,6 +199,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         templateId: session.template_id,
         threadId: session.thread_id,
         effectiveProviderId: session.effective_provider_id,
+        effectiveModel: session.effective_model,
         status: "idle",
         messages: snapshot.messages,
         pendingAssistant: null,
@@ -264,10 +267,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       const nextSessionState: ChatSessionState = {
         sessionKey: activated.session_key,
-        sessionId,
+        sessionId: sessionId,
         templateId: activated.template_id,
-        threadId,
+        threadId: threadId,
         effectiveProviderId: activated.effective_provider_id,
+        effectiveModel: activated.effective_model,
         status: "idle",
         messages: snapshot.messages,
         pendingAssistant: null,
@@ -359,7 +363,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   selectTemplate(templateId: number) {
-    set({ selectedTemplateId: templateId, errorMessage: null });
+    const state = get();
+    const agent = state.templates.find((t) => t.id === templateId);
+    set({
+      selectedTemplateId: templateId,
+      // Apply the agent's per-agent default model (model_id) as the effective override.
+      // This takes precedence over the agent's provider default_model but is lower priority
+      // than a manual model selection via selectModelOverride.
+      selectedModelOverride: agent?.model_id ?? null,
+      errorMessage: null,
+    });
   },
 
   async selectProviderPreference(providerId: number | null) {

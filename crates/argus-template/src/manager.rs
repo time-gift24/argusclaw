@@ -98,12 +98,13 @@ impl TemplateManager {
         if template.id.inner() == 0 {
             sqlx::query(
                 r#"
-                INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                INSERT INTO agents (display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(display_name) DO UPDATE SET
                     description = excluded.description,
                     version = excluded.version,
                     provider_id = excluded.provider_id,
+                    model_id = excluded.model_id,
                     system_prompt = excluded.system_prompt,
                     tool_names = excluded.tool_names,
                     max_tokens = excluded.max_tokens,
@@ -118,6 +119,7 @@ impl TemplateManager {
             .bind(&template.description)
             .bind(&template.version)
             .bind(template.provider_id.map(|p| p.inner()))
+            .bind(&template.model_id)
             .bind(&template.system_prompt)
             .bind(&tool_names_json)
             .bind(template.max_tokens.map(|t| t as i64))
@@ -141,13 +143,14 @@ impl TemplateManager {
         } else {
             sqlx::query(
                 r#"
-                INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(id) DO UPDATE SET
                     display_name = excluded.display_name,
                     description = excluded.description,
                     version = excluded.version,
                     provider_id = excluded.provider_id,
+                    model_id = excluded.model_id,
                     system_prompt = excluded.system_prompt,
                     tool_names = excluded.tool_names,
                     max_tokens = excluded.max_tokens,
@@ -163,6 +166,7 @@ impl TemplateManager {
             .bind(&template.description)
             .bind(&template.version)
             .bind(template.provider_id.map(|p| p.inner()))
+            .bind(&template.model_id)
             .bind(&template.system_prompt)
             .bind(&tool_names_json)
             .bind(template.max_tokens.map(|t| t as i64))
@@ -202,12 +206,13 @@ impl TemplateManager {
 
         // Insert with ON CONFLICT(display_name) DO UPDATE
         sqlx::query(
-            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO agents (display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(display_name) DO UPDATE SET
                  description = excluded.description,
                  version = excluded.version,
                  provider_id = excluded.provider_id,
+                 model_id = excluded.model_id,
                  system_prompt = excluded.system_prompt,
                  tool_names = excluded.tool_names,
                  max_tokens = excluded.max_tokens,
@@ -221,6 +226,7 @@ impl TemplateManager {
         .bind(&record.description)
         .bind(&record.version)
         .bind(record.provider_id.as_ref().map(|id| id.inner()))
+        .bind(&record.model_id)
         .bind(&record.system_prompt)
         .bind(&tool_names_json)
         .bind(record.max_tokens.map(|t| t as i64))
@@ -266,6 +272,7 @@ impl TemplateManager {
             description: String,
             version: String,
             provider_id: Option<i64>,
+            model_id: Option<String>,
             system_prompt: String,
             tool_names: String,
             max_tokens: Option<i64>,
@@ -274,7 +281,7 @@ impl TemplateManager {
         }
 
         let placeholder: AgentRow = sqlx::query_as(
-            "SELECT display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config FROM agents WHERE id = 0",
+            "SELECT display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config FROM agents WHERE id = 0",
         )
         .fetch_one(&self.pool)
         .await
@@ -287,6 +294,7 @@ impl TemplateManager {
             description,
             version,
             provider_id,
+            model_id,
             system_prompt,
             tool_names,
             max_tokens,
@@ -313,12 +321,13 @@ impl TemplateManager {
         // Insert the new row with auto-generated id.
         // ON CONFLICT: if name already exists (from seed), do nothing.
         sqlx::query(
-            "INSERT INTO agents (display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(display_name) DO NOTHING",
+            "INSERT INTO agents (display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(display_name) DO NOTHING",
         )
         .bind(&display_name)
         .bind(&description)
         .bind(&version)
         .bind(provider_id)
+        .bind(&model_id)
         .bind(&system_prompt)
         .bind(&tool_names)
         .bind(max_tokens)
@@ -374,7 +383,7 @@ impl TemplateManager {
     pub async fn get(&self, id: AgentId) -> Result<Option<AgentRecord>> {
         let row = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+            SELECT id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents WHERE id = ?
             "#,
         )
@@ -393,7 +402,7 @@ impl TemplateManager {
     pub async fn list(&self) -> Result<Vec<AgentRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+            SELECT id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents ORDER BY id ASC
             "#,
         )
@@ -475,7 +484,7 @@ impl TemplateManager {
     pub async fn list_subagents(&self, parent_id: AgentId) -> Result<Vec<AgentRecord>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
+            SELECT id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type
             FROM agents WHERE parent_agent_id = ? ORDER BY id ASC
             "#,
         )
@@ -549,6 +558,12 @@ impl TemplateManager {
                     reason: e.to_string(),
                 })?;
 
+        let model_id: Option<String> = row
+            .try_get("model_id")
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+
         let max_tokens: Option<u32> = row
             .try_get::<Option<i64>, _>("max_tokens")
             .map_err(|e| ArgusError::DatabaseError {
@@ -603,6 +618,7 @@ impl TemplateManager {
                     reason: e.to_string(),
                 })?,
             provider_id: provider_id.map(ProviderId::new),
+            model_id,
             system_prompt: row
                 .try_get("system_prompt")
                 .map_err(|e| ArgusError::DatabaseError {

@@ -113,6 +113,7 @@ fn build_smoke_agent_record(
         description: "Smoke test agent for default provider chat".to_string(),
         version: "0.1.0".to_string(),
         provider_id: Some(ProviderId::new(provider_id.into_inner())),
+        model_id: None,
         system_prompt: system_prompt.unwrap_or_default(),
         tool_names: Vec::new(),
         max_tokens: None,

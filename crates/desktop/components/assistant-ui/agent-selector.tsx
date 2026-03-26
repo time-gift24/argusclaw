@@ -44,9 +44,13 @@ export function AgentSelector() {
   const handleConfirmPendingSwitch = React.useCallback(() => {
     if (pendingTemplateId == null) return;
     setConfirmOpen(false);
+    // Apply the pending agent's per-agent default model before activating.
+    const pendingAgent = templates.find((t) => t.id === pendingTemplateId);
+    const effectiveModel = pendingAgent?.model_id ?? null;
+    useChatStore.getState().selectModelOverride(effectiveModel);
     void activateSession(pendingTemplateId);
     setPendingTemplateId(null);
-  }, [activateSession, pendingTemplateId]);
+  }, [activateSession, pendingTemplateId, templates]);
 
   if (templates.length === 0) return null;
 
