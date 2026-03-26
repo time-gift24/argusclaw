@@ -99,12 +99,12 @@ const ComposerAction: FC = () => {
             className="size-8 opacity-80"
           />
         )}
-        
+
         {isRunning ? (
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            className="size-8 rounded-full text-destructive hover:bg-destructive/10" 
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 rounded-full text-destructive hover:bg-destructive/10"
             aria-label="Stop generation"
             onClick={handleCancel}
           >

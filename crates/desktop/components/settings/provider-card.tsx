@@ -68,13 +68,13 @@ export function ProviderCard({
               </p>
             </div>
           </div>
-          
+
           <div className="shrink-0">
             {isTesting ? (
               <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-sky-200 text-sky-600 animate-pulse font-bold uppercase">测试中</Badge>
             ) : isSuccess ? (
-              <Badge 
-                variant="outline" 
+              <Badge
+                variant="outline"
                 className="text-[9px] h-4 px-1.5 border-emerald-200 text-emerald-600 cursor-pointer hover:bg-emerald-50 font-bold uppercase"
                 aria-label="查看状态"
                 title="查看状态"
@@ -83,8 +83,8 @@ export function ProviderCard({
                 在线 · {testResult?.latency_ms}ms
               </Badge>
             ) : isFailure ? (
-              <Badge 
-                variant="outline" 
+              <Badge
+                variant="outline"
                 className="text-[9px] h-4 px-1.5 border-destructive/30 text-destructive cursor-pointer hover:bg-destructive/5 font-bold uppercase"
                 aria-label="查看状态"
                 title="查看状态"
@@ -128,9 +128,9 @@ export function ProviderCard({
         {/* Bottom: Actions */}
         <div className="flex items-center justify-between gap-2 pt-1">
           <div className="flex items-center gap-1">
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               className="h-8 text-[11px] px-3 rounded-lg hover:bg-primary/5 hover:text-primary transition-colors font-medium"
               onClick={() => onTestConnection(provider.id)}
               disabled={isTesting || requiresReentry}
@@ -138,9 +138,9 @@ export function ProviderCard({
               <Activity className="h-3.5 w-3.5 mr-1.5" />
               测试连接
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               className="h-8 text-[11px] px-3 rounded-lg hover:bg-muted/80 transition-colors font-medium text-muted-foreground"
               onClick={() => onSetDefault(provider.id)}
               disabled={provider.is_default}
@@ -149,20 +149,20 @@ export function ProviderCard({
               设为默认
             </Button>
           </div>
-          
+
           <div className="flex items-center gap-1">
-            <Button 
-              variant="ghost" 
-              size="icon" 
+            <Button
+              variant="ghost"
+              size="icon"
               className="h-8 w-8 rounded-lg hover:bg-muted/80 transition-colors"
               onClick={() => router.push(`/settings/providers/edit?id=${provider.id}`)}
             >
               <Pencil className="h-3.5 w-3.5" />
               <span className="sr-only">编辑</span>
             </Button>
-            <Button 
-              variant="ghost" 
-              size="icon" 
+            <Button
+              variant="ghost"
+              size="icon"
               className="h-8 w-8 rounded-lg hover:bg-destructive/5 hover:text-destructive transition-colors text-muted-foreground hover:text-destructive"
               onClick={() => onDelete(provider.id)}
               disabled={provider.is_default}

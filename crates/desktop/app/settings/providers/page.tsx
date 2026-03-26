@@ -162,7 +162,7 @@ export default function ProvidersPage() {
             管理您的 AI 模型提供者连接、API 密钥及模型列表。
           </p>
         </div>
-        
+
         <Button size="sm" onClick={() => router.push("/settings/providers/new")} className="h-9 shadow-sm">
           <Plus className="h-4 w-4 mr-1.5" />
           添加提供者

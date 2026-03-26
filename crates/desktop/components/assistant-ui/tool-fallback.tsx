@@ -108,15 +108,15 @@ function ToolFallbackTrigger({
     >
       <div className={cn(
         "flex h-5 w-5 shrink-0 items-center justify-center rounded-md",
-        isRunning ? "bg-primary/10 text-primary" : 
-        isFailed ? "bg-destructive/10 text-destructive" : 
+        isRunning ? "bg-primary/10 text-primary" :
+        isFailed ? "bg-destructive/10 text-destructive" :
         isCancelled ? "bg-muted text-muted-foreground" : "bg-emerald-500/10 text-emerald-600"
       )}>
-        {isRunning ? <Loader2 className="size-3 animate-spin" /> : 
+        {isRunning ? <Loader2 className="size-3 animate-spin" /> :
          isFailed ? <AlertCircleIcon className="size-3" /> :
          isCancelled ? <XCircleIcon className="size-3" /> : <CheckIcon className="size-3" />}
       </div>
-      
+
       <span
         data-slot="tool-fallback-trigger-label"
         className={cn(
@@ -128,7 +128,7 @@ function ToolFallbackTrigger({
           {isCancelled ? "已取消" : isRunning ? "正在调用" : isFailed ? "调用失败" : "已调用"}: <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-[10px] ml-1">{toolName}</code>
         </span>
       </span>
-      
+
       <ChevronDownIcon
         data-slot="tool-fallback-trigger-chevron"
         className={cn(
@@ -236,7 +236,7 @@ function ToolFallbackError({
   if (!errorText) return null;
 
   const isCancelled = status.reason === "cancelled";
-  
+
   return (
     <div
       data-slot="tool-fallback-error"

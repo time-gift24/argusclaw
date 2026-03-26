@@ -92,7 +92,7 @@ export default function AgentsPage() {
             在这里创建、配置和管理您的 AI 智能体及其子智能体。
           </p>
         </div>
-        
+
         <div className="flex items-center gap-2">
           {subagents.length > 0 && (
             <Button
@@ -116,7 +116,7 @@ export default function AgentsPage() {
                 新建智能体
               </Button>
             </Link>
-            
+
             {parentAgents.length > 0 && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -173,7 +173,7 @@ export default function AgentsPage() {
                 onEdit={handleEdit}
                 onDelete={(id) => setDeleteId(id)}
               />
-              
+
               {showSubagents && (
                 <div className="grid gap-4 ml-6 pl-6 border-l-2 border-primary/10 relative">
                   {subagents

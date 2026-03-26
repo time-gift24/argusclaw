@@ -152,10 +152,10 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       {/* 顶部标题栏 - 固定 */}
       <div className="flex items-center justify-between border-b pb-6 shrink-0 px-1">
         <div className="flex items-center gap-4">
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            className="h-9 w-9 rounded-full hover:bg-muted" 
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-9 w-9 rounded-full hover:bg-muted"
             onClick={() => router.push("/settings/agents")}
           >
             <ArrowLeft className="h-4 w-4" />

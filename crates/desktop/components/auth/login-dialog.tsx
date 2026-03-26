@@ -64,7 +64,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
 
     try {
       // If no user exists, the first "Login" is effectively a setup
-      const result = (hasUser === false) 
+      const result = (hasUser === false)
         ? await setupAccount(username.trim(), password)
         : await login(username.trim(), password);
 
@@ -145,9 +145,9 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
               </div>
             )}
 
-            <Button 
-              type="submit" 
-              className="w-full h-11 text-sm font-bold rounded-xl shadow-md shadow-primary/10 hover:shadow-lg transition-all active:scale-[0.98]" 
+            <Button
+              type="submit"
+              className="w-full h-11 text-sm font-bold rounded-xl shadow-md shadow-primary/10 hover:shadow-lg transition-all active:scale-[0.98]"
               disabled={isLoading}
             >
               {isLoading ? (
@@ -159,7 +159,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
                 '登录系统'
               )}
             </Button>
-            
+
             <p className="text-[11px] text-center text-muted-foreground/60 px-4">
               您的凭据将安全地存储在本地加密库中
             </p>

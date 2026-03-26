@@ -107,9 +107,9 @@ export default function DashboardShell({
               </Link>
             ))}
           </nav>
-          
+
           <Separator className="my-4 mx-2" />
-          
+
           <nav className="grid gap-1">
             <Link
               href="/settings/agents"
@@ -152,7 +152,7 @@ export default function DashboardShell({
             >
               <PanelLeft className="h-4 w-4" />
             </Button>
-            
+
             <Button
               variant="ghost"
               size="icon"
@@ -161,7 +161,7 @@ export default function DashboardShell({
             >
               <Menu className="h-5 w-5" />
             </Button>
-            
+
             <div className="relative w-64">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -176,7 +176,7 @@ export default function DashboardShell({
             <Button variant="ghost" size="icon" onClick={toggleTheme}>
               {resolvedTheme === "dark" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
             </Button>
-            
+
             <Button variant="ghost" size="icon" className="relative">
               <Bell className="h-4 w-4" />
               <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-primary" />

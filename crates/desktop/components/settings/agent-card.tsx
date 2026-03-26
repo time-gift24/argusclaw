@@ -96,18 +96,18 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
 
         {/* Right: Actions */}
         <div className="flex items-center gap-1 shrink-0">
-          <Button 
-            variant="ghost" 
-            size="icon" 
+          <Button
+            variant="ghost"
+            size="icon"
             className="h-8 w-8 rounded-lg hover:bg-primary/5 hover:text-primary transition-colors text-muted-foreground"
             onClick={() => onEdit(agent.id)}
           >
             <Pencil className="h-3.5 w-3.5" />
             <span className="sr-only">编辑</span>
           </Button>
-          <Button 
-            variant="ghost" 
-            size="icon" 
+          <Button
+            variant="ghost"
+            size="icon"
             className="h-8 w-8 rounded-lg hover:bg-destructive/5 hover:text-destructive transition-colors text-muted-foreground hover:text-destructive"
             onClick={() => onDelete(agent.id)}
           >

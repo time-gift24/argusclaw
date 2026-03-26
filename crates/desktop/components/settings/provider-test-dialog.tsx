@@ -56,13 +56,13 @@ export function ProviderTestDialog({
   onRetest,
 }: ProviderTestDialogProps) {
   const isSuccess = result?.status === "success";
-  
+
   const statusTone = testing
     ? "border-sky-200 text-sky-600 bg-sky-50/50"
     : isSuccess
       ? "border-emerald-200 text-emerald-600 bg-emerald-50/50"
       : "border-destructive/30 text-destructive bg-destructive/5";
-      
+
   const statusLabel = testing
     ? "正在测试"
     : isSuccess
@@ -88,7 +88,7 @@ export function ProviderTestDialog({
                 </DialogDescription>
               </div>
             </div>
-            
+
             <Badge variant="outline" className={cn("px-2 py-0.5 h-6 text-[10px] font-bold uppercase tracking-tighter rounded-full border shadow-none", statusTone)}>
               {testing ? (
                 <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
@@ -173,9 +173,9 @@ export function ProviderTestDialog({
               <MessageSquare className="h-3.5 w-3.5" />
               System Diagnostics
             </div>
-            <div className={cn("p-5 rounded-2xl border flex items-start gap-4", 
+            <div className={cn("p-5 rounded-2xl border flex items-start gap-4",
               isSuccess ? "bg-emerald-50/20 border-emerald-100" : "bg-muted/20 border-muted/60")}>
-              <div className={cn("p-2 rounded-xl shrink-0 shadow-sm", 
+              <div className={cn("p-2 rounded-xl shrink-0 shadow-sm",
                 isSuccess ? "bg-emerald-100 text-emerald-600" : "bg-muted text-muted-foreground")}>
                 {isSuccess ? <CircleCheckBig className="h-4 w-4" /> : <Activity className="h-4 w-4" />}
               </div>
@@ -244,10 +244,10 @@ export function ProviderTestDialog({
             <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-xs font-bold text-muted-foreground uppercase tracking-wider h-9">
               关闭
             </Button>
-            <Button 
-              size="sm" 
-              onClick={onRetest} 
-              disabled={!provider || testing} 
+            <Button
+              size="sm"
+              onClick={onRetest}
+              disabled={!provider || testing}
               className="h-9 px-6 text-xs font-bold shadow-lg shadow-primary/20"
             >
               {testing ? (

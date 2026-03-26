@@ -215,8 +215,8 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         : await providers.testInput(input, model)
       setTestResults((prev) => ({ ...prev, [model]: result }))
     } catch (error) {
-      setTestResults((prev) => ({ 
-        ...prev, 
+      setTestResults((prev) => ({
+        ...prev,
         [model]: {
           provider_id: String(formData.id),
           model,
@@ -403,7 +403,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                       <div className="flex items-center justify-between px-8 py-4 hover:bg-muted/30 transition-colors">
                         <div className="flex items-center gap-4">
                           <Badge variant={model === formData.default_model ? "default" : "outline"} className="font-mono">{model}</Badge>
-                          {isTesting ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : 
+                          {isTesting ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> :
                            isSuccess ? <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold"><Check className="h-4 w-4" /> 成功 · {result.latency_ms}ms</div> :
                            isFailed ? <div className="flex items-center gap-1.5 text-xs text-destructive font-bold"><AlertCircle className="h-4 w-4" /> 失败</div> :
                            <span className="text-xs text-muted-foreground">待测试</span>}
