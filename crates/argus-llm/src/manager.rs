@@ -18,7 +18,7 @@ use argus_protocol::llm::{
     ProviderTestStatus, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 use futures_util::StreamExt;
-use sqlx::SqlitePool;
+use argus_repository::traits::AccountRepository;
 
 use crate::providers::{
     DEFAULT_OPENAI_COMPATIBLE_TIMEOUT, OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig,
@@ -35,7 +35,7 @@ const PROVIDER_TIMEOUT_META_KEY: &str = "timeout_secs";
 /// from stored configuration.
 pub struct ProviderManager {
     repository: Arc<dyn LlmProviderRepository>,
-    pool: Option<Arc<SqlitePool>>,
+    account_repo: Option<Arc<dyn AccountRepository>>,
     cipher: Option<Arc<Cipher>>,
 }
 
@@ -45,17 +45,26 @@ impl ProviderManager {
     pub fn new(repository: Arc<dyn LlmProviderRepository>) -> Self {
         Self {
             repository,
-            pool: None,
+            account_repo: None,
             cipher: None,
         }
     }
 
-    /// Set the pool and cipher for token-based auth providers.
+    /// Set the account repository and cipher for token-based auth providers.
     #[must_use]
-    pub fn with_auth(mut self, pool: Arc<SqlitePool>, cipher: Arc<Cipher>) -> Self {
-        self.pool = Some(pool);
+    pub fn with_auth(
+        mut self,
+        account_repo: Arc<dyn AccountRepository>,
+        cipher: Arc<Cipher>,
+    ) -> Self {
+        self.account_repo = Some(account_repo);
         self.cipher = Some(cipher);
         self
+    }
+
+    /// Get the account repository.
+    pub fn account_repository(&self) -> Option<Arc<dyn AccountRepository>> {
+        self.account_repo.clone()
     }
 
     /// List all provider records.
@@ -246,11 +255,11 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let pool = self
-            .pool
+        let repo = self
+            .account_repo
             .as_ref()
             .ok_or_else(|| argus_protocol::ArgusError::LlmError {
-                reason: "account_token_source requires SqlitePool".to_string(),
+                reason: "account_token_source requires AccountRepository".to_string(),
             })?;
         let cipher = self
             .cipher
@@ -261,27 +270,25 @@ impl ProviderManager {
 
         let base = self.build_base_openai_compatible_provider(record, model)?;
 
-        let token_source = Arc::new(AccountTokenSource::new(pool.clone(), cipher.clone()));
+        let token_source = Arc::new(AccountTokenSource::new(repo.clone(), cipher.clone()));
 
-        // Query credentials to derive cache key (username/password stored for cache invalidation).
-        let creds: (String, String) = sqlx::query_as::<_, (String, Vec<u8>, Vec<u8>)>(
-            "SELECT username, password, nonce FROM accounts WHERE id = 1",
-        )
-        .fetch_optional(pool.as_ref())
-        .await
-        .map_err(|e| argus_protocol::ArgusError::LlmError {
-            reason: e.to_string(),
-        })?
-        .ok_or_else(|| argus_protocol::ArgusError::LlmError {
-            reason: "No stored credentials for token auth".to_string(),
-        })
-        .map(|(username, _, _)| (username, String::new()))?;
+        // Query credentials via repository to derive cache key (username/password stored for cache
+        // invalidation). The real credentials are fetched inside AccountTokenSource::fetch_token.
+        let creds = repo
+            .get_credentials()
+            .await
+            .map_err(|e| argus_protocol::ArgusError::LlmError {
+                reason: e.to_string(),
+            })?
+            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+                reason: "No stored credentials for token auth".to_string(),
+            })?;
 
         let wrapped = TokenLLMProvider::new(
             base,
             token_source,
-            creds.0,
-            creds.1,
+            creds.username,
+            String::new(),
             Duration::from_secs(300),
         );
 
@@ -748,6 +755,12 @@ mod tests {
         ) -> Result<Option<LlmProviderRecord>, argus_protocol::ArgusError> {
             Ok(Some(self.record.clone()))
         }
+
+        async fn get_default_provider_id(
+            &self,
+        ) -> Result<Option<LlmProviderId>, argus_protocol::ArgusError> {
+            Ok(Some(self.record.id))
+        }
     }
 
     fn make_record() -> LlmProviderRecord {
@@ -836,18 +849,18 @@ mod tests {
             .meta_data
             .insert("account_token_source".to_string(), "true".to_string());
 
-        // Without pool/cipher, it should return an error mentioning SqlitePool
+        // Without account_repo/cipher, it should return an error mentioning AccountRepository
         let repo = Arc::new(MockProviderRepository {
             record: record.clone(),
         });
         let manager = ProviderManager::new(repo);
 
         let result = manager.build_provider_with_model(record, "gpt-4").await;
-        assert!(result.is_err(), "should fail without SqlitePool");
+        assert!(result.is_err(), "should fail without AccountRepository");
         let err = result.err().expect("already checked");
         assert!(
-            err.to_string().contains("SqlitePool"),
-            "error should mention SqlitePool: {err}"
+            err.to_string().contains("AccountRepository"),
+            "error should mention AccountRepository: {err}"
         );
     }
 

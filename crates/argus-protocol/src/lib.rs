@@ -1,3 +1,4 @@
+pub mod account;
 pub mod agent;
 pub mod approval;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod ssrf;
 pub mod token_usage;
 pub mod tool;
 
+pub use account::{AccountCredentials, AccountRepository};
 pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
 pub use error::{ArgusError, Result};

@@ -156,6 +156,8 @@ mod tests {
 
     use argus_protocol::{AgentId, LlmProvider, ProviderId, ProviderResolver, ThreadId};
     use argus_template::TemplateManager;
+    use argus_repository::traits::AgentRepository;
+    use argus_repository::ArgusSqlite;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
     use sqlx::SqlitePool;
@@ -188,8 +190,12 @@ mod tests {
     fn test_job_manager() -> Arc<JobManager> {
         let pool = SqlitePool::connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool should build for tests");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
         Arc::new(JobManager::new(
-            Arc::new(TemplateManager::new(pool)),
+            Arc::new(TemplateManager::new(
+                sqlite.clone() as Arc<dyn AgentRepository>,
+                sqlite.clone(),
+            )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
         ))

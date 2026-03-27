@@ -40,4 +40,7 @@ pub trait LlmProviderRepository: Send + Sync {
 
     /// Get the default provider record.
     async fn get_default_provider(&self) -> Result<Option<LlmProviderRecord>>;
+
+    /// Get the default provider's ID only (avoids decoding encrypted fields).
+    async fn get_default_provider_id(&self) -> Result<Option<LlmProviderId>>;
 }

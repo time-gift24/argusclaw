@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use argus_crypto::Cipher;
-use sqlx::SqlitePool;
 use subtle::ConstantTimeEq;
 
+use argus_repository::traits::AccountRepository;
 use super::error::AuthError;
 
 #[derive(Debug, Clone)]
@@ -14,20 +14,22 @@ pub struct UserInfo {
 }
 
 pub struct AccountManager {
-    pool: Arc<SqlitePool>,
+    repo: Arc<dyn AccountRepository>,
     cipher: Arc<Cipher>,
 }
 
 impl AccountManager {
-    pub fn new(pool: Arc<SqlitePool>, cipher: Arc<Cipher>) -> Self {
-        Self { pool, cipher }
+    pub fn new(repo: Arc<dyn AccountRepository>, cipher: Arc<Cipher>) -> Self {
+        Self { repo, cipher }
     }
 
     pub async fn has_account(&self) -> Result<bool, AuthError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
-            .fetch_one(self.pool.as_ref())
-            .await?;
-        Ok(count > 0)
+        self.repo
+            .has_account()
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn setup_account(&self, username: &str, password: &str) -> Result<(), AuthError> {
@@ -44,41 +46,38 @@ impl AccountManager {
                 reason: e.to_string(),
             })?;
 
-        // Insert account (id is always 1 for single-user)
-        sqlx::query(
-            r#"
-            INSERT INTO accounts (id, username, password, nonce, created_at, updated_at)
-            VALUES (1, ?1, ?2, ?3, datetime('now'), datetime('now'))
-            "#,
-        )
-        .bind(username)
-        .bind(&encrypted.ciphertext)
-        .bind(&encrypted.nonce)
-        .execute(self.pool.as_ref())
-        .await?;
-
-        Ok(())
+        self.repo
+            .setup_account(username, &encrypted.ciphertext, &encrypted.nonce)
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Result<bool, AuthError> {
-        let row: Option<(String, Vec<u8>, Vec<u8>)> =
-            sqlx::query_as("SELECT username, password, nonce FROM accounts WHERE id = 1")
-                .fetch_optional(self.pool.as_ref())
-                .await?;
+        let creds = self
+            .repo
+            .get_credentials()
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
-        match row {
-            Some((stored_username, ciphertext, nonce)) => {
+        match creds {
+            Some(stored) => {
                 // Verify username matches using constant-time comparison to prevent timing attacks
-                let username_matches = stored_username.as_bytes().ct_eq(username.as_bytes());
+                let username_matches =
+                    stored.username.as_bytes().ct_eq(username.as_bytes());
                 if !bool::from(username_matches) {
                     return Ok(false);
                 }
                 // Decrypt and verify password using constant-time comparison
-                let decrypted = self.cipher.decrypt(&nonce, &ciphertext).map_err(|e| {
-                    AuthError::DecryptionFailed {
+                let decrypted = self
+                    .cipher
+                    .decrypt(&stored.nonce, &stored.ciphertext)
+                    .map_err(|e| AuthError::DecryptionFailed {
                         reason: e.to_string(),
-                    }
-                })?;
+                    })?;
                 let password_bytes = password.as_bytes();
                 let decrypted_bytes = decrypted.expose_secret().as_bytes();
                 let password_matches = decrypted_bytes.ct_eq(password_bytes);
@@ -94,10 +93,13 @@ impl AccountManager {
     }
 
     pub async fn get_current_user(&self) -> Result<Option<UserInfo>, AuthError> {
-        let row: Option<(String,)> = sqlx::query_as("SELECT username FROM accounts WHERE id = 1")
-            .fetch_optional(self.pool.as_ref())
-            .await?;
-
-        Ok(row.map(|(username,)| UserInfo { username }))
+        let username = self
+            .repo
+            .get_username()
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        Ok(username.map(|username| UserInfo { username }))
     }
 }

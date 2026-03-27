@@ -8,12 +8,14 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::DbError;
-use argus_llm::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
+use argus_crypto::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
 use argus_protocol::llm::SecretString;
 
 mod agent;
+mod account;
 mod job;
 mod llm_provider;
+mod session;
 mod thread;
 mod workflow;
 
@@ -162,6 +164,155 @@ impl ArgusSqlite {
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "no key sources configured".to_string()),
         })
+    }
+
+    /// Repair legacy placeholder agent IDs that were incorrectly persisted as `0`.
+    ///
+    /// This is a one-time migration that:
+    /// 1. Reads all agents with `id = 0`
+    /// 2. Deletes the placeholder rows
+    /// 3. Re-inserts each with auto-generated real IDs
+    /// 4. Updates foreign keys in `threads` and `jobs` tables
+    pub async fn repair_placeholder_ids(&self) -> DbResult<()> {
+        #[derive(sqlx::FromRow)]
+        struct AgentRow {
+            display_name: String,
+            description: String,
+            version: String,
+            provider_id: Option<i64>,
+            model_id: Option<String>,
+            system_prompt: String,
+            tool_names: String,
+            max_tokens: Option<i64>,
+            temperature: Option<i64>,
+            thinking_config: Option<String>,
+        }
+
+        let placeholder_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id = 0")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        if placeholder_count == 0 {
+            return Ok(());
+        }
+
+        // Read all placeholder rows into memory first
+        let placeholder: AgentRow = sqlx::query_as(
+            "SELECT display_name, description, version, provider_id, model_id, system_prompt,
+                    tool_names, max_tokens, temperature, thinking_config
+             FROM agents WHERE id = 0",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: format!("failed to fetch placeholder: {}", e),
+        })?;
+
+        let AgentRow {
+            display_name,
+            description,
+            version,
+            provider_id,
+            model_id,
+            system_prompt,
+            tool_names,
+            max_tokens,
+            temperature,
+            thinking_config,
+        } = placeholder;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        // Delete placeholder row first (no conflict possible now)
+        sqlx::query("DELETE FROM agents WHERE id = 0")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        // Re-insert with auto-generated id; ON CONFLICT: if name exists, do nothing
+        sqlx::query(
+            "INSERT INTO agents (display_name, description, version, provider_id, model_id,
+                                 system_prompt, tool_names, max_tokens, temperature, thinking_config)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(display_name) DO NOTHING",
+        )
+        .bind(&display_name)
+        .bind(&description)
+        .bind(&version)
+        .bind(provider_id)
+        .bind(&model_id)
+        .bind(&system_prompt)
+        .bind(&tool_names)
+        .bind(max_tokens)
+        .bind(temperature)
+        .bind(&thinking_config)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        // Get the new id: last_insert_rowid if inserted, otherwise find by display_name
+        let last_id: i64 = sqlx::query_scalar("SELECT last_insert_rowid()")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to get last_insert_rowid: {}", e),
+            })?;
+
+        let repaired_id = if last_id == 0 {
+            // ON CONFLICT fired: name already exists, find it
+            sqlx::query_scalar("SELECT id FROM agents WHERE display_name = ? AND id != 0")
+                .bind(&display_name)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: format!("failed to get existing id for '{}': {}", display_name, e),
+                })?
+        } else {
+            last_id
+        };
+
+        // Update foreign keys in threads and jobs tables
+        for statement in [
+            "UPDATE threads SET template_id = ? WHERE template_id = 0",
+            "UPDATE jobs SET agent_id = ? WHERE agent_id = 0",
+        ] {
+            sqlx::query(statement)
+                .bind(repaired_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        }
+
+        tx.commit().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+
+    /// Insert a legacy placeholder agent for testing the repair mechanism.
+    pub async fn insert_legacy_agent_for_test(&self) -> DbResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
+            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', NULL, NULL, datetime('now'), datetime('now'))
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        Ok(())
     }
 }
 

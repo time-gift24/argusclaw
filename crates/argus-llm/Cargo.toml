@@ -17,6 +17,7 @@ argus-protocol = { path = "../argus-protocol" }
 argus-test-support = { path = "../argus-test-support" }
 argus-crypto = { path = "../argus-crypto" }
 argus-auth = { path = "../argus-auth" }
+argus-repository = { path = "../argus-repository" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

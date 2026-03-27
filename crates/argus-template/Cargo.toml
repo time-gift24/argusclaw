@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
+argus-repository = { path = "../argus-repository" }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -60,6 +60,12 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 
 所有 I/O 使用 tokio 异步。使用 Arc<T> 共享状态，RwLock 并发访问。
 
+
+## 持久化层隔离
+
+- 禁止在非 argus-repository 中编写任何 sql 语句
+- 所有需要依赖持久化的部分均使用 Arc<dyn > 依赖注入，而不是依赖具体实现
+
 ## Crate 依赖图
 
 ```
