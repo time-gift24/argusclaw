@@ -8,9 +8,8 @@ license = "MIT OR Apache-2.0"
 argus-protocol = { path = "../argus-protocol" }
 argus-repository = { path = "../argus-repository" }
 argus-template = { path = "../argus-template" }
-argus-thread = { path = "../argus-thread" }
+argus-agent = { path = "../argus-agent" }
 argus-tool = { path = "../argus-tool" }
-argus-turn = { path = "../argus-turn" }
 argus-llm = { path = "../argus-llm" }
 argus-job = { path = "../argus-job" }
 sqlx = { workspace = true, features = ["runtime-tokio", "sqlite"] }

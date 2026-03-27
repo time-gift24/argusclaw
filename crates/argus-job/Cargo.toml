@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
-argus-turn = { path = "../argus-turn" }
+argus-agent = { path = "../argus-agent" }
 argus-llm = { path = "../argus-llm" }
 argus-repository = { path = "../argus-repository" }
 argus-template = { path = "../argus-template" }

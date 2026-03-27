@@ -45,7 +45,7 @@ use argus_repository::traits::{
 };
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
-use argus_thread::CompactorManager;
+use argus_agent::CompactorManager;
 use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;

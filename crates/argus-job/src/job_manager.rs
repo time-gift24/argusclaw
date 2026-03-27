@@ -18,7 +18,7 @@ use argus_protocol::{
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
-use argus_turn::{TurnBuilder, TurnConfig, TurnOutput};
+use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, broadcast, mpsc};
 

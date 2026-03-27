@@ -6,7 +6,7 @@ use argus_protocol::{
     MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadInbox,
     ThreadJobResult, ThreadRuntimeState,
 };
-use argus_turn::turn::TurnCancellation;
+use crate::turn::TurnCancellation;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::command::ThreadRuntimeSnapshot;
@@ -367,7 +367,7 @@ async fn process_runtime_action(
     runtime_handle: &mut ThreadHandle,
     active_turn_cancellation: &mut Option<TurnCancellation>,
     action: ThreadRuntimeAction,
-    turn_done_tx: &mpsc::UnboundedSender<std::result::Result<argus_turn::TurnOutput, ThreadError>>,
+    turn_done_tx: &mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
 ) {
     let mut next_action = action;
     loop {
@@ -420,7 +420,7 @@ async fn start_turn_task(
     thread: Arc<RwLock<Thread>>,
     content: String,
     msg_override: Option<MessageOverride>,
-    turn_done_tx: mpsc::UnboundedSender<std::result::Result<argus_turn::TurnOutput, ThreadError>>,
+    turn_done_tx: mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
 ) -> std::result::Result<TurnCancellation, ThreadError> {
     let cancellation = TurnCancellation::new();
     let turn = {

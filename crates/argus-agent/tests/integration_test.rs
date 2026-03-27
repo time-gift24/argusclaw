@@ -18,8 +18,8 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_protocol::{AgentId, MessageOverride, ThreadId};
-use argus_turn::turn::TurnCancellation;
-use argus_turn::{TurnBuilder, TurnConfig};
+use argus_agent::turn::TurnCancellation;
+use argus_agent::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -437,7 +437,7 @@ async fn turn_cancel_returns_cancelled_instead_of_error() {
         .expect("turn should terminate quickly after cancellation")
         .expect("turn task should not panic");
 
-    assert!(matches!(result, Err(argus_turn::TurnError::Cancelled)));
+    assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
 }
 
 #[tokio::test]
@@ -472,7 +472,7 @@ async fn turn_cancel_does_not_emit_turn_failed_event() {
         .await
         .expect("turn should terminate quickly after cancellation")
         .expect("turn task should not panic");
-    assert!(matches!(result, Err(argus_turn::TurnError::Cancelled)));
+    assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
 
     let mut saw_idle = false;
     let mut saw_failed = false;

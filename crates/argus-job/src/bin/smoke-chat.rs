@@ -8,7 +8,7 @@ use argus_protocol::llm::{ChatMessage, LlmProviderId, LlmStreamEvent, Role};
 use argus_protocol::{AgentId, AgentRecord, AgentType, ProviderId, ThreadEvent};
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
 use argus_repository::traits::AccountRepository;
-use argus_turn::{TurnBuilder, TurnConfig};
+use argus_agent::{TurnBuilder, TurnConfig};
 use clap::Parser;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;

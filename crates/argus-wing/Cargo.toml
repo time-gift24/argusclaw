@@ -39,7 +39,7 @@ argus-template = { path = "../argus-template" }
 argus-session = { path = "../argus-session" }
 argus-approval = { path = "../argus-approval" }
 argus-tool = { path = "../argus-tool" }
-argus-thread = { path = "../argus-thread" }
+argus-agent = { path = "../argus-agent" }
 argus-repository = { path = "../argus-repository" }
 argus-auth = { path = "../argus-auth" }
 argus-crypto = { path = "../argus-crypto" }

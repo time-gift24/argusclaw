@@ -1,4 +1,4 @@
-use argus_turn::TurnLogEvent;
+use argus_agent::TurnLogEvent;
 
 #[test]
 fn test_turn_start_serialization() {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use argus_protocol::{SessionId, ThreadControlEvent, ThreadEvent, ThreadId};
-use argus_thread::Thread;
+use argus_agent::Thread;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
