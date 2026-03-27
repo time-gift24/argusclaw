@@ -63,8 +63,6 @@ pub use llm::{
     ThinkingMode,
     ToolCall,
     ToolCallDelta,
-    ToolCompletionRequest,
-    ToolCompletionResponse,
     ToolDefinition,
     ToolResult,
     sanitize_tool_messages,

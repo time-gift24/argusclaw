@@ -5,7 +5,6 @@ use argus_job::JobManager;
 use argus_protocol::{
     llm::{
         ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
-        ToolCompletionRequest, ToolCompletionResponse,
     },
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
 };
@@ -65,23 +64,9 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
         Err(self.llm_error())
     }
 
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> std::result::Result<ToolCompletionResponse, LlmError> {
-        Err(self.llm_error())
-    }
-
     async fn stream_complete(
         &self,
         _request: CompletionRequest,
-    ) -> std::result::Result<LlmEventStream, LlmError> {
-        Err(self.llm_error())
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
     ) -> std::result::Result<LlmEventStream, LlmError> {
         Err(self.llm_error())
     }
@@ -1092,8 +1077,7 @@ mod tests {
     use std::time::Duration;
 
     use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
-        ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, FinishReason, LlmError,
     };
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
@@ -1139,18 +1123,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
+            request: CompletionRequest,
         ) -> std::result::Result<CompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "capturing".to_string(),
-                reason: "streaming only in tests".to_string(),
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            request: ToolCompletionRequest,
-        ) -> std::result::Result<ToolCompletionResponse, LlmError> {
             let last_user_input = request
                 .messages
                 .iter()
@@ -1165,7 +1139,7 @@ mod tests {
 
             sleep(self.delay).await;
 
-            Ok(ToolCompletionResponse {
+            Ok(CompletionResponse {
                 content: Some(self.response.clone()),
                 reasoning_content: None,
                 tool_calls: Vec::new(),

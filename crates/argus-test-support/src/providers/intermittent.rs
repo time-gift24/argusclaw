@@ -11,7 +11,6 @@ use rust_decimal::Decimal;
 
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream, LlmProvider,
-    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Provider that succeeds on first call, fails on next 3 calls, then succeeds.
@@ -70,28 +69,6 @@ impl LlmProvider for IntermittentFailureProvider {
         }
 
         Ok(CompletionResponse {
-            content: "Success after intermittent failures".to_string(),
-            reasoning_content: None,
-            input_tokens: 10,
-            output_tokens: 5,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        if self.should_fail() {
-            return Err(LlmError::RateLimited {
-                provider: "intermittent-failure".to_string(),
-                retry_after: Some(Duration::from_millis(300)),
-            });
-        }
-
-        Ok(ToolCompletionResponse {
             content: Some("Success after intermittent failures".to_string()),
             reasoning_content: None,
             tool_calls: vec![],
@@ -115,26 +92,6 @@ impl LlmProvider for IntermittentFailureProvider {
         }
 
         // Simple stream that emits a finish event
-        let stream = futures_util::stream::once(async move {
-            Ok(argus_protocol::llm::LlmStreamEvent::Finished {
-                finish_reason: FinishReason::Stop,
-            })
-        });
-
-        Ok(Box::pin(stream))
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        if self.should_fail() {
-            return Err(LlmError::RateLimited {
-                provider: "intermittent-failure".to_string(),
-                retry_after: Some(Duration::from_millis(300)),
-            });
-        }
-
         let stream = futures_util::stream::once(async move {
             Ok(argus_protocol::llm::LlmStreamEvent::Finished {
                 finish_reason: FinishReason::Stop,

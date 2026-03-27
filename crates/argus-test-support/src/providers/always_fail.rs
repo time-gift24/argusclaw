@@ -9,7 +9,6 @@ use rust_decimal::Decimal;
 
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
-    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Provider that always fails with a retryable error.
@@ -47,29 +46,9 @@ impl LlmProvider for AlwaysFailProvider {
         })
     }
 
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        Err(LlmError::RateLimited {
-            provider: "always-fail".to_string(),
-            retry_after: Some(Duration::from_millis(300)),
-        })
-    }
-
     async fn stream_complete(
         &self,
         _request: CompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        Err(LlmError::RateLimited {
-            provider: "always-fail".to_string(),
-            retry_after: Some(Duration::from_millis(300)),
-        })
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         Err(LlmError::RateLimited {
             provider: "always-fail".to_string(),

@@ -9,8 +9,7 @@ use argus_protocol::AgentRecord;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
-    LlmProvider, LlmStreamEvent, ToolCall, ToolCallDelta, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    LlmProvider, LlmStreamEvent, ToolCall, ToolCallDelta, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_agent::trace::TraceConfig;
@@ -43,21 +42,6 @@ impl LlmProvider for SimpleMockProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Ok(CompletionResponse {
-            content: self.response.clone(),
-            reasoning_content: None,
-            input_tokens: 10,
-            output_tokens: 5,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        Ok(ToolCompletionResponse {
             content: Some(self.response.clone()),
             reasoning_content: None,
             tool_calls: vec![],
@@ -72,16 +56,6 @@ impl LlmProvider for SimpleMockProvider {
     async fn stream_complete(
         &self,
         _request: CompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        Err(LlmError::RequestFailed {
-            provider: "mock".to_string(),
-            reason: "not implemented".to_string(),
-        })
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let response = self.response.clone();
         let stream = futures_util::stream::once(async move {
@@ -171,16 +145,6 @@ impl LlmProvider for ToolCallMockProvider {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        Err(LlmError::RequestFailed {
-            provider: "mock".to_string(),
-            reason: "not implemented".to_string(),
-        })
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
         let (content, tool_calls) = self.next_response();
         let finish_reason = if tool_calls.is_empty() {
             FinishReason::Stop
@@ -188,7 +152,7 @@ impl LlmProvider for ToolCallMockProvider {
             FinishReason::ToolUse
         };
 
-        Ok(ToolCompletionResponse {
+        Ok(CompletionResponse {
             content: Some(content),
             reasoning_content: None,
             tool_calls,
@@ -203,16 +167,6 @@ impl LlmProvider for ToolCallMockProvider {
     async fn stream_complete(
         &self,
         _request: CompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        Err(LlmError::RequestFailed {
-            provider: "mock".to_string(),
-            reason: "not implemented".to_string(),
-        })
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let (content, tool_calls) = self.next_response();
         let has_tool_calls = !tool_calls.is_empty();

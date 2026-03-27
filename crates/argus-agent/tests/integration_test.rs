@@ -13,8 +13,7 @@ use argus_protocol::events::{
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
-    LlmProvider, LlmStreamEvent, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition,
+    LlmProvider, LlmStreamEvent, Role, ToolCall, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_protocol::{AgentId, MessageOverride, ThreadId};
@@ -98,29 +97,13 @@ impl LlmProvider for MockProvider {
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let response = self.next_response();
-        Ok(CompletionResponse {
-            content: response.content,
-            reasoning_content: None,
-            input_tokens: 10,
-            output_tokens: 5,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        let response = self.next_response();
         let finish_reason = if response.tool_calls.is_empty() {
             FinishReason::Stop
         } else {
             FinishReason::ToolUse
         };
 
-        Ok(ToolCompletionResponse {
+        Ok(CompletionResponse {
             content: Some(response.content),
             reasoning_content: None,
             tool_calls: response.tool_calls,
@@ -254,16 +237,6 @@ impl LlmProvider for FlakyProvider {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        Err(LlmError::RequestFailed {
-            provider: "flaky".to_string(),
-            reason: "streaming not supported".to_string(),
-        })
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -280,7 +253,7 @@ impl LlmProvider for FlakyProvider {
             });
         }
 
-        Ok(ToolCompletionResponse {
+        Ok(CompletionResponse {
             content: Some("Success after retries!".to_string()),
             reasoning_content: None,
             tool_calls: vec![],
@@ -295,16 +268,6 @@ impl LlmProvider for FlakyProvider {
     async fn stream_complete(
         &self,
         _request: CompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        Err(LlmError::RequestFailed {
-            provider: "flaky".to_string(),
-            reason: "use complete_with_tools".to_string(),
-        })
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -376,19 +339,9 @@ impl LlmProvider for HangingStreamingProvider {
         })
     }
 
-    async fn complete_with_tools(
+    async fn stream_complete(
         &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        Err(LlmError::UnsupportedCapability {
-            provider: "hanging".to_string(),
-            capability: "complete_with_tools".to_string(),
-        })
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
+        _request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         let stream = futures_util::stream::unfold(0usize, |state| async move {
             tokio::time::sleep(Duration::from_millis(50)).await;

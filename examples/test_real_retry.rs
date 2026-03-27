@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match retry_provider.complete(request).await {
             Ok(response) => {
                 println!("✅ Success!");
-                println!("Response: {}", response.content.trim());
+                println!("Response: {}", response.content.as_deref().unwrap_or("").trim());
             }
             Err(e) => {
                 println!("❌ Failed: {}", e);

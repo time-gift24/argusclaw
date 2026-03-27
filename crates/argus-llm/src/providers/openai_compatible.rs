@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, ContentPart, LlmError, LlmEventStream, LlmProvider,
     LlmStreamEvent, ProviderCapabilities, Role, ThinkingConfig, ToolCall, ToolCallDelta,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolDefinition,
 };
 
 use crate::retry::{RetryConfig, RetryProvider};
@@ -450,9 +450,10 @@ impl OpenAiCompatibleProvider {
     async fn send_chat_request(
         &self,
         body: &ChatCompletionsRequest,
+        extra_headers: &[(String, String)],
     ) -> Result<reqwest::Response, LlmError> {
         let response =
-            self.build_chat_request(body)
+            self.build_chat_request(body, extra_headers)
                 .send()
                 .await
                 .map_err(|e| LlmError::RequestFailed {
@@ -467,7 +468,11 @@ impl OpenAiCompatibleProvider {
         Err(map_http_error(response, &self.model).await)
     }
 
-    fn build_chat_request(&self, body: &ChatCompletionsRequest) -> reqwest::RequestBuilder {
+    fn build_chat_request(
+        &self,
+        body: &ChatCompletionsRequest,
+        extra_headers: &[(String, String)],
+    ) -> reqwest::RequestBuilder {
         let client = if body.stream {
             &self.stream_client
         } else {
@@ -478,6 +483,15 @@ impl OpenAiCompatibleProvider {
             request = request
                 .header(ACCEPT, "text/event-stream")
                 .header(ACCEPT_ENCODING, "identity");
+        }
+        for (name, value) in extra_headers {
+            let header_name = HeaderName::try_from(name.clone()).unwrap_or_else(|_| {
+                HeaderName::from_static("x-unknown-header")
+            });
+            let header_value = HeaderValue::from_str(value).unwrap_or_else(|_| {
+                HeaderValue::from_static("")
+            });
+            request = request.header(header_name, header_value);
         }
 
         request
@@ -539,8 +553,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let extra_headers = request.extra_headers.clone();
         let body = ChatCompletionsRequest::from_completion_request(&self.model, request, false);
-        let response = self.send_chat_request(&body).await?;
+        let response = self.send_chat_request(&body, &extra_headers).await?;
         let payload: ChatCompletionResponse =
             response
                 .json()
@@ -580,57 +595,21 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let content = if choice.message.content.is_none() {
             if let Some(ref reasoning) = choice.message.reasoning_content {
                 tracing::warn!("content is None, using reasoning_content as fallback");
-                reasoning.clone()
+                Some(reasoning.clone())
+            } else if choice.message.tool_calls.is_some() {
+                None
             } else {
                 tracing::warn!(
                     "both content and reasoning_content are None, returning empty string"
                 );
-                String::new()
+                Some(String::new())
             }
         } else {
-            choice.message.content.clone().unwrap_or_default()
+            choice.message.content
         };
 
         Ok(CompletionResponse {
             content,
-            reasoning_content: choice.message.reasoning_content,
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
-            finish_reason: parse_finish_reason(choice.finish_reason.as_deref()),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
-    }
-
-    async fn complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        let body =
-            ChatCompletionsRequest::from_tool_completion_request(&self.model, request, false);
-        let response = self.send_chat_request(&body).await?;
-        let payload: ChatCompletionResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| LlmError::InvalidResponse {
-                    provider: "openai-compatible".to_string(),
-                    reason: e.to_string(),
-                })?;
-
-        let choice =
-            payload
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
-                    provider: "openai-compatible".to_string(),
-                    reason: "response had no choices".to_string(),
-                })?;
-        let usage = payload.usage.unwrap_or_default();
-
-        Ok(ToolCompletionResponse {
-            content: choice.message.content,
             reasoning_content: choice.message.reasoning_content,
             tool_calls: choice
                 .message
@@ -651,20 +630,10 @@ impl LlmProvider for OpenAiCompatibleProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
+        let extra_headers = request.extra_headers.clone();
         let body = ChatCompletionsRequest::from_completion_request(&self.model, request, true);
-        let response = self.send_chat_request(&body).await?;
+        let response = self.send_chat_request(&body, &extra_headers).await?;
         let stream = build_sse_event_stream("stream_complete", response.bytes_stream());
-
-        Ok(Box::pin(stream))
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        let body = ChatCompletionsRequest::from_tool_completion_request(&self.model, request, true);
-        let response = self.send_chat_request(&body).await?;
-        let stream = build_sse_event_stream("stream_complete_with_tools", response.bytes_stream());
 
         Ok(Box::pin(stream))
     }
@@ -705,38 +674,9 @@ impl ChatCompletionsRequest {
             temperature: request.temperature,
             stop: request.stop_sequences,
             thinking: request.thinking,
-            tools: None,
-            tool_choice: None,
-            stream,
-            stream_options: stream.then_some(StreamOptions {
-                include_usage: true,
+            tools: request.tools.map(|tools| {
+                tools.into_iter().map(OpenAiToolDefinition::from).collect()
             }),
-        }
-    }
-
-    fn from_tool_completion_request(
-        model: &str,
-        request: ToolCompletionRequest,
-        stream: bool,
-    ) -> Self {
-        Self {
-            model: request.model.unwrap_or_else(|| model.to_string()),
-            messages: request
-                .messages
-                .into_iter()
-                .map(OpenAiMessage::from)
-                .collect(),
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            stop: None,
-            thinking: request.thinking,
-            tools: Some(
-                request
-                    .tools
-                    .into_iter()
-                    .map(OpenAiToolDefinition::from)
-                    .collect(),
-            ),
             tool_choice: request.tool_choice,
             stream,
             stream_options: stream.then_some(StreamOptions {
@@ -1110,7 +1050,7 @@ mod tests {
         );
 
         let request = provider
-            .build_chat_request(&body)
+            .build_chat_request(&body, &[])
             .build()
             .expect("request should build");
 

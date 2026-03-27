@@ -567,8 +567,7 @@ mod tests {
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
     use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
-        ToolCompletionResponse,
+        CompletionRequest, CompletionResponse, LlmError,
     };
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
     use async_trait::async_trait;
@@ -597,16 +596,6 @@ mod tests {
                 reason: "not implemented".to_string(),
             })
         }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "dummy".to_string(),
-                reason: "not implemented".to_string(),
-            })
-        }
     }
 
     struct SmallContextProvider {
@@ -627,16 +616,6 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "small-context".to_string(),
-                reason: "not implemented".to_string(),
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
             Err(LlmError::RequestFailed {
                 provider: "small-context".to_string(),
                 reason: "not implemented".to_string(),
@@ -726,18 +705,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
+            request: CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "sequenced".to_string(),
-                reason: "streaming only in tests".to_string(),
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
             let last_user_input = request
                 .messages
                 .iter()
@@ -759,7 +728,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| ResponsePlan::Ok("default response".to_string()));
             let ResponsePlan::Ok(content) = next_plan;
-            Ok(ToolCompletionResponse {
+            Ok(CompletionResponse {
                 content: Some(content),
                 reasoning_content: None,
                 tool_calls: Vec::new(),

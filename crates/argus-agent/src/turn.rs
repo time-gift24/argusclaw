@@ -13,8 +13,8 @@ use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmStreamEvent, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+    LlmStreamEvent, ToolCall, ToolDefinition,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -181,7 +181,7 @@ impl StreamingAccumulator {
         }
     }
 
-    fn into_response(self) -> ToolCompletionResponse {
+    fn into_response(self) -> CompletionResponse {
         // Convert accumulated tool calls to ToolCall structs
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
@@ -195,7 +195,7 @@ impl StreamingAccumulator {
             })
             .collect();
 
-        ToolCompletionResponse {
+        CompletionResponse {
             content: if self.content.is_empty() {
                 None
             } else {
@@ -763,7 +763,7 @@ impl Turn {
             }
 
             // Build the request with current messages and tools
-            let mut request = ToolCompletionRequest::new(messages.clone(), tools.clone());
+            let mut request = CompletionRequest::new(messages.clone()).with_tools(tools.clone());
             if let Some(max_tokens) = self.agent_record.max_tokens {
                 request.max_tokens = Some(max_tokens);
             }
@@ -809,7 +809,7 @@ impl Turn {
             );
 
             // Clone for tracing before processing consumes it
-            let trace_response = argus_protocol::llm::ToolCompletionResponse {
+            let trace_response = argus_protocol::llm::CompletionResponse {
                 content: response.content.clone(),
                 reasoning_content: response.reasoning_content.clone(),
                 tool_calls: response.tool_calls.clone(),
@@ -962,15 +962,15 @@ impl Turn {
     /// Falls back to non-streaming if the provider doesn't support streaming.
     async fn call_llm_streaming(
         &self,
-        request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, TurnError> {
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, TurnError> {
         if self.cancellation.is_cancelled() {
             return Err(TurnError::Cancelled);
         }
 
         match self
             .provider
-            .stream_complete_with_tools(request.clone())
+            .stream_complete(request.clone())
             .await
         {
             Ok(mut stream) => {
@@ -1017,7 +1017,7 @@ impl Turn {
                 tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
                 tokio::select! {
                     _ = self.cancellation.cancelled() => Err(TurnError::Cancelled),
-                    result = self.provider.complete_with_tools(request) => result.map_err(TurnError::LlmFailed),
+                    result = self.provider.complete(request) => result.map_err(TurnError::LlmFailed),
                 }
             }
             Err(e) => Err(TurnError::LlmFailed(e)),
@@ -1027,11 +1027,11 @@ impl Turn {
     /// Processes the LLM response and determines the next action.
     fn process_finish_reason(
         &self,
-        response: ToolCompletionResponse,
+        response: CompletionResponse,
         messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
     ) -> Result<NextAction, TurnError> {
-        let ToolCompletionResponse {
+        let CompletionResponse {
             content,
             reasoning_content,
             tool_calls: response_tool_calls,
