@@ -286,6 +286,7 @@ name = "argus-template"
 version = "0.1.0"
 dependencies = [
  "argus-protocol",
+ "argus-repository",
  "async-trait",
  "serde",
  "serde_json",

@@ -40,6 +40,7 @@ use argus_protocol::{
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
+use argus_repository::traits::AgentRepository;
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
@@ -111,7 +112,11 @@ impl ArgusWing {
         );
 
         // Create template manager
-        let template_manager = Arc::new(TemplateManager::new(pool.clone()));
+        let arc_sqlite = Arc::new(ArgusSqlite::new(pool.clone()));
+        let template_manager = Arc::new(TemplateManager::new(
+            arc_sqlite.clone() as Arc<dyn AgentRepository>,
+            arc_sqlite.clone(),
+        ));
         template_manager.repair_placeholder_ids().await?;
 
         // Seed builtin agents from agents/ directory
@@ -174,7 +179,11 @@ impl ArgusWing {
         let provider_manager = Arc::new(
             ProviderManager::new(llm_repository).with_auth(Arc::new(pool.clone()), cipher.clone()),
         );
-        let template_manager = Arc::new(TemplateManager::new(pool.clone()));
+        let arc_sqlite = Arc::new(ArgusSqlite::new(pool.clone()));
+        let template_manager = Arc::new(TemplateManager::new(
+            arc_sqlite.clone() as Arc<dyn AgentRepository>,
+            arc_sqlite.clone(),
+        ));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
         // Create provider resolver wrapper FIRST

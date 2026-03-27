@@ -11,14 +11,13 @@ use super::{ArgusSqlite, DbResult};
 
 #[async_trait]
 impl AgentRepository for ArgusSqlite {
-    async fn upsert(&self, record: &AgentRecord) -> DbResult<()> {
+    async fn upsert(&self, record: &AgentRecord) -> DbResult<AgentId> {
         let tool_names_json =
             serde_json::to_string(&record.tool_names).map_err(|e| DbError::QueryFailed {
                 reason: format!("failed to serialize tool_names: {e}"),
             })?;
         let temperature_int = record.temperature.map(|t| (t * 100.0) as i64);
 
-        // Serialize thinking_config to JSON
         let thinking_config_json = record
             .thinking_config
             .as_ref()
@@ -36,7 +35,20 @@ impl AgentRepository for ArgusSqlite {
         if record.id.into_inner() == 0 {
             sqlx::query(
                 "INSERT INTO agents (display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(display_name) DO UPDATE SET
+                     description = excluded.description,
+                     version = excluded.version,
+                     provider_id = excluded.provider_id,
+                     model_id = excluded.model_id,
+                     system_prompt = excluded.system_prompt,
+                     tool_names = excluded.tool_names,
+                     max_tokens = excluded.max_tokens,
+                     temperature = excluded.temperature,
+                     thinking_config = excluded.thinking_config,
+                     parent_agent_id = excluded.parent_agent_id,
+                     agent_type = excluded.agent_type,
+                     updated_at = CURRENT_TIMESTAMP",
             )
             .bind(&record.display_name)
             .bind(&record.description)
@@ -53,6 +65,16 @@ impl AgentRepository for ArgusSqlite {
             .execute(&self.pool)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+            let id = sqlx::query_scalar::<_, i64>("SELECT id FROM agents WHERE display_name = ?")
+                .bind(&record.display_name)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: format!("failed to fetch id after upsert: {e}"),
+                })?;
+
+            Ok(AgentId::new(id))
         } else {
             sqlx::query(
                 "INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config, parent_agent_id, agent_type)
@@ -88,9 +110,9 @@ impl AgentRepository for ArgusSqlite {
             .execute(&self.pool)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
-        }
 
-        Ok(())
+            Ok(record.id)
+        }
     }
 
     async fn get(&self, id: &AgentId) -> DbResult<Option<AgentRecord>> {
@@ -154,6 +176,70 @@ impl AgentRepository for ArgusSqlite {
             })?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn find_id_by_display_name(&self, display_name: &str) -> DbResult<Option<AgentId>> {
+        let id: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE display_name = ?1 LIMIT 1",
+        )
+        .bind(display_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        Ok(id.map(AgentId::new))
+    }
+
+    async fn count_references(&self, id: &AgentId) -> DbResult<(i64, i64)> {
+        let thread_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE template_id = ?1")
+                .bind(id.into_inner())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        let job_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE agent_id = ?1")
+                .bind(id.into_inner())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        Ok((thread_count, job_count))
+    }
+
+    async fn add_subagent(&self, parent_id: &AgentId, child_id: &AgentId) -> DbResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE agents
+            SET parent_agent_id = ?1, agent_type = 'subagent', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?2
+            "#,
+        )
+        .bind(parent_id.into_inner())
+        .bind(child_id.into_inner())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        Ok(())
+    }
+
+    async fn remove_subagent(&self, parent_id: &AgentId, child_id: &AgentId) -> DbResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE agents
+            SET parent_agent_id = NULL, agent_type = 'standard', updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?1 AND parent_agent_id = ?2
+            "#,
+        )
+        .bind(child_id.into_inner())
+        .bind(parent_id.into_inner())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+
+        Ok(())
     }
 }
 
