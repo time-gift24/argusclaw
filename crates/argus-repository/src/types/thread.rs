@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use argus_protocol::ThreadId;
+use argus_protocol::{AgentId, SessionId, ThreadId};
 use argus_protocol::llm::LlmProviderId;
 
 /// Unique identifier for a stored message.
@@ -60,6 +60,25 @@ pub struct ThreadRecord {
     pub token_count: u32,
     /// Turn count.
     pub turn_count: u32,
+    /// Session this thread belongs to (for session-scoped queries).
+    pub session_id: Option<SessionId>,
+    /// Template (agent) this thread uses.
+    pub template_id: Option<AgentId>,
+    /// Per-thread model override.
+    pub model_override: Option<String>,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+}
+
+/// Session record (minimal, for repository operations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    /// Session ID.
+    pub id: SessionId,
+    /// Session name.
+    pub name: String,
     /// Creation timestamp.
     pub created_at: String,
     /// Last update timestamp.

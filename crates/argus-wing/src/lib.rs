@@ -40,7 +40,9 @@ use argus_protocol::{
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
-use argus_repository::traits::AgentRepository;
+use argus_repository::traits::{
+    AccountRepository, AgentRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
+};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_thread::CompactorManager;
@@ -103,12 +105,15 @@ impl ArgusWing {
 
         // Create auth components first (needed for account management)
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
-        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
+        let account_repo: Arc<dyn AccountRepository> = Arc::new(ArgusSqlite::new(pool.clone()));
+        let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
 
         // Create LLM provider repository and manager
-        let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let llm_repository: Arc<dyn LlmProviderRepository> =
+            Arc::new(ArgusSqlite::new(pool.clone()));
         let provider_manager = Arc::new(
-            ProviderManager::new(llm_repository).with_auth(Arc::new(pool.clone()), cipher.clone()),
+            ProviderManager::new(llm_repository.clone())
+                .with_auth(account_repo, cipher.clone()),
         );
 
         // Create template manager
@@ -142,7 +147,9 @@ impl ArgusWing {
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
-            pool.clone(),
+            arc_sqlite.clone() as Arc<dyn SessionRepository>,
+            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
+            Arc::clone(&llm_repository) as Arc<dyn LlmProviderRepository>,
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
@@ -172,12 +179,15 @@ impl ArgusWing {
     pub fn with_pool(pool: SqlitePool) -> Arc<Self> {
         // Create auth components first
         let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
-        let account_manager = Arc::new(AccountManager::new(Arc::new(pool.clone()), cipher.clone()));
+        let account_repo: Arc<dyn AccountRepository> = Arc::new(ArgusSqlite::new(pool.clone()));
+        let account_manager = Arc::new(AccountManager::new(account_repo.clone(), cipher.clone()));
 
         // Create LLM provider repository and manager
-        let llm_repository = Arc::new(ArgusSqlite::new(pool.clone()));
+        let llm_repository: Arc<dyn LlmProviderRepository> =
+            Arc::new(ArgusSqlite::new(pool.clone()));
         let provider_manager = Arc::new(
-            ProviderManager::new(llm_repository).with_auth(Arc::new(pool.clone()), cipher.clone()),
+            ProviderManager::new(llm_repository.clone())
+                .with_auth(account_repo, cipher.clone()),
         );
         let arc_sqlite = Arc::new(ArgusSqlite::new(pool.clone()));
         let template_manager = Arc::new(TemplateManager::new(
@@ -198,7 +208,9 @@ impl ArgusWing {
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
-            pool.clone(),
+            arc_sqlite.clone() as Arc<dyn SessionRepository>,
+            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
+            Arc::clone(&llm_repository) as Arc<dyn LlmProviderRepository>,
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
@@ -733,6 +745,8 @@ mod tests {
 
     #[tokio::test]
     async fn init_repairs_legacy_placeholder_agent_ids() {
+        use argus_repository::ArgusSqlite;
+
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
 
@@ -740,15 +754,11 @@ mod tests {
             .await
             .expect("ArgusWing should initialize");
 
-        sqlx::query(
-            r#"
-            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
-            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', NULL, NULL, datetime('now'), datetime('now'))
-            "#,
-        )
-        .execute(&wing.pool)
-        .await
-        .expect("legacy zero-id agent should insert");
+        // Insert a legacy placeholder agent for the repair test
+        let db = ArgusSqlite::new(wing.pool.clone());
+        db.insert_legacy_agent_for_test()
+            .await
+            .expect("legacy zero-id agent should insert");
 
         drop(wing);
 

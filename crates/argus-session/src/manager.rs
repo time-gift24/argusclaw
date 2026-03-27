@@ -7,8 +7,9 @@ use argus_protocol::{
         ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
         ToolCompletionRequest, ToolCompletionResponse,
     },
-    AgentId, ArgusError, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
+    AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
 };
+use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_thread::config::ThreadConfigBuilder;
 use argus_thread::{CompactorManager, FilePlanStore, ThreadBuilder};
@@ -17,7 +18,6 @@ use argus_turn::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, Tur
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
-use sqlx::{Row, SqlitePool};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
@@ -90,7 +90,9 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
 /// Manages sessions and their threads.
 #[derive(Clone)]
 pub struct SessionManager {
-    pool: SqlitePool,
+    session_repo: Arc<dyn SessionRepository>,
+    thread_repo: Arc<dyn ThreadRepository>,
+    llm_provider_repo: Arc<dyn LlmProviderRepository>,
     sessions: DashMap<SessionId, Arc<Session>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
@@ -104,7 +106,9 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new SessionManager.
     pub fn new(
-        pool: SqlitePool,
+        session_repo: Arc<dyn SessionRepository>,
+        thread_repo: Arc<dyn ThreadRepository>,
+        llm_provider_repo: Arc<dyn LlmProviderRepository>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
@@ -125,7 +129,9 @@ impl SessionManager {
         tool_manager.register(Arc::new(get_job_result_tool));
 
         Self {
-            pool,
+            session_repo,
+            thread_repo,
+            llm_provider_repo,
             sessions: DashMap::new(),
             template_manager,
             provider_resolver,
@@ -145,34 +151,23 @@ impl SessionManager {
 
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT s.id, s.name, s.updated_at, COUNT(t.id) as thread_count
-            FROM sessions s
-            LEFT JOIN threads t ON t.session_id = s.id
-            GROUP BY s.id
-            ORDER BY s.updated_at DESC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        let sessions = self
+            .session_repo
+            .list_with_counts()
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        let sessions = rows
+        let sessions = sessions
             .into_iter()
-            .map(|row| {
-                let updated_at_str: String = row.get("updated_at");
-                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+            .map(|swc| {
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&swc.session.updated_at)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now());
 
                 SessionSummary {
-                    id: SessionId::parse(&row.get::<String, _>("id"))
-                        .unwrap_or_else(|_| SessionId::new()),
-                    name: row.get("name"),
-                    thread_count: row.get("thread_count"),
+                    id: swc.session.id,
+                    name: swc.session.name,
+                    thread_count: swc.thread_count,
                     updated_at,
                 }
             })
@@ -194,19 +189,14 @@ impl SessionManager {
         }
 
         // Load from DB
-        let row = sqlx::query("SELECT id, name FROM sessions WHERE id = ?")
-            .bind(session_id.to_string())
-            .fetch_optional(&self.pool)
+        let session_record = self
+            .session_repo
+            .get(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        let session = match row {
-            Some(row) => {
-                let name: String = row.get("name");
-                Arc::new(Session::new(session_id, name))
-            }
+        let session = match session_record {
+            Some(record) => Arc::new(Session::new(session_id, record.name)),
             None => return Err(ArgusError::SessionNotFound(session_id)),
         };
 
@@ -214,45 +204,51 @@ impl SessionManager {
         let sm = self.clone();
 
         // Load threads metadata from DB
-        let thread_rows = sqlx::query(
-            r#"
-            SELECT id, template_id, provider_id, title, token_count, turn_count, created_at, updated_at, model_override
-            FROM threads WHERE session_id = ?
-            "#,
-        )
-        .bind(session_id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        let thread_records = self
+            .thread_repo
+            .list_threads_in_session(&session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        for thread_row in thread_rows {
-            let thread_id_str: String = thread_row.get("id");
-            let thread_id = ThreadId::parse(&thread_id_str).unwrap_or_default();
-            let template_id: i64 = thread_row.get("template_id");
-            let provider_id_val: i64 = thread_row.get("provider_id");
-            let token_count: i64 = thread_row.get("token_count");
-            let turn_count: i64 = thread_row.get("turn_count");
-            let model_override: Option<String> = thread_row.get("model_override");
+        for thread_record in thread_records {
+            let thread_id = thread_record.id;
+            let thread_id_str = thread_id.to_string();
+            let template_id = thread_record.template_id;
+            let provider_id_val = thread_record.provider_id.into_inner();
+            let token_count = thread_record.token_count;
+            let turn_count = thread_record.turn_count;
+            let model_override = thread_record.model_override.clone();
+            let title: Option<String> = thread_record.title;
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
 
             // Get agent record (template)
-            let agent_record = match self.template_manager.get(AgentId::new(template_id)).await {
-                Ok(Some(record)) => record,
-                Ok(None) => {
+            let agent_record = match template_id {
+                Some(tid) => match self.template_manager.get(tid).await {
+                    Ok(Some(record)) => record,
+                    Ok(None) => {
+                        tracing::warn!(
+                            thread_id = %thread_id_str,
+                            template_id = %tid.inner(),
+                            "Template not found for thread, skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = %thread_id_str,
+                            template_id = %tid.inner(),
+                            error = %e,
+                            "Failed to get template for thread, skipping"
+                        );
+                        continue;
+                    }
+                },
+                None => {
                     tracing::warn!(
                         thread_id = %thread_id_str,
-                        template_id = %template_id,
-                        "Template not found for thread, skipping"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        template_id = %template_id,
-                        error = %e,
-                        "Failed to get template for thread, skipping"
+                        "No template_id for thread, skipping"
                     );
                     continue;
                 }
@@ -312,13 +308,6 @@ impl SessionManager {
             let compactor = self.compactor_manager.default_compactor().clone();
 
             // Build Thread directly
-            let title: Option<String> = thread_row.get("title");
-            let updated_at = {
-                let updated_at_str: String = thread_row.get("updated_at");
-                chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now())
-            };
             let trace_cfg = TraceConfig::new(true, self.trace_dir.clone())
                 .with_session_id(session_id)
                 .with_turn_start(
@@ -404,14 +393,10 @@ impl SessionManager {
     /// Create a new session.
     pub async fn create(&self, name: String) -> Result<SessionId> {
         let session_id = SessionId::new();
-        sqlx::query(
-            "INSERT INTO sessions (id, name, created_at, updated_at) VALUES (?, ?, datetime('now'), datetime('now'))",
-        )
-        .bind(session_id.to_string())
-        .bind(&name)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        self.session_repo
+            .create(&session_id, &name)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         // Create session trace directory with meta.json
         if let Err(e) = self.ensure_session_dir(session_id).await {
@@ -479,22 +464,16 @@ impl SessionManager {
     /// Delete a session and all its threads.
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
         // Delete threads belonging to this session (no CASCADE on session_id FK)
-        sqlx::query("DELETE FROM threads WHERE session_id = ?")
-            .bind(session_id.to_string())
-            .execute(&self.pool)
+        self.thread_repo
+            .delete_threads_in_session(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         // Delete the session row
-        sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(session_id.to_string())
-            .execute(&self.pool)
+        self.session_repo
+            .delete(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
@@ -550,16 +529,13 @@ impl SessionManager {
                 (provider_id, provider)
             }
             None => {
-                let default_provider_id = sqlx::query_scalar::<_, i64>(
-                    "SELECT id FROM llm_providers WHERE is_default = 1 LIMIT 1",
-                )
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| ArgusError::DatabaseError {
-                    reason: error.to_string(),
-                })?
-                .map(ProviderId::new)
-                .ok_or(ArgusError::DefaultProviderNotConfigured)?;
+                let default_llm_provider_id = self
+                    .llm_provider_repo
+                    .get_default_provider_id()
+                    .await
+                    .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?
+                    .ok_or(ArgusError::DefaultProviderNotConfigured)?;
+                let default_provider_id = ProviderId::new(default_llm_provider_id.into_inner());
 
                 let provider = match requested_model {
                     Some(model) => match self
@@ -647,20 +623,23 @@ impl SessionManager {
             })?;
 
         // Insert into DB
-        sqlx::query(
-            r#"
-            INSERT INTO threads (id, session_id, template_id, provider_id, token_count, turn_count, model_override, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 0, 0, ?, datetime('now'), datetime('now'))
-            "#,
-        )
-        .bind(thread_id.inner().to_string())
-        .bind(session_id.to_string())
-        .bind(template_id.inner())
-        .bind(provider_id.inner())
-        .bind(Some(effective_model.as_str()))
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        use argus_repository::types::ThreadRecord;
+        let thread_record = ThreadRecord {
+            id: thread_id,
+            provider_id: LlmProviderId::new(provider_id.inner()),
+            title: None,
+            token_count: 0,
+            turn_count: 0,
+            session_id: Some(session_id),
+            template_id: Some(template_id),
+            model_override: Some(effective_model.clone()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.thread_repo
+            .upsert_thread(&thread_record)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
@@ -676,14 +655,10 @@ impl SessionManager {
     /// Delete a thread from a session.
     pub async fn delete_thread(&self, session_id: SessionId, thread_id: &ThreadId) -> Result<()> {
         // Delete from DB
-        sqlx::query("DELETE FROM threads WHERE id = ? AND session_id = ?")
-            .bind(thread_id.inner().to_string())
-            .bind(session_id.to_string())
-            .execute(&self.pool)
+        self.thread_repo
+            .delete_thread(thread_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -695,22 +670,13 @@ impl SessionManager {
 
     /// Rename a persisted session.
     pub async fn rename_session(&self, session_id: SessionId, name: String) -> Result<()> {
-        let result = sqlx::query(
-            r#"
-            UPDATE sessions
-            SET name = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            "#,
-        )
-        .bind(name.trim())
-        .bind(session_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        let found = self
+            .session_repo
+            .rename(&session_id, name.trim())
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        if result.rows_affected() == 0 {
+        if !found {
             return Err(ArgusError::SessionNotFound(session_id));
         }
 
@@ -725,31 +691,30 @@ impl SessionManager {
         title: String,
     ) -> Result<()> {
         let normalized = title.trim().to_string();
-        let persisted_title = (!normalized.is_empty()).then_some(normalized);
-        let result = sqlx::query(
-            r#"
-            UPDATE threads
-            SET title = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND session_id = ?
-            "#,
-        )
-        .bind(persisted_title.as_deref())
-        .bind(thread_id.inner().to_string())
-        .bind(session_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        let persisted_title: Option<&str> = if normalized.is_empty() {
+            None
+        } else {
+            Some(&normalized)
+        };
+        let in_memory_title: Option<String> = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.clone())
+        };
+        let found = self
+            .thread_repo
+            .rename_thread(thread_id, &session_id, persisted_title)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        if result.rows_affected() == 0 {
+        if !found {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
         if let Some(session) = self.sessions.get(&session_id) {
             if let Some(thread) = session.get_thread(thread_id) {
                 let mut thread = thread.write().await;
-                thread.set_title(persisted_title);
+                thread.set_title(in_memory_title);
             }
         }
 
@@ -775,24 +740,13 @@ impl SessionManager {
             .await?;
         let effective_model = provider.model_name().to_string();
 
-        let result = sqlx::query(
-            r#"
-            UPDATE threads
-            SET provider_id = ?, model_override = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND session_id = ?
-            "#,
-        )
-        .bind(provider_id.inner())
-        .bind(&effective_model)
-        .bind(thread_id.inner().to_string())
-        .bind(session_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        let found = self
+            .thread_repo
+            .update_thread_model(thread_id, &session_id, LlmProviderId::new(provider_id.inner()), Some(&effective_model))
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        if result.rows_affected() == 0 {
+        if !found {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
@@ -810,33 +764,25 @@ impl SessionManager {
         }
 
         // Otherwise, load from DB
-        let rows = sqlx::query(
-            r#"
-            SELECT id, title, token_count, turn_count, updated_at
-            FROM threads WHERE session_id = ?
-            ORDER BY updated_at DESC
-            "#,
-        )
-        .bind(session_id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?;
+        let thread_records = self
+            .thread_repo
+            .list_threads_in_session(&session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
 
-        let threads = rows
+        let threads = thread_records
             .into_iter()
-            .map(|row| {
-                let updated_at_str: String = row.get("updated_at");
-                let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now());
+            .map(|record| {
+                let updated_at =
+                    chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now());
 
                 ThreadSummary {
-                    id: ThreadId::parse(&row.get::<String, _>("id")).unwrap_or_default(),
-                    title: row.get("title"),
-                    token_count: row.get("token_count"),
-                    turn_count: row.get("turn_count"),
+                    id: record.id,
+                    title: record.title,
+                    token_count: record.token_count as i64,
+                    turn_count: record.turn_count as i64,
                     updated_at,
                 }
             })
@@ -904,31 +850,24 @@ impl SessionManager {
         session_id: SessionId,
         thread_id: &ThreadId,
     ) -> Result<(AgentId, Option<ProviderId>, Option<String>)> {
-        let row = sqlx::query(
-            r#"
-            SELECT template_id, provider_id, token_count, turn_count, updated_at, model_override
-            FROM threads WHERE session_id = ? AND id = ?
-            "#,
-        )
-        .bind(session_id.to_string())
-        .bind(thread_id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| ArgusError::DatabaseError {
-            reason: e.to_string(),
-        })?
-        .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+        let thread_record = self
+            .thread_repo
+            .get_thread_in_session(thread_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
-        let template_id = AgentId::new(row.get::<i64, _>("template_id"));
-        let provider_id = Some(ProviderId::new(row.get::<i64, _>("provider_id")));
-        let token_count = row.get::<i64, _>("token_count").max(0) as u32;
-        let turn_count = row.get::<i64, _>("turn_count").max(0) as u32;
-        let updated_at = {
-            let updated_at_str: String = row.get("updated_at");
-            chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+        let template_id = thread_record.template_id.unwrap_or_else(|| {
+            tracing::warn!(thread_id = %thread_id, "No template_id for thread, using AgentId(0)");
+            AgentId::new(0)
+        });
+        let provider_id = Some(ProviderId::new(thread_record.provider_id.into_inner()));
+        let token_count = thread_record.token_count;
+        let turn_count = thread_record.turn_count;
+        let updated_at =
+            chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now())
-        };
+                .unwrap_or_else(|_| chrono::Utc::now());
 
         let session = self.load(session_id).await?;
         let thread = session

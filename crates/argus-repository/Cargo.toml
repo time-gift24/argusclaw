@@ -17,7 +17,7 @@ uuid = { workspace = true }
 
 # Argus crates
 argus-protocol = { path = "../argus-protocol" }
-argus-llm = { path = "../argus-llm" }
+argus-crypto = { path = "../argus-crypto" }
 
 [dev-dependencies]
 tokio = { workspace = true }

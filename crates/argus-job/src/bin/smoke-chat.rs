@@ -7,6 +7,7 @@ use argus_llm::{Cipher, FileKeySource, ProviderManager};
 use argus_protocol::llm::{ChatMessage, LlmProviderId, LlmStreamEvent, Role};
 use argus_protocol::{AgentId, AgentRecord, AgentType, ProviderId, ThreadEvent};
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
+use argus_repository::traits::AccountRepository;
 use argus_turn::{TurnBuilder, TurnConfig};
 use clap::Parser;
 use sqlx::SqlitePool;
@@ -152,8 +153,9 @@ async fn run(cli: Cli) -> Result<()> {
     let pool = connect_database(&database_target).await?;
     let cipher = Arc::new(Cipher::new(FileKeySource::from_env_or_default()));
     let repository = Arc::new(ArgusSqlite::new(pool.clone()));
+    let account_repo = repository.clone() as Arc<dyn AccountRepository>;
     let provider_manager =
-        ProviderManager::new(repository).with_auth(Arc::new(pool), Arc::clone(&cipher));
+        ProviderManager::new(repository).with_auth(account_repo, Arc::clone(&cipher));
 
     let provider_record = provider_manager
         .get_default_provider_record()

@@ -8,12 +8,14 @@ use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
 use crate::error::DbError;
-use argus_llm::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
+use argus_crypto::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
 use argus_protocol::llm::SecretString;
 
 mod agent;
+mod account;
 mod job;
 mod llm_provider;
+mod session;
 mod thread;
 mod workflow;
 
@@ -296,6 +298,20 @@ impl ArgusSqlite {
             reason: e.to_string(),
         })?;
 
+        Ok(())
+    }
+
+    /// Insert a legacy placeholder agent for testing the repair mechanism.
+    pub async fn insert_legacy_agent_for_test(&self) -> DbResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
+            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', NULL, NULL, datetime('now'), datetime('now'))
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
         Ok(())
     }
 }

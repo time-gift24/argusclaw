@@ -7,5 +7,5 @@ mod workflow;
 
 pub use agent::{AgentId, AgentRecord};
 pub use job::{JobRecord, JobResult, JobType};
-pub use thread::{MessageId, MessageRecord, ThreadRecord};
+pub use thread::{MessageId, MessageRecord, SessionRecord, ThreadRecord};
 pub use workflow::{JobId, WorkflowId, WorkflowRecord, WorkflowStatus};

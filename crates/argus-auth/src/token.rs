@@ -8,9 +8,9 @@ use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+use argus_repository::traits::AccountRepository;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
 use super::error::AuthError;
@@ -45,7 +45,7 @@ impl TokenConfig {
 /// Holds auth dependencies needed to construct token-wrapped LLM providers.
 #[derive(Clone)]
 pub struct TokenContext {
-    pub pool: Arc<SqlitePool>,
+    pub account_repo: Arc<dyn AccountRepository>,
     pub cipher: Arc<Cipher>,
     pub config: TokenConfig,
 }
@@ -121,10 +121,10 @@ impl TokenSource for SimpleTokenSource {
     }
 }
 
-/// TokenSource that fetches credentials from the accounts table via SqlitePool.
+/// TokenSource that fetches credentials from the accounts table via AccountRepository.
 /// Token URL, header_name, header_prefix are hardcoded.
 pub struct AccountTokenSource {
-    pool: Arc<SqlitePool>,
+    repo: Arc<dyn AccountRepository>,
     cipher: Arc<Cipher>,
     header_name: String,
     header_prefix: String,
@@ -133,9 +133,9 @@ pub struct AccountTokenSource {
 
 impl AccountTokenSource {
     #[must_use]
-    pub fn new(pool: Arc<SqlitePool>, cipher: Arc<Cipher>) -> Self {
+    pub fn new(repo: Arc<dyn AccountRepository>, cipher: Arc<Cipher>) -> Self {
         Self {
-            pool,
+            repo,
             cipher,
             header_name: "Authorization".to_string(),
             header_prefix: "Bearer ".to_string(),
@@ -147,25 +147,27 @@ impl AccountTokenSource {
 #[async_trait]
 impl TokenSource for AccountTokenSource {
     async fn fetch_token(&self, _username: &str, _password: &str) -> Result<String, AuthError> {
-        let row: Option<(String, Vec<u8>, Vec<u8>)> =
-            sqlx::query_as("SELECT username, password, nonce FROM accounts WHERE id = 1")
-                .fetch_optional(self.pool.as_ref())
-                .await?;
+        let creds = self
+            .repo
+            .get_credentials()
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or(AuthError::TokenNotAvailable)?;
 
-        let (username, ciphertext, nonce) = row.ok_or(AuthError::TokenNotAvailable)?;
-
-        let decrypted =
-            self.cipher
-                .decrypt(&nonce, &ciphertext)
-                .map_err(|e| AuthError::DecryptionFailed {
-                    reason: e.to_string(),
-                })?;
+        let decrypted = self
+            .cipher
+            .decrypt(&creds.nonce, &creds.ciphertext)
+            .map_err(|e| AuthError::DecryptionFailed {
+                reason: e.to_string(),
+            })?;
 
         let client = reqwest::Client::new();
         let response = client
             .post(self.token_url)
             .json(&serde_json::json!({
-                "username": username,
+                "username": creds.username,
                 "password": decrypted.expose_secret()
             }))
             .send()

@@ -142,6 +142,7 @@ version = "0.1.0"
 dependencies = [
  "argus-crypto",
  "argus-protocol",
+ "argus-repository",
  "async-trait",
  "reqwest 0.12.28",
  "rust_decimal",
@@ -201,6 +202,7 @@ dependencies = [
  "argus-auth",
  "argus-crypto",
  "argus-protocol",
+ "argus-repository",
  "argus-test-support",
  "async-trait",
  "chrono",
@@ -244,7 +246,7 @@ dependencies = [
 name = "argus-repository"
 version = "0.1.0"
 dependencies = [
- "argus-llm",
+ "argus-crypto",
  "argus-protocol",
  "async-trait",
  "chrono",
@@ -264,6 +266,7 @@ dependencies = [
  "argus-job",
  "argus-llm",
  "argus-protocol",
+ "argus-repository",
  "argus-template",
  "argus-thread",
  "argus-tool",
