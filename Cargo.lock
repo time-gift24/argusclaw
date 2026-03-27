@@ -121,6 +121,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "argus-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argus-llm",
+ "argus-protocol",
+ "argus-test-support",
+ "argus-tool",
+ "async-trait",
+ "chrono",
+ "clap",
+ "derive_builder",
+ "futures-util",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "toml 0.8.2",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "argus-approval"
 version = "0.1.0"
 dependencies = [
@@ -175,12 +201,12 @@ name = "argus-job"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus-agent",
  "argus-llm",
  "argus-protocol",
  "argus-repository",
  "argus-template",
  "argus-tool",
- "argus-turn",
  "async-trait",
  "chrono",
  "clap",
@@ -263,14 +289,13 @@ dependencies = [
 name = "argus-session"
 version = "0.1.0"
 dependencies = [
+ "argus-agent",
  "argus-job",
  "argus-llm",
  "argus-protocol",
  "argus-repository",
  "argus-template",
- "argus-thread",
  "argus-tool",
- "argus-turn",
  "async-trait",
  "chrono",
  "dashmap",
@@ -312,26 +337,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-thread"
-version = "0.1.0"
-dependencies = [
- "argus-protocol",
- "argus-tool",
- "argus-turn",
- "async-trait",
- "chrono",
- "derive_builder",
- "rust_decimal",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "argus-tool"
 version = "0.1.0"
 dependencies = [
@@ -352,34 +357,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-turn"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "argus-llm",
- "argus-protocol",
- "argus-test-support",
- "argus-tool",
- "async-trait",
- "chrono",
- "clap",
- "derive_builder",
- "futures-util",
- "rust_decimal",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "toml 0.8.2",
- "tracing",
-]
-
-[[package]]
 name = "argus-wing"
 version = "0.1.0"
 dependencies = [
+ "argus-agent",
  "argus-approval",
  "argus-auth",
  "argus-crypto",
@@ -389,7 +370,6 @@ dependencies = [
  "argus-repository",
  "argus-session",
  "argus-template",
- "argus-thread",
  "argus-tool",
  "async-trait",
  "chrono",

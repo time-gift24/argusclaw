@@ -13,8 +13,8 @@ use argus_protocol::{
     ThreadEvent, ThreadId, ThreadMailbox,
 };
 use argus_tool::ToolManager;
-use argus_turn::turn::TurnCancellation;
-use argus_turn::{TurnBuilder, TurnOutput};
+use crate::turn::TurnCancellation;
+use crate::{TurnBuilder, TurnOutput};
 
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
@@ -403,7 +403,7 @@ impl Thread {
         user_input: String,
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
-    ) -> Result<argus_turn::Turn, ThreadError> {
+    ) -> Result<crate::Turn, ThreadError> {
         self.set_turn_running(true);
 
         // Compactor decides internally whether to compact
@@ -475,7 +475,7 @@ impl Thread {
                 self.apply_turn_output(output);
                 Ok(())
             }
-            Err(ThreadError::TurnFailed(argus_turn::TurnError::Cancelled)) => Ok(()),
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -484,7 +484,7 @@ impl Thread {
         &mut self,
         agent_record: Arc<AgentRecord>,
         cancellation: TurnCancellation,
-    ) -> Result<argus_turn::Turn, ThreadError> {
+    ) -> Result<crate::Turn, ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
         let thread_id = self.id.to_string();

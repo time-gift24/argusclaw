@@ -11,10 +11,10 @@ use argus_protocol::{
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
-use argus_thread::config::ThreadConfigBuilder;
-use argus_thread::{CompactorManager, FilePlanStore, ThreadBuilder};
+use argus_agent::config::ThreadConfigBuilder;
+use argus_agent::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_tool::ToolManager;
-use argus_turn::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
+use argus_agent::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
@@ -374,7 +374,7 @@ impl SessionManager {
                 }
             };
 
-            argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
+            argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
             session.add_thread(thread);
         }
 
@@ -598,7 +598,7 @@ impl SessionManager {
                 tokio::spawn(async move {
                     let _ = sm.update_session_turn(sid, turn_num).await;
                 });
-            }) as argus_turn::OnTurnComplete
+            }) as argus_agent::OnTurnComplete
         };
 
         let mut turn_config = TurnConfig::new();
@@ -644,7 +644,7 @@ impl SessionManager {
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
 
-        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread_arc));
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread_arc));
 
         // Add to in-memory session
         session.add_thread(thread_arc);
@@ -1099,7 +1099,7 @@ mod tests {
         AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
         ThreadEvent, ThreadId, ThreadJobResult,
     };
-    use argus_thread::{KeepRecentCompactor, ThreadBuilder};
+    use argus_agent::{KeepRecentCompactor, ThreadBuilder};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use tokio::time::{sleep, timeout};
@@ -1199,7 +1199,7 @@ mod tests {
     fn build_test_thread(
         session_id: SessionId,
         provider: Arc<CapturingProvider>,
-    ) -> Arc<tokio::sync::RwLock<argus_thread::Thread>> {
+    ) -> Arc<tokio::sync::RwLock<argus_agent::Thread>> {
         let compactor = Arc::new(KeepRecentCompactor::with_defaults());
         Arc::new(tokio::sync::RwLock::new(
             ThreadBuilder::new()
@@ -1213,7 +1213,7 @@ mod tests {
     }
 
     async fn wait_for_idle(
-        thread: &Arc<tokio::sync::RwLock<argus_thread::Thread>>,
+        thread: &Arc<tokio::sync::RwLock<argus_agent::Thread>>,
         expected_count: usize,
     ) {
         let mut rx = {
@@ -1423,7 +1423,7 @@ mod tests {
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
-        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
         session.add_thread(Arc::clone(&thread));
 
         {
@@ -1451,7 +1451,7 @@ mod tests {
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
-        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -1487,7 +1487,7 @@ mod tests {
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
 
-        argus_thread::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;

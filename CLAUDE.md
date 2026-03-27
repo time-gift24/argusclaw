@@ -85,26 +85,19 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
                               │            ┌────────────┴────────────┐
                               │            │                         │
 ┌─────────────────┐    ┌──────┴──────────┐│                        ┌┴──────────────────┐
-│argus-protocol   │◄───│  argus-session  ││                        │ argus-thread      │
-│  ★ 核心类型 ★    │    │   会话管理      ││                        │  线程管理         │
+│argus-protocol   │◄───│  argus-session  ││                        │ argus-agent       │
+│  ★ 核心类型 ★    │    │   会话管理      ││                        │  智能体(线程+轮次) │
 │                 │    └─────────────────┘│                        └───────────────────┘
 │ • ThreadId      │             ▲          │
-│ • ThreadEvent ★ │             │          │              ┌───────────────────┐
-│ • TokenUsage    │             └──────────┴──────────────│ argus-turn        │
-│ • Approval*     │                        │              │  轮次执行          │
-│ • RiskLevel     │             ┌───────────┴───────────┐  └───────────────────┘
-│ • Hook*         │             │                       │
+│ • ThreadEvent ★ │             │          │
+│ • TokenUsage    │             └──────────┴──────────────┐
+│ • Approval*     │                        │              ┌───────────────────┐
+│ • RiskLevel     │             ┌───────────┴───────────┐  │ argus-llm         │
+│ • Hook*         │             │                       │  └───────────────────┘
 │ • LlmProvider   │    ┌────────┴───────┐    ┌─────────┴───────┐
-│ • NamedTool     │    │argus-approval │    │ argus-llm       │
-└─────────────────┘    │  审批系统       │    │  LLM 抽象层      │
-        ▲              └────────────────┘    └────────┬────────┘
-        │                                               │
-        │            ┌─────────────────────────────────┴────────────┐
-        │            │                                          │
-        │    ┌───────┴────────┐                      ┌─────────┴────────┐
-        ├────┤ argus-tool     │                      │ argus-repository │
-        │    │ 工具注册表      │                      │  持久化层        │
-        │    └─────────────────┘                      └──────────────────┘
+│ • NamedTool     │    │argus-approval │    │ argus-tool       │
+└─────────────────┘    │  审批系统       │    │  工具注册表       │
+        ▲              └────────────────┘    └──────────────────┘
         │
         │    ┌────────────────┐        ┌──────────────────┐
         ├────┤ argus-job      │        │ argus-template   │
@@ -192,9 +185,8 @@ Turn (stream_tx: TurnStreamEvent)
 | Crate | 职责 | 关键依赖 |
 |-------|------|---------|
 | `argus-protocol` | 核心类型定义（叶子模块） | 无内部依赖 |
-| `argus-session` | 会话管理 | protocol, template, thread, tool, turn, llm, job |
-| `argus-thread` | 线程管理 | protocol, turn, tool |
-| `argus-turn` | 轮次执行 | protocol, test-support, tool, llm |
+| `argus-agent` | 统一智能体：Turn 执行引擎 + Thread 会话管理 | protocol, tool, llm, test-support |
+| `argus-session` | 会话管理 | protocol, template, agent, job |
 | `argus-llm` | LLM 抽象层 | protocol, test-support, crypto |
 | `argus-approval` | 审批系统 | protocol |
 | `argus-tool` | 工具注册表 | protocol |

@@ -13,8 +13,8 @@ use argus_protocol::llm::{
     ToolCompletionResponse, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
-use argus_turn::trace::TraceConfig;
-use argus_turn::{TurnBuilder, TurnConfig};
+use argus_agent::trace::TraceConfig;
+use argus_agent::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 

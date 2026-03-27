@@ -230,7 +230,7 @@ impl StreamingAccumulator {
 /// # Example
 ///
 /// ```ignore
-/// use argus_turn::{Turn, TurnBuilder};
+/// use argus_agent::{Turn, TurnBuilder};
 /// use argus_protocol::llm::ChatMessage;
 ///
 /// let turn = TurnBuilder::new()
@@ -369,7 +369,7 @@ impl Turn {
     ///
     /// This method:
     /// 1. Spawns the event forwarder task
-    /// 2. Executes the main LLM → Tool → LLM loop
+    /// 2. Executes the main LLM -> Tool -> LLM loop
     /// 3. Sends TurnCompleted/TurnFailed event
     /// 4. Sends Idle event
     /// 5. Returns TurnOutput with updated messages and token usage
@@ -676,7 +676,7 @@ impl Turn {
         Ok(HookAction::Continue)
     }
 
-    /// Internal method: execute the main LLM → Tool → LLM loop.
+    /// Internal method: execute the main LLM -> Tool -> LLM loop.
     ///
     /// This is where the core execution logic lives.
     #[allow(dead_code)]

@@ -1,7 +1,8 @@
-//! Argus Turn - single turn execution with LLM and tool support.
+//! Argus Agent - unified turn execution and thread management.
 //!
-//! This crate provides the core turn execution logic for agent-based conversations.
-//! A "Turn" represents a single execution cycle: LLM → Tool → LLM (with parallel tool support).
+//! This crate provides:
+//! - **`Turn`**: single-turn LLM + tool execution engine
+//! - **`Thread`**: multi-turn conversation manager (orchestrates Turns)
 //!
 //! # Architecture
 //!
@@ -14,7 +15,7 @@
 //! # Example (New API)
 //!
 //! ```ignore
-//! use argus_turn::{Turn, TurnBuilder};
+//! use argus_agent::{Turn, TurnBuilder};
 //! use argus_protocol::llm::ChatMessage;
 //! use argus_protocol::tool::NamedTool;
 //! use std::sync::Arc;
@@ -34,29 +35,42 @@
 //! let output = turn.execute().await?;
 //! ```
 //!
-//! # Example (Legacy API - Still Supported)
+//! # Example (Thread)
 //!
 //! ```ignore
-//! use argus_turn::{TurnInput, TurnInputBuilder, TurnOutput, execute_turn};
+//! use argus_agent::{Thread, ThreadBuilder, ThreadConfig};
 //! use argus_protocol::llm::ChatMessage;
 //!
-//! let input = TurnInputBuilder::new()
+//! let thread = ThreadBuilder::new()
 //!     .provider(my_provider)
-//!     .messages(vec![ChatMessage::user("Hello!")])
+//!     .compactor(my_compactor)
 //!     .build()
 //!     .unwrap();
 //!
-//! let output = execute_turn(input, TurnConfig::default()).await.unwrap();
+//! thread.send_message("Hello!".to_string()).await.unwrap();
 //! ```
 
+pub mod command;
+pub mod compact;
 pub mod config;
 pub mod error;
 pub mod events;
 pub mod execution;
+pub mod plan_store;
+pub mod plan_tool;
+mod runtime;
+pub mod thread;
+pub mod thread_handle;
 pub mod tool_context;
 pub mod trace;
 pub mod turn;
+pub mod types;
 
+// ---------------------------------------------------------------------------
+// Public exports
+// ---------------------------------------------------------------------------
+
+// Turn (low-level)
 pub use config::{
     OnTurnComplete, TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput,
     TurnOutputBuilder, TurnStreamEvent,
@@ -65,7 +79,20 @@ pub use error::{TurnError, TurnLogError};
 pub use events::TurnLogEvent;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
 pub use trace::{TraceConfig, TraceWriter, TurnLogState, read_jsonl_events, recover_turn_events};
-pub use turn::{Turn, TurnBuilder};
+pub use turn::{Turn, TurnBuilder, TurnCancellation};
+
+// Thread (high-level)
+pub use command::ThreadRuntimeSnapshot;
+pub use compact::{
+    CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
+    estimate_tokens,
+};
+pub use config::ThreadConfig;
+pub use error::{CompactError, ThreadError};
+pub use plan_store::FilePlanStore;
+pub use thread::{Thread, ThreadBuilder};
+pub use thread_handle::ThreadHandle;
+pub use types::{ThreadInfo, ThreadState};
 
 // Re-export hook types from argus-protocol for convenience
 pub use argus_protocol::{

@@ -2,8 +2,8 @@
 
 use argus_protocol::TokenUsage;
 use argus_protocol::llm::ChatMessage;
-use argus_turn::TurnLogEvent;
-use argus_turn::trace::{TraceConfig, TraceWriter, read_jsonl_events};
+use argus_agent::TurnLogEvent;
+use argus_agent::trace::{TraceConfig, TraceWriter, read_jsonl_events};
 
 #[tokio::test]
 async fn test_trace_writer_success() {

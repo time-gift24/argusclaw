@@ -51,7 +51,7 @@ impl NamedTool for ListSubagentsTool {
         _input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let agent_id = argus_turn::tool_context::current_agent_id().ok_or_else(|| {
+        let agent_id = argus_agent::tool_context::current_agent_id().ok_or_else(|| {
             ToolError::ExecutionFailed {
                 tool_name: self.name().to_string(),
                 reason: "current agent_id not available".to_string(),

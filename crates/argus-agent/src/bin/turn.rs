@@ -19,7 +19,7 @@ use argus_llm::providers::{
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role, ToolDefinition};
 use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
-use argus_turn::{TurnBuilder, TurnConfig, TurnStreamEvent};
+use argus_agent::{TurnBuilder, TurnConfig, TurnStreamEvent};
 
 /// Configuration file structure.
 #[derive(Debug, Deserialize, Default)]
@@ -212,9 +212,9 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
         args.model.as_deref(),
     )?;
 
-    println!("🚀 Executing Turn");
-    println!("📝 Prompt: {}", args.prompt);
-    println!("🔧 Stream: {}", args.stream);
+    println!("Executing Turn");
+    println!("Prompt: {}", args.prompt);
+    println!("Stream: {}", args.stream);
     println!();
 
     let provider = create_provider(&resolved)?;
@@ -240,8 +240,8 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
     // Execute turn (no streaming for now due to Send trait issue)
     let output = turn.execute().await?;
 
-    println!("✅ Turn completed!");
-    println!("📊 Messages:");
+    println!("Turn completed!");
+    println!("Messages:");
     for (i, msg) in output.messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
@@ -257,7 +257,7 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
         println!("  [{}] {}: {}", i, role_str, content);
     }
     println!(
-        "📊 Tokens: {} input, {} output, {} total",
+        "Tokens: {} input, {} output, {} total",
         output.token_usage.input_tokens,
         output.token_usage.output_tokens,
         output.token_usage.total_tokens
@@ -274,8 +274,8 @@ async fn tool_test(args: ToolTestArgs, config: &Config) -> Result<()> {
         args.model.as_deref(),
     )?;
 
-    println!("🧪 Testing Tool Execution");
-    println!("📝 Prompt: {}", args.prompt);
+    println!("Testing Tool Execution");
+    println!("Prompt: {}", args.prompt);
     println!();
 
     let provider = create_provider(&resolved)?;
@@ -319,9 +319,9 @@ Example flow:
     // Execute turn
     let output = turn.execute().await?;
 
-    println!("✅ Turn completed!");
+    println!("Turn completed!");
     println!(
-        "📊 Total tool calls in conversation: {}",
+        "Total tool calls in conversation: {}",
         output
             .messages
             .iter()
@@ -329,7 +329,7 @@ Example flow:
             .count()
     );
 
-    println!("📊 Messages:");
+    println!("Messages:");
     for (i, msg) in output.messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
@@ -347,7 +347,7 @@ Example flow:
         if let Some(tool_calls) = &msg.tool_calls {
             for tc in tool_calls {
                 println!(
-                    "    🔧 Tool call: {} ({}) - args: {}",
+                    "    Tool call: {} ({}) - args: {}",
                     tc.name, tc.id, tc.arguments
                 );
             }
@@ -355,7 +355,7 @@ Example flow:
     }
 
     println!(
-        "📊 Tokens: {} input, {} output, {} total",
+        "Tokens: {} input, {} output, {} total",
         output.token_usage.input_tokens,
         output.token_usage.output_tokens,
         output.token_usage.total_tokens
@@ -412,9 +412,9 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
 
         match turn.execute().await {
             Ok(output) => {
-                println!("✓ Turn completed successfully!");
+                println!("Turn completed successfully!");
                 println!(
-                    "📊 Tokens: {} input, {} output, {} total",
+                    "Tokens: {} input, {} output, {} total",
                     output.token_usage.input_tokens,
                     output.token_usage.output_tokens,
                     output.token_usage.total_tokens
@@ -422,7 +422,7 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
                 Ok(())
             }
             Err(e) => {
-                println!("✗ Turn failed: {}", e);
+                println!("Turn failed: {}", e);
                 Err(anyhow!("Mock test failed: {}", e))
             }
         }
