@@ -7,18 +7,18 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 argus-crypto = { path = "../argus-crypto" }
 argus-protocol = { path = "../argus-protocol" }
-async-trait = "0.1"
-reqwest = { workspace = true, features = ["json"] }
-rust_decimal = "1"
-secrecy = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls"] }
-subtle = "2"
-thiserror = "2"
-tokio = { version = "1", features = ["sync"] }
-tracing = "0.1"
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+rust_decimal = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true }

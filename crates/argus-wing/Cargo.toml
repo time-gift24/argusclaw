@@ -2,6 +2,7 @@
 name = "argus-wing"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Unified entry point for ArgusWing application"
 
 [features]
@@ -9,27 +10,27 @@ default = []
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-async-trait = "0.1"
+tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { workspace = true }
 
 # Logging
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-appender = "0.2"
+tracing-appender = { workspace = true }
 
 # Utilities
-thiserror = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-dashmap = "6"
-dirs = "6"
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+dirs = { workspace = true }
 
 # Internal crates
 argus-protocol = { path = "../argus-protocol" }

@@ -2,22 +2,23 @@
 name = "argus-tool"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
-async-trait = "0.1"
-dashmap = "6"
-glob = "0.3"
-regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["process", "fs", "time", "macros", "rt-multi-thread"] }
-tracing = "0.1"
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+glob = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 reqwest = { workspace = true }
 once_cell = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }

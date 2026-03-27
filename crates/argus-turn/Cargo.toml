@@ -2,6 +2,7 @@
 name = "argus-turn"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "argus-turn"
@@ -12,21 +13,21 @@ argus-protocol = { path = "../argus-protocol" }
 argus-test-support = { path = "../argus-test-support" }
 argus-tool = { path = "../argus-tool" }
 argus-llm = { path = "../argus-llm" }
-tokio = { version = "1", features = ["sync", "rt", "time", "test-util", "macros"] }
-derive_builder = "0.20"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-futures-util = "0.3"
-chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-async-trait = "0.1"
-rust_decimal = "1"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-toml = "0.8"
-tokio-stream = { version = "0.1", features = ["io-util"] }
+tokio = { workspace = true }
+derive_builder = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures-util = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+rust_decimal = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+tokio-stream = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 tempfile = "3"

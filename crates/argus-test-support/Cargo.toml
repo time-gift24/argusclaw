@@ -2,10 +2,11 @@
 name = "argus-test-support"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
-async-trait = "0.1"
-futures-util = "0.3"
-rust_decimal = "1"
-tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+rust_decimal = { workspace = true }
+tokio = { workspace = true }

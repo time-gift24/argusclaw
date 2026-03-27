@@ -7,15 +7,15 @@ description = "Approval management for ArgusWing - gates dangerous operations be
 
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-dashmap = "6.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2.0"
-tokio = { version = "1", features = ["sync", "time"] }
-tracing = "0.1"
-uuid = { version = "1.0", features = ["v4", "serde"] }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true }
