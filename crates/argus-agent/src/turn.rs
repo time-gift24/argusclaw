@@ -13,8 +13,8 @@ use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
 use argus_protocol::llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
-    LlmStreamEvent, ToolCall, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, LlmStreamEvent,
+    ToolCall, ToolDefinition,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -968,11 +968,7 @@ impl Turn {
             return Err(TurnError::Cancelled);
         }
 
-        match self
-            .provider
-            .stream_complete(request.clone())
-            .await
-        {
+        match self.provider.stream_complete(request.clone()).await {
             Ok(mut stream) => {
                 tracing::debug!(
                     thread_id = %self.thread_id,

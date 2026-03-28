@@ -155,9 +155,9 @@ mod tests {
     use std::sync::Arc;
 
     use argus_protocol::{AgentId, LlmProvider, ProviderId, ProviderResolver, ThreadId};
-    use argus_template::TemplateManager;
-    use argus_repository::traits::AgentRepository;
     use argus_repository::ArgusSqlite;
+    use argus_repository::traits::AgentRepository;
+    use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
     use sqlx::SqlitePool;

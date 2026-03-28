@@ -21,7 +21,8 @@ pub trait AgentRepository: Send + Sync {
     ) -> Result<Option<AgentRecord>, DbError>;
 
     /// Find an agent ID by display name.
-    async fn find_id_by_display_name(&self, display_name: &str) -> Result<Option<AgentId>, DbError>;
+    async fn find_id_by_display_name(&self, display_name: &str)
+    -> Result<Option<AgentId>, DbError>;
 
     /// List all agents.
     async fn list(&self) -> Result<Vec<AgentRecord>, DbError>;
@@ -36,7 +37,8 @@ pub trait AgentRepository: Send + Sync {
     async fn add_subagent(&self, parent_id: &AgentId, child_id: &AgentId) -> Result<(), DbError>;
 
     /// Demote a subagent back to standard (clears parent_agent_id).
-    async fn remove_subagent(&self, parent_id: &AgentId, child_id: &AgentId) -> Result<(), DbError>;
+    async fn remove_subagent(&self, parent_id: &AgentId, child_id: &AgentId)
+    -> Result<(), DbError>;
 
     /// Delete an agent.
     async fn delete(&self, id: &AgentId) -> Result<bool, DbError>;

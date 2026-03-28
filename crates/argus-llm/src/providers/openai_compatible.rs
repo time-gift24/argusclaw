@@ -452,14 +452,14 @@ impl OpenAiCompatibleProvider {
         body: &ChatCompletionsRequest,
         extra_headers: &[(String, String)],
     ) -> Result<reqwest::Response, LlmError> {
-        let response =
-            self.build_chat_request(body, extra_headers)
-                .send()
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: "openai-compatible".to_string(),
-                    reason: e.to_string(),
-                })?;
+        let response = self
+            .build_chat_request(body, extra_headers)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "openai-compatible".to_string(),
+                reason: e.to_string(),
+            })?;
 
         if response.status().is_success() {
             return Ok(response);
@@ -685,9 +685,9 @@ impl ChatCompletionsRequest {
             temperature: request.temperature,
             stop: request.stop_sequences,
             thinking: request.thinking,
-            tools: request.tools.map(|tools| {
-                tools.into_iter().map(OpenAiToolDefinition::from).collect()
-            }),
+            tools: request
+                .tools
+                .map(|tools| tools.into_iter().map(OpenAiToolDefinition::from).collect()),
             tool_choice: request.tool_choice,
             stream,
             stream_options: stream.then_some(StreamOptions {

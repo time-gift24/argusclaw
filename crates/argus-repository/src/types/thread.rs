@@ -4,8 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use argus_protocol::{AgentId, SessionId, ThreadId};
 use argus_protocol::llm::LlmProviderId;
+use argus_protocol::{AgentId, SessionId, ThreadId};
 
 /// Unique identifier for a stored message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

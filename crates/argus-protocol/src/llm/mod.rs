@@ -473,7 +473,6 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-
 /// Metadata about a model returned by the provider's API.
 #[derive(Debug, Clone)]
 pub struct ModelMetadata {

@@ -604,7 +604,6 @@ mod tests {
                 reason: "auth error".to_string(),
             })
         }
-
     }
 
     #[tokio::test]

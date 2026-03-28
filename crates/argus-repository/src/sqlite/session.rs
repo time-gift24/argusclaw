@@ -19,7 +19,9 @@ impl SessionRepository for ArgusSqlite {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         rows.into_iter()
             .map(|r| self.map_session_with_count(r))
@@ -27,11 +29,14 @@ impl SessionRepository for ArgusSqlite {
     }
 
     async fn get(&self, id: &SessionId) -> DbResult<Option<SessionRecord>> {
-        let row = sqlx::query("SELECT id, name, created_at, updated_at FROM sessions WHERE id = ?1")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        let row =
+            sqlx::query("SELECT id, name, created_at, updated_at FROM sessions WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
 
         row.map(|r| self.map_session_record(&r)).transpose()
     }
@@ -45,7 +50,9 @@ impl SessionRepository for ArgusSqlite {
         .bind(name)
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -58,7 +65,9 @@ impl SessionRepository for ArgusSqlite {
         .bind(id.to_string())
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -68,7 +77,9 @@ impl SessionRepository for ArgusSqlite {
             .bind(id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -88,10 +99,7 @@ impl ArgusSqlite {
         })
     }
 
-    fn map_session_with_count(
-        &self,
-        row: sqlx::sqlite::SqliteRow,
-    ) -> DbResult<SessionWithCount> {
+    fn map_session_with_count(&self, row: sqlx::sqlite::SqliteRow) -> DbResult<SessionWithCount> {
         let session = self.map_session_record(&row)?;
         let thread_count = Self::get_column::<i64>(&row, "thread_count")?;
         Ok(SessionWithCount {

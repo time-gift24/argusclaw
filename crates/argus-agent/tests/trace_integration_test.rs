@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
+use argus_agent::trace::TraceConfig;
+use argus_agent::{TurnBuilder, TurnConfig};
 use argus_protocol::AgentRecord;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::llm::{
@@ -12,8 +14,6 @@ use argus_protocol::llm::{
     LlmProvider, LlmStreamEvent, ToolCall, ToolCallDelta, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
-use argus_agent::trace::TraceConfig;
-use argus_agent::{TurnBuilder, TurnConfig};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 

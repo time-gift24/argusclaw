@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use crate::turn::TurnCancellation;
 use argus_protocol::{
     MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadInbox,
     ThreadJobResult, ThreadRuntimeState,
 };
-use crate::turn::TurnCancellation;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::command::ThreadRuntimeSnapshot;

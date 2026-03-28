@@ -30,6 +30,7 @@ use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
+use argus_agent::CompactorManager;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
@@ -39,13 +40,12 @@ use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
 };
-use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_repository::traits::{
     AccountRepository, AgentRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
 };
+use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
-use argus_agent::CompactorManager;
 use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
@@ -112,8 +112,7 @@ impl ArgusWing {
         let llm_repository: Arc<dyn LlmProviderRepository> =
             Arc::new(ArgusSqlite::new(pool.clone()));
         let provider_manager = Arc::new(
-            ProviderManager::new(llm_repository.clone())
-                .with_auth(account_repo, cipher.clone()),
+            ProviderManager::new(llm_repository.clone()).with_auth(account_repo, cipher.clone()),
         );
 
         // Create template manager
@@ -186,8 +185,7 @@ impl ArgusWing {
         let llm_repository: Arc<dyn LlmProviderRepository> =
             Arc::new(ArgusSqlite::new(pool.clone()));
         let provider_manager = Arc::new(
-            ProviderManager::new(llm_repository.clone())
-                .with_auth(account_repo, cipher.clone()),
+            ProviderManager::new(llm_repository.clone()).with_auth(account_repo, cipher.clone()),
         );
         let arc_sqlite = Arc::new(ArgusSqlite::new(pool.clone()));
         let template_manager = Arc::new(TemplateManager::new(

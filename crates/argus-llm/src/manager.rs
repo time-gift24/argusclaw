@@ -14,11 +14,11 @@ use chrono::Utc;
 use argus_protocol::Result;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent,
-    ProviderSecretStatus, ProviderTestResult, ProviderTestStatus, ToolCall, ToolDefinition,
+    LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
+    ProviderTestResult, ProviderTestStatus, ToolCall, ToolDefinition,
 };
-use futures_util::StreamExt;
 use argus_repository::traits::AccountRepository;
+use futures_util::StreamExt;
 
 use crate::providers::{
     DEFAULT_OPENAI_COMPATIBLE_TIMEOUT, OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig,
@@ -255,12 +255,12 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let repo = self
-            .account_repo
-            .as_ref()
-            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
-                reason: "account_token_source requires AccountRepository".to_string(),
-            })?;
+        let repo =
+            self.account_repo
+                .as_ref()
+                .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+                    reason: "account_token_source requires AccountRepository".to_string(),
+                })?;
         let cipher = self
             .cipher
             .as_ref()
@@ -397,11 +397,9 @@ async fn run_provider_connection_test(
     };
 
     // 使用 CompletionRequest，要求模型调用工具
-    let request = CompletionRequest::new(
-        vec![ChatMessage::user(
-            "Please call the echo tool with the text 'OK'",
-        )],
-    )
+    let request = CompletionRequest::new(vec![ChatMessage::user(
+        "Please call the echo tool with the text 'OK'",
+    )])
     .with_model(&model)
     .with_temperature(0.0)
     .with_tools(vec![echo_tool]);

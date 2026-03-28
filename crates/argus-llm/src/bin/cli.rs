@@ -233,7 +233,10 @@ async fn test_connection(config: &ResolvedConfig) -> Result<()> {
         Ok(response) => {
             let latency = started.elapsed();
             println!("✓ Connection successful ({}ms)", latency.as_millis());
-            println!("Response: {}", response.content.as_deref().unwrap_or("").trim());
+            println!(
+                "Response: {}",
+                response.content.as_deref().unwrap_or("").trim()
+            );
             Ok(())
         }
         Err(e) => {
@@ -382,7 +385,10 @@ async fn test_retry(config: &ResolvedConfig, max_retries: u32) -> Result<()> {
     match provider.complete(request).await {
         Ok(response) => {
             println!("✓ Request completed successfully");
-            println!("Response: {}", response.content.as_deref().unwrap_or("").trim());
+            println!(
+                "Response: {}",
+                response.content.as_deref().unwrap_or("").trim()
+            );
             println!("Total time: {}ms", started.elapsed().as_millis());
             Ok(())
         }

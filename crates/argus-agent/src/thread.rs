@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
+use crate::turn::TurnCancellation;
+use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -13,8 +15,6 @@ use argus_protocol::{
     ThreadEvent, ThreadId, ThreadMailbox,
 };
 use argus_tool::ToolManager;
-use crate::turn::TurnCancellation;
-use crate::{TurnBuilder, TurnOutput};
 
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
@@ -566,9 +566,7 @@ mod tests {
     use crate::error::CompactError;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
-    use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, LlmError,
-    };
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
     use async_trait::async_trait;
     use rust_decimal::Decimal;

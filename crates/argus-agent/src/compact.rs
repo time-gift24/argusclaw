@@ -345,9 +345,7 @@ mod tests {
     use std::sync::Arc;
 
     use argus_protocol::LlmProvider;
-    use argus_protocol::llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError,
-    };
+    use argus_protocol::llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 

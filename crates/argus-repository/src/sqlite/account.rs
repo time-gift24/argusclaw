@@ -14,7 +14,9 @@ impl AccountRepository for ArgusSqlite {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
         Ok(count > 0)
     }
 
@@ -35,18 +37,19 @@ impl AccountRepository for ArgusSqlite {
         .bind(nonce)
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
         Ok(())
     }
 
-    async fn get_credentials(
-        &self,
-    ) -> argus_protocol::Result<Option<AccountCredentials>> {
-        let row =
-            sqlx::query("SELECT username, password, nonce FROM accounts WHERE id = 1")
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+    async fn get_credentials(&self) -> argus_protocol::Result<Option<AccountCredentials>> {
+        let row = sqlx::query("SELECT username, password, nonce FROM accounts WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         match row {
             Some(r) => Ok(Some(self.map_account_row(&r)?)),
@@ -58,7 +61,9 @@ impl AccountRepository for ArgusSqlite {
         let row = sqlx::query("SELECT username FROM accounts WHERE id = 1")
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         match row {
             Some(r) => Ok(Some(Self::get_account_column::<String>(&r, "username")?)),
@@ -72,7 +77,9 @@ impl ArgusSqlite {
     where
         T: for<'r> sqlx::decode::Decode<'r, sqlx::Sqlite> + sqlx::types::Type<sqlx::Sqlite>,
     {
-        row.try_get(col).map_err(|e| DbError::QueryFailed { reason: e.to_string() })
+        row.try_get(col).map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })
     }
 
     fn map_account_row(&self, row: &sqlx::sqlite::SqliteRow) -> DbResult<AccountCredentials> {
