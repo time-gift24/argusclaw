@@ -485,12 +485,23 @@ impl OpenAiCompatibleProvider {
                 .header(ACCEPT_ENCODING, "identity");
         }
         for (name, value) in extra_headers {
-            let header_name = HeaderName::try_from(name.clone()).unwrap_or_else(|_| {
-                HeaderName::from_static("x-unknown-header")
-            });
-            let header_value = HeaderValue::from_str(value).unwrap_or_else(|_| {
-                HeaderValue::from_static("")
-            });
+            let header_name = match HeaderName::try_from(name.clone()) {
+                Ok(h) => h,
+                Err(_) => {
+                    tracing::warn!("Skipping invalid extra header name: {:?}", name);
+                    continue;
+                }
+            };
+            let header_value = match HeaderValue::from_str(value) {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!(
+                        "Skipping extra header with invalid value for {:?}",
+                        header_name
+                    );
+                    continue;
+                }
+            };
             request = request.header(header_name, header_value);
         }
 

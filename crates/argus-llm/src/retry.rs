@@ -8,7 +8,7 @@
 //!
 //! Local modifications:
 //! - Adapted retryability classification to ArgusClaw's reduced `LlmError` surface.
-//! - Extends retry setup to `stream_complete` and `stream_complete_with_tools`.
+//! - Extends retry setup to `stream_complete`.
 
 use std::collections::VecDeque;
 use std::future::Future;
