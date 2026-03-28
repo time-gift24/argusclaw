@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use argus_crypto::Cipher;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
-    ToolCompletionRequest, ToolCompletionResponse,
 };
 use argus_repository::traits::AccountRepository;
 use async_trait::async_trait;
@@ -293,22 +292,6 @@ impl<T: LlmProvider> LlmProvider for TokenLLMProvider<T> {
         self.inner.complete(request).await
     }
 
-    async fn complete_with_tools(
-        &self,
-        mut request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        let extra_header = self
-            .get_auth_header()
-            .await
-            .map_err(|e| LlmError::AuthFailed {
-                provider: self.inner.active_model_name(),
-                reason: e.to_string(),
-            })?;
-
-        request.extra_headers.push(extra_header);
-        self.inner.complete_with_tools(request).await
-    }
-
     async fn stream_complete(
         &self,
         mut request: CompletionRequest,
@@ -323,22 +306,6 @@ impl<T: LlmProvider> LlmProvider for TokenLLMProvider<T> {
 
         request.extra_headers.push(extra_header);
         self.inner.stream_complete(request).await
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        mut request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        let extra_header = self
-            .get_auth_header()
-            .await
-            .map_err(|e| LlmError::AuthFailed {
-                provider: self.inner.active_model_name(),
-                reason: e.to_string(),
-            })?;
-
-        request.extra_headers.push(extra_header);
-        self.inner.stream_complete_with_tools(request).await
     }
 }
 

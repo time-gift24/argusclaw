@@ -305,7 +305,7 @@ impl ChatMessage {
     }
 }
 
-/// Request for a chat completion.
+/// Request for a chat completion (with optional tool support).
 #[derive(Debug, Clone, Serialize)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
@@ -327,6 +327,12 @@ pub struct CompletionRequest {
     /// Not serialized — only used at runtime by transport-layer wrappers.
     #[serde(skip)]
     pub extra_headers: Vec<(String, String)>,
+    /// Tool definitions for tool-use completions. `None` = no tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolDefinition>>,
+    /// How to handle tool use: "auto", "required", or "none". `None` = default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
 }
 
 impl CompletionRequest {
@@ -341,6 +347,8 @@ impl CompletionRequest {
             thinking: None,
             metadata: std::collections::HashMap::new(),
             extra_headers: Vec::new(),
+            tools: None,
+            tool_choice: None,
         }
     }
 
@@ -367,13 +375,28 @@ impl CompletionRequest {
         self.thinking = Some(thinking);
         self
     }
+
+    /// Set tool definitions for tool-use completions.
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Set tool choice mode.
+    pub fn with_tool_choice(mut self, choice: impl Into<String>) -> Self {
+        self.tool_choice = Some(choice.into());
+        self
+    }
 }
 
-/// Response from a chat completion.
+/// Response from a chat completion (with optional tool calls).
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
-    pub content: String,
+    /// Text content. `None` when only tool calls are present.
+    pub content: Option<String>,
     pub reasoning_content: Option<String>,
+    /// Tool calls requested by the model. Empty vec = no tool calls.
+    pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
@@ -450,97 +473,6 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-/// Request for a completion with tool use.
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolCompletionRequest {
-    pub messages: Vec<ChatMessage>,
-    pub tools: Vec<ToolDefinition>,
-    /// Optional per-request model override.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    /// How to handle tool use: "auto", "required", or "none".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking: Option<ThinkingConfig>,
-    /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub metadata: std::collections::HashMap<String, String>,
-    /// Extra HTTP headers injected by wrappers (e.g. auth token headers).
-    /// Not serialized — only used at runtime by transport-layer wrappers.
-    #[serde(skip)]
-    pub extra_headers: Vec<(String, String)>,
-}
-
-impl ToolCompletionRequest {
-    /// Create a new tool completion request.
-    pub fn new(messages: Vec<ChatMessage>, tools: Vec<ToolDefinition>) -> Self {
-        Self {
-            messages,
-            tools,
-            model: None,
-            max_tokens: None,
-            temperature: None,
-            tool_choice: None,
-            thinking: None,
-            metadata: std::collections::HashMap::new(),
-            extra_headers: Vec::new(),
-        }
-    }
-
-    /// Set model override.
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
-    }
-
-    /// Set max tokens.
-    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
-        self.max_tokens = Some(max_tokens);
-        self
-    }
-
-    /// Set temperature.
-    pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = Some(temperature);
-        self
-    }
-
-    /// Set tool choice mode.
-    pub fn with_tool_choice(mut self, choice: impl Into<String>) -> Self {
-        self.tool_choice = Some(choice.into());
-        self
-    }
-
-    /// Set thinking configuration.
-    pub fn with_thinking(mut self, thinking: ThinkingConfig) -> Self {
-        self.thinking = Some(thinking);
-        self
-    }
-}
-
-/// Response from a completion with potential tool calls.
-#[derive(Debug, Clone)]
-pub struct ToolCompletionResponse {
-    /// Text content (may be empty if tool calls are present).
-    pub content: Option<String>,
-    /// Reasoning content emitted separately from visible content.
-    pub reasoning_content: Option<String>,
-    /// Tool calls requested by the model.
-    pub tool_calls: Vec<ToolCall>,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub finish_reason: FinishReason,
-    /// Tokens read from the provider's server-side prompt cache (Anthropic).
-    pub cache_read_input_tokens: u32,
-    /// Tokens written to the provider's server-side prompt cache (Anthropic).
-    pub cache_creation_input_tokens: u32,
-}
-
 /// Metadata about a model returned by the provider's API.
 #[derive(Debug, Clone)]
 pub struct ModelMetadata {
@@ -567,14 +499,8 @@ pub trait LlmProvider: Send + Sync {
         ProviderCapabilities::default()
     }
 
-    /// Complete a chat conversation.
+    /// Complete a chat conversation (with optional tool support).
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
-
-    /// Complete with tool use support.
-    async fn complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError>;
 
     /// Stream a chat completion incrementally.
     async fn stream_complete(
@@ -584,17 +510,6 @@ pub trait LlmProvider: Send + Sync {
         Err(LlmError::UnsupportedCapability {
             provider: self.active_model_name(),
             capability: "stream_complete".to_string(),
-        })
-    }
-
-    /// Stream a tool-capable completion incrementally.
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        Err(LlmError::UnsupportedCapability {
-            provider: self.active_model_name(),
-            capability: "stream_complete_with_tools".to_string(),
         })
     }
 
@@ -691,25 +606,11 @@ impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
         (**self).complete(request).await
     }
 
-    async fn complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        (**self).complete_with_tools(request).await
-    }
-
     async fn stream_complete(
         &self,
         request: CompletionRequest,
     ) -> Result<LlmEventStream, LlmError> {
         (**self).stream_complete(request).await
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        (**self).stream_complete_with_tools(request).await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -865,7 +766,8 @@ mod tests {
 
     #[test]
     fn test_tool_completion_request_with_thinking_sets_config() {
-        let request = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], vec![])
+        let request = CompletionRequest::new(vec![ChatMessage::user("hi")])
+            .with_tools(vec![])
             .with_thinking(ThinkingConfig::disabled());
 
         assert_eq!(request.thinking, Some(ThinkingConfig::disabled()));
@@ -890,21 +792,6 @@ mod tests {
                 _request: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
-                    content: String::new(),
-                    reasoning_content: None,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    finish_reason: FinishReason::Stop,
-                    cache_read_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                })
-            }
-
-            async fn complete_with_tools(
-                &self,
-                _request: ToolCompletionRequest,
-            ) -> Result<ToolCompletionResponse, LlmError> {
-                Ok(ToolCompletionResponse {
                     content: None,
                     reasoning_content: None,
                     tool_calls: Vec::new(),

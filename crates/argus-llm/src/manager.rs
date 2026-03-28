@@ -13,12 +13,12 @@ use chrono::Utc;
 
 use argus_protocol::Result;
 use argus_protocol::llm::{
-    ChatMessage, FinishReason, LlmError, LlmProvider, LlmProviderId, LlmProviderRecord,
-    LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus, ProviderTestResult,
-    ProviderTestStatus, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+    LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
+    ProviderTestResult, ProviderTestStatus, ToolCall, ToolDefinition,
 };
-use futures_util::StreamExt;
 use argus_repository::traits::AccountRepository;
+use futures_util::StreamExt;
 
 use crate::providers::{
     DEFAULT_OPENAI_COMPATIBLE_TIMEOUT, OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig,
@@ -255,12 +255,12 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let repo = self
-            .account_repo
-            .as_ref()
-            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
-                reason: "account_token_source requires AccountRepository".to_string(),
-            })?;
+        let repo =
+            self.account_repo
+                .as_ref()
+                .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+                    reason: "account_token_source requires AccountRepository".to_string(),
+                })?;
         let cipher = self
             .cipher
             .as_ref()
@@ -396,20 +396,18 @@ async fn run_provider_connection_test(
         }),
     };
 
-    // 使用 ToolCompletionRequest，要求模型调用工具
-    let request = ToolCompletionRequest::new(
-        vec![ChatMessage::user(
-            "Please call the echo tool with the text 'OK'",
-        )],
-        vec![echo_tool],
-    )
+    // 使用 CompletionRequest，要求模型调用工具
+    let request = CompletionRequest::new(vec![ChatMessage::user(
+        "Please call the echo tool with the text 'OK'",
+    )])
     .with_model(&model)
-    .with_temperature(0.0);
+    .with_temperature(0.0)
+    .with_tools(vec![echo_tool]);
 
     let request_json = serde_json::to_string(&request).ok();
 
     // 尝试使用流式 API
-    match provider.stream_complete_with_tools(request.clone()).await {
+    match provider.stream_complete(request.clone()).await {
         Ok(stream) => {
             let mut accumulator = TestStreamingAccumulator::new();
 
@@ -483,7 +481,7 @@ async fn run_provider_connection_test(
             // Provider 不支持流式，降级到非流式
             tracing::debug!("Provider doesn't support streaming, falling back to non-streaming");
 
-            match provider.complete_with_tools(request.clone()).await {
+            match provider.complete(request.clone()).await {
                 Ok(resp) => {
                     let has_tool_calls = !resp.tool_calls.is_empty();
                     let response_content = if has_tool_calls {
@@ -610,7 +608,7 @@ impl TestStreamingAccumulator {
         }
     }
 
-    fn into_response(self) -> ToolCompletionResponse {
+    fn into_response(self) -> CompletionResponse {
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_iter()
@@ -623,7 +621,7 @@ impl TestStreamingAccumulator {
             })
             .collect();
 
-        ToolCompletionResponse {
+        CompletionResponse {
             content: if self.content.is_empty() {
                 None
             } else {

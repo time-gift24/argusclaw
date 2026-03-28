@@ -11,8 +11,8 @@ use crate::error::DbError;
 use argus_crypto::{Cipher, FileKeySource, KeyMaterialSource, StaticKeySource};
 use argus_protocol::llm::SecretString;
 
-mod agent;
 mod account;
+mod agent;
 mod job;
 mod llm_provider;
 mod session;
@@ -224,13 +224,9 @@ impl ArgusSqlite {
             thinking_config,
         } = placeholder;
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| DbError::QueryFailed {
-                reason: e.to_string(),
-            })?;
+        let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         // Delete placeholder row first (no conflict possible now)
         sqlx::query("DELETE FROM agents WHERE id = 0")
@@ -291,7 +287,9 @@ impl ArgusSqlite {
                 .bind(repaired_id)
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
         }
 
         tx.commit().await.map_err(|e| DbError::QueryFailed {

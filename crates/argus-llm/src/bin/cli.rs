@@ -233,7 +233,10 @@ async fn test_connection(config: &ResolvedConfig) -> Result<()> {
         Ok(response) => {
             let latency = started.elapsed();
             println!("✓ Connection successful ({}ms)", latency.as_millis());
-            println!("Response: {}", response.content.trim());
+            println!(
+                "Response: {}",
+                response.content.as_deref().unwrap_or("").trim()
+            );
             Ok(())
         }
         Err(e) => {
@@ -341,7 +344,7 @@ async fn complete_prompt(
             .await
             .map_err(|e| anyhow!("Completion failed: {}", e))?;
 
-        println!("{}", response.content);
+        println!("{}", response.content.as_deref().unwrap_or(""));
         println!();
         println!(
             "Tokens: {} input, {} output ({}ms)",
@@ -382,7 +385,10 @@ async fn test_retry(config: &ResolvedConfig, max_retries: u32) -> Result<()> {
     match provider.complete(request).await {
         Ok(response) => {
             println!("✓ Request completed successfully");
-            println!("Response: {}", response.content.trim());
+            println!(
+                "Response: {}",
+                response.content.as_deref().unwrap_or("").trim()
+            );
             println!("Total time: {}ms", started.elapsed().as_millis());
             Ok(())
         }

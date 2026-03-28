@@ -46,12 +46,11 @@ impl TemplateManager {
                 })?;
 
             let record = def.to_agent_record();
-            let agent_id = self
-                .upsert_by_display_name(&record)
-                .await
-                .map_err(|e| ArgusError::DatabaseError {
+            let agent_id = self.upsert_by_display_name(&record).await.map_err(|e| {
+                ArgusError::DatabaseError {
                     reason: format!("failed to seed agent '{}': {}", record.display_name, e),
-                })?;
+                }
+            })?;
 
             tracing::info!(
                 "seeded builtin agent '{}' (id={})",
@@ -71,11 +70,13 @@ impl TemplateManager {
 
     /// Upsert (create or update) an agent template.
     pub async fn upsert(&self, template: AgentRecord) -> Result<AgentId> {
-        let id = self
-            .repository
-            .upsert(&template)
-            .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        let id =
+            self.repository
+                .upsert(&template)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
         Ok(id)
     }
 
@@ -85,7 +86,9 @@ impl TemplateManager {
             .repository
             .upsert(record)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
         Ok(id)
     }
 
@@ -94,7 +97,9 @@ impl TemplateManager {
         self.sqlite
             .repair_placeholder_ids()
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     /// Get a template by ID.
@@ -102,7 +107,9 @@ impl TemplateManager {
         self.repository
             .get(&id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     /// List all templates.
@@ -110,7 +117,9 @@ impl TemplateManager {
         self.repository
             .list()
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     /// Find a template by display name.
@@ -118,16 +127,20 @@ impl TemplateManager {
         self.repository
             .find_by_display_name(display_name)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     /// Delete a template.
     pub async fn delete(&self, id: AgentId) -> Result<()> {
-        let (thread_count, job_count) = self
-            .repository
-            .count_references(&id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        let (thread_count, job_count) =
+            self.repository
+                .count_references(&id)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
 
         if thread_count > 0 || job_count > 0 {
             return Err(ArgusError::DatabaseError {
@@ -138,7 +151,9 @@ impl TemplateManager {
         self.repository
             .delete(&id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         Ok(())
     }
@@ -148,7 +163,9 @@ impl TemplateManager {
         self.repository
             .list_by_parent_id(&parent_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     /// Add a subagent to a parent agent.
@@ -156,7 +173,9 @@ impl TemplateManager {
         self.repository
             .add_subagent(&parent_id, &child_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 
     /// Remove a subagent from its parent.
@@ -164,6 +183,8 @@ impl TemplateManager {
         self.repository
             .remove_subagent(&parent_id, &child_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 }

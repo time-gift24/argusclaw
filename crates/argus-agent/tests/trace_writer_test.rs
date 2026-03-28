@@ -1,9 +1,9 @@
 //! Tests for TraceWriter.
 
-use argus_protocol::TokenUsage;
-use argus_protocol::llm::ChatMessage;
 use argus_agent::TurnLogEvent;
 use argus_agent::trace::{TraceConfig, TraceWriter, read_jsonl_events};
+use argus_protocol::TokenUsage;
+use argus_protocol::llm::ChatMessage;
 
 #[tokio::test]
 async fn test_trace_writer_success() {

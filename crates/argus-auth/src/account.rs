@@ -5,8 +5,8 @@ use std::sync::Arc;
 use argus_crypto::Cipher;
 use subtle::ConstantTimeEq;
 
-use argus_repository::traits::AccountRepository;
 use super::error::AuthError;
+use argus_repository::traits::AccountRepository;
 
 #[derive(Debug, Clone)]
 pub struct UserInfo {
@@ -66,8 +66,7 @@ impl AccountManager {
         match creds {
             Some(stored) => {
                 // Verify username matches using constant-time comparison to prevent timing attacks
-                let username_matches =
-                    stored.username.as_bytes().ct_eq(username.as_bytes());
+                let username_matches = stored.username.as_bytes().ct_eq(username.as_bytes());
                 if !bool::from(username_matches) {
                     return Ok(false);
                 }

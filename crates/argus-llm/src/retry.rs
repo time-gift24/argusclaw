@@ -8,7 +8,7 @@
 //!
 //! Local modifications:
 //! - Adapted retryability classification to ArgusClaw's reduced `LlmError` surface.
-//! - Extends retry setup to `stream_complete` and `stream_complete_with_tools`.
+//! - Extends retry setup to `stream_complete`.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -24,7 +24,7 @@ use rust_decimal::Decimal;
 
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider, LlmStreamEvent,
-    ModelMetadata, ToolCompletionRequest, ToolCompletionResponse,
+    ModelMetadata,
 };
 
 fn is_retryable(err: &LlmError) -> bool {
@@ -305,24 +305,6 @@ impl LlmProvider for RetryProvider {
         Ok(response)
     }
 
-    async fn complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        let inner = &self.inner;
-        let (response, _retry_events) = self
-            .retry_loop(
-                || {
-                    let req = request.clone();
-                    async move { inner.complete_with_tools(req).await }
-                },
-                " (tools)",
-            )
-            .await
-            .map_err(|(err, _events)| err)?;
-        Ok(response)
-    }
-
     async fn stream_complete(
         &self,
         request: CompletionRequest,
@@ -357,54 +339,6 @@ impl LlmProvider for RetryProvider {
                     setup_retry_count,
                     self.inner.active_model_name(),
                     " (stream)",
-                )))
-            }
-            Err((err, retry_events)) => {
-                // Even on failure, return retry events in the stream before the error
-                use futures_util::{StreamExt, stream};
-
-                let retry_event_stream = stream::iter(retry_events.into_iter().map(Ok));
-                let error_stream = stream::once(async move { Err(err) });
-                let combined_stream = retry_event_stream.chain(error_stream);
-                Ok(Box::pin(combined_stream))
-            }
-        }
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        let inner = self.inner.clone();
-        let result = self
-            .retry_loop(
-                || {
-                    let req = request.clone();
-                    let inner = inner.clone();
-                    async move { inner.stream_complete_with_tools(req).await }
-                },
-                " (stream tools)",
-            )
-            .await;
-
-        match result {
-            Ok((stream, retry_events)) => {
-                let setup_retry_count = retry_events.len() as u32;
-                let restart_inner = self.inner.clone();
-                let restart_request = request.clone();
-
-                Ok(Box::pin(RetryEventStream::new(
-                    retry_events,
-                    stream,
-                    Box::new(move || {
-                        let inner = restart_inner.clone();
-                        let request = restart_request.clone();
-                        Box::pin(async move { inner.stream_complete_with_tools(request).await })
-                    }),
-                    self.config.max_retries,
-                    setup_retry_count,
-                    self.inner.active_model_name(),
-                    " (stream tools)",
                 )))
             }
             Err((err, retry_events)) => {
@@ -526,21 +460,15 @@ mod tests {
             }
 
             Ok(CompletionResponse {
-                content: "ok".to_string(),
+                content: Some("ok".to_string()),
                 reasoning_content: None,
+                tool_calls: vec![],
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            unimplemented!("tool retry is covered by the same retry path");
         }
 
         async fn stream_complete(
@@ -614,13 +542,6 @@ mod tests {
             unreachable!()
         }
 
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            unreachable!()
-        }
-
         async fn stream_complete(
             &self,
             _request: CompletionRequest,
@@ -683,13 +604,6 @@ mod tests {
                 reason: "auth error".to_string(),
             })
         }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            unreachable!()
-        }
     }
 
     #[tokio::test]
@@ -702,7 +616,7 @@ mod tests {
             .await
             .expect("transient errors should be retried");
 
-        assert_eq!(response.content, "ok");
+        assert_eq!(response.content, Some("ok".to_string()));
         assert_eq!(inner.calls(), 3);
     }
 

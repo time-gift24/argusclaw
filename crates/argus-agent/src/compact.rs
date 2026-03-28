@@ -345,10 +345,7 @@ mod tests {
     use std::sync::Arc;
 
     use argus_protocol::LlmProvider;
-    use argus_protocol::llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError, ToolCompletionRequest,
-        ToolCompletionResponse,
-    };
+    use argus_protocol::llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
@@ -372,16 +369,6 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "fixed-context".to_string(),
-                reason: "not implemented".to_string(),
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
             Err(LlmError::RequestFailed {
                 provider: "fixed-context".to_string(),
                 reason: "not implemented".to_string(),

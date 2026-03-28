@@ -179,13 +179,14 @@ impl AgentRepository for ArgusSqlite {
     }
 
     async fn find_id_by_display_name(&self, display_name: &str) -> DbResult<Option<AgentId>> {
-        let id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM agents WHERE display_name = ?1 LIMIT 1",
-        )
-        .bind(display_name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        let id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM agents WHERE display_name = ?1 LIMIT 1")
+                .bind(display_name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
 
         Ok(id.map(AgentId::new))
     }
@@ -196,14 +197,17 @@ impl AgentRepository for ArgusSqlite {
                 .bind(id.into_inner())
                 .fetch_one(&self.pool)
                 .await
-                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
 
-        let job_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE agent_id = ?1")
-                .bind(id.into_inner())
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        let job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE agent_id = ?1")
+            .bind(id.into_inner())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok((thread_count, job_count))
     }
@@ -220,7 +224,9 @@ impl AgentRepository for ArgusSqlite {
         .bind(child_id.into_inner())
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -237,7 +243,9 @@ impl AgentRepository for ArgusSqlite {
         .bind(parent_id.into_inner())
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(())
     }

@@ -127,12 +127,12 @@ mod tests {
 
     /// Mock LLM provider for testing.
     struct MockProvider {
-        responses: Mutex<Vec<argus_protocol::llm::ToolCompletionResponse>>,
+        responses: Mutex<Vec<argus_protocol::llm::CompletionResponse>>,
         call_count: Mutex<usize>,
     }
 
     impl MockProvider {
-        fn new(responses: Vec<argus_protocol::llm::ToolCompletionResponse>) -> Self {
+        fn new(responses: Vec<argus_protocol::llm::CompletionResponse>) -> Self {
             Self {
                 responses: Mutex::new(responses),
                 call_count: Mutex::new(0),
@@ -150,10 +150,10 @@ mod tests {
             (Decimal::ZERO, Decimal::ZERO)
         }
 
-        async fn complete_with_tools(
+        async fn complete(
             &self,
-            _request: argus_protocol::llm::ToolCompletionRequest,
-        ) -> Result<argus_protocol::llm::ToolCompletionResponse, argus_protocol::llm::LlmError>
+            _request: argus_protocol::llm::CompletionRequest,
+        ) -> Result<argus_protocol::llm::CompletionResponse, argus_protocol::llm::LlmError>
         {
             let mut count = self.call_count.lock().unwrap();
             let responses = self.responses.lock().unwrap();
@@ -163,7 +163,7 @@ mod tests {
                 Ok(response)
             } else {
                 // Default: return stop
-                Ok(argus_protocol::llm::ToolCompletionResponse {
+                Ok(argus_protocol::llm::CompletionResponse {
                     content: Some("Done".to_string()),
                     reasoning_content: None,
                     tool_calls: Vec::new(),
@@ -174,14 +174,6 @@ mod tests {
                     cache_creation_input_tokens: 0,
                 })
             }
-        }
-
-        async fn complete(
-            &self,
-            _request: argus_protocol::llm::CompletionRequest,
-        ) -> Result<argus_protocol::llm::CompletionResponse, argus_protocol::llm::LlmError>
-        {
-            unreachable!("complete not used in turn execution")
         }
     }
 
@@ -224,7 +216,7 @@ mod tests {
     async fn test_simple_response_without_tools() {
         // Provider returns immediate stop
         let provider = Arc::new(MockProvider::new(vec![
-            argus_protocol::llm::ToolCompletionResponse {
+            argus_protocol::llm::CompletionResponse {
                 content: Some("Hello, world!".to_string()),
                 reasoning_content: None,
                 tool_calls: Vec::new(),
@@ -272,7 +264,7 @@ mod tests {
         }
 
         let provider = Arc::new(MockProvider::new(vec![
-            argus_protocol::llm::ToolCompletionResponse {
+            argus_protocol::llm::CompletionResponse {
                 content: Some("Response".to_string()),
                 reasoning_content: None,
                 tool_calls: Vec::new(),

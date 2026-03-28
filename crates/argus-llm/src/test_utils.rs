@@ -10,7 +10,6 @@ use rust_decimal::Decimal;
 use crate::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
-    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Wrapper that injects intermittent failures into any provider.
@@ -77,19 +76,6 @@ impl LlmProvider for TestRetryProvider {
         self.inner.complete(request).await
     }
 
-    async fn complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, LlmError> {
-        if self.should_fail() {
-            return Err(LlmError::RateLimited {
-                provider: self.model_name().to_string(),
-                retry_after: Some(Duration::from_millis(300)),
-            });
-        }
-        self.inner.complete_with_tools(request).await
-    }
-
     async fn stream_complete(
         &self,
         request: CompletionRequest,
@@ -101,19 +87,6 @@ impl LlmProvider for TestRetryProvider {
             });
         }
         self.inner.stream_complete(request).await
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        request: ToolCompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        if self.should_fail() {
-            return Err(LlmError::RateLimited {
-                provider: self.model_name().to_string(),
-                retry_after: Some(Duration::from_millis(300)),
-            });
-        }
-        self.inner.stream_complete_with_tools(request).await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

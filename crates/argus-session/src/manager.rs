@@ -1,20 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use argus_agent::config::ThreadConfigBuilder;
+use argus_agent::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
+use argus_agent::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_job::JobManager;
 use argus_protocol::{
-    llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall,
-        ToolCompletionRequest, ToolCompletionResponse,
-    },
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
-use argus_agent::config::ThreadConfigBuilder;
-use argus_agent::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_tool::ToolManager;
-use argus_agent::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
@@ -65,23 +62,9 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
         Err(self.llm_error())
     }
 
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> std::result::Result<ToolCompletionResponse, LlmError> {
-        Err(self.llm_error())
-    }
-
     async fn stream_complete(
         &self,
         _request: CompletionRequest,
-    ) -> std::result::Result<LlmEventStream, LlmError> {
-        Err(self.llm_error())
-    }
-
-    async fn stream_complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
     ) -> std::result::Result<LlmEventStream, LlmError> {
         Err(self.llm_error())
     }
@@ -105,6 +88,7 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Create a new SessionManager.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_repo: Arc<dyn SessionRepository>,
         thread_repo: Arc<dyn ThreadRepository>,
@@ -151,11 +135,13 @@ impl SessionManager {
 
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
-        let sessions = self
-            .session_repo
-            .list_with_counts()
-            .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        let sessions =
+            self.session_repo
+                .list_with_counts()
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
 
         let sessions = sessions
             .into_iter()
@@ -189,11 +175,13 @@ impl SessionManager {
         }
 
         // Load from DB
-        let session_record = self
-            .session_repo
-            .get(&session_id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+        let session_record =
+            self.session_repo
+                .get(&session_id)
+                .await
+                .map_err(|e| ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                })?;
 
         let session = match session_record {
             Some(record) => Arc::new(Session::new(session_id, record.name)),
@@ -208,7 +196,9 @@ impl SessionManager {
             .thread_repo
             .list_threads_in_session(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         for thread_record in thread_records {
             let thread_id = thread_record.id;
@@ -342,8 +332,6 @@ impl SessionManager {
                 .build()
             {
                 Ok(mut t) => {
-                    let turn_count = turn_count.max(0) as u32;
-                    let token_count = token_count.max(0) as u32;
                     if let Ok(recovered) = recover_thread_state_from_trace(
                         &self.trace_dir,
                         &session_id,
@@ -396,7 +384,9 @@ impl SessionManager {
         self.session_repo
             .create(&session_id, &name)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Create session trace directory with meta.json
         if let Err(e) = self.ensure_session_dir(session_id).await {
@@ -467,13 +457,17 @@ impl SessionManager {
         self.thread_repo
             .delete_threads_in_session(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Delete the session row
         self.session_repo
             .delete(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
@@ -533,7 +527,9 @@ impl SessionManager {
                     .llm_provider_repo
                     .get_default_provider_id()
                     .await
-                    .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?
+                    .map_err(|e| ArgusError::DatabaseError {
+                        reason: e.to_string(),
+                    })?
                     .ok_or(ArgusError::DefaultProviderNotConfigured)?;
                 let default_provider_id = ProviderId::new(default_llm_provider_id.into_inner());
 
@@ -639,7 +635,9 @@ impl SessionManager {
         self.thread_repo
             .upsert_thread(&thread_record)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
@@ -658,7 +656,9 @@ impl SessionManager {
         self.thread_repo
             .delete_thread(thread_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -674,7 +674,9 @@ impl SessionManager {
             .session_repo
             .rename(&session_id, name.trim())
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         if !found {
             return Err(ArgusError::SessionNotFound(session_id));
@@ -705,7 +707,9 @@ impl SessionManager {
             .thread_repo
             .rename_thread(thread_id, &session_id, persisted_title)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         if !found {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
@@ -742,9 +746,16 @@ impl SessionManager {
 
         let found = self
             .thread_repo
-            .update_thread_model(thread_id, &session_id, LlmProviderId::new(provider_id.inner()), Some(&effective_model))
+            .update_thread_model(
+                thread_id,
+                &session_id,
+                LlmProviderId::new(provider_id.inner()),
+                Some(&effective_model),
+            )
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         if !found {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
@@ -768,15 +779,16 @@ impl SessionManager {
             .thread_repo
             .list_threads_in_session(&session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?;
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
         let threads = thread_records
             .into_iter()
             .map(|record| {
-                let updated_at =
-                    chrono::DateTime::parse_from_rfc3339(&record.updated_at)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now());
+                let updated_at = chrono::DateTime::parse_from_rfc3339(&record.updated_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
 
                 ThreadSummary {
                     id: record.id,
@@ -854,7 +866,9 @@ impl SessionManager {
             .thread_repo
             .get_thread_in_session(thread_id, &session_id)
             .await
-            .map_err(|e| ArgusError::DatabaseError { reason: e.to_string() })?
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
 
         let template_id = thread_record.template_id.unwrap_or_else(|| {
@@ -864,10 +878,9 @@ impl SessionManager {
         let provider_id = Some(ProviderId::new(thread_record.provider_id.into_inner()));
         let token_count = thread_record.token_count;
         let turn_count = thread_record.turn_count;
-        let updated_at =
-            chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
 
         let session = self.load(session_id).await?;
         let thread = session
@@ -1091,15 +1104,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
-        ToolCompletionResponse,
-    };
+    use argus_agent::{KeepRecentCompactor, ThreadBuilder};
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
         ThreadEvent, ThreadId, ThreadJobResult,
     };
-    use argus_agent::{KeepRecentCompactor, ThreadBuilder};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use tokio::time::{sleep, timeout};
@@ -1139,18 +1149,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _request: CompletionRequest,
+            request: CompletionRequest,
         ) -> std::result::Result<CompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "capturing".to_string(),
-                reason: "streaming only in tests".to_string(),
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            request: ToolCompletionRequest,
-        ) -> std::result::Result<ToolCompletionResponse, LlmError> {
             let last_user_input = request
                 .messages
                 .iter()
@@ -1165,7 +1165,7 @@ mod tests {
 
             sleep(self.delay).await;
 
-            Ok(ToolCompletionResponse {
+            Ok(CompletionResponse {
                 content: Some(self.response.clone()),
                 reasoning_content: None,
                 tool_calls: Vec::new(),
