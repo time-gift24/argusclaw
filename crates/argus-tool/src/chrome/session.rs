@@ -155,18 +155,24 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn shutdown(&self) -> Result<(), ChromeToolError> {
-        if let Some(driver) = self.driver.lock().await.take() {
+        let driver_error = if let Some(driver) = self.driver.lock().await.take() {
             driver
                 .quit()
                 .await
-                .map_err(|e| ChromeToolError::SessionShutdownFailed {
+                .err()
+                .map(|e| ChromeToolError::SessionShutdownFailed {
                     reason: e.to_string(),
-                })?;
+                })
+        } else {
+            None
+        };
+
+        let mut child_guard = self.driver_process.lock().await;
+        let (result, child_closed) = finalize_shutdown(driver_error, child_guard.as_mut()).await;
+        if child_closed {
+            child_guard.take();
         }
-        if let Some(mut child) = self.driver_process.lock().await.take() {
-            shutdown_child_process(&mut child).await?;
-        }
-        Ok(())
+        result
     }
 }
 
@@ -200,5 +206,79 @@ pub(crate) async fn shutdown_child_process(child: &mut Child) -> Result<(), Chro
         Err(e) => Err(ChromeToolError::SessionShutdownFailed {
             reason: e.to_string(),
         }),
+    }
+}
+
+async fn finalize_shutdown(
+    driver_error: Option<ChromeToolError>,
+    child: Option<&mut Child>,
+) -> (Result<(), ChromeToolError>, bool) {
+    let child_error = match child {
+        Some(child) => shutdown_child_process(child).await.err(),
+        None => None,
+    };
+    let child_closed = child_error.is_none();
+
+    (
+        merge_shutdown_errors(driver_error, child_error),
+        child_closed,
+    )
+}
+
+fn merge_shutdown_errors(
+    driver_error: Option<ChromeToolError>,
+    child_error: Option<ChromeToolError>,
+) -> Result<(), ChromeToolError> {
+    match (driver_error, child_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (Some(driver_error), Some(child_error)) => Err(ChromeToolError::SessionShutdownFailed {
+            reason: format!(
+                "{}; child cleanup also failed: {}",
+                shutdown_error_reason(driver_error),
+                shutdown_error_reason(child_error)
+            ),
+        }),
+    }
+}
+
+fn shutdown_error_reason(error: ChromeToolError) -> String {
+    match error {
+        ChromeToolError::SessionShutdownFailed { reason } => reason,
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Stdio;
+
+    use tokio::process::Command;
+
+    use super::{ChromeToolError, finalize_shutdown};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finalize_shutdown_still_cleans_child_after_driver_quit_error() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let (result, child_closed) = finalize_shutdown(
+            Some(ChromeToolError::SessionShutdownFailed {
+                reason: "driver quit failed".to_string(),
+            }),
+            Some(&mut child),
+        )
+        .await;
+
+        assert!(child_closed);
+        assert!(
+            matches!(result, Err(ChromeToolError::SessionShutdownFailed { reason }) if reason == "driver quit failed")
+        );
+        assert!(child.try_wait().unwrap().is_some());
     }
 }
