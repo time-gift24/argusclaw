@@ -19,7 +19,10 @@ pub trait ThreadRepository: Send + Sync {
     async fn list_threads(&self, limit: u32) -> Result<Vec<ThreadRecord>, DbError>;
 
     /// List threads belonging to a session.
-    async fn list_threads_in_session(&self, session_id: &SessionId) -> Result<Vec<ThreadRecord>, DbError>;
+    async fn list_threads_in_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<ThreadRecord>, DbError>;
 
     /// Delete a thread and all its messages.
     async fn delete_thread(&self, id: &ThreadId) -> Result<bool, DbError>;

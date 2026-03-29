@@ -10,6 +10,7 @@ use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -18,7 +19,6 @@ use argus_protocol::{
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
-use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -457,9 +457,9 @@ mod tests {
     use std::sync::Arc;
 
     use argus_protocol::{LlmProvider, ProviderId};
-    use argus_template::TemplateManager;
-    use argus_repository::traits::AgentRepository;
     use argus_repository::ArgusSqlite;
+    use argus_repository::traits::AgentRepository;
+    use argus_template::TemplateManager;
     use async_trait::async_trait;
     use sqlx::SqlitePool;
 

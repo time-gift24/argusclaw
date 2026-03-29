@@ -12,10 +12,7 @@ use super::{ArgusSqlite, DbResult};
 #[async_trait]
 impl ThreadRepository for ArgusSqlite {
     async fn upsert_thread(&self, thread: &ThreadRecord) -> DbResult<()> {
-        let session_id_str = thread
-            .session_id
-            .as_ref()
-            .map(|s| s.to_string());
+        let session_id_str = thread.session_id.as_ref().map(|s| s.to_string());
         let template_id_i64 = thread.template_id.as_ref().map(|t| t.into_inner());
 
         sqlx::query(
@@ -44,7 +41,9 @@ impl ThreadRepository for ArgusSqlite {
         .bind(&thread.updated_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -58,7 +57,9 @@ impl ThreadRepository for ArgusSqlite {
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         row.map(|r| self.map_thread_record(r)).transpose()
     }
@@ -72,9 +73,13 @@ impl ThreadRepository for ArgusSqlite {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
-        rows.into_iter().map(|r| self.map_thread_record(r)).collect()
+        rows.into_iter()
+            .map(|r| self.map_thread_record(r))
+            .collect()
     }
 
     async fn list_threads_in_session(&self, session_id: &SessionId) -> DbResult<Vec<ThreadRecord>> {
@@ -86,9 +91,13 @@ impl ThreadRepository for ArgusSqlite {
         .bind(session_id.to_string())
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
-        rows.into_iter().map(|r| self.map_thread_record(r)).collect()
+        rows.into_iter()
+            .map(|r| self.map_thread_record(r))
+            .collect()
     }
 
     async fn delete_thread(&self, id: &ThreadId) -> DbResult<bool> {
@@ -96,7 +105,9 @@ impl ThreadRepository for ArgusSqlite {
             .bind(id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -106,7 +117,9 @@ impl ThreadRepository for ArgusSqlite {
             .bind(session_id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected())
     }
@@ -175,7 +188,9 @@ impl ThreadRepository for ArgusSqlite {
             .bind(seq as i64)
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected())
     }
@@ -214,7 +229,9 @@ impl ThreadRepository for ArgusSqlite {
         .bind(session_id.to_string())
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -255,7 +272,9 @@ impl ThreadRepository for ArgusSqlite {
         .bind(session_id.to_string())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         row.map(|r| self.map_thread_record(r)).transpose()
     }
@@ -264,8 +283,7 @@ impl ThreadRepository for ArgusSqlite {
 impl ArgusSqlite {
     fn map_thread_record(&self, row: sqlx::sqlite::SqliteRow) -> DbResult<ThreadRecord> {
         let session_id_str: Option<String> = Self::get_column(&row, "session_id")?;
-        let session_id = session_id_str
-            .and_then(|s| SessionId::parse(&s).ok());
+        let session_id = session_id_str.and_then(|s| SessionId::parse(&s).ok());
 
         let template_id_i64: Option<i64> = Self::get_column(&row, "template_id")?;
         let template_id = template_id_i64.map(AgentId::new);

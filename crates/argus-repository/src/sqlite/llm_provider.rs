@@ -234,12 +234,13 @@ impl LlmProviderRepository for ArgusSqlite {
     }
 
     async fn get_default_provider_id(&self) -> Result<Option<LlmProviderId>, ArgusError> {
-        let id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM llm_providers WHERE is_default = 1 LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        let id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM llm_providers WHERE is_default = 1 LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
 
         Ok(id.map(LlmProviderId::new))
     }
