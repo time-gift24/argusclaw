@@ -1,31 +1,31 @@
 //! JobManager for dispatching and managing background jobs.
 //!
-//! Each dispatched job runs as a lightweight Turn (via TurnBuilder).
+//! Each dispatched job is tracked through a ThreadPool-managed execution thread.
 //! Results are sent back through the unified pipe as ThreadEvent::JobResult.
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use argus_protocol::llm::{ChatMessage, Role};
-use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
-    ThreadMailbox,
+    ThreadPoolSnapshot,
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use futures_util::FutureExt;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
 use crate::get_job_result_tool::GetJobResultTool;
 use crate::list_subagents_tool::ListSubagentsTool;
+use crate::thread_pool::ThreadPool;
+use crate::types::ThreadPoolJobRequest;
 
 #[derive(Debug, Clone)]
 enum TrackedJobState {
@@ -56,8 +56,7 @@ pub enum JobLookup {
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
     template_manager: Arc<TemplateManager>,
-    provider_resolver: Arc<dyn ProviderResolver>,
-    tool_manager: Arc<ToolManager>,
+    thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<HashMap<String, TrackedJob>>>,
 }
 
@@ -68,6 +67,7 @@ impl fmt::Debug for JobManager {
 }
 
 impl JobManager {
+    #[cfg(test)]
     const JOB_RESULT_SUMMARY_CHAR_LIMIT: usize = 4000;
 
     /// Create a new JobManager.
@@ -76,10 +76,15 @@ impl JobManager {
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
-        Self {
-            template_manager,
+        let thread_pool = Arc::new(ThreadPool::new(
+            template_manager.clone(),
             provider_resolver,
             tool_manager,
+        ));
+
+        Self {
+            template_manager,
+            thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -97,6 +102,16 @@ impl JobManager {
     /// Create a GetJobResultTool for this manager.
     pub fn create_get_job_result_tool(self: Arc<Self>) -> GetJobResultTool {
         GetJobResultTool::new(self)
+    }
+
+    /// Get the currently bound execution thread for a job, if any.
+    pub fn thread_binding(&self, job_id: &str) -> Option<ThreadId> {
+        self.thread_pool.get_thread_binding(job_id)
+    }
+
+    /// Collect a point-in-time thread-pool snapshot.
+    pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
+        self.thread_pool.collect_metrics()
     }
 
     /// Record that a job was dispatched for a thread.
@@ -141,18 +156,15 @@ impl JobManager {
         }
     }
 
-    /// Spawn a background job executor.
-    ///
-    /// Resolves the agent, builds a Turn, executes it, and sends
-    /// ThreadEvent::JobResult into the pipe when done.
+    /// Dispatch a background job through the thread pool.
     #[allow(clippy::too_many_arguments)]
-    pub async fn spawn_job_executor(
+    pub async fn dispatch_job(
         &self,
         originating_thread_id: ThreadId,
         job_id: String,
         agent_id: AgentId,
         prompt: String,
-        _context: Option<serde_json::Value>,
+        context: Option<serde_json::Value>,
         pipe_tx: broadcast::Sender<ThreadEvent>,
         control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> Result<(), JobError> {
@@ -164,10 +176,28 @@ impl JobManager {
 
         self.record_dispatched_job(originating_thread_id, job_id.clone());
 
-        // ThreadId is Copy — captured into async block directly
-        let template_manager = Arc::clone(&self.template_manager);
-        let provider_resolver = Arc::clone(&self.provider_resolver);
-        let tool_manager = Arc::clone(&self.tool_manager);
+        let request = ThreadPoolJobRequest {
+            originating_thread_id,
+            job_id: job_id.clone(),
+            agent_id,
+            prompt,
+            context,
+        };
+
+        let execution_thread_id = self.thread_pool.enqueue_job(request.clone()).await?;
+        let _ = pipe_tx.send(ThreadEvent::ThreadBoundToJob {
+            job_id: job_id.clone(),
+            thread_id: execution_thread_id,
+        });
+        let _ = pipe_tx.send(ThreadEvent::ThreadPoolQueued {
+            job_id: job_id.clone(),
+            thread_id: execution_thread_id,
+        });
+        let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
+            snapshot: self.thread_pool.collect_metrics(),
+        });
+
+        let thread_pool = Arc::clone(&self.thread_pool);
         let tracked_jobs = Arc::clone(&self.tracked_jobs);
         let pipe_tx_clone = pipe_tx.clone();
         let control_tx_clone = control_tx.clone();
@@ -175,14 +205,9 @@ impl JobManager {
         tokio::spawn(async move {
             let fallback_job_id = job_id.clone();
             let fallback_display_name = format!("Agent {}", agent_id.inner());
-            let result = AssertUnwindSafe(Self::execute_job(
-                template_manager,
-                provider_resolver,
-                tool_manager,
-                originating_thread_id,
-                job_id,
-                agent_id,
-                prompt,
+            let result = AssertUnwindSafe(thread_pool.execute_job(
+                request,
+                execution_thread_id,
                 pipe_tx_clone.clone(),
                 control_tx_clone.clone(),
             ))
@@ -212,131 +237,8 @@ impl JobManager {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_job(
-        template_manager: Arc<TemplateManager>,
-        provider_resolver: Arc<dyn ProviderResolver>,
-        tool_manager: Arc<ToolManager>,
-        originating_thread_id: ThreadId,
-        job_id: String,
-        agent_id: AgentId,
-        prompt: String,
-        pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
-    ) -> ThreadJobResult {
-        let thread_id = format!("job-{}", job_id);
-        let default_display_name = format!("Agent {}", agent_id.inner());
-
-        let agent_record = match template_manager.get(agent_id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    default_display_name,
-                    String::new(),
-                    format!("agent {} not found", agent_id.inner()),
-                );
-            }
-            Err(e) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    default_display_name,
-                    String::new(),
-                    format!("failed to load agent: {}", e),
-                );
-            }
-        };
-        let agent_display_name = agent_record.display_name.clone();
-        let agent_description = agent_record.description.clone();
-
-        let provider = match agent_record.provider_id {
-            Some(pid) => match provider_resolver.resolve(pid).await {
-                Ok(p) => p,
-                Err(e) => {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name.clone(),
-                        agent_description.clone(),
-                        format!("failed to resolve provider: {}", e),
-                    );
-                }
-            },
-            None => match provider_resolver.default_provider().await {
-                Ok(p) => p,
-                Err(e) => {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name.clone(),
-                        agent_description.clone(),
-                        format!("no provider configured: {}", e),
-                    );
-                }
-            },
-        };
-
-        let enabled_tool_names: HashSet<_> = agent_record.tool_names.iter().collect();
-        let tools: Vec<Arc<dyn NamedTool>> = tool_manager
-            .list_ids()
-            .iter()
-            .filter(|name| enabled_tool_names.contains(*name))
-            .filter_map(|name| tool_manager.get(name))
-            .collect();
-
-        let (stream_tx, _stream_rx) = broadcast::channel(256);
-
-        let turn = match TurnBuilder::default()
-            .turn_number(1)
-            .thread_id(thread_id)
-            .messages(vec![ChatMessage::user(&prompt)])
-            .provider(provider)
-            .tools(tools)
-            .hooks(Vec::new())
-            .config(TurnConfig::new())
-            .agent_record(Arc::new(agent_record))
-            .stream_tx(stream_tx)
-            .thread_event_tx(pipe_tx)
-            .originating_thread_id(originating_thread_id)
-            .control_tx(control_tx)
-            .mailbox(Arc::new(Mutex::new(ThreadMailbox::default())))
-            .build()
-        {
-            Ok(turn) => turn,
-            Err(e) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    agent_display_name.clone(),
-                    agent_description.clone(),
-                    format!("failed to build turn: {}", e),
-                );
-            }
-        };
-
-        match turn.execute().await {
-            Ok(output) => ThreadJobResult {
-                job_id,
-                success: true,
-                message: Self::summarize_output(&output),
-                token_usage: Some(output.token_usage),
-                agent_id,
-                agent_display_name,
-                agent_description,
-            },
-            Err(e) => Self::failure_result(
-                job_id,
-                agent_id,
-                agent_display_name,
-                agent_description,
-                e.to_string(),
-            ),
-        }
-    }
-
     /// Summarize turn output into a brief result message.
+    #[cfg(test)]
     fn summarize_output(output: &TurnOutput) -> String {
         for msg in output.messages.iter().rev() {
             if let ChatMessage {
@@ -352,6 +254,7 @@ impl JobManager {
         format!("job completed, {} messages in turn", output.messages.len())
     }
 
+    #[cfg(test)]
     fn truncate_summary(content: &str) -> String {
         let mut chars = content.chars();
         let summary: String = chars
@@ -497,7 +400,7 @@ mod tests {
         JobManager::new(
             Arc::new(TemplateManager::new(
                 sqlite.clone() as Arc<dyn AgentRepository>,
-                sqlite.clone(),
+                sqlite,
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
@@ -569,5 +472,30 @@ mod tests {
             manager.get_job_result_status(thread_id, &result.job_id, false),
             JobLookup::Consumed(found) if found.job_id == result.job_id
         ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_creates_thread_pool_binding() {
+        let manager = test_job_manager();
+        let originating_thread_id = ThreadId::new();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(16);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let job_id = "job-bound".to_string();
+
+        manager
+            .dispatch_job(
+                originating_thread_id,
+                job_id.clone(),
+                AgentId::new(99),
+                "run this".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("job should enqueue even if execution later fails");
+
+        assert!(manager.thread_binding(&job_id).is_some());
+        assert_eq!(manager.thread_pool_snapshot().active_threads, 1);
     }
 }
