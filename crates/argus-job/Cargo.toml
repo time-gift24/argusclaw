@@ -24,5 +24,3 @@ chrono = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rust_decimal = { workspace = true }
-
-[dev-dependencies]

@@ -8,19 +8,19 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::CompactorManager;
-#[cfg(test)]
-use argus_agent::TurnOutput;
-#[cfg(test)]
+use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
     AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
     ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot, ThreadPoolState,
 };
-use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
+use argus_repository::traits::JobRepository;
+use argus_repository::types::{JobId, JobResult as PersistedJobResult, WorkflowStatus};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
-use tokio::sync::{broadcast, mpsc};
+use chrono::Utc;
+use futures_util::FutureExt;
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
@@ -58,7 +58,9 @@ pub enum JobLookup {
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
     template_manager: Arc<TemplateManager>,
-    thread_pool: Arc<ThreadPool>,
+    provider_resolver: Arc<dyn ProviderResolver>,
+    tool_manager: Arc<ToolManager>,
+    job_repo: Option<Arc<dyn JobRepository>>,
     tracked_jobs: Arc<StdMutex<HashMap<String, TrackedJob>>>,
 }
 
@@ -80,37 +82,35 @@ impl JobManager {
         compactor_manager: Arc<CompactorManager>,
         trace_dir: PathBuf,
     ) -> Self {
-        Self::new_with_persistence(
-            template_manager,
-            provider_resolver,
-            tool_manager,
-            compactor_manager,
-            trace_dir,
-            None,
-        )
+        Self::build(template_manager, provider_resolver, tool_manager, None)
     }
 
-    /// Create a new JobManager with optional persistent thread-pool backing.
-    pub fn new_with_persistence(
+    /// Create a new JobManager with a repository-backed execution path.
+    pub fn with_job_repository(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
-        trace_dir: PathBuf,
-        persistence: Option<ThreadPoolPersistence>,
+        job_repo: Arc<dyn JobRepository>,
     ) -> Self {
-        let thread_pool = Arc::new(ThreadPool::with_persistence(
-            template_manager.clone(),
+        Self::build(
+            template_manager,
             provider_resolver,
             tool_manager,
-            compactor_manager,
-            trace_dir,
-            persistence,
-        ));
+            Some(job_repo),
+        )
+    }
 
+    fn build(
+        template_manager: Arc<TemplateManager>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        tool_manager: Arc<ToolManager>,
+        job_repo: Option<Arc<dyn JobRepository>>,
+    ) -> Self {
         Self {
             template_manager,
-            thread_pool,
+            provider_resolver,
+            tool_manager,
+            job_repo,
             tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -288,6 +288,229 @@ impl JobManager {
         Ok(())
     }
 
+    /// Spawn a repository-backed workflow job executor.
+    pub async fn spawn_persisted_job_executor(
+        &self,
+        originating_thread_id: ThreadId,
+        job_id: JobId,
+        pipe_tx: broadcast::Sender<ThreadEvent>,
+        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+    ) -> Result<(), JobError> {
+        let job_repo = self
+            .job_repo
+            .clone()
+            .ok_or_else(|| JobError::Internal("job repository not configured".to_string()))?;
+        let job = job_repo
+            .get(&job_id)
+            .await
+            .map_err(|error| JobError::Internal(format!("failed to load job {job_id}: {error}")))?
+            .ok_or_else(|| JobError::JobNotFound(job_id.to_string()))?;
+
+        if job.prompt.trim().is_empty() {
+            return Err(JobError::ExecutionFailed(
+                "prompt cannot be empty".to_string(),
+            ));
+        }
+
+        let started_at = Utc::now().to_rfc3339();
+        job_repo
+            .update_status(&job_id, WorkflowStatus::Running, Some(&started_at), None)
+            .await
+            .map_err(|error| {
+                JobError::Internal(format!(
+                    "failed to mark job {} running: {}",
+                    job_id, error
+                ))
+            })?;
+
+        self.record_dispatched_job(originating_thread_id, job_id.to_string());
+
+        let template_manager = Arc::clone(&self.template_manager);
+        let provider_resolver = Arc::clone(&self.provider_resolver);
+        let tool_manager = Arc::clone(&self.tool_manager);
+        let tracked_jobs = Arc::clone(&self.tracked_jobs);
+        let pipe_tx_clone = pipe_tx.clone();
+        let control_tx_clone = control_tx.clone();
+        let job_repo_clone = Arc::clone(&job_repo);
+        let job_id_string = job_id.to_string();
+        let agent_id = job.agent_id;
+        let prompt = job.prompt;
+
+        tokio::spawn(async move {
+            let fallback_job_id = job_id_string.clone();
+            let fallback_display_name = format!("Agent {}", agent_id.inner());
+            let result = AssertUnwindSafe(Self::execute_job(
+                template_manager,
+                provider_resolver,
+                tool_manager,
+                originating_thread_id,
+                job_id_string,
+                agent_id,
+                prompt,
+                pipe_tx_clone.clone(),
+                control_tx_clone.clone(),
+            ))
+            .catch_unwind()
+            .await;
+
+            let result = match result {
+                Ok(result) => result,
+                Err(payload) => Self::failure_result(
+                    fallback_job_id,
+                    agent_id,
+                    fallback_display_name,
+                    String::new(),
+                    Self::panic_message(payload),
+                ),
+            };
+
+            if let Err(error) = Self::persist_job_completion(
+                &job_repo_clone,
+                &job_id,
+                &started_at,
+                &result,
+            )
+            .await
+            {
+                tracing::error!(job_id = %job_id, "failed to persist job completion: {error}");
+            }
+
+            Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
+            Self::record_completed_job_result_in_store(
+                &tracked_jobs,
+                originating_thread_id,
+                result.clone(),
+            );
+            Self::broadcast_job_result(&pipe_tx_clone, originating_thread_id, result);
+        });
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_job(
+        template_manager: Arc<TemplateManager>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        tool_manager: Arc<ToolManager>,
+        originating_thread_id: ThreadId,
+        job_id: String,
+        agent_id: AgentId,
+        prompt: String,
+        pipe_tx: broadcast::Sender<ThreadEvent>,
+        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+    ) -> ThreadJobResult {
+        let thread_id = format!("job-{}", job_id);
+        let default_display_name = format!("Agent {}", agent_id.inner());
+
+        let agent_record = match template_manager.get(agent_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return Self::failure_result(
+                    job_id,
+                    agent_id,
+                    default_display_name,
+                    String::new(),
+                    format!("agent {} not found", agent_id.inner()),
+                );
+            }
+            Err(e) => {
+                return Self::failure_result(
+                    job_id,
+                    agent_id,
+                    default_display_name,
+                    String::new(),
+                    format!("failed to load agent: {}", e),
+                );
+            }
+        };
+        let agent_display_name = agent_record.display_name.clone();
+        let agent_description = agent_record.description.clone();
+
+        let provider = match agent_record.provider_id {
+            Some(pid) => match provider_resolver.resolve(pid).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return Self::failure_result(
+                        job_id,
+                        agent_id,
+                        agent_display_name.clone(),
+                        agent_description.clone(),
+                        format!("failed to resolve provider: {}", e),
+                    );
+                }
+            },
+            None => match provider_resolver.default_provider().await {
+                Ok(p) => p,
+                Err(e) => {
+                    return Self::failure_result(
+                        job_id,
+                        agent_id,
+                        agent_display_name.clone(),
+                        agent_description.clone(),
+                        format!("no provider configured: {}", e),
+                    );
+                }
+            },
+        };
+
+        let enabled_tool_names: HashSet<_> = agent_record.tool_names.iter().collect();
+        let tools: Vec<Arc<dyn NamedTool>> = tool_manager
+            .list_ids()
+            .iter()
+            .filter(|name| enabled_tool_names.contains(*name))
+            .filter_map(|name| tool_manager.get(name))
+            .collect();
+
+        let (stream_tx, _stream_rx) = broadcast::channel(256);
+
+        let turn = match TurnBuilder::default()
+            .turn_number(1)
+            .thread_id(thread_id)
+            .messages(vec![ChatMessage::user(&prompt)])
+            .provider(provider)
+            .tools(tools)
+            .hooks(Vec::new())
+            .config(TurnConfig::new())
+            .agent_record(Arc::new(agent_record))
+            .stream_tx(stream_tx)
+            .thread_event_tx(pipe_tx)
+            .originating_thread_id(originating_thread_id)
+            .control_tx(control_tx)
+            .mailbox(Arc::new(Mutex::new(ThreadMailbox::default())))
+            .build()
+        {
+            Ok(turn) => turn,
+            Err(e) => {
+                return Self::failure_result(
+                    job_id,
+                    agent_id,
+                    agent_display_name.clone(),
+                    agent_description.clone(),
+                    format!("failed to build turn: {}", e),
+                );
+            }
+        };
+
+        match turn.execute().await {
+            Ok(output) => ThreadJobResult {
+                job_id,
+                success: true,
+                message: Self::summarize_output(&output),
+                token_usage: Some(output.token_usage),
+                agent_id,
+                agent_display_name,
+                agent_description,
+            },
+            Err(e) => Self::failure_result(
+                job_id,
+                agent_id,
+                agent_display_name,
+                agent_description,
+                e.to_string(),
+            ),
+        }
+    }
+
     /// Summarize turn output into a brief result message.
     #[cfg(test)]
     fn summarize_output(output: &TurnOutput) -> String {
@@ -317,6 +540,78 @@ impl JobManager {
         } else {
             content.to_string()
         }
+    }
+
+    fn failure_result(
+        job_id: String,
+        agent_id: AgentId,
+        agent_display_name: String,
+        agent_description: String,
+        message: String,
+    ) -> ThreadJobResult {
+        ThreadJobResult {
+            job_id,
+            success: false,
+            message,
+            token_usage: None,
+            agent_id,
+            agent_display_name,
+            agent_description,
+        }
+    }
+
+    fn panic_message(payload: Box<dyn Any + Send>) -> String {
+        let payload = payload.as_ref();
+        let detail = payload
+            .downcast_ref::<&'static str>()
+            .map(|msg| (*msg).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic payload".to_string());
+        format!("job executor panicked: {detail}")
+    }
+
+    async fn persist_job_completion(
+        job_repo: &Arc<dyn JobRepository>,
+        job_id: &JobId,
+        started_at: &str,
+        result: &ThreadJobResult,
+    ) -> Result<(), JobError> {
+        let persisted_result = PersistedJobResult {
+            success: result.success,
+            message: result.message.clone(),
+            token_usage: result.token_usage.clone(),
+            agent_id: result.agent_id,
+            agent_display_name: result.agent_display_name.clone(),
+            agent_description: result.agent_description.clone(),
+        };
+        let final_status = if result.success {
+            WorkflowStatus::Succeeded
+        } else {
+            WorkflowStatus::Failed
+        };
+        let finished_at = Utc::now().to_rfc3339();
+
+        job_repo
+            .update_result(job_id, &persisted_result)
+            .await
+            .map_err(|error| {
+                JobError::Internal(format!(
+                    "failed to persist result for job {}: {}",
+                    job_id, error
+                ))
+            })?;
+
+        job_repo
+            .update_status(job_id, final_status, Some(started_at), Some(&finished_at))
+            .await
+            .map_err(|error| {
+                JobError::Internal(format!(
+                    "failed to persist terminal status for job {}: {}",
+                    job_id, error
+                ))
+            })?;
+
+        Ok(())
     }
 
     fn record_dispatched_job_in_store(
@@ -381,15 +676,22 @@ impl JobManager {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
-    use argus_protocol::llm::LlmProviderRepository;
-    use argus_protocol::{LlmProvider, ProviderId};
-    use argus_repository::ArgusSqlite;
-    use argus_repository::migrate;
-    use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use argus_protocol::{LlmProvider, ProviderId, ThreadEvent, ThreadId};
+    use argus_repository::traits::{AgentRepository, JobRepository, WorkflowRepository};
+    use argus_repository::types::{JobId, JobRecord, JobType, WorkflowId, WorkflowRecord};
+    use argus_repository::{ArgusSqlite, connect_path, migrate};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
+    use rust_decimal::Decimal;
     use sqlx::SqlitePool;
+    use tokio::sync::{broadcast, mpsc, oneshot};
+    use uuid::Uuid;
 
     use argus_protocol::TokenUsage;
     use argus_tool::ToolManager;
@@ -416,6 +718,82 @@ mod tests {
             _model: &str,
         ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
             unreachable!("resolver should not be called in tracking tests");
+        }
+    }
+
+    #[derive(Debug)]
+    struct ControlledProvider {
+        response: String,
+        release_rx: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl ControlledProvider {
+        fn new(response: impl Into<String>, release_rx: oneshot::Receiver<()>) -> Self {
+            Self {
+                response: response.into(),
+                release_rx: tokio::sync::Mutex::new(Some(release_rx)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ControlledProvider {
+        fn model_name(&self) -> &str {
+            "controlled"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!("complete is not used in job manager tests")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            if let Some(release_rx) = self.release_rx.lock().await.take() {
+                let _ = release_rx.await;
+            }
+
+            Ok(ToolCompletionResponse {
+                content: Some(self.response.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 5,
+                output_tokens: 7,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct StaticProviderResolver {
+        provider: Arc<dyn LlmProvider>,
+    }
+
+    #[async_trait]
+    impl ProviderResolver for StaticProviderResolver {
+        async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
         }
     }
 
@@ -464,6 +842,95 @@ mod tests {
             sqlite.clone() as Arc<dyn ThreadRepository>,
             sqlite as Arc<dyn LlmProviderRepository>,
         )
+    }
+
+    async fn seeded_repo() -> Arc<ArgusSqlite> {
+        let db_path = std::env::temp_dir().join(format!("argus-job-{}.sqlite", Uuid::new_v4()));
+        let pool = connect_path(&db_path).await.expect("create sqlite pool");
+        migrate(&pool).await.expect("run migrations");
+        Arc::new(ArgusSqlite::new(pool))
+    }
+
+    async fn seed_test_agent(repo: &ArgusSqlite) -> AgentId {
+        let provider_id: i64 =
+            sqlx::query_scalar("SELECT id FROM llm_providers ORDER BY id LIMIT 1")
+                .fetch_one(repo.pool())
+                .await
+                .expect("default provider");
+
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(7_i64)
+        .bind("Workflow Test Agent")
+        .bind("Test agent")
+        .bind("1.0.0")
+        .bind(provider_id)
+        .bind(Option::<String>::None)
+        .bind("You are a workflow test agent.")
+        .bind("[]")
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
+        .bind(r#"{"type":"disabled","clear_thinking":false}"#)
+        .execute(repo.pool())
+        .await
+        .expect("seed agent");
+
+        AgentId::new(7)
+    }
+
+    async fn seed_persisted_workflow_job(repo: &ArgusSqlite, job_id: &JobId, agent_id: AgentId) {
+        let workflow_id = WorkflowId::new("wf-persisted");
+        repo.create_workflow_execution(&WorkflowRecord {
+            id: workflow_id.clone(),
+            name: "Persisted Workflow".to_string(),
+            status: WorkflowStatus::Pending,
+            template_id: None,
+            template_version: None,
+            initiating_thread_id: None,
+        })
+        .await
+        .expect("create workflow execution");
+
+        repo.create(&JobRecord {
+            id: job_id.clone(),
+            job_type: JobType::Workflow,
+            name: "Persisted Job".to_string(),
+            status: WorkflowStatus::Pending,
+            agent_id,
+            context: None,
+            prompt: "Summarize the repository".to_string(),
+            thread_id: None,
+            group_id: Some(workflow_id.to_string()),
+            node_key: Some("summarize".to_string()),
+            depends_on: Vec::new(),
+            cron_expr: None,
+            scheduled_at: None,
+            started_at: None,
+            finished_at: None,
+            parent_job_id: None,
+            result: None,
+        })
+        .await
+        .expect("create persisted workflow job");
+    }
+
+    async fn wait_for_running_status(repo: &ArgusSqlite, job_id: &JobId) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let job = JobRepository::get(repo, job_id)
+                    .await
+                    .expect("load job")
+                    .expect("job should exist");
+                if job.status == WorkflowStatus::Running {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("job should reach running state");
     }
 
     fn assistant_output(content: &str) -> TurnOutput {
@@ -534,156 +1001,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_job_creates_thread_pool_binding() {
-        let manager = test_job_manager();
+    async fn persisted_workflow_job_updates_status_and_result() {
+        let repo = seeded_repo().await;
+        let agent_id = seed_test_agent(repo.as_ref()).await;
+        let job_id = JobId::new("job-1");
         let originating_thread_id = ThreadId::new();
-        let (pipe_tx, _pipe_rx) = broadcast::channel(16);
+        seed_persisted_workflow_job(repo.as_ref(), &job_id, agent_id).await;
+
+        let (release_tx, release_rx) = oneshot::channel();
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(ControlledProvider::new("Workflow complete", release_rx));
+        let manager = JobManager::with_job_repository(
+            Arc::new(TemplateManager::new(
+                repo.clone() as Arc<dyn AgentRepository>,
+                repo.clone(),
+            )),
+            Arc::new(StaticProviderResolver { provider }),
+            Arc::new(ToolManager::new()),
+            repo.clone() as Arc<dyn JobRepository>,
+        );
+        let (pipe_tx, mut pipe_rx) = broadcast::channel(8);
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
-        let job_id = "job-bound".to_string();
 
         manager
-            .dispatch_job(
+            .spawn_persisted_job_executor(
                 originating_thread_id,
                 job_id.clone(),
-                AgentId::new(99),
-                "run this".to_string(),
-                None,
                 pipe_tx,
                 control_tx,
             )
             .await
-            .expect("job should enqueue even if execution later fails");
+            .expect("spawn persisted job executor");
 
-        let bound_thread_id = manager
-            .thread_binding(&job_id)
-            .expect("job should be bound to a thread");
-        let runtime = manager
-            .thread_pool_state()
-            .runtimes
-            .into_iter()
-            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
-            .expect("bound runtime should be tracked in thread pool state");
-        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
-        assert!(matches!(
-            runtime.status,
-            argus_protocol::ThreadRuntimeStatus::Queued
-                | argus_protocol::ThreadRuntimeStatus::Running
-                | argus_protocol::ThreadRuntimeStatus::Cooling
-        ));
-    }
+        wait_for_running_status(repo.as_ref(), &job_id).await;
 
-    #[tokio::test]
-    async fn alpha_dispatch_job_emits_binding_queue_metrics_and_result_events() {
-        let manager = test_job_manager();
-        let originating_thread_id = ThreadId::new();
-        let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-        let job_id = "alpha-job-event-flow".to_string();
-
-        manager
-            .dispatch_job(
-                originating_thread_id,
-                job_id.clone(),
-                AgentId::new(99),
-                "run alpha event flow".to_string(),
-                None,
-                pipe_tx,
-                control_tx,
-            )
+        let running_job = JobRepository::get(repo.as_ref(), &job_id)
             .await
-            .expect("job should enqueue even if execution later fails");
+            .expect("load running job")
+            .expect("job should exist");
+        assert_eq!(running_job.status, WorkflowStatus::Running);
+        assert!(running_job.result.is_none());
 
-        let mut bound_thread_id = None;
-        let mut saw_queued = false;
-        let mut saw_metrics = false;
-        let mut saw_result = false;
+        release_tx.send(()).expect("release provider");
 
-        timeout(Duration::from_secs(5), async {
-            while !saw_result {
-                match pipe_rx.recv().await {
-                    Ok(ThreadEvent::ThreadBoundToJob {
-                        job_id: event_job_id,
-                        thread_id: execution_thread_id,
-                    }) if event_job_id == job_id => {
-                        assert_ne!(execution_thread_id, originating_thread_id);
-                        bound_thread_id = Some(execution_thread_id);
-                    }
-                    Ok(ThreadEvent::ThreadPoolQueued { runtime })
-                        if runtime.job_id.as_deref() == Some(job_id.as_str()) =>
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match pipe_rx.recv().await.expect("receive job event") {
+                    ThreadEvent::JobResult { job_id: event_job_id, .. }
+                        if event_job_id == job_id.to_string() =>
                     {
-                        assert_eq!(runtime.kind, ThreadPoolRuntimeKind::Job);
-                        if let Some(execution_thread_id) = bound_thread_id {
-                            assert_eq!(runtime.thread_id, execution_thread_id);
-                        }
-                        saw_queued = true;
+                        break;
                     }
-                    Ok(ThreadEvent::ThreadPoolMetricsUpdated { .. }) => {
-                        saw_metrics = true;
-                    }
-                    Ok(ThreadEvent::JobResult {
-                        thread_id,
-                        job_id: event_job_id,
-                        success,
-                        ..
-                    }) if event_job_id == job_id => {
-                        assert_eq!(thread_id, originating_thread_id);
-                        assert!(
-                            !success,
-                            "alpha flow should surface execution failure when the agent record is missing"
-                        );
-                        saw_result = true;
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        panic!("thread event channel should remain open");
-                    }
+                    _ => {}
                 }
             }
         })
         .await
         .expect("job result event should arrive");
 
-        let control_event = timeout(Duration::from_secs(1), control_rx.recv())
+        let completed_job = JobRepository::get(repo.as_ref(), &job_id)
             .await
-            .expect("forwarded control event should arrive")
-            .expect("control channel should stay open");
-        assert!(matches!(
-            control_event,
-            ThreadControlEvent::JobResult(result)
-                if result.job_id == job_id && !result.success
-        ));
-
-        let execution_thread_id = bound_thread_id.expect("job should bind to an execution thread");
-        assert_eq!(manager.thread_binding(&job_id), Some(execution_thread_id));
-        assert!(saw_queued, "queued event should be observed");
-        assert!(saw_metrics, "metrics update should be observed");
-    }
-
-    #[tokio::test]
-    async fn dispatch_job_enqueue_failure_does_not_leave_pending_tracking() {
-        let manager = test_persistent_job_manager_without_default_provider().await;
-        let originating_thread_id = ThreadId::new();
-        let (pipe_tx, _pipe_rx) = broadcast::channel(16);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
-        let job_id = "job-enqueue-failure".to_string();
-
-        let dispatch_result = manager
-            .dispatch_job(
-                originating_thread_id,
-                job_id.clone(),
-                AgentId::new(999_999),
-                "run this".to_string(),
-                None,
-                pipe_tx,
-                control_tx,
-            )
-            .await;
-
-        assert!(dispatch_result.is_err());
-        assert!(matches!(
-            manager.get_job_result_status(originating_thread_id, &job_id, false),
-            JobLookup::NotFound
-        ));
+            .expect("load completed job")
+            .expect("job should exist");
+        assert_eq!(completed_job.status, WorkflowStatus::Succeeded);
+        let persisted_result = completed_job.result.expect("job result should be stored");
+        assert!(persisted_result.success);
+        assert_eq!(persisted_result.message, "Workflow complete");
+        assert_eq!(persisted_result.agent_id, agent_id);
     }
 }

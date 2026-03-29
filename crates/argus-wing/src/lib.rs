@@ -136,15 +136,11 @@ impl ArgusWing {
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create job manager with all dependencies
-        let job_manager = Arc::new(JobManager::new_with_repositories(
+        let job_manager = Arc::new(JobManager::with_job_repository(
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
-            compactor_manager.clone(),
-            trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
-            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
-            llm_repository.clone(),
         ));
 
         // Create session manager
@@ -203,15 +199,11 @@ impl ArgusWing {
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create job manager with all dependencies
-        let job_manager = Arc::new(JobManager::new_with_repositories(
+        let job_manager = Arc::new(JobManager::with_job_repository(
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
-            compactor_manager.clone(),
-            trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
-            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
-            llm_repository.clone(),
         ));
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
