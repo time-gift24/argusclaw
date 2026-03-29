@@ -1,8 +1,10 @@
 pub mod error;
 pub mod installer;
+pub mod manager;
 pub mod models;
 pub mod patcher;
 pub mod policy;
+pub mod session;
 
 #[cfg(test)]
 mod tests {

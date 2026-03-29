@@ -115,3 +115,27 @@ impl ChromeToolArgs {
         Ok(args)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenArgs {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageMetadata {
+    pub final_url: String,
+    pub page_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedSession {
+    pub session_id: String,
+    pub final_url: String,
+    pub page_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LinkSummary {
+    pub href: String,
+    pub text: String,
+}
