@@ -589,7 +589,7 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
 export const Thread: FC = () => {
   return (
     <ThreadPrimitive.Root
-      className="aui-root aui-thread-root @container relative flex h-full min-h-0 flex-col bg-background overflow-hidden"
+      className="aui-root aui-thread-root @container relative flex h-full min-h-0 w-full flex-1 flex-col bg-background overflow-hidden"
       style={{
         ["--thread-max-width" as string]: "72rem",
         ["--composer-max-width" as string]: "60rem",

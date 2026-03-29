@@ -18,19 +18,28 @@ export function ChatScreen() {
   }, [initialize]);
 
   return (
-    <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col gap-3">
+    <Tabs
+      defaultValue="chat"
+      className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden"
+    >
       <div className="px-4 pt-4">
         <TabsList className="bg-muted/60 shadow-sm">
           <TabsTrigger value="chat">Chat</TabsTrigger>
           <TabsTrigger value="threads">Threads</TabsTrigger>
         </TabsList>
       </div>
-      <TabsContent value="chat" className="m-0 flex min-h-0 flex-1">
+      <TabsContent
+        value="chat"
+        className="m-0 flex min-h-0 flex-1 overflow-hidden"
+      >
         <AssistantRuntimeProvider runtime={runtime}>
           <Thread />
         </AssistantRuntimeProvider>
       </TabsContent>
-      <TabsContent value="threads" className="m-0 flex min-h-0 flex-1">
+      <TabsContent
+        value="threads"
+        className="m-0 flex min-h-0 flex-1 overflow-hidden"
+      >
         <ThreadMonitorScreen />
       </TabsContent>
     </Tabs>
