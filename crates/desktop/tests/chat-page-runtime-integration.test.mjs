@@ -19,6 +19,10 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatRuntimeSource, /onNew:/);
   assert.match(chatScreenSource, /AssistantRuntimeProvider/);
   assert.match(chatScreenSource, /useChatRuntime\(\)/);
+  assert.match(chatScreenSource, /TabsTrigger value="chat"/);
+  assert.match(chatScreenSource, /TabsTrigger value="threads"/);
+  assert.match(chatScreenSource, /TabsContent value="threads"/);
+  assert.match(chatScreenSource, /ThreadMonitorScreen/);
   assert.match(chatScreenSource, /<Thread \/>/);
   assert.match(threadSource, /ChatStatusBanner/);
   assert.match(threadSource, /jobStatuses|JobStatus/);
