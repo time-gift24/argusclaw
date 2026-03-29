@@ -126,6 +126,10 @@ mod tests {
     fn patcher_rewrites_cdc_tokens() {
         let input = b"aaaaacdc_123456789012345678zz".to_vec();
         let output = patch_cdc_tokens(input, b'X').unwrap();
-        assert!(!String::from_utf8_lossy(&output).contains("cdc_123456789012345678"));
+
+        let expected = b"aaaaaXXXXXXXXXXXXXXXXXXXXXXzz".to_vec();
+        assert_eq!(output, expected);
+        assert!(output.starts_with(b"aaaaa"));
+        assert!(output.ends_with(b"zz"));
     }
 }
