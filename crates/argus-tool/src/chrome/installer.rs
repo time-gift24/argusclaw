@@ -45,3 +45,39 @@ fn create_directory(path: &Path) -> Result<(), ChromeToolError> {
         reason: e.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn ensure_directories_creates_expected_tree() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+
+        paths.ensure_directories().unwrap();
+
+        assert!(paths.root.is_dir());
+        assert!(paths.driver.is_dir());
+        assert!(paths.patched.is_dir());
+        assert!(paths.screenshots.is_dir());
+        assert!(paths.tmp.is_dir());
+    }
+
+    #[test]
+    fn ensure_directories_returns_create_failed_error() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+
+        std::fs::create_dir_all(paths.root.parent().unwrap()).unwrap();
+        std::fs::write(&paths.root, b"file-blocking-directory").unwrap();
+
+        let err = paths.ensure_directories().unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::DirectoryCreateFailed { path, .. } if path == paths.root
+        ));
+    }
+}
