@@ -12,35 +12,63 @@ use super::{ArgusSqlite, DbResult};
 #[async_trait]
 impl JobRepository for ArgusSqlite {
     async fn create(&self, job: &JobRecord) -> DbResult<()> {
-        if job.job_type == JobType::Workflow {
-            if job
+        let workflow_group_id = if job.job_type == JobType::Workflow {
+            let group_id = job
                 .group_id
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .is_none()
-            {
-                return Err(DbError::QueryFailed {
+                .ok_or_else(|| DbError::QueryFailed {
                     reason: "workflow jobs require a non-empty group_id".to_string(),
-                });
-            }
-
-            if job
+                })?;
+            let node_key = job
                 .node_key
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .is_none()
-            {
-                return Err(DbError::QueryFailed {
+                .ok_or_else(|| DbError::QueryFailed {
                     reason: "workflow jobs require a non-empty node_key".to_string(),
+                })?;
+
+            let workflow_exists = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM workflows WHERE id = ?1)",
+            )
+            .bind(group_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+            if workflow_exists == 0 {
+                return Err(DbError::QueryFailed {
+                    reason: format!(
+                        "workflow jobs require an existing workflow execution: {}",
+                        group_id
+                    ),
                 });
             }
+
+            Some((group_id.to_string(), node_key.to_string()))
+        } else {
+            None
+        };
+
+        if job.job_type == JobType::Workflow {
         } else if job.node_key.is_some() {
             return Err(DbError::QueryFailed {
                 reason: "node_key is only valid for workflow jobs".to_string(),
             });
         }
+
+        let group_id = workflow_group_id
+            .as_ref()
+            .map(|(group_id, _)| group_id.clone())
+            .or_else(|| job.group_id.clone());
+        let node_key = workflow_group_id
+            .as_ref()
+            .map(|(_, node_key)| node_key.clone())
+            .or_else(|| job.node_key.clone());
 
         let depends_on_json = serde_json::to_string(
             &job.depends_on
@@ -62,8 +90,8 @@ impl JobRepository for ArgusSqlite {
         .bind(&job.context)
         .bind(&job.prompt)
         .bind(job.thread_id.map(|t| t.to_string()))
-        .bind(&job.group_id)
-        .bind(&job.node_key)
+        .bind(&group_id)
+        .bind(&node_key)
         .bind(&depends_on_json)
         .bind(&job.cron_expr)
         .bind(&job.scheduled_at)
@@ -153,6 +181,10 @@ impl JobRepository for ArgusSqlite {
             "SELECT j.id, j.job_type, j.name, j.status, j.agent_id, j.context, j.prompt, j.thread_id, j.group_id, j.node_key, j.depends_on, j.cron_expr, j.scheduled_at, j.started_at, j.finished_at, j.parent_job_id, j.result
              FROM jobs j
              WHERE j.status = 'pending' AND j.job_type != 'cron'
+               AND (
+                   j.job_type != 'workflow'
+                   OR EXISTS (SELECT 1 FROM workflows w WHERE w.id = j.group_id)
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM jobs dep
                    WHERE dep.id IN (SELECT value FROM json_each(j.depends_on))
@@ -265,7 +297,8 @@ impl ArgusSqlite {
 mod tests {
     use super::*;
 
-    use crate::traits::JobRepository;
+    use crate::traits::{JobRepository, WorkflowRepository};
+    use crate::types::WorkflowRecord;
     use uuid::Uuid;
 
     async fn test_repo() -> ArgusSqlite {
@@ -307,11 +340,26 @@ mod tests {
         AgentId::new(7)
     }
 
+    async fn seed_workflow_execution(repo: &ArgusSqlite, id: &WorkflowId) {
+        repo.create_workflow_execution(&WorkflowRecord {
+            id: id.clone(),
+            name: "Workflow".to_string(),
+            status: WorkflowStatus::Pending,
+            template_id: None,
+            template_version: None,
+            initiating_thread_id: None,
+        })
+        .await
+        .expect("seed workflow execution");
+    }
+
     #[tokio::test]
     async fn workflow_job_round_trips_node_key() {
         let repo = test_repo().await;
         let agent_id = seed_test_agent(&repo).await;
+        let workflow_id = WorkflowId::new("wf-1");
         let job_id = JobId::new("job-1");
+        seed_workflow_execution(&repo, &workflow_id).await;
 
         repo.create(&JobRecord {
             id: job_id.clone(),
@@ -322,7 +370,7 @@ mod tests {
             context: None,
             prompt: "Collect context".to_string(),
             thread_id: None,
-            group_id: Some("wf-1".to_string()),
+            group_id: Some(workflow_id.to_string()),
             node_key: Some("collect".to_string()),
             depends_on: vec![],
             cron_expr: None,
@@ -368,5 +416,71 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("workflow jobs require"));
+    }
+
+    #[tokio::test]
+    async fn workflow_job_requires_existing_execution() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+
+        let err = repo
+            .create(&JobRecord {
+                id: JobId::new("job-3"),
+                job_type: JobType::Workflow,
+                name: "Broken".to_string(),
+                status: WorkflowStatus::Pending,
+                agent_id,
+                context: None,
+                prompt: "Broken".to_string(),
+                thread_id: None,
+                group_id: Some("wf-missing".to_string()),
+                node_key: Some("collect".to_string()),
+                depends_on: vec![],
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("workflow jobs require an existing workflow execution"));
+    }
+
+    #[tokio::test]
+    async fn find_ready_jobs_skips_orphaned_workflow_jobs() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+
+        sqlx::query(
+            "INSERT INTO jobs (id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, node_key, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )
+        .bind("job-orphan")
+        .bind(JobType::Workflow.as_str())
+        .bind("Orphan")
+        .bind(WorkflowStatus::Pending.as_str())
+        .bind(agent_id.into_inner())
+        .bind(Option::<String>::None)
+        .bind("Collect context")
+        .bind(Option::<String>::None)
+        .bind("wf-missing")
+        .bind("collect")
+        .bind("[]")
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .execute(repo.pool())
+        .await
+        .unwrap();
+
+        let ready_jobs = repo.find_ready_jobs(10).await.unwrap();
+        assert!(ready_jobs.is_empty());
     }
 }
