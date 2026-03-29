@@ -312,7 +312,7 @@ impl WorkflowRepository for ArgusSqlite {
             reason: e.to_string(),
         })?;
 
-        sqlx::query("DELETE FROM jobs WHERE group_id = ?1")
+        let result = sqlx::query("DELETE FROM workflows WHERE id = ?1")
             .bind(id.as_ref())
             .execute(&mut *tx)
             .await
@@ -320,7 +320,15 @@ impl WorkflowRepository for ArgusSqlite {
                 reason: e.to_string(),
             })?;
 
-        let result = sqlx::query("DELETE FROM workflows WHERE id = ?1")
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+            return Ok(false);
+        }
+
+        sqlx::query("DELETE FROM jobs WHERE job_type = 'workflow' AND group_id = ?1")
             .bind(id.as_ref())
             .execute(&mut *tx)
             .await
@@ -737,5 +745,44 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_missing_execution_keeps_unrelated_grouped_jobs() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+        let missing_execution_id = WorkflowId::new("wf-missing");
+        let standalone_job_id = JobId::new("job-standalone");
+
+        repo.create(&JobRecord {
+            id: standalone_job_id.clone(),
+            job_type: JobType::Standalone,
+            name: "Standalone".to_string(),
+            status: WorkflowStatus::Pending,
+            agent_id,
+            context: None,
+            prompt: "Keep me".to_string(),
+            thread_id: None,
+            group_id: Some(missing_execution_id.to_string()),
+            node_key: None,
+            depends_on: vec![],
+            cron_expr: None,
+            scheduled_at: None,
+            started_at: None,
+            finished_at: None,
+            parent_job_id: None,
+            result: None,
+        })
+        .await
+        .unwrap();
+
+        let deleted = repo
+            .delete_workflow_execution(&missing_execution_id)
+            .await
+            .unwrap();
+        assert!(!deleted);
+
+        let job = repo.get(&standalone_job_id).await.unwrap();
+        assert!(job.is_some());
     }
 }
