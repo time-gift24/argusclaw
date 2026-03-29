@@ -145,11 +145,15 @@ impl TryFrom<&str> for WorkflowStatus {
     }
 }
 
-/// Workflow record stored in database.
+/// Workflow execution header stored in database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowRecord {
     pub id: WorkflowId,
     pub name: String,
     pub status: WorkflowStatus,
+    pub template_id: Option<WorkflowTemplateId>,
+    pub template_version: Option<i64>,
+    pub initiating_thread_id: Option<ThreadId>,
 }
 
 #[cfg(test)]
@@ -161,6 +165,9 @@ impl WorkflowRecord {
             id: WorkflowId::new(id),
             name: name.to_string(),
             status: WorkflowStatus::Pending,
+            template_id: None,
+            template_version: None,
+            initiating_thread_id: None,
         }
     }
 }
@@ -207,6 +214,83 @@ pub struct WorkflowExecutionNodeRecord {
     pub prompt: String,
     pub context: Option<String>,
     pub depends_on_keys: Vec<String>,
+}
+
+/// Aggregated workflow execution progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowProgressRecord {
+    pub workflow_id: WorkflowId,
+    pub template_id: Option<WorkflowTemplateId>,
+    pub template_version: Option<i64>,
+    pub status: WorkflowStatus,
+    pub total_jobs: i64,
+    pub pending_jobs: i64,
+    pub running_jobs: i64,
+    pub succeeded_jobs: i64,
+    pub failed_jobs: i64,
+    pub cancelled_jobs: i64,
+}
+
+/// Shared read-only accessors for workflow execution headers.
+pub trait WorkflowExecutionHeader {
+    fn id(&self) -> &WorkflowId;
+    fn name(&self) -> &str;
+    fn status(&self) -> WorkflowStatus;
+    fn template_id(&self) -> Option<&WorkflowTemplateId>;
+    fn template_version(&self) -> Option<i64>;
+    fn initiating_thread_id(&self) -> Option<&ThreadId>;
+}
+
+impl WorkflowExecutionHeader for WorkflowRecord {
+    fn id(&self) -> &WorkflowId {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn status(&self) -> WorkflowStatus {
+        self.status
+    }
+
+    fn template_id(&self) -> Option<&WorkflowTemplateId> {
+        self.template_id.as_ref()
+    }
+
+    fn template_version(&self) -> Option<i64> {
+        self.template_version
+    }
+
+    fn initiating_thread_id(&self) -> Option<&ThreadId> {
+        self.initiating_thread_id.as_ref()
+    }
+}
+
+impl WorkflowExecutionHeader for WorkflowExecutionRecord {
+    fn id(&self) -> &WorkflowId {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn status(&self) -> WorkflowStatus {
+        self.status
+    }
+
+    fn template_id(&self) -> Option<&WorkflowTemplateId> {
+        self.template_id.as_ref()
+    }
+
+    fn template_version(&self) -> Option<i64> {
+        self.template_version
+    }
+
+    fn initiating_thread_id(&self) -> Option<&ThreadId> {
+        self.initiating_thread_id.as_ref()
+    }
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ pub use agent::{AgentId, AgentRecord};
 pub use job::{JobRecord, JobResult, JobType};
 pub use thread::{MessageId, MessageRecord, SessionRecord, ThreadRecord};
 pub use workflow::{
-    JobId, WorkflowExecutionNodeRecord, WorkflowExecutionRecord, WorkflowId,
-    WorkflowRecord, WorkflowStatus, WorkflowTemplateId, WorkflowTemplateNodeRecord,
-    WorkflowTemplateRecord,
+    JobId, WorkflowExecutionHeader, WorkflowExecutionNodeRecord, WorkflowExecutionRecord,
+    WorkflowId, WorkflowProgressRecord, WorkflowRecord, WorkflowStatus, WorkflowTemplateId,
+    WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
 };

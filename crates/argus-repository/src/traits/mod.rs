@@ -12,6 +12,7 @@ pub use agent::AgentRepository;
 pub use job::JobRepository;
 pub use session::{SessionRepository, SessionWithCount};
 pub use thread::ThreadRepository;
+// WorkflowRepository now covers template, execution, and progress queries.
 pub use workflow::WorkflowRepository;
 
 // Re-export LlmProviderRepository from argus_protocol

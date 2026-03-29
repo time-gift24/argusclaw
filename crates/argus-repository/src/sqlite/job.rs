@@ -21,8 +21,8 @@ impl JobRepository for ArgusSqlite {
         .unwrap_or_else(|_| "[]".to_string());
 
         sqlx::query(
-            "INSERT INTO jobs (id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO jobs (id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, node_key, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
         .bind(job.id.to_string())
         .bind(job.job_type.as_str())
@@ -33,6 +33,7 @@ impl JobRepository for ArgusSqlite {
         .bind(&job.prompt)
         .bind(job.thread_id.map(|t| t.to_string()))
         .bind(&job.group_id)
+        .bind(&job.node_key)
         .bind(&depends_on_json)
         .bind(&job.cron_expr)
         .bind(&job.scheduled_at)
@@ -48,7 +49,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn get(&self, id: &JobId) -> DbResult<Option<JobRecord>> {
         let row = sqlx::query(
-            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
+            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, node_key, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
              FROM jobs WHERE id = ?1",
         )
         .bind(id.to_string())
@@ -119,7 +120,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn find_ready_jobs(&self, limit: usize) -> DbResult<Vec<JobRecord>> {
         let rows = sqlx::query(
-            "SELECT j.id, j.job_type, j.name, j.status, j.agent_id, j.context, j.prompt, j.thread_id, j.group_id, j.depends_on, j.cron_expr, j.scheduled_at, j.started_at, j.finished_at, j.parent_job_id, j.result
+            "SELECT j.id, j.job_type, j.name, j.status, j.agent_id, j.context, j.prompt, j.thread_id, j.group_id, j.node_key, j.depends_on, j.cron_expr, j.scheduled_at, j.started_at, j.finished_at, j.parent_job_id, j.result
              FROM jobs j
              WHERE j.status = 'pending' AND j.job_type != 'cron'
                AND NOT EXISTS (
@@ -139,7 +140,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn find_due_cron_jobs(&self, now: &str) -> DbResult<Vec<JobRecord>> {
         let rows = sqlx::query(
-            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
+            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, node_key, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
              FROM jobs
              WHERE job_type = 'cron' AND scheduled_at IS NOT NULL AND scheduled_at <= ?1
              ORDER BY scheduled_at ASC",
@@ -169,7 +170,7 @@ impl JobRepository for ArgusSqlite {
 
     async fn list_by_group(&self, group_id: &str) -> DbResult<Vec<JobRecord>> {
         let rows = sqlx::query(
-            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
+            "SELECT id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, node_key, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id, result
              FROM jobs WHERE group_id = ?1 ORDER BY created_at ASC",
         )
         .bind(group_id)
@@ -218,7 +219,7 @@ impl ArgusSqlite {
             prompt: Self::get_column(&row, "prompt")?,
             thread_id,
             group_id: Self::get_column(&row, "group_id")?,
-            node_key: None,
+            node_key: Self::get_column(&row, "node_key")?,
             depends_on,
             cron_expr: Self::get_column(&row, "cron_expr")?,
             scheduled_at: Self::get_column(&row, "scheduled_at")?,
