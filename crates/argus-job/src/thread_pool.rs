@@ -561,18 +561,19 @@ impl ThreadPool {
             })?;
 
         if existing_job.is_some() {
+            if existing_thread_id.is_some() {
+                return Ok(thread_id);
+            }
+
             if let Err(err) = Self::persist_existing_job_binding(persistence, &job_id, thread_id)
                 .await
             {
-                if existing_thread_id.is_none() {
-                    return Err(Self::rollback_thread_record(
-                        persistence,
-                        thread_id,
-                        format!("{err}"),
-                    )
-                    .await);
-                }
-                return Err(err);
+                return Err(Self::rollback_thread_record(
+                    persistence,
+                    thread_id,
+                    format!("{err}"),
+                )
+                .await);
             }
             return Ok(thread_id);
         }
@@ -1376,39 +1377,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reenqueue_update_thread_id_failure_does_not_delete_existing_thread_record() {
-        let (pool, thread_repository, thread_id) = test_pool_with_failing_update_thread_id(Some(
-            ThreadId::new(),
-        ))
-        .await;
+    async fn reenqueue_existing_thread_skips_update_thread_id_even_if_repository_would_fail() {
+        let (pool, thread_repository, thread_id) =
+            test_pool_with_failing_update_thread_id(Some(ThreadId::new())).await;
         let thread_id = thread_id.expect("existing thread should be seeded");
 
         let result = pool
             .enqueue_job(super::test_request("job-update-thread-id-fails"))
             .await;
 
-        let error = result.expect_err("enqueue should fail when update_thread_id fails");
-        assert!(
-            error
-                .to_string()
-                .contains("failed to persist job-thread binding"),
-            "unexpected error: {error}"
-        );
-        let persisted_thread = thread_repository
-            .get_thread(&thread_id)
-            .await
-            .expect("thread lookup should succeed");
-        assert!(
-            persisted_thread.is_some(),
-            "existing thread record should remain persisted"
-        );
-        assert!(
-            !thread_repository
+        let recovered_thread_id = result.expect("already-bound recovery should succeed");
+        assert_eq!(recovered_thread_id, thread_id);
+        assert_eq!(
+            thread_repository
                 .deleted_threads
                 .lock()
                 .expect("deleted thread mutex poisoned")
-                .contains(&thread_id.to_string()),
-            "existing thread record should not be deleted on update_thread_id failure"
+                .len(),
+            0,
+            "short-circuited recovery should not delete the existing thread"
+        );
+        assert!(
+            thread_repository
+                .get_thread(&thread_id)
+                .await
+                .expect("thread lookup should succeed")
+                .is_some(),
+            "existing thread record should remain persisted"
         );
     }
 
