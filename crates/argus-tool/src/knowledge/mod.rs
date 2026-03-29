@@ -10,7 +10,9 @@ mod tool;
 
 pub use cache::SnapshotCache;
 pub use error::KnowledgeToolError;
-pub use github::{GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport};
+pub use github::{
+    GitHubKnowledgeBackend, GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport,
+};
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
 pub use markdown::{ParsedSection, parse_markdown_sections};
@@ -20,7 +22,7 @@ pub use models::{
     KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
 pub use registry::KnowledgeRepoRegistry;
-pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeTool};
+pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeRuntimeBackend, KnowledgeTool};
 
 #[cfg(test)]
 mod tests {
@@ -140,7 +142,10 @@ mod tests {
     fn knowledge_tool_risk_level_is_medium() {
         let tool = KnowledgeTool::new_for_test(FakeKnowledgeRuntime::default());
 
-        assert_eq!(tool.risk_level(), argus_protocol::risk_level::RiskLevel::Medium);
+        assert_eq!(
+            tool.risk_level(),
+            argus_protocol::risk_level::RiskLevel::Medium
+        );
     }
 
     #[tokio::test]

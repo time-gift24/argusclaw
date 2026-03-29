@@ -1,10 +1,14 @@
 use async_trait::async_trait;
 use base64::Engine;
+use dashmap::DashMap;
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::error::KnowledgeToolError;
+use super::manifest::{DEFAULT_MANIFEST_PATHS, RepositoryManifest};
 use super::models::{GitHubBlob, GitHubSnapshot, GitHubTree, GitHubTreeEntry, GitHubTreeEntryKind};
+use super::tool::KnowledgeRuntimeBackend;
+use super::{KnowledgeBackend, KnowledgeRepoDescriptor};
 
 #[async_trait]
 pub trait GitHubTransport: Send + Sync {
@@ -176,6 +180,165 @@ impl<T: GitHubTransport> GitHubKnowledgeClient<T> {
             sha: response.sha,
             text,
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotRecord {
+    repo: KnowledgeRepoDescriptor,
+    snapshot: GitHubSnapshot,
+}
+
+pub struct GitHubKnowledgeBackend<T: GitHubTransport> {
+    client: GitHubKnowledgeClient<T>,
+    repos: DashMap<String, KnowledgeRepoDescriptor>,
+    snapshots: DashMap<String, SnapshotRecord>,
+}
+
+impl<T: GitHubTransport> GitHubKnowledgeBackend<T> {
+    #[must_use]
+    pub fn new(repos: Vec<KnowledgeRepoDescriptor>, transport: T) -> Self {
+        Self::with_client(GitHubKnowledgeClient::new(transport), repos)
+    }
+
+    #[must_use]
+    pub fn with_client(
+        client: GitHubKnowledgeClient<T>,
+        repos: Vec<KnowledgeRepoDescriptor>,
+    ) -> Self {
+        let repos = repos
+            .into_iter()
+            .map(|repo| (repo.repo_id.clone(), repo))
+            .collect::<DashMap<_, _>>();
+        Self {
+            client,
+            repos,
+            snapshots: DashMap::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl<T: GitHubTransport> KnowledgeRuntimeBackend for GitHubKnowledgeBackend<T> {
+    async fn list_repos(&self) -> Result<Vec<KnowledgeRepoDescriptor>, KnowledgeToolError> {
+        Ok(self
+            .repos
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect())
+    }
+
+    fn repo_descriptor(&self, repo_id: &str) -> Option<KnowledgeRepoDescriptor> {
+        self.repos.get(repo_id).map(|entry| entry.value().clone())
+    }
+
+    async fn resolve_snapshot(
+        &self,
+        repo_id: &str,
+        ref_name: &str,
+    ) -> Result<(String, GitHubSnapshot), KnowledgeToolError> {
+        let repo = self
+            .repo_descriptor(repo_id)
+            .ok_or_else(|| KnowledgeToolError::NotFound(repo_id.to_string()))?;
+
+        let snapshot = self
+            .client
+            .resolve_snapshot(&repo.owner, &repo.name, ref_name)
+            .await?;
+        let snapshot_id = format!("{repo_id}@{}", snapshot.rev);
+        self.snapshots.insert(
+            snapshot_id.clone(),
+            SnapshotRecord {
+                repo,
+                snapshot: snapshot.clone(),
+            },
+        );
+
+        Ok((snapshot_id, snapshot))
+    }
+}
+
+#[async_trait]
+impl<T: GitHubTransport> KnowledgeBackend for GitHubKnowledgeBackend<T> {
+    async fn read_tree(&self, snapshot_id: &str) -> Result<GitHubTree, KnowledgeToolError> {
+        let record = self
+            .snapshots
+            .get(snapshot_id)
+            .ok_or_else(|| KnowledgeToolError::NotFound(snapshot_id.to_string()))?;
+
+        self.client
+            .read_tree(&record.repo.owner, &record.repo.name, &record.snapshot.rev)
+            .await
+    }
+
+    async fn read_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<RepositoryManifest>, KnowledgeToolError> {
+        let record = self
+            .snapshots
+            .get(snapshot_id)
+            .ok_or_else(|| KnowledgeToolError::NotFound(snapshot_id.to_string()))?;
+
+        let tree = self
+            .client
+            .read_tree(&record.repo.owner, &record.repo.name, &record.snapshot.rev)
+            .await?;
+
+        let manifest_paths = if record.repo.manifest_paths.is_empty() {
+            DEFAULT_MANIFEST_PATHS
+                .iter()
+                .map(|path| path.to_string())
+                .collect()
+        } else {
+            record.repo.manifest_paths.clone()
+        };
+
+        let Some(manifest_entry) = manifest_paths
+            .iter()
+            .flat_map(|manifest_path| {
+                tree.entries
+                    .iter()
+                    .filter(move |entry| entry.path == *manifest_path)
+            })
+            .find(|entry| matches!(entry.kind, GitHubTreeEntryKind::Blob))
+        else {
+            return Ok(None);
+        };
+
+        let blob = self
+            .client
+            .read_blob(&record.repo.owner, &record.repo.name, &manifest_entry.sha)
+            .await?;
+
+        let value: Value = serde_json::from_str(&blob.text)
+            .map_err(|err| KnowledgeToolError::manifest_parse(err.to_string()))?;
+        let manifest = RepositoryManifest::from_json(value)?;
+        Ok(Some(manifest))
+    }
+
+    async fn read_blob(
+        &self,
+        snapshot_id: &str,
+        path: &str,
+        sha: &str,
+    ) -> Result<GitHubBlob, KnowledgeToolError> {
+        let record = self
+            .snapshots
+            .get(snapshot_id)
+            .ok_or_else(|| KnowledgeToolError::NotFound(snapshot_id.to_string()))?;
+
+        self.client
+            .read_blob(&record.repo.owner, &record.repo.name, sha)
+            .await
+            .map(|blob| GitHubBlob {
+                sha: blob.sha,
+                text: blob.text,
+            })
+            .map_err(|err| match err {
+                KnowledgeToolError::NotFound(_) => KnowledgeToolError::NotFound(path.to_string()),
+                other => other,
+            })
     }
 }
 
