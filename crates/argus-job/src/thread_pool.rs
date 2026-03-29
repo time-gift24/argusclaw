@@ -561,7 +561,19 @@ impl ThreadPool {
             })?;
 
         if existing_job.is_some() {
-            Self::persist_existing_job_binding(persistence, &job_id, thread_id).await?;
+            if let Err(err) = Self::persist_existing_job_binding(persistence, &job_id, thread_id)
+                .await
+            {
+                if existing_thread_id.is_none() {
+                    return Err(Self::rollback_thread_record(
+                        persistence,
+                        thread_id,
+                        format!("{err}"),
+                    )
+                    .await);
+                }
+                return Err(err);
+            }
             return Ok(thread_id);
         }
 
@@ -881,7 +893,8 @@ mod tests {
     }
 
     async fn test_pool_with_failing_update_thread_id(
-    ) -> (ThreadPool, Arc<RecordingThreadRepository>, ThreadId) {
+        existing_thread_id: Option<ThreadId>,
+    ) -> (ThreadPool, Arc<RecordingThreadRepository>, Option<ThreadId>) {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("sqlite memory pool should connect");
@@ -916,30 +929,33 @@ mod tests {
             .await
             .expect("agent upsert should succeed");
 
-        let thread_id = ThreadId::new();
         let thread_repository = Arc::new(RecordingThreadRepository::default());
-        thread_repository
-            .threads
-            .lock()
-            .expect("thread store mutex poisoned")
-            .insert(
-                thread_id.to_string(),
-                ThreadRecord {
-                    id: thread_id,
-                    provider_id,
-                    title: Some("job:job-update-thread-id-fails".to_string()),
-                    token_count: 0,
-                    turn_count: 0,
-                    session_id: None,
-                    template_id: Some(RepoAgentId::new(7)),
-                    model_override: Some("gpt-4o-mini".to_string()),
-                    created_at: "2026-03-29T00:00:00Z".to_string(),
-                    updated_at: "2026-03-29T00:00:00Z".to_string(),
-                },
-            );
 
         let job_id = JobId::new("job-update-thread-id-fails");
         let agent_id = RepoAgentId::new(7);
+        let job_thread_id = existing_thread_id;
+
+        if let Some(thread_id) = job_thread_id {
+            thread_repository
+                .threads
+                .lock()
+                .expect("thread store mutex poisoned")
+                .insert(
+                    thread_id.to_string(),
+                    ThreadRecord {
+                        id: thread_id,
+                        provider_id,
+                        title: Some("job:job-update-thread-id-fails".to_string()),
+                        token_count: 0,
+                        turn_count: 0,
+                        session_id: None,
+                        template_id: Some(RepoAgentId::new(7)),
+                        model_override: Some("gpt-4o-mini".to_string()),
+                        created_at: "2026-03-29T00:00:00Z".to_string(),
+                        updated_at: "2026-03-29T00:00:00Z".to_string(),
+                    },
+                );
+        }
 
         let thread_pool = ThreadPool::with_persistence(
             template_manager,
@@ -948,7 +964,7 @@ mod tests {
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingUpdateThreadIdJobRepository::new(
                     job_id,
-                    thread_id,
+                    job_thread_id,
                     agent_id,
                 ))
                     as Arc<dyn JobRepository>,
@@ -957,7 +973,7 @@ mod tests {
             )),
         );
 
-        (thread_pool, thread_repository, thread_id)
+        (thread_pool, thread_repository, job_thread_id)
     }
 
     #[derive(Default)]
@@ -1150,12 +1166,12 @@ mod tests {
 
     struct FailingUpdateThreadIdJobRepository {
         job_id: JobId,
-        thread_id: ThreadId,
+        thread_id: Option<ThreadId>,
         agent_id: RepoAgentId,
     }
 
     impl FailingUpdateThreadIdJobRepository {
-        fn new(job_id: JobId, thread_id: ThreadId, agent_id: RepoAgentId) -> Self {
+        fn new(job_id: JobId, thread_id: Option<ThreadId>, agent_id: RepoAgentId) -> Self {
             Self {
                 job_id,
                 thread_id,
@@ -1179,7 +1195,7 @@ mod tests {
                 agent_id: self.agent_id,
                 context: None,
                 prompt: "run test".to_string(),
-                thread_id: Some(self.thread_id),
+                thread_id: self.thread_id,
                 group_id: None,
                 depends_on: Vec::new(),
                 cron_expr: None,
@@ -1361,7 +1377,11 @@ mod tests {
 
     #[tokio::test]
     async fn reenqueue_update_thread_id_failure_does_not_delete_existing_thread_record() {
-        let (pool, thread_repository, thread_id) = test_pool_with_failing_update_thread_id().await;
+        let (pool, thread_repository, thread_id) = test_pool_with_failing_update_thread_id(Some(
+            ThreadId::new(),
+        ))
+        .await;
+        let thread_id = thread_id.expect("existing thread should be seeded");
 
         let result = pool
             .enqueue_job(super::test_request("job-update-thread-id-fails"))
@@ -1389,6 +1409,40 @@ mod tests {
                 .expect("deleted thread mutex poisoned")
                 .contains(&thread_id.to_string()),
             "existing thread record should not be deleted on update_thread_id failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn reenqueue_update_thread_id_failure_rolls_back_new_thread_record() {
+        let (pool, thread_repository, _) = test_pool_with_failing_update_thread_id(None).await;
+
+        let result = pool
+            .enqueue_job(super::test_request("job-update-thread-id-fails"))
+            .await;
+
+        let error = result.expect_err("enqueue should fail when update_thread_id fails");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to persist job-thread binding"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            thread_repository
+                .threads
+                .lock()
+                .expect("thread store mutex poisoned")
+                .is_empty(),
+            "newly created thread record should be rolled back"
+        );
+        assert_eq!(
+            thread_repository
+                .deleted_threads
+                .lock()
+                .expect("deleted thread mutex poisoned")
+                .len(),
+            1,
+            "newly created thread should be deleted on update_thread_id failure"
         );
     }
 
