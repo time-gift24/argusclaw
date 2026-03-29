@@ -44,7 +44,7 @@ struct RuntimeEntry {
 #[derive(Debug, Default)]
 struct ThreadPoolStore {
     runtimes: HashMap<String, RuntimeEntry>,
-    evicted_threads: u64,
+    evicted_jobs: HashSet<String>,
     peak_estimated_memory_bytes: u64,
     peak_process_memory_bytes: Option<u64>,
 }
@@ -123,6 +123,7 @@ impl ThreadPool {
         let estimated_memory_bytes = request.prompt.len() as u64;
 
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        store.evicted_jobs.remove(&request.job_id);
         store.runtimes.insert(
             request.job_id,
             RuntimeEntry {
@@ -164,7 +165,7 @@ impl ThreadPool {
             return None;
         }
         let removed = store.runtimes.remove(job_id)?;
-        store.evicted_threads += 1;
+        store.evicted_jobs.insert(job_id.to_string());
         Some(removed.thread_id)
     }
 
@@ -200,7 +201,7 @@ impl ThreadPool {
             queued_jobs,
             running_threads,
             cooling_threads,
-            evicted_threads: store.evicted_threads,
+            evicted_threads: store.evicted_jobs.len() as u64,
             estimated_memory_bytes,
             peak_estimated_memory_bytes: store.peak_estimated_memory_bytes,
             process_memory_bytes: None,
@@ -1162,7 +1163,7 @@ mod tests {
         let snapshot = pool.collect_metrics();
         assert_eq!(snapshot.active_threads, 1);
         assert_eq!(snapshot.queued_jobs, 1);
-        assert_eq!(snapshot.evicted_threads, 1);
+        assert_eq!(snapshot.evicted_threads, 0);
     }
 
     #[tokio::test]
