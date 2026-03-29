@@ -1,15 +1,22 @@
-//! ThreadPool for coordinating background job execution.
+//! ThreadPool for coordinating unified job and chat runtimes.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
+use argus_agent::config::ThreadConfigBuilder;
+use argus_agent::{
+    read_jsonl_events, CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder,
+    TraceConfig, TurnBuilder, TurnConfig, TurnLogEvent, TurnOutput,
+};
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
-    ThreadMailbox, ThreadPoolSnapshot,
+    AgentId, ProviderId, ProviderResolver, SessionId, ThreadControlEvent, ThreadEvent, ThreadId,
+    ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
+    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
+    ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
@@ -19,32 +26,37 @@ use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
 use futures_util::FutureExt;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
 
 const DEFAULT_MAX_THREADS: u32 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeState {
-    Queued,
-    Running,
-    Cooling,
+#[derive(Debug, Clone)]
+struct ChatRuntimeConfig {
+    compactor_manager: Arc<CompactorManager>,
+    trace_dir: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct RecoveredThreadState {
+    messages: Vec<ChatMessage>,
+    turn_count: u32,
+    token_count: u32,
+}
+
+#[derive(Debug)]
 struct RuntimeEntry {
-    thread_id: ThreadId,
-    state: RuntimeState,
-    estimated_memory_bytes: u64,
-    last_active_at: String,
+    summary: ThreadPoolRuntimeSummary,
+    sender: broadcast::Sender<ThreadEvent>,
+    chat_thread: Option<Arc<RwLock<argus_agent::Thread>>>,
 }
 
 #[derive(Debug, Default)]
 struct ThreadPoolStore {
     runtimes: HashMap<String, RuntimeEntry>,
-    evicted_jobs: HashSet<String>,
+    job_bindings: HashMap<String, ThreadId>,
     peak_estimated_memory_bytes: u64,
     peak_process_memory_bytes: Option<u64>,
 }
@@ -76,6 +88,7 @@ pub struct ThreadPool {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
+    chat_runtime_config: ChatRuntimeConfig,
     persistence: Option<ThreadPoolPersistence>,
     max_threads: u32,
     store: Arc<StdMutex<ThreadPoolStore>>,
@@ -95,8 +108,17 @@ impl ThreadPool {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
+        compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
     ) -> Self {
-        Self::with_persistence(template_manager, provider_resolver, tool_manager, None)
+        Self::with_persistence(
+            template_manager,
+            provider_resolver,
+            tool_manager,
+            compactor_manager,
+            trace_dir,
+            None,
+        )
     }
 
     /// Create a thread pool with optional repository-backed persistence.
@@ -104,15 +126,92 @@ impl ThreadPool {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
+        compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
         Self {
             template_manager,
             provider_resolver,
             tool_manager,
+            chat_runtime_config: ChatRuntimeConfig {
+                compactor_manager,
+                trace_dir,
+            },
             persistence,
             max_threads: DEFAULT_MAX_THREADS,
             store: Arc::new(StdMutex::new(ThreadPoolStore::default())),
+        }
+    }
+
+    /// Register a chat thread in the unified pool without loading its runtime.
+    pub fn register_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> broadcast::Receiver<ThreadEvent> {
+        let runtime = ThreadPoolRuntimeRef {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(session_id),
+            job_id: None,
+        };
+        self.upsert_runtime_summary(
+            runtime,
+            ThreadRuntimeStatus::Inactive,
+            0,
+            None,
+            true,
+            None,
+            None,
+        )
+        .subscribe()
+    }
+
+    /// Subscribe to a registered runtime.
+    pub fn subscribe(&self, thread_id: &ThreadId) -> Option<broadcast::Receiver<ThreadEvent>> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .map(|entry| entry.sender.subscribe())
+    }
+
+    /// Remove a runtime from the pool registry.
+    pub fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let removed = store.runtimes.remove(&thread_id.to_string()).is_some();
+        if removed {
+            store.job_bindings.retain(|_, bound_thread_id| bound_thread_id != thread_id);
+            Self::refresh_peaks(&mut store);
+        }
+        removed
+    }
+
+    /// Return a currently loaded chat runtime, if present.
+    pub fn loaded_chat_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<Arc<RwLock<argus_agent::Thread>>> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .and_then(|entry| entry.chat_thread.clone())
+    }
+
+    /// Return the authoritative pool state used by external observers.
+    pub fn collect_state(&self) -> ThreadPoolState {
+        let store = self.store.lock().expect("thread-pool mutex poisoned");
+        ThreadPoolState {
+            snapshot: Self::collect_metrics_from_store(self.max_threads, &store),
+            runtimes: store
+                .runtimes
+                .values()
+                .map(|entry| entry.summary.clone())
+                .collect(),
         }
     }
 
@@ -120,20 +219,26 @@ impl ThreadPool {
     pub async fn enqueue_job(&self, request: ThreadPoolJobRequest) -> Result<ThreadId, JobError> {
         let now = Utc::now().to_rfc3339();
         let thread_id = self.persist_binding(&request, &now).await?;
-        let estimated_memory_bytes = request.prompt.len() as u64;
-
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        store.evicted_jobs.remove(&request.job_id);
-        store.runtimes.insert(
-            request.job_id,
-            RuntimeEntry {
-                thread_id,
-                state: RuntimeState::Queued,
-                estimated_memory_bytes,
-                last_active_at: now,
-            },
+        let runtime = ThreadPoolRuntimeRef {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: None,
+            job_id: Some(request.job_id.clone()),
+        };
+        self.upsert_runtime_summary(
+            runtime,
+            ThreadRuntimeStatus::Queued,
+            request.prompt.len() as u64,
+            Some(now),
+            true,
+            None,
+            None,
         );
-        Self::refresh_peaks(&mut store);
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .job_bindings
+            .insert(request.job_id, thread_id);
         Ok(thread_id)
     }
 
@@ -142,74 +247,131 @@ impl ThreadPool {
         self.store
             .lock()
             .expect("thread-pool mutex poisoned")
-            .runtimes
+            .job_bindings
             .get(job_id)
-            .map(|entry| entry.thread_id)
+            .copied()
     }
 
     /// Mark a queued runtime as running.
     pub fn mark_running(&self, job_id: &str) -> Option<ThreadId> {
-        self.update_state(job_id, RuntimeState::Running)
+        let thread_id = self.get_thread_binding(job_id)?;
+        self.update_state(&thread_id, ThreadRuntimeStatus::Running, None)
     }
 
     /// Mark a runtime as cooling.
     pub fn mark_cooling(&self, job_id: &str) -> Option<ThreadId> {
-        self.update_state(job_id, RuntimeState::Cooling)
+        let thread_id = self.get_thread_binding(job_id)?;
+        self.update_state(&thread_id, ThreadRuntimeStatus::Cooling, None)
     }
 
-    /// Evict a runtime that is currently cooling.
+    /// Evict a job runtime that is currently cooling.
     pub fn evict_if_idle(&self, job_id: &str) -> Option<ThreadId> {
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get(job_id)?;
-        if entry.state != RuntimeState::Cooling {
-            return None;
-        }
-        let removed = store.runtimes.remove(job_id)?;
-        store.evicted_jobs.insert(job_id.to_string());
-        Some(removed.thread_id)
+        let thread_id = self.get_thread_binding(job_id)?;
+        self.evict_runtime(&thread_id, ThreadPoolEventReason::CoolingExpired)
+            .map(|runtime| runtime.thread_id)
+    }
+
+    /// Evict a chat runtime that is currently cooling.
+    pub fn evict_chat_if_idle(&self, thread_id: &ThreadId) -> Option<ThreadPoolRuntimeRef> {
+        self.evict_runtime(thread_id, ThreadPoolEventReason::CoolingExpired)
     }
 
     /// Collect a point-in-time metrics snapshot for the pool.
     pub fn collect_metrics(&self) -> ThreadPoolSnapshot {
         let store = self.store.lock().expect("thread-pool mutex poisoned");
-        let queued_jobs = store
-            .runtimes
-            .values()
-            .filter(|entry| entry.state == RuntimeState::Queued)
-            .count() as u32;
-        let running_threads = store
-            .runtimes
-            .values()
-            .filter(|entry| entry.state == RuntimeState::Running)
-            .count() as u32;
-        let cooling_threads = store
-            .runtimes
-            .values()
-            .filter(|entry| entry.state == RuntimeState::Cooling)
-            .count() as u32;
-        let estimated_memory_bytes = Self::total_estimated_memory(&store);
-        let resident_thread_count = store.runtimes.len() as u32;
-        let avg_thread_memory_bytes = if resident_thread_count == 0 {
-            0
-        } else {
-            estimated_memory_bytes / u64::from(resident_thread_count)
+        Self::collect_metrics_from_store(self.max_threads, &store)
+    }
+
+    /// Queue a user message onto a chat runtime, loading it on demand.
+    pub async fn send_chat_message(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        message: String,
+    ) -> Result<(), JobError> {
+        self.register_chat_thread(session_id, thread_id);
+        let thread = self.ensure_chat_runtime(session_id, thread_id).await?;
+        let estimated_memory_bytes =
+            Self::estimate_chat_thread_memory(&thread).await + message.len() as u64;
+        let sender = {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let sender = {
+                let entry = store
+                    .runtimes
+                    .get_mut(&thread_id.to_string())
+                    .ok_or_else(|| {
+                        JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
+                    })?;
+                entry.summary.status = ThreadRuntimeStatus::Running;
+                entry.summary.estimated_memory_bytes = estimated_memory_bytes;
+                entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+                entry.summary.last_reason = None;
+                entry.sender.clone()
+            };
+            Self::refresh_peaks(&mut store);
+            sender
         };
 
-        ThreadPoolSnapshot {
-            max_threads: self.max_threads,
-            active_threads: resident_thread_count,
-            queued_jobs,
-            running_threads,
-            cooling_threads,
-            evicted_threads: store.evicted_jobs.len() as u64,
-            estimated_memory_bytes,
-            peak_estimated_memory_bytes: store.peak_estimated_memory_bytes,
-            process_memory_bytes: None,
-            peak_process_memory_bytes: store.peak_process_memory_bytes,
-            resident_thread_count,
-            avg_thread_memory_bytes,
-            captured_at: Utc::now().to_rfc3339(),
+        let _ = sender.send(ThreadEvent::ThreadPoolStarted {
+            runtime: ThreadPoolRuntimeRef {
+                thread_id,
+                kind: ThreadPoolRuntimeKind::Chat,
+                session_id: Some(session_id),
+                job_id: None,
+            },
+        });
+        let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated {
+            snapshot: self.collect_metrics(),
+        });
+
+        thread
+            .read()
+            .await
+            .send_user_message(message, None)
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))
+    }
+
+    /// Ensure a chat runtime is resident and ready for message delivery.
+    pub async fn ensure_chat_runtime(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
+        if let Some(thread) = self
+            .store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .and_then(|entry| entry.chat_thread.clone())
+        {
+            return Ok(thread);
         }
+
+        self.upsert_runtime_summary(
+            ThreadPoolRuntimeRef {
+                thread_id,
+                kind: ThreadPoolRuntimeKind::Chat,
+                session_id: Some(session_id),
+                job_id: None,
+            },
+            ThreadRuntimeStatus::Loading,
+            0,
+            Some(Utc::now().to_rfc3339()),
+            true,
+            None,
+            None,
+        );
+
+        let thread = self.build_chat_thread(session_id, thread_id).await?;
+        let runtime_rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        self.attach_chat_runtime(thread_id, session_id, Arc::clone(&thread), runtime_rx)
+            .await;
+        Ok(thread)
     }
 
     /// Execute an enqueued job on its bound thread runtime.
@@ -227,8 +389,12 @@ impl ThreadPool {
 
         let _ = self.mark_running(&request.job_id);
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolStarted {
-            job_id: request.job_id.clone(),
-            thread_id: execution_thread_id,
+            runtime: ThreadPoolRuntimeRef {
+                thread_id: execution_thread_id,
+                kind: ThreadPoolRuntimeKind::Job,
+                session_id: None,
+                job_id: Some(request.job_id.clone()),
+            },
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.collect_metrics(),
@@ -259,8 +425,12 @@ impl ThreadPool {
 
         let _ = self.mark_cooling(&request.job_id);
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolCooling {
-            job_id: request.job_id.clone(),
-            thread_id: execution_thread_id,
+            runtime: ThreadPoolRuntimeRef {
+                thread_id: execution_thread_id,
+                kind: ThreadPoolRuntimeKind::Job,
+                session_id: None,
+                job_id: Some(request.job_id.clone()),
+            },
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.collect_metrics(),
@@ -396,19 +566,38 @@ impl ThreadPool {
         }
     }
 
-    fn update_state(&self, job_id: &str, state: RuntimeState) -> Option<ThreadId> {
+    fn update_state(
+        &self,
+        thread_id: &ThreadId,
+        state: ThreadRuntimeStatus,
+        reason: Option<ThreadPoolEventReason>,
+    ) -> Option<ThreadId> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let entry = store.runtimes.get_mut(job_id)?;
-        entry.state = state;
-        entry.last_active_at = Utc::now().to_rfc3339();
-        Some(entry.thread_id)
+        let runtime_thread_id = {
+            let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+            entry.summary.status = state;
+            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+            entry.summary.last_reason = reason;
+            entry.summary.runtime.thread_id
+        };
+        Self::refresh_peaks(&mut store);
+        Some(runtime_thread_id)
     }
 
     fn total_estimated_memory(store: &ThreadPoolStore) -> u64 {
         store
             .runtimes
             .values()
-            .map(|entry| entry.estimated_memory_bytes)
+            .filter(|entry| {
+                matches!(
+                    entry.summary.status,
+                    ThreadRuntimeStatus::Loading
+                        | ThreadRuntimeStatus::Queued
+                        | ThreadRuntimeStatus::Running
+                        | ThreadRuntimeStatus::Cooling
+                )
+            })
+            .map(|entry| entry.summary.estimated_memory_bytes)
             .sum()
     }
 
@@ -417,6 +606,196 @@ impl ThreadPool {
         if estimated > store.peak_estimated_memory_bytes {
             store.peak_estimated_memory_bytes = estimated;
         }
+    }
+
+    fn collect_metrics_from_store(max_threads: u32, store: &ThreadPoolStore) -> ThreadPoolSnapshot {
+        let queued_threads = store
+            .runtimes
+            .values()
+            .filter(|entry| entry.summary.status == ThreadRuntimeStatus::Queued)
+            .count() as u32;
+        let running_threads = store
+            .runtimes
+            .values()
+            .filter(|entry| entry.summary.status == ThreadRuntimeStatus::Running)
+            .count() as u32;
+        let cooling_threads = store
+            .runtimes
+            .values()
+            .filter(|entry| entry.summary.status == ThreadRuntimeStatus::Cooling)
+            .count() as u32;
+        let resident_thread_count = store
+            .runtimes
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.summary.status,
+                    ThreadRuntimeStatus::Loading
+                        | ThreadRuntimeStatus::Queued
+                        | ThreadRuntimeStatus::Running
+                        | ThreadRuntimeStatus::Cooling
+                )
+            })
+            .count() as u32;
+        let estimated_memory_bytes = Self::total_estimated_memory(store);
+        let avg_thread_memory_bytes = if resident_thread_count == 0 {
+            0
+        } else {
+            estimated_memory_bytes / u64::from(resident_thread_count)
+        };
+
+        ThreadPoolSnapshot {
+            max_threads,
+            active_threads: resident_thread_count,
+            queued_threads,
+            running_threads,
+            cooling_threads,
+            evicted_threads: store
+                .runtimes
+                .values()
+                .filter(|entry| entry.summary.status == ThreadRuntimeStatus::Evicted)
+                .count() as u64,
+            estimated_memory_bytes,
+            peak_estimated_memory_bytes: store.peak_estimated_memory_bytes,
+            process_memory_bytes: None,
+            peak_process_memory_bytes: store.peak_process_memory_bytes,
+            resident_thread_count,
+            avg_thread_memory_bytes,
+            captured_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn upsert_runtime_summary(
+        &self,
+        runtime: ThreadPoolRuntimeRef,
+        status: ThreadRuntimeStatus,
+        estimated_memory_bytes: u64,
+        last_active_at: Option<String>,
+        recoverable: bool,
+        last_reason: Option<ThreadPoolEventReason>,
+        chat_thread: Option<Arc<RwLock<argus_agent::Thread>>>,
+    ) -> broadcast::Sender<ThreadEvent> {
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let runtime_key = runtime.thread_id.to_string();
+        let sender = store
+            .runtimes
+            .get(&runtime_key)
+            .map(|entry| entry.sender.clone())
+            .unwrap_or_else(|| {
+                let (sender, _rx) = broadcast::channel(256);
+                sender
+            });
+
+        let existing_chat_thread = store
+            .runtimes
+            .get(&runtime_key)
+            .and_then(|entry| entry.chat_thread.clone());
+        store.runtimes.insert(
+            runtime_key,
+            RuntimeEntry {
+                summary: ThreadPoolRuntimeSummary {
+                    runtime,
+                    status,
+                    estimated_memory_bytes,
+                    last_active_at,
+                    recoverable,
+                    last_reason,
+                },
+                sender: sender.clone(),
+                chat_thread: chat_thread.or(existing_chat_thread),
+            },
+        );
+        Self::refresh_peaks(&mut store);
+        sender
+    }
+
+    async fn attach_chat_runtime(
+        &self,
+        thread_id: ThreadId,
+        session_id: SessionId,
+        thread: Arc<RwLock<argus_agent::Thread>>,
+        mut runtime_rx: broadcast::Receiver<ThreadEvent>,
+    ) {
+        let estimated_memory_bytes = Self::estimate_chat_thread_memory(&thread).await;
+        let sender = {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let sender = {
+                let entry = store
+                    .runtimes
+                    .get_mut(&thread_id.to_string())
+                    .expect("chat runtime should be registered");
+                entry.summary.status = ThreadRuntimeStatus::Inactive;
+                entry.summary.estimated_memory_bytes = estimated_memory_bytes;
+                entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+                entry.summary.last_reason = None;
+                entry.chat_thread = Some(thread);
+                entry.sender.clone()
+            };
+            Self::refresh_peaks(&mut store);
+            sender
+        };
+        let store = Arc::clone(&self.store);
+        let max_threads = self.max_threads;
+
+        tokio::spawn(async move {
+            loop {
+                match runtime_rx.recv().await {
+                    Ok(event) => {
+                        let _ = sender.send(event.clone());
+                        if matches!(event, ThreadEvent::Idle { .. }) {
+                            let snapshot = {
+                                let mut store = store.lock().expect("thread-pool mutex poisoned");
+                                if let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) {
+                                    entry.summary.status = ThreadRuntimeStatus::Cooling;
+                                    entry.summary.last_active_at =
+                                        Some(Utc::now().to_rfc3339());
+                                    entry.summary.last_reason = None;
+                                }
+                                ThreadPool::collect_metrics_from_store(max_threads, &store)
+                            };
+                            let _ = sender.send(ThreadEvent::ThreadPoolCooling {
+                                runtime: ThreadPoolRuntimeRef {
+                                    thread_id,
+                                    kind: ThreadPoolRuntimeKind::Chat,
+                                    session_id: Some(session_id),
+                                    job_id: None,
+                                },
+                            });
+                            let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
+
+    fn evict_runtime(
+        &self,
+        thread_id: &ThreadId,
+        reason: ThreadPoolEventReason,
+    ) -> Option<ThreadPoolRuntimeRef> {
+        let (runtime, sender) = {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+            if entry.summary.status != ThreadRuntimeStatus::Cooling {
+                return None;
+            }
+            entry.summary.status = ThreadRuntimeStatus::Evicted;
+            entry.summary.last_reason = Some(reason.clone());
+            entry.summary.estimated_memory_bytes = 0;
+            entry.chat_thread = None;
+            (entry.summary.runtime.clone(), entry.sender.clone())
+        };
+        let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
+            runtime: runtime.clone(),
+            reason,
+        });
+        let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated {
+            snapshot: self.collect_metrics(),
+        });
+        Some(runtime)
     }
 
     fn summarize_output(output: &TurnOutput) -> String {
@@ -468,6 +847,129 @@ impl ThreadPool {
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "unknown panic payload".to_string());
         format!("job executor panicked: {detail}")
+    }
+
+    async fn build_chat_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
+        let persistence = self.persistence.as_ref().ok_or_else(|| {
+            JobError::ExecutionFailed("thread pool persistence is not configured".to_string())
+        })?;
+        let thread_record = persistence
+            .thread_repository
+            .get_thread_in_session(&thread_id, &session_id)
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load thread record: {err}"))
+            })?
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("thread {} not found", thread_id))
+            })?;
+        let template_id = thread_record.template_id.ok_or_else(|| {
+            JobError::ExecutionFailed(format!("thread {} is missing template_id", thread_id))
+        })?;
+        let agent_record = self
+            .template_manager
+            .get(AgentId::new(template_id.inner()))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!(
+                    "failed to load agent {}: {err}",
+                    template_id.inner()
+                ))
+            })?
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("agent {} not found", template_id.inner()))
+            })?;
+        let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
+        let provider = match thread_record.model_override.as_deref() {
+            Some(model) => match self
+                .provider_resolver
+                .resolve_with_model(provider_id, model)
+                .await
+            {
+                Ok(provider) => Ok(provider),
+                Err(_) => self.provider_resolver.resolve(provider_id).await,
+            },
+            None => self.provider_resolver.resolve(provider_id).await,
+        }
+        .map_err(|err| JobError::ExecutionFailed(format!("failed to resolve provider: {err}")))?;
+
+        let trace_cfg = TraceConfig::new(true, self.chat_runtime_config.trace_dir.clone())
+            .with_session_id(session_id)
+            .with_turn_start(
+                Some(agent_record.system_prompt.clone()),
+                Some(provider.model_name().to_string()),
+            );
+        let mut turn_config = TurnConfig::new();
+        turn_config.trace_config = Some(trace_cfg);
+        turn_config.on_turn_complete =
+            Some(Self::build_on_turn_complete(self.chat_runtime_config.trace_dir.clone()));
+        let config = ThreadConfigBuilder::default()
+            .turn_config(turn_config)
+            .build()
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let plan_store = FilePlanStore::new(
+            self.chat_runtime_config.trace_dir.clone(),
+            &thread_id.inner().to_string(),
+        );
+        let thread = ThreadBuilder::new()
+            .id(thread_id)
+            .session_id(session_id)
+            .agent_record(Arc::new(agent_record))
+            .title(thread_record.title.clone())
+            .provider(provider)
+            .tool_manager(self.tool_manager.clone())
+            .compactor(self.chat_runtime_config.compactor_manager.default_compactor().clone())
+            .plan_store(plan_store)
+            .config(config)
+            .build()
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let thread = Arc::new(RwLock::new(thread));
+
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        let recovered = Self::recover_thread_state_from_trace(
+            &self.chat_runtime_config.trace_dir,
+            &session_id,
+            &thread_id,
+            (thread_record.turn_count > 0).then_some(thread_record.turn_count),
+        )
+        .await
+        .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        if recovered.turn_count > 0 {
+            thread.write().await.hydrate_from_persisted_state(
+                recovered.messages,
+                thread_record.token_count.max(recovered.token_count),
+                thread_record.turn_count.max(recovered.turn_count),
+                updated_at,
+            );
+        }
+
+        Ok(thread)
+    }
+
+    fn build_on_turn_complete(trace_dir: PathBuf) -> OnTurnComplete {
+        Arc::new(move |sid: SessionId, turn_num: u32| {
+            let trace_dir = trace_dir.clone();
+            tokio::spawn(async move {
+                let _ = ThreadPool::update_session_turn_file(&trace_dir, sid, turn_num).await;
+            });
+        })
+    }
+
+    async fn estimate_chat_thread_memory(thread: &Arc<RwLock<argus_agent::Thread>>) -> u64 {
+        let guard = thread.read().await;
+        let history_bytes = guard
+            .history()
+            .iter()
+            .map(|message| message.content.len() as u64)
+            .sum::<u64>();
+        let plan_bytes = guard.plan().len() as u64 * 128;
+        history_bytes + plan_bytes + u64::from(guard.token_count())
     }
 
     async fn persist_binding(
@@ -645,6 +1147,115 @@ impl ThreadPool {
         }
     }
 
+    async fn update_session_turn_file(
+        trace_dir: &Path,
+        session_id: SessionId,
+        turn_number: u32,
+    ) -> std::io::Result<()> {
+        let meta_path = trace_dir.join(session_id.to_string()).join("meta.json");
+        let meta = if meta_path.exists() {
+            let content = tokio::fs::read_to_string(&meta_path).await?;
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "session_id": session_id.to_string(),
+                    "current_turn": 0,
+                })
+            })
+        } else {
+            serde_json::json!({
+                "session_id": session_id.to_string(),
+                "current_turn": 0,
+            })
+        };
+
+        let updated = serde_json::json!({
+            "session_id": meta.get("session_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&session_id.to_string()),
+            "current_turn": turn_number,
+        });
+        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await
+    }
+
+    async fn recover_thread_state_from_trace(
+        trace_dir: &Path,
+        session_id: &SessionId,
+        thread_id: &ThreadId,
+        turn_count_hint: Option<u32>,
+    ) -> Result<RecoveredThreadState, std::io::Error> {
+        let turns_dir = trace_dir
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("turns");
+        let mut turn_numbers = Vec::new();
+        if let Some(turn_count) = turn_count_hint {
+            turn_numbers.extend(1..=turn_count);
+        } else if turns_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&turns_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                    && let Ok(number) = stem.parse::<u32>()
+                {
+                    turn_numbers.push(number);
+                }
+            }
+            turn_numbers.sort_unstable();
+        }
+
+        let mut messages = Vec::new();
+        let mut token_count = 0;
+        for turn_number in &turn_numbers {
+            let path = turns_dir.join(format!("{turn_number}.jsonl"));
+            let events = read_jsonl_events(&path)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            for event in events {
+                match event {
+                    TurnLogEvent::UserInput { content, .. } => {
+                        if !content.trim().is_empty() {
+                            messages.push(ChatMessage::user(content));
+                        }
+                    }
+                    TurnLogEvent::LlmResponse {
+                        content,
+                        reasoning_content,
+                        tool_calls,
+                        ..
+                    } => {
+                        if tool_calls.is_empty() {
+                            if !content.trim().is_empty()
+                                || !reasoning_content
+                                    .as_deref()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .is_empty()
+                            {
+                                messages.push(ChatMessage::assistant_with_reasoning(
+                                    content,
+                                    reasoning_content,
+                                ));
+                            }
+                        }
+                    }
+                    TurnLogEvent::TurnEnd { token_usage, .. } => {
+                        token_count = token_usage.total_tokens;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(RecoveredThreadState {
+            messages,
+            turn_count: turn_numbers.len() as u32,
+            token_count,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn test_pool() -> Self {
         use argus_protocol::{LlmProvider, ProviderId};
@@ -688,6 +1299,8 @@ impl ThreadPool {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-thread-pool-tests"),
         )
     }
 }
@@ -701,7 +1314,7 @@ pub(crate) async fn assert_enqueue_job_creates_binding_and_updates_metrics() {
         .expect("enqueue should succeed");
 
     let snapshot = pool.collect_metrics();
-    assert_eq!(snapshot.queued_jobs, 1);
+    assert_eq!(snapshot.queued_threads, 1);
     assert_eq!(pool.get_thread_binding("job-1"), Some(thread_id));
 }
 
@@ -723,6 +1336,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
+    use argus_agent::CompactorManager;
     use argus_protocol::llm::{LlmProviderId, LlmProviderRepository};
     use argus_protocol::{
         AgentRecord, AgentType, LlmProvider, LlmProviderKind, LlmProviderRecord, ProviderId,
@@ -786,6 +1400,8 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 sqlite.clone() as Arc<dyn JobRepository>,
                 sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -883,6 +1499,8 @@ mod tests {
             template_manager,
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingCreateJobRepository) as Arc<dyn JobRepository>,
                 thread_repository.clone() as Arc<dyn ThreadRepository>,
@@ -962,6 +1580,8 @@ mod tests {
             template_manager,
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingUpdateThreadIdJobRepository::new(
                     job_id,
@@ -1344,7 +1964,7 @@ mod tests {
 
         let snapshot = pool.collect_metrics();
         assert_eq!(snapshot.active_threads, 1);
-        assert_eq!(snapshot.queued_jobs, 1);
+        assert_eq!(snapshot.queued_threads, 1);
         assert_eq!(snapshot.evicted_threads, 0);
     }
 
@@ -1462,7 +2082,7 @@ mod tests {
                 event,
                 ThreadEvent::ThreadPoolMetricsUpdated { snapshot }
                     if snapshot.running_threads == 1
-                        && snapshot.queued_jobs == 0
+                        && snapshot.queued_threads == 0
                         && snapshot.cooling_threads == 0
             )
         }));

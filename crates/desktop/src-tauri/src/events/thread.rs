@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use argus_protocol::{LlmStreamEvent, ThreadEvent, ThreadPoolEventReason, ThreadPoolSnapshot};
+use argus_protocol::{
+    LlmStreamEvent, ThreadEvent, ThreadPoolEventReason, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+};
 
 /// Envelope for thread events sent to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,36 +186,29 @@ impl ThreadEventEnvelope {
                 turn_number: None,
                 payload: ThreadEventPayload::ThreadBoundToJob { job_id },
             }),
-            ThreadEvent::ThreadPoolQueued { job_id, thread_id } => Some(Self {
+            ThreadEvent::ThreadPoolQueued { runtime } => Some(Self {
                 session_id,
-                thread_id: thread_id.inner().to_string(),
+                thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolQueued { job_id },
+                payload: ThreadEventPayload::ThreadPoolQueued { runtime },
             }),
-            ThreadEvent::ThreadPoolStarted { job_id, thread_id } => Some(Self {
+            ThreadEvent::ThreadPoolStarted { runtime } => Some(Self {
                 session_id,
-                thread_id: thread_id.inner().to_string(),
+                thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolStarted { job_id },
+                payload: ThreadEventPayload::ThreadPoolStarted { runtime },
             }),
-            ThreadEvent::ThreadPoolCooling { job_id, thread_id } => Some(Self {
+            ThreadEvent::ThreadPoolCooling { runtime } => Some(Self {
                 session_id,
-                thread_id: thread_id.inner().to_string(),
+                thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolCooling { job_id },
+                payload: ThreadEventPayload::ThreadPoolCooling { runtime },
             }),
-            ThreadEvent::ThreadPoolEvicted {
-                job_id,
-                thread_id,
-                reason,
-            } => Some(Self {
+            ThreadEvent::ThreadPoolEvicted { runtime, reason } => Some(Self {
                 session_id,
-                thread_id: thread_id.inner().to_string(),
+                thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolEvicted {
-                    job_id,
-                    reason,
-                },
+                payload: ThreadEventPayload::ThreadPoolEvicted { runtime, reason },
             }),
             ThreadEvent::ThreadPoolMetricsUpdated { snapshot } => Some(Self {
                 session_id,
@@ -285,16 +280,16 @@ pub enum ThreadEventPayload {
         job_id: String,
     },
     ThreadPoolQueued {
-        job_id: String,
+        runtime: ThreadPoolRuntimeRef,
     },
     ThreadPoolStarted {
-        job_id: String,
+        runtime: ThreadPoolRuntimeRef,
     },
     ThreadPoolCooling {
-        job_id: String,
+        runtime: ThreadPoolRuntimeRef,
     },
     ThreadPoolEvicted {
-        job_id: String,
+        runtime: ThreadPoolRuntimeRef,
         reason: ThreadPoolEventReason,
     },
     ThreadPoolMetricsUpdated {
@@ -414,7 +409,7 @@ mod tests {
         let snapshot = ThreadPoolSnapshot {
             max_threads: 8,
             active_threads: 2,
-            queued_jobs: 1,
+            queued_threads: 1,
             running_threads: 1,
             cooling_threads: 1,
             evicted_threads: 3,

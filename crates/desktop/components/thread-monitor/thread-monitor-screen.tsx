@@ -16,6 +16,12 @@ export function ThreadMonitorScreen() {
   const loading = useChatStore((state) => state.threadPoolSnapshotLoading);
   const error = useChatStore((state) => state.threadPoolError);
   const refresh = useChatStore((state) => state.refreshThreadPoolSnapshot);
+  const [kindFilter, setKindFilter] = React.useState<"all" | "chat" | "job">(
+    "all",
+  );
+  const [statusFilter, setStatusFilter] = React.useState<
+    "all" | "running" | "queued" | "cooling" | "inactive" | "evicted"
+  >("all");
 
   React.useEffect(() => {
     void refresh();
@@ -27,6 +33,12 @@ export function ThreadMonitorScreen() {
       window.clearInterval(timer);
     };
   }, [refresh]);
+
+  const filteredThreads = threads.filter((thread) => {
+    if (kindFilter !== "all" && thread.kind !== kindFilter) return false;
+    if (statusFilter !== "all" && thread.status !== statusFilter) return false;
+    return true;
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -41,7 +53,7 @@ export function ThreadMonitorScreen() {
                 </Badge>
               </div>
               <p className="max-w-2xl text-sm text-muted-foreground">
-                监控线程池的总览和最近观测到的线程状态。页面只读，线程列表来自事件流，池级指标来自快照拉取。
+                监控线程池的总览和统一 runtime 状态。页面只读，线程列表与池级指标都来自后端权威状态查询。
               </p>
               <div className="flex flex-wrap gap-2 pt-1 text-xs">
                 <Badge variant="outline" className="rounded-full border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">
@@ -68,15 +80,66 @@ export function ThreadMonitorScreen() {
               {error}
             </div>
           ) : null}
+          <div className="flex flex-wrap gap-2 text-xs">
+            {[
+              ["all", "全部类型"],
+              ["chat", "Chat"],
+              ["job", "Job"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setKindFilter(value as "all" | "chat" | "job")}
+                className={`rounded-full border px-3 py-1 transition ${
+                  kindFilter === value
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-muted/60 text-muted-foreground hover:bg-muted/40"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            {[
+              ["all", "全部状态"],
+              ["running", "运行中"],
+              ["queued", "排队中"],
+              ["cooling", "冷却中"],
+              ["inactive", "未激活"],
+              ["evicted", "已驱逐"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() =>
+                  setStatusFilter(
+                    value as
+                      | "all"
+                      | "running"
+                      | "queued"
+                      | "cooling"
+                      | "inactive"
+                      | "evicted",
+                  )
+                }
+                className={`rounded-full border px-3 py-1 transition ${
+                  statusFilter === value
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-muted/60 text-muted-foreground hover:bg-muted/40"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <ThreadMonitorSummary
           snapshot={snapshot}
-          observedCount={threads.length}
+          observedCount={filteredThreads.length}
           loading={loading}
         />
 
-        <ThreadMonitorTable threads={threads} />
+        <ThreadMonitorTable threads={filteredThreads} />
       </div>
     </div>
   );

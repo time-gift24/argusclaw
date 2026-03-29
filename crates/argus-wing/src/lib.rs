@@ -38,6 +38,7 @@ use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
     ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
+    ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, SessionRepository,
@@ -128,6 +129,8 @@ impl ArgusWing {
 
         // Create compactor manager
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
 
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
@@ -137,14 +140,14 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
+            compactor_manager.clone(),
+            trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
             llm_repository.clone(),
         ));
 
         // Create session manager
-        let trace_dir = default_trace_dir();
-        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -152,8 +155,8 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
-            compactor_manager.clone(),
             trace_dir,
+            job_manager.thread_pool(),
             job_manager.clone(),
         ));
 
@@ -194,6 +197,8 @@ impl ArgusWing {
         ));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
@@ -202,12 +207,12 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
+            compactor_manager.clone(),
+            trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
             llm_repository.clone(),
         ));
-        let trace_dir = default_trace_dir();
-        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -215,8 +220,8 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
-            compactor_manager.clone(),
             trace_dir,
+            job_manager.thread_pool(),
             job_manager.clone(),
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
@@ -277,6 +282,11 @@ impl ArgusWing {
     #[must_use]
     pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
         self.job_manager.thread_pool_snapshot()
+    }
+
+    /// Return the authoritative thread-pool state including runtime summaries.
+    pub fn thread_pool_state(&self) -> ThreadPoolState {
+        self.job_manager.thread_pool_state()
     }
 
     /// Resolve the persisted execution thread bound to a job ID, if available.
@@ -587,6 +597,17 @@ impl ArgusWing {
     ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
         self.session_manager
             .get_thread_messages(session_id, &thread_id)
+            .await
+    }
+
+    /// Get a thread snapshot without forcing the runtime to stay resident.
+    pub async fn get_thread_snapshot(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<(Vec<argus_protocol::llm::ChatMessage>, u32, u32, u32)> {
+        self.session_manager
+            .get_thread_snapshot(session_id, &thread_id)
             .await
     }
 
@@ -1109,6 +1130,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_thread_removes_chat_runtime_from_thread_pool_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Pool Cleanup Agent".to_string(),
+                description: "Verifies chat runtimes are removed on delete".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help verify pool cleanup.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("pool-cleanup-session")
+            .await
+            .expect("session should create");
+        let thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        assert!(wing
+            .thread_pool_state()
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == thread_id));
+
+        wing.delete_thread(session_id, thread_id)
+            .await
+            .expect("thread delete should succeed");
+
+        assert!(!wing
+            .thread_pool_state()
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == thread_id));
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_registered_chat_runtimes_from_thread_pool_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Session Cleanup Agent".to_string(),
+                description: "Verifies session delete clears pooled chat runtimes".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help verify session cleanup.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("session-cleanup-session")
+            .await
+            .expect("session should create");
+        let first_thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("first thread should create");
+        let second_thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("second thread should create");
+
+        let before_delete = wing.thread_pool_state();
+        assert!(before_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+        assert!(before_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+
+        wing.delete_session(session_id)
+            .await
+            .expect("session delete should succeed");
+
+        let after_delete = wing.thread_pool_state();
+        assert!(!after_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+        assert!(!after_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+    }
+
+    #[tokio::test]
     async fn update_thread_model_rebinds_existing_thread() {
         use argus_protocol::LlmProviderRecord;
         use std::collections::HashMap;
@@ -1200,15 +1341,15 @@ mod tests {
         );
         assert_eq!(updated_model, "gpt-5");
 
-        let session = wing
-            .load_session(session_id)
+        let (_template_id, rebound_provider_id, rebound_model) = wing
+            .activate_thread(session_id, thread_id)
             .await
-            .expect("session should load");
-        let thread = session
-            .get_thread(&thread_id)
-            .expect("thread should stay loaded");
-        let thread = thread.read().await;
-        assert_eq!(thread.provider().model_name(), "gpt-5");
+            .expect("thread should remain activatable");
+        assert_eq!(
+            rebound_provider_id,
+            Some(argus_protocol::ProviderId::new(provider_id.into_inner()))
+        );
+        assert_eq!(rebound_model.as_deref(), Some("gpt-5"));
     }
 
     #[tokio::test]

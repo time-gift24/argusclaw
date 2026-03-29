@@ -33,6 +33,8 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatScreenSource, /ThreadMonitorScreen/);
   assert.match(threadMonitorScreenSource, /冷却中/);
   assert.match(threadMonitorScreenSource, /已驱逐/);
+  assert.match(threadMonitorScreenSource, /kindFilter|类型筛选|聊天线程|后台任务/);
+  assert.match(threadMonitorScreenSource, /权威|authoritative/i);
   assert.match(chatScreenSource, /<Thread \/>/);
   assert.match(threadSource, /className="aui-root aui-thread-root @container relative flex h-full min-h-0 w-full flex-1 flex-col bg-background overflow-hidden"/);
   assert.match(threadSource, /ChatStatusBanner/);

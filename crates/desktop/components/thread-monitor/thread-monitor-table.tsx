@@ -79,6 +79,10 @@ function reasonLabel(reason: ThreadPoolThreadState["lastReason"]): string {
   }
 }
 
+function kindLabel(kind: ThreadPoolThreadState["kind"]): string {
+  return kind === "chat" ? "Chat" : "Job";
+}
+
 interface ThreadMonitorTableProps {
   threads: ThreadPoolThreadState[];
 }
@@ -87,32 +91,33 @@ export function ThreadMonitorTable({ threads }: ThreadMonitorTableProps) {
   return (
     <Card className="border-muted/60 bg-background/70 backdrop-blur-xl shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">最近观测线程</CardTitle>
+        <CardTitle className="text-base">统一 Runtime 列表</CardTitle>
         <CardDescription>
-          仅展示最近通过线程池事件捕获到的线程，按最新活动时间排序。
+          展示后端当前返回的 chat / job runtime 状态，按最近活动时间排序。
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
         {threads.length === 0 ? (
           <div className="flex min-h-56 items-center justify-center rounded-xl border border-dashed border-muted-foreground/20 bg-muted/20 px-6 text-center text-sm text-muted-foreground">
-            暂无线程观测数据，切到 Threads 页签或等待后台任务产生事件后会自动出现。
+            当前筛选条件下没有 runtime 数据，刷新快照或切换筛选条件后会更新。
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-muted-foreground/10">
-            <div className="min-w-[920px] grid grid-cols-[1.3fr_1fr_0.9fr_0.8fr_1fr_0.8fr] gap-0 border-b border-muted-foreground/10 bg-muted/30 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+            <div className="min-w-[1080px] grid grid-cols-[1.2fr_0.7fr_1fr_0.9fr_0.8fr_1fr_0.8fr] gap-0 border-b border-muted-foreground/10 bg-muted/30 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
               <div>Thread</div>
+              <div>Kind</div>
               <div>Job</div>
               <div>Status</div>
               <div>Memory</div>
               <div>Last Active</div>
               <div>Recovery</div>
             </div>
-            <div className="min-w-[920px] divide-y divide-muted-foreground/10">
+            <div className="min-w-[1080px] divide-y divide-muted-foreground/10">
               {threads.map((thread) => (
                 <div
                   key={thread.threadId}
                   className={cn(
-                    "grid grid-cols-[1.3fr_1fr_0.9fr_0.8fr_1fr_0.8fr] items-center gap-0 px-4 py-3 text-sm",
+                    "grid grid-cols-[1.2fr_0.7fr_1fr_0.9fr_0.8fr_1fr_0.8fr] items-center gap-0 px-4 py-3 text-sm",
                     "hover:bg-muted/20",
                   )}
                 >
@@ -124,8 +129,13 @@ export function ThreadMonitorTable({ threads }: ThreadMonitorTableProps) {
                       {thread.eventCount} 次事件 · {reasonLabel(thread.lastReason)}
                     </div>
                   </div>
+                  <div>
+                    <Badge variant="outline" className="rounded-full">
+                      {kindLabel(thread.kind)}
+                    </Badge>
+                  </div>
                   <div className="min-w-0 text-sm text-foreground/90">
-                    {thread.jobId ?? "—"}
+                    {thread.jobId ?? thread.sessionId ?? "—"}
                   </div>
                   <div>
                     <Badge variant="outline" className={cn("rounded-full", statusBadgeClass(thread.status))}>

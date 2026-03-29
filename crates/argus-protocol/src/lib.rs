@@ -22,7 +22,8 @@ pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalRes
 pub use error::{ArgusError, Result};
 pub use events::{
     QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadInbox,
-    ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolSnapshot,
+    ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
+    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
     ThreadRuntimeSnapshot, ThreadRuntimeState, ThreadRuntimeStatus, TurnControlInput,
 };
 pub use hooks::{

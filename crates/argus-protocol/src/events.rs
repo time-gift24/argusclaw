@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
-use crate::ids::{AgentId, ThreadId};
+use crate::ids::{AgentId, SessionId, ThreadId};
 use crate::llm::LlmStreamEvent;
 use crate::message_override::MessageOverride;
 
@@ -344,13 +344,34 @@ pub enum ThreadRuntimeStatus {
     Evicted,
 }
 
-/// Snapshot of a single thread tracked by the thread pool.
+/// Runtime source classification inside the unified thread pool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadRuntimeSnapshot {
+#[serde(rename_all = "snake_case")]
+pub enum ThreadPoolRuntimeKind {
+    /// User-facing conversational runtime.
+    Chat,
+    /// Background job runtime.
+    Job,
+}
+
+/// Stable identifier for a runtime tracked by the unified thread pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolRuntimeRef {
     /// Thread ID.
     pub thread_id: ThreadId,
+    /// Runtime category.
+    pub kind: ThreadPoolRuntimeKind,
+    /// Bound session ID when the runtime belongs to a user chat thread.
+    pub session_id: Option<SessionId>,
     /// Bound job ID if this runtime is associated with a dispatched job.
     pub job_id: Option<String>,
+}
+
+/// Snapshot of a single thread tracked by the thread pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolRuntimeSummary {
+    /// Stable runtime identity.
+    pub runtime: ThreadPoolRuntimeRef,
     /// Runtime status.
     pub status: ThreadRuntimeStatus,
     /// Estimated memory usage for this runtime.
@@ -359,7 +380,12 @@ pub struct ThreadRuntimeSnapshot {
     pub last_active_at: Option<String>,
     /// Whether the runtime can be reloaded after in-memory eviction.
     pub recoverable: bool,
+    /// Last eviction/cooling reason when available.
+    pub last_reason: Option<ThreadPoolEventReason>,
 }
+
+/// Backward-compatible alias for older thread-pool consumers.
+pub type ThreadRuntimeSnapshot = ThreadPoolRuntimeSummary;
 
 /// Aggregated thread-pool telemetry snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -368,8 +394,8 @@ pub struct ThreadPoolSnapshot {
     pub max_threads: u32,
     /// Total active (loaded) runtimes.
     pub active_threads: u32,
-    /// Jobs waiting in the queue.
-    pub queued_jobs: u32,
+    /// Runtimes waiting in the queue.
+    pub queued_threads: u32,
     /// Runtimes currently executing.
     pub running_threads: u32,
     /// Runtimes in cooling state.
@@ -390,6 +416,15 @@ pub struct ThreadPoolSnapshot {
     pub avg_thread_memory_bytes: u64,
     /// Snapshot timestamp (RFC3339).
     pub captured_at: String,
+}
+
+/// Authoritative thread-pool query payload used by external observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolState {
+    /// Aggregated pool metrics.
+    pub snapshot: ThreadPoolSnapshot,
+    /// Current runtime summaries.
+    pub runtimes: Vec<ThreadPoolRuntimeSummary>,
 }
 
 /// Reason associated with thread-pool lifecycle transitions.
@@ -533,31 +568,23 @@ pub enum ThreadEvent {
     },
     /// Job/thread has entered queued state inside the thread pool.
     ThreadPoolQueued {
-        /// Job ID.
-        job_id: String,
-        /// Thread ID.
-        thread_id: ThreadId,
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
     },
     /// Job/thread has started running inside the thread pool.
     ThreadPoolStarted {
-        /// Job ID.
-        job_id: String,
-        /// Thread ID.
-        thread_id: ThreadId,
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
     },
     /// Job/thread has entered cooling state inside the thread pool.
     ThreadPoolCooling {
-        /// Job ID.
-        job_id: String,
-        /// Thread ID.
-        thread_id: ThreadId,
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
     },
     /// Job/thread runtime has been evicted from memory.
     ThreadPoolEvicted {
-        /// Job ID.
-        job_id: String,
-        /// Thread ID.
-        thread_id: ThreadId,
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
         /// Eviction reason.
         reason: ThreadPoolEventReason,
     },
@@ -588,7 +615,7 @@ pub(crate) fn assert_thread_pool_snapshot_round_trip() {
     let snapshot = ThreadPoolSnapshot {
         max_threads: 8,
         active_threads: 2,
-        queued_jobs: 1,
+        queued_threads: 1,
         running_threads: 1,
         cooling_threads: 1,
         evicted_threads: 3,
@@ -604,7 +631,7 @@ pub(crate) fn assert_thread_pool_snapshot_round_trip() {
     let value = serde_json::to_value(&snapshot).unwrap();
     let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
     assert_eq!(restored.max_threads, 8);
-    assert_eq!(restored.queued_jobs, 1);
+    assert_eq!(restored.queued_threads, 1);
 }
 
 #[cfg(test)]

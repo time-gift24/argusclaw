@@ -7,7 +7,11 @@ import type {
   JobStatusPayload,
   ThreadEventEnvelope,
   ThreadPoolEventReason,
+  ThreadPoolRuntimeKind,
+  ThreadPoolRuntimeRef,
+  ThreadPoolRuntimeSummary,
   ThreadPoolSnapshot,
+  ThreadPoolState,
   ThreadSnapshotPayload,
   ThreadRuntimeStatus,
 } from "@/lib/types/chat";
@@ -67,6 +71,8 @@ const normalizeJobStatusPayload = (
 
 export interface ThreadPoolThreadState {
   threadId: string;
+  kind: ThreadPoolRuntimeKind;
+  sessionId: string | null;
   jobId: string | null;
   status: ThreadRuntimeStatus;
   estimatedMemoryBytes: number;
@@ -149,6 +155,24 @@ export interface ChatStore {
 let threadEventListenerInitPromise: Promise<UnlistenFn> | null = null;
 let threadPoolSnapshotRequestVersion = 0;
 
+function mapRuntimeSummaryToThreadState(
+  runtime: ThreadPoolRuntimeSummary,
+  existing?: ThreadPoolThreadState,
+): ThreadPoolThreadState {
+  return {
+    threadId: runtime.runtime.thread_id,
+    kind: runtime.runtime.kind,
+    sessionId: runtime.runtime.session_id,
+    jobId: runtime.runtime.job_id,
+    status: runtime.status,
+    estimatedMemoryBytes: runtime.estimated_memory_bytes,
+    lastActiveAt: runtime.last_active_at,
+    recoverable: runtime.recoverable,
+    lastReason: runtime.last_reason,
+    eventCount: existing?.eventCount ?? 0,
+  };
+}
+
 function sortThreadPoolThreads(
   threads: ThreadPoolThreadState[],
 ): ThreadPoolThreadState[] {
@@ -186,6 +210,8 @@ function touchThreadPoolThread(
   const existing = threads.find((entry) => entry.threadId === update.threadId);
   const nextEntry: ThreadPoolThreadState = {
     threadId: update.threadId,
+    kind: update.kind,
+    sessionId: update.sessionId,
     jobId: update.jobId,
     status: update.status,
     estimatedMemoryBytes:
@@ -609,20 +635,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
 
     try {
-      const snapshot = await threadPool.getSnapshot();
+      const poolState = await threadPool.getState();
       set((state) => ({
         ...(requestVersion === threadPoolSnapshotRequestVersion
           ? {
-              threadPoolSnapshot: snapshot,
+              threadPoolSnapshot: poolState.snapshot,
               threadPoolSnapshotLoading: false,
               threadPoolError: null,
-              threadPoolThreads: state.threadPoolThreads.map((thread) => ({
-                ...thread,
-                estimatedMemoryBytes:
-                  thread.estimatedMemoryBytes > 0
-                    ? thread.estimatedMemoryBytes
-                    : snapshot.avg_thread_memory_bytes,
-              })),
+              threadPoolThreads: sortThreadPoolThreads(
+                poolState.runtimes.map((runtime) =>
+                  mapRuntimeSummaryToThreadState(
+                    runtime,
+                    state.threadPoolThreads.find(
+                      (thread) => thread.threadId === runtime.runtime.thread_id,
+                    ),
+                  ),
+                ),
+              ),
             }
           : {}),
       }));
@@ -736,6 +765,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
+                  kind: "job",
+                  sessionId: null,
                   jobId: payload.job_id,
                   status: "queued",
                   reason: null,
@@ -750,7 +781,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  jobId: payload.job_id,
+                  kind: payload.runtime.kind,
+                  sessionId: payload.runtime.session_id,
+                  jobId: payload.runtime.job_id,
                   status: "queued",
                   reason: null,
                   lastActiveAt: now,
@@ -764,7 +797,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  jobId: payload.job_id,
+                  kind: payload.runtime.kind,
+                  sessionId: payload.runtime.session_id,
+                  jobId: payload.runtime.job_id,
                   status: "running",
                   reason: null,
                   lastActiveAt: now,
@@ -778,7 +813,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  jobId: payload.job_id,
+                  kind: payload.runtime.kind,
+                  sessionId: payload.runtime.session_id,
+                  jobId: payload.runtime.job_id,
                   status: "cooling",
                   reason: null,
                   lastActiveAt: now,
@@ -792,7 +829,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 state.threadPoolThreads,
                 {
                   threadId: envelope.thread_id,
-                  jobId: payload.job_id,
+                  kind: payload.runtime.kind,
+                  sessionId: payload.runtime.session_id,
+                  jobId: payload.runtime.job_id,
                   status: "evicted",
                   reason: payload.reason,
                   lastActiveAt: now,

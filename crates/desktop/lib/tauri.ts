@@ -217,19 +217,28 @@ export type ThreadRuntimeStatus =
   | "cooling"
   | "evicted";
 
-export interface ThreadRuntimeSnapshot {
+export type ThreadPoolRuntimeKind = "chat" | "job";
+
+export interface ThreadPoolRuntimeRef {
   thread_id: string;
+  kind: ThreadPoolRuntimeKind;
+  session_id: string | null;
   job_id: string | null;
+}
+
+export interface ThreadPoolRuntimeSummary {
+  runtime: ThreadPoolRuntimeRef;
   status: ThreadRuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;
   recoverable: boolean;
+  last_reason: ThreadPoolEventReason | null;
 }
 
 export interface ThreadPoolSnapshot {
   max_threads: number;
   active_threads: number;
-  queued_jobs: number;
+  queued_threads: number;
   running_threads: number;
   cooling_threads: number;
   evicted_threads: number;
@@ -240,6 +249,11 @@ export interface ThreadPoolSnapshot {
   resident_thread_count: number;
   avg_thread_memory_bytes: number;
   captured_at: string;
+}
+
+export interface ThreadPoolState {
+  snapshot: ThreadPoolSnapshot;
+  runtimes: ThreadPoolRuntimeSummary[];
 }
 
 export type ApprovalDecision = "approved" | "denied" | "timed_out";
@@ -304,4 +318,5 @@ export const chat = {
 
 export const threadPool = {
   getSnapshot: () => invoke<ThreadPoolSnapshot>("get_thread_pool_snapshot"),
+  getState: () => invoke<ThreadPoolState>("get_thread_pool_state"),
 };

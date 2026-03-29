@@ -92,6 +92,7 @@ pub fn run() {
             commands::rename_thread,
             commands::list_tools,
             commands::get_thread_pool_snapshot,
+            commands::get_thread_pool_state,
             // Account commands
             commands::get_current_user,
             commands::has_any_user,

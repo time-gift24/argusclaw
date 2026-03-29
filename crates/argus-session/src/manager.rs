@@ -4,7 +4,7 @@ use std::sync::Arc;
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
 use argus_agent::{CompactorManager, FilePlanStore, ThreadBuilder};
-use argus_job::JobManager;
+use argus_job::{JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
@@ -16,7 +16,7 @@ use argus_tool::ToolManager;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -80,9 +80,8 @@ pub struct SessionManager {
     sessions: DashMap<SessionId, Arc<Session>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
-    tool_manager: Arc<ToolManager>,
-    compactor_manager: Arc<CompactorManager>,
     trace_dir: PathBuf,
+    thread_pool: Arc<ThreadPool>,
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
 }
@@ -97,8 +96,8 @@ impl SessionManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
         trace_dir: PathBuf,
+        thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
     ) -> Self {
         // Register the dispatch_job tool
@@ -120,9 +119,8 @@ impl SessionManager {
             sessions: DashMap::new(),
             template_manager,
             provider_resolver,
-            tool_manager,
-            compactor_manager,
             trace_dir,
+            thread_pool,
             job_manager,
         }
     }
@@ -189,6 +187,7 @@ impl SessionManager {
             None => return Err(ArgusError::SessionNotFound(session_id)),
         };
 
+<<<<<<< HEAD
         // Capture self as Arc for use in callbacks (Clone impl uses Arc fields internally)
         let sm = self.clone();
 
@@ -368,6 +367,8 @@ impl SessionManager {
         }
 
         // Store in memory
+=======
+>>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
         self.sessions.insert(session_id, session.clone());
 
         Ok(session)
@@ -454,6 +455,17 @@ impl SessionManager {
 
     /// Delete a session and all its threads.
     pub async fn delete(&self, session_id: SessionId) -> Result<()> {
+        let thread_ids = self
+            .thread_repo
+            .list_threads_in_session(&session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect::<Vec<_>>();
+
         // Delete threads belonging to this session (no CASCADE on session_id FK)
         self.thread_repo
             .delete_threads_in_session(&session_id)
@@ -472,6 +484,9 @@ impl SessionManager {
 
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
+        for thread_id in thread_ids {
+            self.thread_pool.remove_runtime(&thread_id);
+        }
 
         // Clean up session trace directory
         let session_dir = self.trace_dir.join(session_id.to_string());
@@ -497,8 +512,7 @@ impl SessionManager {
         explicit_provider_id: Option<ProviderId>,
         model_override: Option<&str>,
     ) -> Result<ThreadId> {
-        // Ensure session is loaded
-        let session = self.load(session_id).await?;
+        self.load(session_id).await?;
 
         // Get agent record (template)
         let agent_record = self
@@ -573,52 +587,6 @@ impl SessionManager {
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
 
-        // Get compactor
-        let compactor = self.compactor_manager.default_compactor().clone();
-
-        // Create plan store with persistence
-        let plan_store = FilePlanStore::new(self.trace_dir.clone(), &thread_id.inner().to_string());
-
-        // Create Thread directly
-        let trace_cfg = TraceConfig::new(true, self.trace_dir.clone())
-            .with_session_id(session_id)
-            .with_turn_start(
-                Some(agent_record.system_prompt.clone()),
-                Some(provider.model_name().to_string()),
-            );
-
-        // Wire on_turn_complete callback to update session turn count
-        let on_turn_complete = {
-            let sm = self.clone();
-            Arc::new(move |sid: argus_protocol::SessionId, turn_num: u32| {
-                let sm = sm.clone();
-                tokio::spawn(async move {
-                    let _ = sm.update_session_turn(sid, turn_num).await;
-                });
-            }) as argus_agent::OnTurnComplete
-        };
-
-        let mut turn_config = TurnConfig::new();
-        turn_config.trace_config = Some(trace_cfg);
-        turn_config.on_turn_complete = Some(on_turn_complete);
-        let config = ThreadConfigBuilder::default()
-            .turn_config(turn_config)
-            .build()
-            .expect("ThreadConfigBuilder should not fail with defaults");
-        let thread = ThreadBuilder::new()
-            .id(thread_id)
-            .session_id(session_id)
-            .agent_record(Arc::new(agent_record))
-            .provider(provider)
-            .tool_manager(self.tool_manager.clone())
-            .compactor(compactor)
-            .plan_store(plan_store)
-            .config(config)
-            .build()
-            .map_err(|e| ArgusError::ThreadBuildFailed {
-                reason: e.to_string(),
-            })?;
-
         // Insert into DB
         use argus_repository::types::ThreadRecord;
         let thread_record = ThreadRecord {
@@ -639,6 +607,7 @@ impl SessionManager {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })?;
+<<<<<<< HEAD
 
         // Wrap in Arc<RwLock<>> for safe concurrent read access
         let thread_arc = Arc::new(RwLock::new(thread));
@@ -647,6 +616,9 @@ impl SessionManager {
 
         // Add to in-memory session
         session.add_thread(thread_arc);
+=======
+        self.thread_pool.register_chat_thread(session_id, thread_id);
+>>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
 
         Ok(thread_id)
     }
@@ -660,6 +632,10 @@ impl SessionManager {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })?;
+<<<<<<< HEAD
+=======
+        self.thread_pool.remove_runtime(thread_id);
+>>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -716,11 +692,9 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
-        if let Some(session) = self.sessions.get(&session_id) {
-            if let Some(thread) = session.get_thread(thread_id) {
-                let mut thread = thread.write().await;
-                thread.set_title(in_memory_title);
-            }
+        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+            let mut thread = thread.write().await;
+            thread.set_title(in_memory_title);
         }
 
         Ok(())
@@ -734,11 +708,6 @@ impl SessionManager {
         provider_id: ProviderId,
         model: &str,
     ) -> Result<(ProviderId, String)> {
-        let session = self.load(session_id).await?;
-        let thread = session
-            .get_thread(thread_id)
-            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-
         let provider = self
             .provider_resolver
             .resolve_with_model(provider_id, model)
@@ -762,20 +731,16 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
-        let mut thread = thread.write().await;
-        thread.set_provider(provider);
+        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+            let mut thread = thread.write().await;
+            thread.set_provider(provider);
+        }
 
         Ok((provider_id, effective_model))
     }
 
     /// Get threads for a session (metadata only, from DB).
     pub async fn list_threads(&self, session_id: SessionId) -> Result<Vec<ThreadSummary>> {
-        // If session is loaded, return in-memory threads
-        if let Some(session) = self.sessions.get(&session_id) {
-            return Ok(session.list_threads().await);
-        }
-
-        // Otherwise, load from DB
         let thread_records = self
             .thread_repo
             .list_threads_in_session(&session_id)
@@ -811,27 +776,13 @@ impl SessionManager {
         thread_id: &ThreadId,
         message: String,
     ) -> Result<()> {
-        // Load session from DB if not already in memory
         self.load(session_id).await?;
-
-        let session = self
-            .sessions
-            .get(&session_id)
-            .ok_or(ArgusError::SessionNotFound(session_id))?;
-
-        let thread = session
-            .get_thread(thread_id)
-            .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
-
-        // send_user_message writes to the broadcast pipe (Sender::send is &self).
-        let result = thread
-            .read()
+        self.thread_pool
+            .send_chat_message(session_id, *thread_id, message)
             .await
-            .send_user_message(message, None)
             .map_err(|e| ArgusError::LlmError {
                 reason: e.to_string(),
-            });
-        result
+            })
     }
 
     /// Send a cancel/interrupt signal to a specific thread's active turn.
@@ -866,20 +817,80 @@ impl SessionManager {
         session_id: SessionId,
         thread_id: &ThreadId,
     ) -> Result<Vec<ChatMessage>> {
-        let session = self.load(session_id).await?;
-        let thread = session
-            .get_thread(thread_id)
-            .ok_or(ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+        self.load(session_id).await?;
+        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+            let thread = thread.read().await;
+            if !thread.history().is_empty() || thread.turn_count() == 0 {
+                return Ok(thread.history().to_vec());
+            }
+        }
+        let thread_record = self
+            .thread_repo
+            .get_thread_in_session(thread_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+        recover_messages_from_trace(
+            &self.trace_dir,
+            &session_id,
+            thread_id,
+            thread_record.turn_count.max(0) as u32,
+        )
+        .await
+    }
 
-        let thread = thread.read().await;
-        if !thread.history().is_empty() || thread.turn_count() == 0 {
-            return Ok(thread.history().to_vec());
+    /// Get a thread snapshot without forcing the runtime to become resident.
+    pub async fn get_thread_snapshot(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<(Vec<ChatMessage>, u32, u32, u32)> {
+        self.load(session_id).await?;
+        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+            let thread = thread.read().await;
+            let messages = if !thread.history().is_empty() {
+                thread.history().to_vec()
+            } else {
+                recover_messages_from_trace(
+                    &self.trace_dir,
+                    &session_id,
+                    thread_id,
+                    thread.turn_count(),
+                )
+                .await?
+            };
+            return Ok((
+                messages,
+                thread.turn_count(),
+                thread.token_count(),
+                thread.plan().len() as u32,
+            ));
         }
 
-        let turn_count = thread.turn_count();
-        drop(thread);
+        let thread_record = self
+            .thread_repo
+            .get_thread_in_session(thread_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+        let recovered = recover_thread_state_from_trace(
+            &self.trace_dir,
+            &session_id,
+            thread_id,
+            (thread_record.turn_count > 0).then_some(thread_record.turn_count),
+        )
+        .await?;
 
-        recover_messages_from_trace(&self.trace_dir, &session_id, thread_id, turn_count).await
+        Ok((
+            recovered.messages,
+            thread_record.turn_count.max(recovered.turn_count),
+            thread_record.token_count.max(recovered.token_count),
+            0,
+        ))
     }
 
     /// Activate a historical thread so it can continue as a live in-memory thread.
@@ -902,6 +913,7 @@ impl SessionManager {
             AgentId::new(0)
         });
         let provider_id = Some(ProviderId::new(thread_record.provider_id.into_inner()));
+<<<<<<< HEAD
         let token_count = thread_record.token_count;
         let turn_count = thread_record.turn_count;
         let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
@@ -939,6 +951,15 @@ impl SessionManager {
         );
 
         let effective_model = Some(thread.provider().model_name().to_string());
+=======
+        self.load(session_id).await?;
+        self.thread_pool.register_chat_thread(session_id, *thread_id);
+        let effective_model = if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+            Some(thread.read().await.provider().model_name().to_string())
+        } else {
+            thread_record.model_override.clone()
+        };
+>>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
         Ok((template_id, provider_id, effective_model))
     }
 
@@ -948,10 +969,10 @@ impl SessionManager {
         session_id: SessionId,
         thread_id: &ThreadId,
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
-        let session = self.sessions.get(&session_id)?;
-        let thread = session.get_thread(thread_id)?;
-        let thread = thread.read().await;
-        Some(thread.subscribe())
+        let _ = self.load(session_id).await.ok()?;
+        self.thread_pool
+            .subscribe(thread_id)
+            .or_else(|| Some(self.thread_pool.register_chat_thread(session_id, *thread_id)))
     }
 }
 
@@ -1131,7 +1152,14 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::{KeepRecentCompactor, ThreadBuilder};
+<<<<<<< HEAD
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
+=======
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+>>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
         ThreadEvent, ThreadId, ThreadJobResult,

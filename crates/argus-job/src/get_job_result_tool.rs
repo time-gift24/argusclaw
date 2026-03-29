@@ -156,9 +156,7 @@ mod tests {
 
     use argus_protocol::{AgentId, LlmProvider, ProviderId, ProviderResolver, ThreadId};
     use argus_repository::ArgusSqlite;
-    use argus_repository::traits::{
-        AgentRepository, JobRepository, LlmProviderRepository, ThreadRepository,
-    };
+    use argus_repository::traits::AgentRepository;
     use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
@@ -200,6 +198,8 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(argus_agent::CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-job-tests"),
         ))
     }
 

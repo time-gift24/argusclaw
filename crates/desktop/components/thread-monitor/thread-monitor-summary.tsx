@@ -98,7 +98,7 @@ export function ThreadMonitorSummary({
         value={snapshot ? `${snapshot.running_threads}` : "—"}
         detail={
           snapshot
-            ? `${snapshot.queued_jobs} 个任务排队，${snapshot.cooling_threads} 个线程冷却中`
+            ? `${snapshot.queued_threads} 个线程排队，${snapshot.cooling_threads} 个线程冷却中`
             : "等待池快照"
         }
       />

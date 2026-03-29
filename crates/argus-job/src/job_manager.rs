@@ -5,13 +5,17 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
+use argus_agent::CompactorManager;
+#[cfg(test)]
+use argus_agent::TurnOutput;
+#[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
     AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
-    ThreadPoolSnapshot,
+    ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -73,8 +77,17 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
+        compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
     ) -> Self {
-        Self::new_with_persistence(template_manager, provider_resolver, tool_manager, None)
+        Self::new_with_persistence(
+            template_manager,
+            provider_resolver,
+            tool_manager,
+            compactor_manager,
+            trace_dir,
+            None,
+        )
     }
 
     /// Create a new JobManager with optional persistent thread-pool backing.
@@ -82,12 +95,16 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
+        compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
         let thread_pool = Arc::new(ThreadPool::with_persistence(
             template_manager.clone(),
             provider_resolver,
             tool_manager,
+            compactor_manager,
+            trace_dir,
             persistence,
         ));
 
@@ -103,6 +120,8 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
+        compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
         job_repository: Arc<dyn JobRepository>,
         thread_repository: Arc<dyn ThreadRepository>,
         provider_repository: Arc<dyn LlmProviderRepository>,
@@ -111,6 +130,8 @@ impl JobManager {
             template_manager,
             provider_resolver,
             tool_manager,
+            compactor_manager,
+            trace_dir,
             Some(ThreadPoolPersistence::new(
                 job_repository,
                 thread_repository,
@@ -139,9 +160,19 @@ impl JobManager {
         self.thread_pool.get_thread_binding(job_id)
     }
 
+    /// Return the shared unified thread pool.
+    pub fn thread_pool(&self) -> Arc<ThreadPool> {
+        Arc::clone(&self.thread_pool)
+    }
+
     /// Collect a point-in-time thread-pool snapshot.
     pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
         self.thread_pool.collect_metrics()
+    }
+
+    /// Collect the authoritative thread-pool state.
+    pub fn thread_pool_state(&self) -> ThreadPoolState {
+        self.thread_pool.collect_state()
     }
 
     /// Record that a job was dispatched for a thread.
@@ -219,8 +250,12 @@ impl JobManager {
             thread_id: execution_thread_id,
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolQueued {
-            job_id: job_id.clone(),
-            thread_id: execution_thread_id,
+            runtime: ThreadPoolRuntimeRef {
+                thread_id: execution_thread_id,
+                kind: ThreadPoolRuntimeKind::Job,
+                session_id: None,
+                job_id: Some(job_id.clone()),
+            },
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.thread_pool.collect_metrics(),
@@ -394,6 +429,8 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-job-tests"),
         )
     }
 
@@ -420,6 +457,8 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-job-tests"),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
             sqlite as Arc<dyn LlmProviderRepository>,
