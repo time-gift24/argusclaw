@@ -335,6 +335,62 @@ mod tests {
         assert!(open_call.driver_binary.is_file());
     }
 
+    #[tokio::test]
+    async fn managed_constructor_keeps_only_latest_session_live() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let tool = ChromeTool::new_with_managed_components_for_test(
+            host,
+            FakeManagedDownloader::with_zip_bytes(fake_driver_zip()),
+            paths,
+        );
+
+        let first_open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com/one"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("first open should succeed");
+        let second_open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com/two"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("second open should succeed");
+
+        assert_ne!(first_open["session_id"], second_open["session_id"]);
+
+        let err = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                    "session_id": first_open["session_id"].as_str().unwrap()
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect_err("previous production session should be evicted");
+
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { tool_name, reason }
+                if tool_name == "chrome" && reason.contains("session not found")
+        ));
+    }
+
     #[test]
     fn chrome_paths_use_arguswing_root() {
         let paths = ChromePaths::from_home(Path::new("/tmp/home"));

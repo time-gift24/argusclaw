@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -389,7 +389,23 @@ struct InstallLockGuard {
 
 impl InstallLockGuard {
     fn acquire(path: &Path) -> Result<Self, ChromeToolError> {
-        for _ in 0..200 {
+        Self::acquire_with_options(
+            path,
+            200,
+            Duration::from_millis(25),
+            Duration::from_secs(120),
+        )
+    }
+
+    fn acquire_with_options(
+        path: &Path,
+        max_wait_attempts: usize,
+        wait_interval: Duration,
+        stale_after: Duration,
+    ) -> Result<Self, ChromeToolError> {
+        let mut attempts_remaining = max_wait_attempts.max(1);
+
+        loop {
             match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -399,12 +415,29 @@ impl InstallLockGuard {
                     use std::io::Write;
 
                     let _ = writeln!(file, "pid={}", std::process::id());
+                    let _ = writeln!(
+                        file,
+                        "created_at={}",
+                        SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    );
                     return Ok(Self {
                         path: path.to_path_buf(),
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    thread::sleep(Duration::from_millis(25));
+                    if recover_stale_lock(path, stale_after)? {
+                        continue;
+                    }
+                    attempts_remaining -= 1;
+                    if attempts_remaining == 0 {
+                        break;
+                    }
+                    if !wait_interval.is_zero() {
+                        thread::sleep(wait_interval);
+                    }
                 }
                 Err(err) => {
                     return Err(ChromeToolError::FileWriteFailed {
@@ -422,6 +455,40 @@ impl InstallLockGuard {
     }
 }
 
+fn recover_stale_lock(path: &Path, stale_after: Duration) -> Result<bool, ChromeToolError> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(err) => {
+            return Err(ChromeToolError::FileReadFailed {
+                path: path.to_path_buf(),
+                reason: err.to_string(),
+            });
+        }
+    };
+    let modified = metadata
+        .modified()
+        .map_err(|e| ChromeToolError::FileReadFailed {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+    let age = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO);
+    if age < stale_after {
+        return Ok(false);
+    }
+
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(ChromeToolError::FileWriteFailed {
+            path: path.to_path_buf(),
+            reason: err.to_string(),
+        }),
+    }
+}
+
 impl Drop for InstallLockGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -434,6 +501,7 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     use tempfile::tempdir;
     use zip::write::SimpleFileOptions;
@@ -566,5 +634,25 @@ mod tests {
         let second = cached_installer.ensure_driver("124").await.unwrap();
 
         assert_eq!(second, first);
+    }
+
+    #[test]
+    fn install_lock_reclaims_stale_lock_file() {
+        let home = tempdir().unwrap();
+        let lock_path = home.path().join(".install.lock");
+        std::fs::write(&lock_path, b"stale-lock").unwrap();
+
+        {
+            let _guard = InstallLockGuard::acquire_with_options(
+                &lock_path,
+                1,
+                Duration::from_millis(0),
+                Duration::ZERO,
+            )
+            .unwrap();
+            assert!(lock_path.exists());
+        }
+
+        assert!(!lock_path.exists());
     }
 }
