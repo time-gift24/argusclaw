@@ -61,6 +61,7 @@ pub mod plan_tool;
 mod runtime;
 pub mod thread;
 pub mod thread_handle;
+mod tokenizer;
 pub mod tool_context;
 pub mod trace;
 pub mod turn;
@@ -88,7 +89,7 @@ pub use compact::{
     estimate_tokens,
 };
 pub use config::ThreadConfig;
-pub use error::{CompactError, ThreadError};
+pub use error::{CompactError, ThreadError, TokenizationError};
 pub use plan_store::FilePlanStore;
 pub use thread::{Thread, ThreadBuilder};
 pub use thread_handle::ThreadHandle;

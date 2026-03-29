@@ -22,6 +22,7 @@ use super::error::ThreadError;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
+use crate::tokenizer::count_total_tokens;
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -349,12 +350,9 @@ impl Thread {
     }
 
     /// Recalculate token count from messages.
-    pub fn recalculate_token_count(&mut self) {
-        self.token_count = self
-            .messages
-            .iter()
-            .map(|m| Self::estimate_tokens(&m.content))
-            .sum();
+    pub fn recalculate_token_count(&mut self) -> Result<(), ThreadError> {
+        self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
+        Ok(())
     }
 
     fn apply_turn_output(&mut self, output: TurnOutput) {
@@ -453,7 +451,7 @@ impl Thread {
         };
 
         self.messages.push(ChatMessage::user(user_input));
-        self.recalculate_token_count();
+        self.recalculate_token_count()?;
         match self.build_turn(effective_record, cancellation) {
             Ok(turn) => Ok(turn),
             Err(error) => {
@@ -543,11 +541,6 @@ impl Thread {
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))
     }
-
-    /// Estimate token count for a string.
-    fn estimate_tokens(content: &str) -> u32 {
-        (content.len() / 4).max(1) as u32
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +559,7 @@ mod tests {
     use crate::error::CompactError;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
+    use crate::tokenizer::count_total_tokens;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
     use async_trait::async_trait;
@@ -752,6 +746,15 @@ mod tests {
         ))
     }
 
+    fn repeated_test_message() -> String {
+        ["test"; 10].join(" ")
+    }
+
+    fn token_count_for_messages(messages: &[ChatMessage]) -> u32 {
+        count_total_tokens(messages.iter().map(|message| message.content.as_str()))
+            .expect("tokenization should succeed")
+    }
+
     async fn wait_for_idle_events(
         thread: &Arc<tokio::sync::RwLock<Thread>>,
         expected_count: usize,
@@ -821,9 +824,9 @@ mod tests {
 
     #[test]
     fn estimate_tokens_reasonable() {
-        assert_eq!(Thread::estimate_tokens("test"), 1);
-        assert_eq!(Thread::estimate_tokens("test test"), 2);
-        assert_eq!(Thread::estimate_tokens(""), 1);
+        assert_eq!(crate::estimate_tokens("test").unwrap(), 1);
+        assert_eq!(crate::estimate_tokens("test test").unwrap(), 2);
+        assert_eq!(crate::estimate_tokens("").unwrap(), 0);
     }
 
     #[test]
@@ -1140,13 +1143,17 @@ mod tests {
             .config(config)
             .build()
             .expect("thread should build");
+        let repeated = repeated_test_message();
+        let persisted_messages = vec![
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated.clone()),
+        ];
+        let expected_compacted_token_count =
+            crate::estimate_tokens(&repeated).expect("tokenization should succeed");
         thread.hydrate_from_persisted_state(
-            vec![
-                ChatMessage::user("a".repeat(40)),
-                ChatMessage::user("b".repeat(40)),
-                ChatMessage::user("c".repeat(40)),
-            ],
-            30,
+            persisted_messages.clone(),
+            token_count_for_messages(&persisted_messages),
             0,
             Utc::now(),
         );
@@ -1164,9 +1171,9 @@ mod tests {
         assert!(matches!(
             event,
             ThreadEvent::Compacted {
-                new_token_count: 10,
+                new_token_count,
                 ..
-            }
+            } if new_token_count == expected_compacted_token_count
         ));
     }
 
@@ -1187,9 +1194,10 @@ mod tests {
             .config(config)
             .build()
             .expect("thread should build");
+        let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
         thread.hydrate_from_persisted_state(
-            vec![ChatMessage::user("a".repeat(40))],
-            10,
+            persisted_messages.clone(),
+            token_count_for_messages(&persisted_messages),
             0,
             Utc::now(),
         );
@@ -1218,12 +1226,14 @@ mod tests {
             .session_id(SessionId::new())
             .build()
             .expect("thread should build");
+        let repeated = repeated_test_message();
+        let persisted_messages = vec![
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated),
+        ];
         thread.hydrate_from_persisted_state(
-            vec![
-                ChatMessage::user("a".repeat(40)),
-                ChatMessage::user("b".repeat(40)),
-            ],
-            20,
+            persisted_messages.clone(),
+            token_count_for_messages(&persisted_messages),
             0,
             Utc::now(),
         );
