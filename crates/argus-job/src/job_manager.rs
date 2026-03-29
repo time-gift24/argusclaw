@@ -3,10 +3,8 @@
 //! Each dispatched job is tracked through a ThreadPool-managed execution thread.
 //! Results are sent back through the unified pipe as ThreadEvent::JobResult.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
@@ -17,7 +15,6 @@ use argus_protocol::{
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
-use futures_util::FutureExt;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::dispatch_tool::DispatchJobTool;
@@ -203,34 +200,14 @@ impl JobManager {
         let control_tx_clone = control_tx.clone();
 
         tokio::spawn(async move {
-            let fallback_job_id = job_id.clone();
-            let fallback_display_name = format!("Agent {}", agent_id.inner());
-            let result = AssertUnwindSafe(thread_pool.execute_job(
+            let result = thread_pool
+                .execute_job(
                 request,
                 execution_thread_id,
                 pipe_tx_clone.clone(),
                 control_tx_clone.clone(),
-            ))
-            .catch_unwind()
+            )
             .await;
-
-            let result = match result {
-                Ok(result) => result,
-                Err(payload) => {
-                    thread_pool.force_cooling_cleanup(
-                        &fallback_job_id,
-                        execution_thread_id,
-                        &pipe_tx_clone,
-                    );
-                    Self::failure_result(
-                        fallback_job_id,
-                        agent_id,
-                        fallback_display_name,
-                        String::new(),
-                        Self::panic_message(payload),
-                    )
-                }
-            };
 
             Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
             Self::record_completed_job_result_in_store(
@@ -273,34 +250,6 @@ impl JobManager {
         } else {
             content.to_string()
         }
-    }
-
-    fn failure_result(
-        job_id: String,
-        agent_id: AgentId,
-        agent_display_name: String,
-        agent_description: String,
-        message: String,
-    ) -> ThreadJobResult {
-        ThreadJobResult {
-            job_id,
-            success: false,
-            message,
-            token_usage: None,
-            agent_id,
-            agent_display_name,
-            agent_description,
-        }
-    }
-
-    fn panic_message(payload: Box<dyn Any + Send>) -> String {
-        let payload = payload.as_ref();
-        let detail = payload
-            .downcast_ref::<&'static str>()
-            .map(|msg| (*msg).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic payload".to_string());
-        format!("job executor panicked: {detail}")
     }
 
     fn record_dispatched_job_in_store(

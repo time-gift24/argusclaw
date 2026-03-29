@@ -1,6 +1,7 @@
 //! ThreadPool for coordinating background job execution.
 
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
@@ -13,6 +14,7 @@ use argus_protocol::{
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
+use futures_util::FutureExt;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::error::JobError;
@@ -180,6 +182,10 @@ impl ThreadPool {
         pipe_tx: broadcast::Sender<ThreadEvent>,
         control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> ThreadJobResult {
+        let fallback_job_id = request.job_id.clone();
+        let fallback_agent_id = request.agent_id;
+        let fallback_display_name = format!("Agent {}", fallback_agent_id.inner());
+
         let _ = self.mark_running(&request.job_id);
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolStarted {
             job_id: request.job_id.clone(),
@@ -189,7 +195,7 @@ impl ThreadPool {
             snapshot: self.collect_metrics(),
         });
 
-        let result = self
+        let result = AssertUnwindSafe(self
             .execute_turn(
                 request.originating_thread_id,
                 request.job_id.clone(),
@@ -198,12 +204,24 @@ impl ThreadPool {
                 request.prompt,
                 pipe_tx.clone(),
                 control_tx,
-            )
-            .await;
+            ))
+        .catch_unwind()
+        .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => Self::failure_result(
+                fallback_job_id,
+                fallback_agent_id,
+                fallback_display_name,
+                String::new(),
+                Self::panic_message(payload),
+            ),
+        };
 
         let _ = self.mark_cooling(&request.job_id);
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolCooling {
-            job_id: request.job_id,
+            job_id: request.job_id.clone(),
             thread_id: execution_thread_id,
         });
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
@@ -224,6 +242,11 @@ impl ThreadPool {
         pipe_tx: broadcast::Sender<ThreadEvent>,
         control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> ThreadJobResult {
+        #[cfg(test)]
+        if prompt == "__panic_thread_pool_execute_turn__" {
+            panic!("thread pool panic test hook");
+        }
+
         let default_display_name = format!("Agent {}", agent_id.inner());
 
         let agent_record = match self.template_manager.get(agent_id).await {
@@ -399,21 +422,14 @@ impl ThreadPool {
         }
     }
 
-    /// Force runtime cleanup for panic paths that bypass normal execute_job teardown.
-    pub fn force_cooling_cleanup(
-        &self,
-        job_id: &str,
-        thread_id: ThreadId,
-        pipe_tx: &broadcast::Sender<ThreadEvent>,
-    ) {
-        let _ = self.mark_cooling(job_id);
-        let _ = pipe_tx.send(ThreadEvent::ThreadPoolCooling {
-            job_id: job_id.to_string(),
-            thread_id,
-        });
-        let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
-            snapshot: self.collect_metrics(),
-        });
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        let payload = payload.as_ref();
+        let detail = payload
+            .downcast_ref::<&'static str>()
+            .map(|msg| (*msg).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic payload".to_string());
+        format!("job executor panicked: {detail}")
     }
 
     #[cfg(test)]
@@ -486,7 +502,18 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
 
 #[cfg(test)]
 mod tests {
+    use argus_protocol::ThreadEvent;
+    use tokio::sync::{broadcast, mpsc};
+
     use super::ThreadPool;
+
+    fn drain_events(rx: &mut broadcast::Receiver<ThreadEvent>) -> Vec<ThreadEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
 
     #[tokio::test]
     async fn enqueue_job_creates_binding_and_updates_metrics() {
@@ -526,5 +553,62 @@ mod tests {
         let snapshot = pool.collect_metrics();
         assert_eq!(snapshot.active_threads, 0);
         assert_eq!(snapshot.evicted_threads, 1);
+    }
+
+    #[tokio::test]
+    async fn execute_job_emits_running_metrics_snapshot() {
+        let pool = ThreadPool::test_pool();
+        let request = super::test_request("job-running-metrics");
+        let execution_thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("enqueue should succeed");
+        let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        let _ = pool
+            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .await;
+        let events = drain_events(&mut pipe_rx);
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::ThreadPoolMetricsUpdated { snapshot }
+                    if snapshot.running_threads == 1
+                        && snapshot.queued_jobs == 0
+                        && snapshot.cooling_threads == 0
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn execute_job_panic_cleans_up_to_cooling_and_emits_metrics() {
+        let pool = ThreadPool::test_pool();
+        let mut request = super::test_request("job-panic-cleanup");
+        request.prompt = "__panic_thread_pool_execute_turn__".to_string();
+        let execution_thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("enqueue should succeed");
+        let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        let result = pool
+            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .await;
+        let events = drain_events(&mut pipe_rx);
+
+        assert!(!result.success);
+        let snapshot = pool.collect_metrics();
+        assert_eq!(snapshot.running_threads, 0);
+        assert_eq!(snapshot.cooling_threads, 1);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadEvent::ThreadPoolMetricsUpdated { snapshot }
+                    if snapshot.cooling_threads == 1 && snapshot.running_threads == 0
+            )
+        }));
     }
 }
