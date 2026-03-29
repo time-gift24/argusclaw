@@ -29,6 +29,7 @@ pub use chrome::ChromeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::HttpTool;
+pub use knowledge::KnowledgeTool;
 pub use list::ListDirTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadTool;

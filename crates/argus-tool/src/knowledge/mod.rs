@@ -6,6 +6,7 @@ mod manifest;
 mod markdown;
 mod models;
 mod registry;
+mod tool;
 
 pub use cache::SnapshotCache;
 pub use error::KnowledgeToolError;
@@ -19,14 +20,18 @@ pub use models::{
     KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
 pub use registry::KnowledgeRepoRegistry;
+pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeTool};
 
 #[cfg(test)]
 mod tests {
     use super::{
         GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree, GitHubTreeEntry,
         GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer, KnowledgeRepoRegistry,
-        KnowledgeToolArgs, RepositoryManifest, parse_markdown_sections,
+        KnowledgeRuntime, KnowledgeTool, KnowledgeToolArgs, RepositoryManifest,
+        parse_markdown_sections,
     };
+    use argus_protocol::NamedTool;
+    use argus_protocol::ids::ThreadId;
     use async_trait::async_trait;
     use serde_json::Value;
     use std::collections::HashMap;
@@ -35,6 +40,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::broadcast;
 
     #[derive(Debug)]
     struct FakeGitHubTransport {
@@ -57,6 +63,33 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .ok_or_else(|| super::KnowledgeToolError::invalid_arguments("missing response"))
+        }
+    }
+
+    fn make_ctx() -> Arc<argus_protocol::ToolExecutionContext> {
+        let (pipe_tx, _) = broadcast::channel(16);
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        Arc::new(argus_protocol::ToolExecutionContext {
+            thread_id: ThreadId::new(),
+            pipe_tx,
+            control_tx,
+        })
+    }
+
+    #[derive(Default)]
+    struct FakeKnowledgeRuntime {
+        dispatch_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl KnowledgeRuntime for FakeKnowledgeRuntime {
+        async fn dispatch(
+            &self,
+            _args: super::KnowledgeToolArgs,
+            _ctx: Arc<argus_protocol::ToolExecutionContext>,
+        ) -> Result<Value, argus_protocol::ToolError> {
+            self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"ok": true}))
         }
     }
 
@@ -90,6 +123,35 @@ mod tests {
             path,
             std::path::PathBuf::from("/tmp/home/.arguswing/knowledge/repos.json")
         );
+    }
+
+    #[test]
+    fn knowledge_tool_definition_lists_expected_actions() {
+        let tool = KnowledgeTool::new_for_test(FakeKnowledgeRuntime::default());
+        let def = tool.definition();
+
+        assert_eq!(def.name, "knowledge");
+        assert!(def.description.contains("GitHub"));
+        assert!(def.parameters.to_string().contains("resolve_snapshot"));
+        assert!(def.parameters.to_string().contains("search_nodes"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_tool_rejects_invalid_action_before_runtime() {
+        let runtime = FakeKnowledgeRuntime::default();
+        let calls = runtime.dispatch_calls.clone();
+        let tool = KnowledgeTool::new_for_test(runtime);
+
+        let err = tool
+            .execute(
+                serde_json::json!({ "action": "unknown_action" }),
+                make_ctx(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
