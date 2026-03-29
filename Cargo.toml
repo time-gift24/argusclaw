@@ -5,6 +5,8 @@ resolver = "3"
 [workspace.dependencies]
 # HTTP / Network
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
+thirtyfour = { version = "0.36.1", default-features = false, features = ["reqwest", "rustls-tls", "tokio-multi-threaded"] }
+zip = "8.4.0"
 
 # Async runtime
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "fs", "process", "time", "macros", "test-util"] }

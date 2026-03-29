@@ -13,6 +13,7 @@ use argus_protocol::risk_level::RiskLevel;
 // Re-export from argus_protocol
 pub use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
+mod chrome;
 pub mod glob;
 pub mod grep;
 pub mod http;
@@ -23,6 +24,7 @@ pub mod read;
 pub mod shell;
 pub mod write;
 
+pub use chrome::ChromeTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::HttpTool;

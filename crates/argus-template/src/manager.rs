@@ -188,3 +188,44 @@ impl TemplateManager {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use argus_repository::{connect_path, migrate, AgentRepository, ArgusSqlite};
+
+    use super::TemplateManager;
+
+    async fn make_template_manager_for_test() -> TemplateManager {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("argus-template-test-{unique}.sqlite"));
+        let pool = connect_path(&db_path)
+            .await
+            .expect("test sqlite database should open");
+        migrate(&pool)
+            .await
+            .expect("test sqlite database should migrate");
+
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        TemplateManager::new(sqlite.clone() as Arc<dyn AgentRepository>, sqlite)
+    }
+
+    #[tokio::test]
+    async fn seed_builtin_agents_includes_chrome_explore() {
+        let manager = make_template_manager_for_test().await;
+        manager.seed_builtin_agents().await.unwrap();
+
+        let record = manager
+            .find_by_display_name("Chrome Explore")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(record.tool_names, vec!["chrome"]);
+    }
+}

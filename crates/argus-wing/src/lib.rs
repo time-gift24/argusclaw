@@ -27,7 +27,7 @@ mod resolver;
 
 use std::sync::Arc;
 
-use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
+use crate::db::{DatabaseTarget, default_trace_dir, ensure_parent_dir, resolve_database_target};
 
 use argus_agent::CompactorManager;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
@@ -235,8 +235,8 @@ impl ArgusWing {
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
     pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
-            ApplyPatchTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool, ShellTool,
-            WriteFileTool,
+            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
+            ShellTool, WriteFileTool,
         };
 
         self.tool_manager.register(Arc::new(ShellTool::new()));
@@ -247,6 +247,7 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(WriteFileTool::new()));
         self.tool_manager.register(Arc::new(ListDirTool::new()));
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
+        self.tool_manager.register(Arc::new(ChromeTool::new()));
 
         Ok(())
     }
@@ -632,6 +633,21 @@ mod tests {
     use super::*;
     use argus_protocol::{AgentType, ThinkingConfig};
 
+    fn make_test_wing() -> Arc<ArgusWing> {
+        let pool = SqlitePool::connect_lazy("sqlite::memory:")
+            .expect("lazy sqlite pool should build for tests");
+        ArgusWing::with_pool(pool)
+    }
+
+    #[tokio::test]
+    async fn register_default_tools_includes_chrome() {
+        let wing = make_test_wing();
+        wing.register_default_tools()
+            .await
+            .expect("default tool registration should succeed");
+        assert!(wing.tool_manager().get("chrome").is_some());
+    }
+
     #[tokio::test]
     async fn init_creates_argus_wing_with_default_database() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
@@ -767,9 +783,11 @@ mod tests {
             .expect("template listing should succeed");
 
         assert!(templates.iter().all(|template| template.id.inner() != 0));
-        assert!(templates
-            .iter()
-            .any(|template| template.display_name == "Legacy Zero Agent"));
+        assert!(
+            templates
+                .iter()
+                .any(|template| template.display_name == "Legacy Zero Agent")
+        );
     }
 
     #[tokio::test]
@@ -1162,6 +1180,7 @@ mod tests {
 
         for expected_tool in [
             "apply_patch",
+            "chrome",
             "glob",
             "grep",
             "http",
