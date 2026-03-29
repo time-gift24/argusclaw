@@ -60,6 +60,50 @@ pub struct KnowledgeRepoDescriptor {
     pub manifest_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubSnapshot {
+    pub owner: String,
+    pub repo: String,
+    pub ref_name: String,
+    pub rev: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubTree {
+    pub rev: String,
+    pub entries: Vec<GitHubTreeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubTreeEntry {
+    pub path: String,
+    pub sha: String,
+    pub kind: GitHubTreeEntryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitHubTreeEntryKind {
+    Blob,
+    Tree,
+    Other(String),
+}
+
+impl GitHubTreeEntryKind {
+    pub fn from_api(kind: &str) -> Self {
+        match kind {
+            "blob" => Self::Blob,
+            "tree" => Self::Tree,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubBlob {
+    pub sha: String,
+    pub text: String,
+}
+
 fn default_branch() -> String {
     "main".to_string()
 }
