@@ -54,8 +54,25 @@ impl NamedTool for StartWorkflowTool {
                 "type": "object",
                 "properties": {
                     "template_id": { "type": "string" },
-                    "template_version": { "type": "number" },
-                    "extra_nodes": { "type": "array" }
+                    "template_version": { "type": "integer" },
+                    "extra_nodes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "node_key": { "type": "string" },
+                                "name": { "type": "string" },
+                                "agent_id": { "type": "integer" },
+                                "prompt": { "type": "string" },
+                                "context": { "type": "string" },
+                                "depends_on_keys": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["node_key", "name", "agent_id", "prompt"]
+                        }
+                    }
                 },
                 "required": ["template_id"]
             }),
@@ -299,5 +316,28 @@ mod tests {
 
         assert!(response.get("workflow_execution_id").is_some());
         assert_eq!(response.pointer("/progress/total_nodes"), Some(&serde_json::json!(1)));
+    }
+
+    #[tokio::test]
+    async fn definition_matches_start_workflow_input_shape() {
+        let (tool, _thread_id) = build_tool().await;
+        let definition = tool.definition();
+
+        assert_eq!(
+            definition.parameters.pointer("/properties/template_version/type"),
+            Some(&serde_json::json!("integer"))
+        );
+        assert_eq!(
+            definition
+                .parameters
+                .pointer("/properties/extra_nodes/items/properties/node_key/type"),
+            Some(&serde_json::json!("string"))
+        );
+        assert_eq!(
+            definition
+                .parameters
+                .pointer("/properties/extra_nodes/items/properties/agent_id/type"),
+            Some(&serde_json::json!("integer"))
+        );
     }
 }

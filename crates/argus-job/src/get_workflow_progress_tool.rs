@@ -68,7 +68,7 @@ impl NamedTool for GetWorkflowProgressTool {
     async fn execute(
         &self,
         input: serde_json::Value,
-        _ctx: Arc<ToolExecutionContext>,
+        ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
         let args: GetWorkflowProgressArgs =
             serde_json::from_value(input).map_err(|error| ToolError::ExecutionFailed {
@@ -77,6 +77,21 @@ impl NamedTool for GetWorkflowProgressTool {
             })?;
 
         let execution_id = argus_repository::types::WorkflowId::new(args.workflow_execution_id);
+        let belongs_to_thread = self
+            .workflow_manager
+            .workflow_belongs_to_thread(&execution_id, ctx.thread_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool_name: self.name().to_string(),
+                reason: error.to_string(),
+            })?;
+        if !belongs_to_thread {
+            return Ok(serde_json::json!({
+                "workflow_execution_id": execution_id.to_string(),
+                "status": "not_found",
+            }));
+        }
+
         let progress = self
             .workflow_manager
             .get_workflow_progress(&execution_id)
@@ -143,7 +158,7 @@ mod tests {
         }
     }
 
-    async fn build_tool() -> (Arc<GetWorkflowProgressTool>, WorkflowId) {
+    async fn build_tool() -> (Arc<GetWorkflowProgressTool>, WorkflowId, ThreadId) {
         let db_path = std::env::temp_dir().join(format!("argus-progress-{}.sqlite", Uuid::new_v4()));
         let pool = connect_path(&db_path).await.expect("create sqlite pool");
         migrate(&pool).await.expect("run migrations");
@@ -174,6 +189,18 @@ mod tests {
         .await
         .expect("seed agent");
 
+        let thread_id = ThreadId::new();
+        sqlx::query(
+            "INSERT INTO threads (id, provider_id, title, token_count, turn_count, session_id, template_id)
+             VALUES (?1, ?2, ?3, 0, 0, NULL, NULL)",
+        )
+        .bind(thread_id.to_string())
+        .bind(provider_id)
+        .bind("workflow progress thread")
+        .execute(repo.pool())
+        .await
+        .expect("seed thread");
+
         let template_manager = Arc::new(TemplateManager::new(
             repo.clone() as Arc<dyn AgentRepository>,
             repo.clone(),
@@ -185,7 +212,7 @@ mod tests {
             status: WorkflowStatus::Running,
             template_id: None,
             template_version: None,
-            initiating_thread_id: None,
+            initiating_thread_id: Some(thread_id),
         })
         .await
         .expect("create workflow");
@@ -234,28 +261,32 @@ mod tests {
             job_manager,
         ));
 
-        (Arc::new(GetWorkflowProgressTool::new(workflow_manager)), workflow_id)
+        (
+            Arc::new(GetWorkflowProgressTool::new(workflow_manager)),
+            workflow_id,
+            thread_id,
+        )
     }
 
-    fn test_ctx() -> Arc<ToolExecutionContext> {
+    fn test_ctx(thread_id: ThreadId) -> Arc<ToolExecutionContext> {
         let (pipe_tx, _pipe_rx) = broadcast::channel::<ThreadEvent>(8);
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
-            thread_id: ThreadId::new(),
+            thread_id,
             pipe_tx,
             control_tx,
         })
     }
 
     pub(crate) async fn get_workflow_progress_returns_grouped_counts_impl() {
-        let (tool, workflow_id) = build_tool().await;
+        let (tool, workflow_id, thread_id) = build_tool().await;
 
         let response = tool
             .execute(
                 serde_json::json!({
                     "workflow_execution_id": workflow_id.to_string(),
                 }),
-                test_ctx(),
+                test_ctx(thread_id),
             )
             .await
             .expect("tool should succeed");
@@ -264,5 +295,22 @@ mod tests {
         assert_eq!(response.pointer("/progress/succeeded_nodes"), Some(&serde_json::json!(1)));
         assert_eq!(response.pointer("/progress/running_nodes"), Some(&serde_json::json!(1)));
         assert_eq!(response.pointer("/progress/pending_nodes"), Some(&serde_json::json!(1)));
+    }
+
+    #[tokio::test]
+    async fn get_workflow_progress_does_not_leak_other_thread_progress() {
+        let (tool, workflow_id, _thread_id) = build_tool().await;
+
+        let response = tool
+            .execute(
+                serde_json::json!({
+                    "workflow_execution_id": workflow_id.to_string(),
+                }),
+                test_ctx(ThreadId::new()),
+            )
+            .await
+            .expect("tool should succeed");
+
+        assert_eq!(response.get("status"), Some(&serde_json::json!("not_found")));
     }
 }
