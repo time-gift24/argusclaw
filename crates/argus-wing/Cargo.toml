@@ -22,8 +22,6 @@ sqlx = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-appender = { workspace = true }
 
 # Utilities
 thiserror = { workspace = true }
