@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ChromeToolError {
     #[error("invalid arguments: {reason}")]
@@ -8,4 +10,7 @@ pub enum ChromeToolError {
 
     #[error("action '{action}' is not allowed")]
     ActionNotAllowed { action: String },
+
+    #[error("failed to create directory '{path:?}': {reason}")]
+    DirectoryCreateFailed { path: PathBuf, reason: String },
 }

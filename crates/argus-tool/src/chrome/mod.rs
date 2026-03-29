@@ -1,13 +1,19 @@
 pub mod error;
+pub mod installer;
 pub mod models;
+pub mod patcher;
 pub mod policy;
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use serde_json::json;
 
     use super::error::ChromeToolError;
+    use super::installer::ChromePaths;
     use super::models::{ChromeAction, ChromeToolArgs};
+    use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
 
     #[test]
@@ -104,5 +110,22 @@ mod tests {
         ExplorePolicy::readonly()
             .validate_action(ChromeAction::ListLinks)
             .unwrap();
+    }
+
+    #[test]
+    fn chrome_paths_use_arguswing_root() {
+        let paths = ChromePaths::from_home(Path::new("/tmp/home"));
+        assert_eq!(paths.root, PathBuf::from("/tmp/home/.arguswing/chrome"));
+        assert_eq!(
+            paths.screenshots,
+            PathBuf::from("/tmp/home/.arguswing/chrome/screenshots")
+        );
+    }
+
+    #[test]
+    fn patcher_rewrites_cdc_tokens() {
+        let input = b"aaaaacdc_123456789012345678zz".to_vec();
+        let output = patch_cdc_tokens(input, b'X').unwrap();
+        assert!(!String::from_utf8_lossy(&output).contains("cdc_123456789012345678"));
     }
 }
