@@ -11,7 +11,7 @@ use argus_repository::types::{
 };
 use argus_template::TemplateManager;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex};
 use uuid::Uuid;
 
 use crate::{JobError, JobManager};
@@ -99,11 +99,13 @@ impl From<&JobRecord> for WorkflowDispatchJob {
 }
 
 /// Manages persistent workflow execution.
+#[derive(Clone)]
 pub struct WorkflowManager {
     template_manager: Arc<TemplateManager>,
     workflow_repo: Arc<dyn WorkflowRepository>,
     job_repo: Arc<dyn JobRepository>,
     job_manager: Arc<JobManager>,
+    dispatch_mutex: Arc<TokioMutex<()>>,
 }
 
 impl WorkflowManager {
@@ -119,6 +121,7 @@ impl WorkflowManager {
             workflow_repo,
             job_repo,
             job_manager,
+            dispatch_mutex: Arc::new(TokioMutex::new(())),
         }
     }
 
@@ -244,10 +247,137 @@ impl WorkflowManager {
         }))
     }
 
+    /// Returns whether a workflow execution belongs to the given initiating thread.
+    pub async fn workflow_belongs_to_thread(
+        &self,
+        execution_id: &WorkflowId,
+        thread_id: ThreadId,
+    ) -> Result<bool, JobError> {
+        let execution = self
+            .workflow_repo
+            .get_workflow_execution(execution_id)
+            .await
+            .map_err(|error| {
+                JobError::Internal(format!(
+                    "failed to load workflow execution {}: {error}",
+                    execution_id
+                ))
+            })?;
+
+        Ok(matches!(
+            execution,
+            Some(record) if record.initiating_thread_id == Some(thread_id)
+        ))
+    }
+
     /// Dispatch currently ready jobs for one workflow execution.
     pub async fn dispatch_ready_jobs(
         &self,
         execution_id: &WorkflowId,
+    ) -> Result<Vec<WorkflowDispatchJob>, JobError> {
+        let _dispatch_guard = Arc::clone(&self.dispatch_mutex).lock_owned().await;
+        let execution = self
+            .workflow_repo
+            .get_workflow_execution(execution_id)
+            .await
+            .map_err(|error| {
+                JobError::Internal(format!(
+                    "failed to load workflow execution {}: {error}",
+                    execution_id
+                ))
+            })?
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("workflow {} not found", execution_id))
+            })?;
+        let jobs = self
+            .job_repo
+            .list_by_group(execution_id.as_ref())
+            .await
+            .map_err(|error| {
+                JobError::Internal(format!(
+                    "failed to list jobs for workflow {}: {error}",
+                    execution_id
+                ))
+            })?;
+        let ready_jobs = Self::find_ready_jobs(&jobs)
+            .into_iter()
+            .map(WorkflowDispatchJob::from)
+            .collect::<Vec<_>>();
+        if ready_jobs.is_empty() {
+            self.recompute_workflow_status(execution_id).await?;
+            return Ok(Vec::new());
+        }
+
+        // Until workflow start tools pass live thread channels, use inert channels here.
+        let (pipe_tx, _pipe_rx) = broadcast::channel::<ThreadEvent>(64);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel::<ThreadControlEvent>();
+        let watcher_pipe_tx = pipe_tx.clone();
+        let watcher_control_tx = control_tx.clone();
+        let mut completion_rx = pipe_tx.subscribe();
+        let workflow_manager = self.clone();
+        let watched_execution_id = execution_id.clone();
+        let mut remaining_jobs = ready_jobs
+            .iter()
+            .map(|job| job.id.to_string())
+            .collect::<HashSet<_>>();
+        let originating_thread_id = execution.initiating_thread_id.unwrap_or_else(ThreadId::new);
+
+        tokio::spawn(async move {
+            while !remaining_jobs.is_empty() {
+                match completion_rx.recv().await {
+                    Ok(ThreadEvent::JobResult { job_id, .. }) => {
+                        if remaining_jobs.remove(&job_id) {
+                            match workflow_manager
+                                .dispatch_ready_jobs_once(
+                                    &watched_execution_id,
+                                    watcher_pipe_tx.clone(),
+                                    watcher_control_tx.clone(),
+                                )
+                                .await
+                            {
+                                Ok(newly_dispatched) => {
+                                    remaining_jobs.extend(
+                                        newly_dispatched
+                                            .into_iter()
+                                            .map(|job| job.id.to_string()),
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        workflow_id = %watched_execution_id,
+                                        "failed to dispatch downstream workflow jobs: {error}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        for job in &ready_jobs {
+            self.job_manager
+                .spawn_persisted_job_executor(
+                    originating_thread_id,
+                    job.id.clone(),
+                    pipe_tx.clone(),
+                    control_tx.clone(),
+                )
+                .await?;
+        }
+
+        self.recompute_workflow_status(execution_id).await?;
+        Ok(ready_jobs)
+    }
+
+    async fn dispatch_ready_jobs_once(
+        &self,
+        execution_id: &WorkflowId,
+        pipe_tx: broadcast::Sender<ThreadEvent>,
+        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> Result<Vec<WorkflowDispatchJob>, JobError> {
         let execution = self
             .workflow_repo
@@ -272,48 +402,16 @@ impl WorkflowManager {
                     execution_id
                 ))
             })?;
-        let ready_jobs = Self::find_ready_jobs(&jobs);
+        let ready_jobs = Self::find_ready_jobs(&jobs)
+            .into_iter()
+            .map(WorkflowDispatchJob::from)
+            .collect::<Vec<_>>();
         if ready_jobs.is_empty() {
             self.recompute_workflow_status(execution_id).await?;
             return Ok(Vec::new());
         }
 
-        // Until workflow start tools pass live thread channels, use inert channels here.
-        let (pipe_tx, _pipe_rx) = broadcast::channel::<ThreadEvent>(64);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel::<ThreadControlEvent>();
-        let mut completion_rx = pipe_tx.subscribe();
-        let workflow_repo = Arc::clone(&self.workflow_repo);
-        let watched_execution_id = execution_id.clone();
-        let mut remaining_jobs = ready_jobs
-            .iter()
-            .map(|job| job.id.to_string())
-            .collect::<HashSet<_>>();
         let originating_thread_id = execution.initiating_thread_id.unwrap_or_else(ThreadId::new);
-
-        tokio::spawn(async move {
-            while !remaining_jobs.is_empty() {
-                match completion_rx.recv().await {
-                    Ok(ThreadEvent::JobResult { job_id, .. }) => {
-                        if remaining_jobs.remove(&job_id)
-                            && let Err(error) = Self::recompute_workflow_status_with_repo(
-                                workflow_repo.as_ref(),
-                                &watched_execution_id,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                workflow_id = %watched_execution_id,
-                                "failed to refresh workflow status after job completion: {error}"
-                            );
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
         for job in &ready_jobs {
             self.job_manager
                 .spawn_persisted_job_executor(
@@ -326,10 +424,7 @@ impl WorkflowManager {
         }
 
         self.recompute_workflow_status(execution_id).await?;
-        Ok(ready_jobs
-            .into_iter()
-            .map(WorkflowDispatchJob::from)
-            .collect())
+        Ok(ready_jobs)
     }
 
     async fn load_template(
@@ -686,6 +781,289 @@ struct NodeSpec {
 }
 
 #[cfg(test)]
+#[tokio::test]
+async fn workflow_execution_reaches_succeeded_after_all_jobs_finish() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use argus_protocol::{LlmProvider, ProviderId};
+    use argus_repository::traits::{AgentRepository, JobRepository, WorkflowRepository};
+    use argus_repository::types::{
+        WorkflowTemplateId, WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
+    };
+    use argus_repository::{ArgusSqlite, connect_path, migrate};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use uuid::Uuid;
+
+    use argus_tool::ToolManager;
+
+    #[derive(Debug)]
+    struct ImmediateProvider;
+
+    #[async_trait]
+    impl LlmProvider for ImmediateProvider {
+        fn model_name(&self) -> &str {
+            "workflow-test-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!("complete is not used in workflow manager tests")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("workflow step complete".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 3,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct StaticProviderResolver {
+        provider: Arc<dyn LlmProvider>,
+    }
+
+    #[async_trait]
+    impl argus_protocol::ProviderResolver for StaticProviderResolver {
+        async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    async fn seed_test_agent(repo: &ArgusSqlite, id: i64, display_name: &str) {
+        let provider_id: i64 =
+            sqlx::query_scalar("SELECT id FROM llm_providers ORDER BY id LIMIT 1")
+                .fetch_one(repo.pool())
+                .await
+                .expect("default provider");
+
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(id)
+        .bind(display_name)
+        .bind(format!("{display_name} agent"))
+        .bind("1.0.0")
+        .bind(provider_id)
+        .bind(Option::<String>::None)
+        .bind(format!("You are the {display_name} workflow agent."))
+        .bind("[]")
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
+        .bind(r#"{"type":"disabled","clear_thinking":false}"#)
+        .execute(repo.pool())
+        .await
+        .expect("seed agent");
+    }
+
+    async fn seed_test_thread(repo: &ArgusSqlite, title: &str) -> ThreadId {
+        let provider_id: i64 =
+            sqlx::query_scalar("SELECT id FROM llm_providers ORDER BY id LIMIT 1")
+                .fetch_one(repo.pool())
+                .await
+                .expect("default provider");
+
+        let thread_id = ThreadId::new();
+        sqlx::query(
+            "INSERT INTO threads (id, provider_id, title, token_count, turn_count, session_id, template_id)
+             VALUES (?1, ?2, ?3, 0, 0, NULL, NULL)",
+        )
+        .bind(thread_id.to_string())
+        .bind(provider_id)
+        .bind(title)
+        .execute(repo.pool())
+        .await
+        .expect("seed thread");
+
+        thread_id
+    }
+
+    async fn seed_template(
+        repo: &ArgusSqlite,
+        template_id: &str,
+        version: i64,
+        name: &str,
+        nodes: Vec<WorkflowTemplateNodeRecord>,
+    ) {
+        repo.create_workflow_template(&WorkflowTemplateRecord {
+            id: WorkflowTemplateId::new(template_id),
+            name: name.to_string(),
+            version,
+            description: format!("{name} template"),
+        })
+        .await
+        .expect("create template");
+
+        for node in nodes {
+            repo.create_workflow_template_node(&node)
+                .await
+                .expect("create template node");
+        }
+    }
+
+    async fn wait_for_job_status(
+        repo: &ArgusSqlite,
+        execution_id: &WorkflowId,
+        node_key: &str,
+        expected: WorkflowStatus,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let jobs = JobRepository::list_by_group(repo, execution_id.as_ref())
+                    .await
+                    .expect("list workflow jobs");
+                let Some(job) = jobs
+                    .iter()
+                    .find(|job| job.node_key.as_deref() == Some(node_key))
+                else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                };
+
+                if job.status == expected {
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("job should reach expected status");
+    }
+
+    let db_path = std::env::temp_dir().join(format!("argus-workflow-e2e-{}.sqlite", Uuid::new_v4()));
+    let pool = connect_path(&db_path).await.expect("create sqlite pool");
+    migrate(&pool).await.expect("run migrations");
+    let repo = Arc::new(ArgusSqlite::new(pool));
+
+    seed_test_agent(repo.as_ref(), 7, "Collector").await;
+    seed_test_agent(repo.as_ref(), 8, "Summarizer").await;
+    seed_test_agent(repo.as_ref(), 9, "Publisher").await;
+
+    let template_manager = Arc::new(TemplateManager::new(
+        repo.clone() as Arc<dyn AgentRepository>,
+        repo.clone(),
+    ));
+    let provider: Arc<dyn LlmProvider> = Arc::new(ImmediateProvider);
+    let job_manager = Arc::new(JobManager::with_job_repository(
+        template_manager.clone(),
+        Arc::new(StaticProviderResolver { provider }),
+        Arc::new(ToolManager::new()),
+        repo.clone() as Arc<dyn JobRepository>,
+    ));
+    let manager = WorkflowManager::new(
+        template_manager,
+        repo.clone() as Arc<dyn WorkflowRepository>,
+        repo.clone() as Arc<dyn JobRepository>,
+        job_manager,
+    );
+
+    let template_id = WorkflowTemplateId::new("tpl-e2e");
+    seed_template(
+        repo.as_ref(),
+        template_id.as_ref(),
+        1,
+        "End-to-end Workflow",
+        vec![
+            WorkflowTemplateNodeRecord {
+                template_id: template_id.clone(),
+                template_version: 1,
+                node_key: "collect".to_string(),
+                name: "Collect".to_string(),
+                agent_id: AgentId::new(7),
+                prompt: "Collect context".to_string(),
+                context: None,
+                depends_on_keys: vec![],
+            },
+            WorkflowTemplateNodeRecord {
+                template_id: template_id.clone(),
+                template_version: 1,
+                node_key: "publish".to_string(),
+                name: "Publish".to_string(),
+                agent_id: AgentId::new(9),
+                prompt: "Publish output".to_string(),
+                context: None,
+                depends_on_keys: vec!["collect".to_string()],
+            },
+        ],
+    )
+    .await;
+    let initiating_thread_id = seed_test_thread(repo.as_ref(), "workflow-e2e").await;
+
+    let execution = manager
+        .instantiate_workflow(InstantiateWorkflowInput {
+            template_id,
+            template_version: Some(1),
+            initiating_thread_id: Some(initiating_thread_id),
+            extra_nodes: Vec::new(),
+        })
+        .await
+        .expect("instantiate workflow");
+
+    wait_for_job_status(
+        repo.as_ref(),
+        &execution.workflow_id,
+        "collect",
+        WorkflowStatus::Succeeded,
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let Some(progress) = manager
+                .get_workflow_progress(&execution.workflow_id)
+                .await
+                .expect("read workflow progress")
+            else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            };
+
+            if progress.status == WorkflowStatus::Succeeded {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("workflow should reach succeeded");
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;
@@ -697,7 +1075,7 @@ mod tests {
     use argus_protocol::{LlmProvider, ProviderId};
     use argus_repository::traits::{AgentRepository, JobRepository, WorkflowRepository};
     use argus_repository::types::{
-        JobType, WorkflowTemplateId, WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
+        WorkflowTemplateId, WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
     };
     use argus_repository::{ArgusSqlite, connect_path, migrate};
     use async_trait::async_trait;
@@ -1108,16 +1486,6 @@ mod tests {
         )
         .await;
 
-        let ready_jobs = harness
-            .manager
-            .dispatch_ready_jobs(&execution.workflow_id)
-            .await
-            .expect("dispatch ready jobs");
-
-        assert_eq!(ready_jobs.len(), 1);
-        assert_eq!(ready_jobs[0].job_type, JobType::Workflow);
-        assert_eq!(ready_jobs[0].node_key.as_str(), "publish");
-
         wait_for_job_status(
             harness.repo.as_ref(),
             &execution.workflow_id,
@@ -1135,4 +1503,5 @@ mod tests {
         assert_eq!(progress.status, WorkflowStatus::Succeeded);
         assert_eq!(progress.succeeded_nodes, 2);
     }
+
 }

@@ -33,7 +33,7 @@ use argus_agent::CompactorManager;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
-use argus_job::{JobManager, WorkflowManager};
+use argus_job::{InstantiateWorkflowInput, JobManager, WorkflowExecutionProgress, WorkflowManager};
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
@@ -45,7 +45,7 @@ use argus_repository::traits::{
     ThreadRepository, WorkflowRepository,
 };
 
-use argus_repository::types::JobId;
+use argus_repository::types::{JobId, WorkflowId};
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
@@ -439,6 +439,50 @@ impl ArgusWing {
             .await
             .map_err(|e| ArgusError::DatabaseError {
                 reason: format!("Failed to fetch default template: {}", e),
+            })
+    }
+
+    // =========================================================================
+    // Workflow API
+    // =========================================================================
+
+    /// Instantiate a persistent workflow execution from a template.
+    pub async fn instantiate_workflow(
+        &self,
+        input: InstantiateWorkflowInput,
+    ) -> Result<WorkflowExecutionProgress> {
+        self.workflow_manager
+            .instantiate_workflow(input)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// Get aggregated progress for a workflow execution.
+    pub async fn get_workflow_progress(
+        &self,
+        execution_id: &WorkflowId,
+    ) -> Result<Option<WorkflowExecutionProgress>> {
+        self.workflow_manager
+            .get_workflow_progress(execution_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// Check whether a workflow execution belongs to a thread.
+    pub async fn workflow_belongs_to_thread(
+        &self,
+        execution_id: &WorkflowId,
+        thread_id: ThreadId,
+    ) -> Result<bool> {
+        self.workflow_manager
+            .workflow_belongs_to_thread(execution_id, thread_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
             })
     }
 
