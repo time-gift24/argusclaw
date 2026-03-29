@@ -1,6 +1,9 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -88,6 +91,10 @@ impl ChromeInstaller {
         let _guard = self.install_lock.lock().await;
         self.paths.ensure_directories()?;
         let platform = ChromePlatform::detect()?;
+        let _file_lock = InstallLockGuard::acquire(&self.paths.root.join(".install.lock"))?;
+        if let Some(cached) = self.find_cached_install(chrome_major, &platform)? {
+            return Ok(cached);
+        }
         let version = self.resolve_driver_version(chrome_major).await?;
         let original_driver = self
             .paths
@@ -101,7 +108,7 @@ impl ChromeInstaller {
         if !original_driver.is_file() {
             let archive_url = driver_archive_url(version.as_str(), &platform);
             let archive_bytes = self.downloader.fetch(&archive_url).await?;
-            extract_driver_binary(&archive_bytes, &platform, &original_driver)?;
+            extract_driver_binary(&archive_bytes, &self.paths.tmp, &platform, &original_driver)?;
         }
         if !patched_driver.is_file() {
             let original_bytes =
@@ -115,7 +122,7 @@ impl ChromeInstaller {
                     reason: e.to_string(),
                 }
             })?;
-            write_file(&patched_driver, &patched_bytes)?;
+            atomic_write_file(&self.paths.tmp, &patched_driver, &patched_bytes)?;
             ensure_executable(&patched_driver)?;
         }
 
@@ -133,6 +140,46 @@ impl ChromeInstaller {
             .map_err(|e| ChromeToolError::DriverArchiveInvalid {
                 reason: format!("release metadata from '{url}' is not valid utf-8: {e}"),
             })
+    }
+
+    fn find_cached_install(
+        &self,
+        chrome_major: &str,
+        platform: &ChromePlatform,
+    ) -> Result<Option<InstalledDriver>, ChromeToolError> {
+        let major_prefix = format!("{chrome_major}.");
+        let entries = std::fs::read_dir(&self.paths.patched).map_err(|e| {
+            ChromeToolError::FileReadFailed {
+                path: self.paths.patched.clone(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| ChromeToolError::FileReadFailed {
+                path: self.paths.patched.clone(),
+                reason: e.to_string(),
+            })?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            let Some(version) = version_from_driver_filename(&file_name, platform) else {
+                continue;
+            };
+            if !version.starts_with(&major_prefix) {
+                continue;
+            }
+
+            let patched_driver = entry.path();
+            let original_driver = self.paths.driver.join(file_name.as_ref());
+            if original_driver.is_file() && patched_driver.is_file() {
+                return Ok(Some(InstalledDriver {
+                    original_driver,
+                    patched_driver,
+                }));
+            }
+        }
+
+        Ok(None)
     }
 }
 
@@ -237,6 +284,7 @@ fn driver_filename(version: &str, platform: &ChromePlatform) -> String {
 
 fn extract_driver_binary(
     archive_bytes: &[u8],
+    tmp_dir: &Path,
     platform: &ChromePlatform,
     output_path: &Path,
 ) -> Result<(), ChromeToolError> {
@@ -264,7 +312,7 @@ fn extract_driver_binary(
                 reason: e.to_string(),
             }
         })?;
-        write_file(output_path, &bytes)?;
+        atomic_write_file(tmp_dir, output_path, &bytes)?;
         ensure_executable(output_path)?;
         return Ok(());
     }
@@ -274,8 +322,29 @@ fn extract_driver_binary(
     })
 }
 
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), ChromeToolError> {
-    std::fs::write(path, bytes).map_err(|e| ChromeToolError::FileWriteFailed {
+fn atomic_write_file(tmp_dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), ChromeToolError> {
+    static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+    let temp_id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed) + 1;
+    let temp_path = tmp_dir.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("chrome"),
+        std::process::id(),
+        temp_id
+    ));
+    std::fs::write(&temp_path, bytes).map_err(|e| ChromeToolError::FileWriteFailed {
+        path: temp_path.clone(),
+        reason: e.to_string(),
+    })?;
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| ChromeToolError::FileWriteFailed {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+    }
+    std::fs::rename(&temp_path, path).map_err(|e| ChromeToolError::FileWriteFailed {
         path: path.to_path_buf(),
         reason: e.to_string(),
     })
@@ -296,6 +365,67 @@ fn ensure_executable(path: &Path) -> Result<(), ChromeToolError> {
     }
 
     Ok(())
+}
+
+fn version_from_driver_filename(file_name: &str, platform: &ChromePlatform) -> Option<String> {
+    let prefix = format!("chromedriver-{}-", platform.archive_key());
+    let suffix = if platform.driver_binary_name().ends_with(".exe") {
+        ".exe"
+    } else {
+        ""
+    };
+    let stripped = file_name.strip_prefix(&prefix)?;
+    let stripped = if suffix.is_empty() {
+        stripped
+    } else {
+        stripped.strip_suffix(suffix)?
+    };
+    Some(stripped.to_string())
+}
+
+struct InstallLockGuard {
+    path: PathBuf,
+}
+
+impl InstallLockGuard {
+    fn acquire(path: &Path) -> Result<Self, ChromeToolError> {
+        for _ in 0..200 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+
+                    let _ = writeln!(file, "pid={}", std::process::id());
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(err) => {
+                    return Err(ChromeToolError::FileWriteFailed {
+                        path: path.to_path_buf(),
+                        reason: err.to_string(),
+                    });
+                }
+            }
+        }
+
+        Err(ChromeToolError::FileWriteFailed {
+            path: path.to_path_buf(),
+            reason: "timed out waiting for install lock".to_string(),
+        })
+    }
+}
+
+impl Drop for InstallLockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +501,18 @@ mod tests {
         }
     }
 
+    struct FailingDownloader;
+
+    #[async_trait]
+    impl DriverDownloader for FailingDownloader {
+        async fn fetch(&self, url: &str) -> Result<Vec<u8>, ChromeToolError> {
+            Err(ChromeToolError::DriverDownloadFailed {
+                url: url.to_string(),
+                reason: "network access should not be required".to_string(),
+            })
+        }
+    }
+
     fn fake_driver_zip() -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut writer = zip::ZipWriter::new(cursor);
@@ -408,5 +550,21 @@ mod tests {
                 .windows(22)
                 .any(|window| window == b"XXXXXXXXXXXXXXXXXXXXXX")
         );
+    }
+
+    #[tokio::test]
+    async fn installer_reuses_cached_driver_without_network() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let first_installer = ChromeInstaller::new(
+            paths.clone(),
+            FakeDownloader::with_zip_bytes(fake_driver_zip()),
+        );
+        let first = first_installer.ensure_driver("124").await.unwrap();
+
+        let cached_installer = ChromeInstaller::new(paths, Arc::new(FailingDownloader));
+        let second = cached_installer.ensure_driver("124").await.unwrap();
+
+        assert_eq!(second, first);
     }
 }

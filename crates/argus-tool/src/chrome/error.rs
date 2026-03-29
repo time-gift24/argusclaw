@@ -55,4 +55,7 @@ pub enum ChromeToolError {
 
     #[error("failed to capture screenshot: {reason}")]
     ScreenshotFailed { reason: String },
+
+    #[error("failed to shut down chrome session: {reason}")]
+    SessionShutdownFailed { reason: String },
 }

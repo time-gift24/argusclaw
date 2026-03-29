@@ -1,11 +1,11 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use thirtyfour::prelude::{By, WebDriver};
 use tokio::process::Child;
+use tokio::sync::Mutex;
 
 use super::error::ChromeToolError;
 use super::models::LinkSummary;
@@ -15,6 +15,7 @@ pub trait BrowserSession: Send + Sync {
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
     async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError>;
     async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError>;
+    async fn shutdown(&self) -> Result<(), ChromeToolError>;
 }
 
 #[derive(Clone)]
@@ -65,7 +66,7 @@ impl ChromeSession {
 }
 
 pub struct ManagedWebDriverSession {
-    driver: WebDriver,
+    driver: Mutex<Option<WebDriver>>,
     driver_process: Mutex<Option<Child>>,
 }
 
@@ -79,20 +80,28 @@ impl fmt::Debug for ManagedWebDriverSession {
 impl ManagedWebDriverSession {
     #[must_use]
     pub fn new(driver: WebDriver, driver_process: Child) -> Self {
-        let _ = driver.clone().leak();
         Self {
-            driver,
+            driver: Mutex::new(Some(driver)),
             driver_process: Mutex::new(Some(driver_process)),
         }
+    }
+
+    async fn live_driver(&self) -> Result<WebDriver, ChromeToolError> {
+        self.driver.lock().await.as_ref().cloned().ok_or_else(|| {
+            ChromeToolError::SessionShutdownFailed {
+                reason: "session already closed".to_string(),
+            }
+        })
     }
 }
 
 #[async_trait]
 impl BrowserSession for ManagedWebDriverSession {
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
+        let driver = self.live_driver().await?;
         let element = match selector {
-            Some(selector) => self.driver.find(By::Css(selector)).await,
-            None => self.driver.find(By::Css("body")).await,
+            Some(selector) => driver.find(By::Css(selector)).await,
+            None => driver.find(By::Css("body")).await,
         }
         .map_err(|e| ChromeToolError::PageReadFailed {
             reason: e.to_string(),
@@ -107,11 +116,14 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-        let elements = self.driver.find_all(By::Css("a")).await.map_err(|e| {
-            ChromeToolError::PageReadFailed {
-                reason: e.to_string(),
-            }
-        })?;
+        let driver = self.live_driver().await?;
+        let elements =
+            driver
+                .find_all(By::Css("a"))
+                .await
+                .map_err(|e| ChromeToolError::PageReadFailed {
+                    reason: e.to_string(),
+                })?;
         let mut links = Vec::with_capacity(elements.len());
         for element in elements {
             let href = element
@@ -133,21 +145,65 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
-        self.driver
+        let driver = self.live_driver().await?;
+        driver
             .screenshot_as_png()
             .await
             .map_err(|e| ChromeToolError::ScreenshotFailed {
                 reason: e.to_string(),
             })
     }
+
+    async fn shutdown(&self) -> Result<(), ChromeToolError> {
+        if let Some(driver) = self.driver.lock().await.take() {
+            driver
+                .quit()
+                .await
+                .map_err(|e| ChromeToolError::SessionShutdownFailed {
+                    reason: e.to_string(),
+                })?;
+        }
+        if let Some(mut child) = self.driver_process.lock().await.take() {
+            shutdown_child_process(&mut child).await?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ManagedWebDriverSession {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.driver_process.lock() {
+        if let Ok(mut driver) = self.driver.try_lock() {
+            if let Some(driver) = driver.take() {
+                let _ = driver.leak();
+            }
+        }
+        if let Ok(mut guard) = self.driver_process.try_lock() {
             if let Some(child) = guard.as_mut() {
                 let _ = child.start_kill();
             }
         }
+    }
+}
+
+pub(crate) async fn shutdown_child_process(child: &mut Child) -> Result<(), ChromeToolError> {
+    match child.try_wait() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            child
+                .start_kill()
+                .map_err(|e| ChromeToolError::SessionShutdownFailed {
+                    reason: e.to_string(),
+                })?;
+            child
+                .wait()
+                .await
+                .map(|_| ())
+                .map_err(|e| ChromeToolError::SessionShutdownFailed {
+                    reason: e.to_string(),
+                })
+        }
+        Err(e) => Err(ChromeToolError::SessionShutdownFailed {
+            reason: e.to_string(),
+        }),
     }
 }

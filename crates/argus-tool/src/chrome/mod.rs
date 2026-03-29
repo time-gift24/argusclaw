@@ -538,6 +538,10 @@ mod tests {
         async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
             Ok(self.screenshot.clone())
         }
+
+        async fn shutdown(&self) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
