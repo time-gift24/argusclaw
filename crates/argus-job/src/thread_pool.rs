@@ -518,12 +518,21 @@ impl ThreadPool {
             .map_err(|err| {
                 JobError::ExecutionFailed(format!("failed to load job record: {err}"))
             })?;
-        let thread_id = existing_job
-            .as_ref()
-            .and_then(|job| job.thread_id)
-            .unwrap_or_else(ThreadId::new);
+        let existing_thread_id = existing_job.as_ref().and_then(|job| job.thread_id);
+        let existing_thread = if let Some(thread_id) = existing_thread_id {
+            persistence
+                .thread_repository
+                .get_thread(&thread_id)
+                .await
+                .map_err(|err| {
+                    JobError::ExecutionFailed(format!("failed to load thread record: {err}"))
+                })?
+        } else {
+            None
+        };
+        let thread_id = existing_thread_id.unwrap_or_else(ThreadId::new);
 
-        let thread_record = ThreadRecord {
+        let mut thread_record = existing_thread.unwrap_or(ThreadRecord {
             id: thread_id,
             provider_id,
             title: Some(format!("job:{}", request.job_id)),
@@ -531,10 +540,17 @@ impl ThreadPool {
             turn_count: 0,
             session_id: None,
             template_id: Some(RepoAgentId::new(request.agent_id.inner())),
-            model_override,
+            model_override: model_override.clone(),
             created_at: now.to_string(),
             updated_at: now.to_string(),
-        };
+        });
+        thread_record.id = thread_id;
+        thread_record.provider_id = provider_id;
+        thread_record.title = Some(format!("job:{}", request.job_id));
+        thread_record.session_id = None;
+        thread_record.template_id = Some(RepoAgentId::new(request.agent_id.inner()));
+        thread_record.model_override = model_override;
+        thread_record.updated_at = now.to_string();
         persistence
             .thread_repository
             .upsert_thread(&thread_record)
@@ -1147,6 +1163,34 @@ mod tests {
         assert_eq!(snapshot.active_threads, 1);
         assert_eq!(snapshot.queued_jobs, 1);
         assert_eq!(snapshot.evicted_threads, 1);
+    }
+
+    #[tokio::test]
+    async fn reenqueue_preserves_persisted_thread_stats() {
+        let (pool, sqlite) = test_recoverable_persistent_pool().await;
+        let request = super::test_request("job-recovery-stats");
+
+        let thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("first enqueue should succeed");
+        ThreadRepository::update_thread_stats(sqlite.as_ref(), &thread_id, 512, 3)
+            .await
+            .expect("thread stats update should succeed");
+        pool.mark_cooling("job-recovery-stats");
+        pool.evict_if_idle("job-recovery-stats")
+            .expect("cooling runtime should be evicted");
+
+        pool.enqueue_job(request)
+            .await
+            .expect("re-enqueue should succeed");
+
+        let persisted_thread = ThreadRepository::get_thread(sqlite.as_ref(), &thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread should remain persisted");
+        assert_eq!(persisted_thread.token_count, 512);
+        assert_eq!(persisted_thread.turn_count, 3);
     }
 
     #[tokio::test]
