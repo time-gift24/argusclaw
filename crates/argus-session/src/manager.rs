@@ -1091,6 +1091,10 @@ async fn resolve_turn_numbers(
         return Ok((1..=turn_count).collect());
     }
 
+    if !turns_dir.exists() {
+        return Ok(Vec::new());
+    }
+
     let mut entries =
         tokio::fs::read_dir(turns_dir)
             .await
@@ -1467,6 +1471,22 @@ mod tests {
         assert_eq!(recovered.messages.len(), 4);
         assert_eq!(recovered.messages[0].content, "hi");
         assert_eq!(recovered.messages[3].content, "welcome back");
+    }
+
+    #[tokio::test]
+    async fn recover_thread_state_from_trace_returns_empty_when_turns_dir_is_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+
+        let recovered =
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
+                .await
+                .expect("missing turns dir should be treated as empty history");
+
+        assert_eq!(recovered.turn_count, 0);
+        assert_eq!(recovered.token_count, 0);
+        assert!(recovered.messages.is_empty());
     }
 
     #[tokio::test]
