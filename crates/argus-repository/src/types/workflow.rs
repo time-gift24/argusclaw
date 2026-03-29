@@ -3,6 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use argus_protocol::{AgentId, ThreadId};
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a workflow.
@@ -47,6 +48,43 @@ impl FromStr for WorkflowId {
 
 /// Unique identifier for a job (alias for WorkflowId for use in job records).
 pub type JobId = WorkflowId;
+
+/// Unique identifier for a workflow template.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkflowTemplateId(String);
+
+impl WorkflowTemplateId {
+    /// Creates a new workflow template ID.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `id` is empty.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "WorkflowTemplateId cannot be empty");
+        Self(id)
+    }
+}
+
+impl AsRef<str> for WorkflowTemplateId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WorkflowTemplateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
+impl FromStr for WorkflowTemplateId {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s))
+    }
+}
 
 /// The execution status of a workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +165,49 @@ impl WorkflowRecord {
     }
 }
 
+/// Workflow template stored in database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowTemplateRecord {
+    pub id: WorkflowTemplateId,
+    pub name: String,
+    pub version: i64,
+    pub description: String,
+}
+
+/// Workflow template node stored in database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowTemplateNodeRecord {
+    pub template_id: WorkflowTemplateId,
+    pub node_key: String,
+    pub name: String,
+    pub agent_id: AgentId,
+    pub prompt: String,
+    pub context: Option<String>,
+    pub depends_on_keys: Vec<String>,
+}
+
+/// Workflow execution header stored in database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowExecutionRecord {
+    pub id: WorkflowId,
+    pub name: String,
+    pub status: WorkflowStatus,
+    pub template_id: Option<WorkflowTemplateId>,
+    pub template_version: Option<i64>,
+    pub initiating_thread_id: Option<ThreadId>,
+}
+
+/// Workflow execution node helper used when instantiating workflows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowExecutionNodeRecord {
+    pub node_key: String,
+    pub name: String,
+    pub agent_id: AgentId,
+    pub prompt: String,
+    pub context: Option<String>,
+    pub depends_on_keys: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +265,44 @@ mod tests {
     #[test]
     fn workflow_status_from_str_invalid() {
         assert!(WorkflowStatus::parse_str("invalid").is_err());
+    }
+
+    #[test]
+    fn workflow_template_node_keeps_depends_on_keys() {
+        let node = WorkflowTemplateNodeRecord {
+            template_id: WorkflowTemplateId::new("tpl-1"),
+            node_key: "summarize".to_string(),
+            name: "Summarize".to_string(),
+            agent_id: AgentId::new(7),
+            prompt: "Summarize the repo".to_string(),
+            context: None,
+            depends_on_keys: vec!["collect".to_string()],
+        };
+
+        assert_eq!(node.depends_on_keys, vec!["collect"]);
+    }
+
+    #[test]
+    fn workflow_execution_node_keeps_node_key() {
+        let execution = WorkflowExecutionRecord {
+            id: WorkflowId::new("workflow-1"),
+            name: "demo".to_string(),
+            status: WorkflowStatus::Pending,
+            template_id: Some(WorkflowTemplateId::new("tpl-1")),
+            template_version: Some(1),
+            initiating_thread_id: Some(ThreadId::new()),
+        };
+
+        let node = WorkflowExecutionNodeRecord {
+            node_key: "collect".to_string(),
+            name: "Collect".to_string(),
+            agent_id: AgentId::new(7),
+            prompt: "Collect context".to_string(),
+            context: None,
+            depends_on_keys: vec![],
+        };
+
+        assert_eq!(execution.template_version, Some(1));
+        assert_eq!(node.node_key, "collect");
     }
 }
