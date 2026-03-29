@@ -12,11 +12,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
-    AgentId, LlmProviderRepository, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId,
-    ThreadJobResult, ThreadPoolSnapshot,
+    AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
+    ThreadPoolSnapshot,
 };
-use argus_repository::traits::{JobRepository, ThreadRepository};
-use argus_repository::types::{JobId, JobRecord, JobType, WorkflowStatus};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use futures_util::FutureExt;
@@ -58,7 +56,6 @@ pub enum JobLookup {
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
     template_manager: Arc<TemplateManager>,
-    job_repo: Arc<dyn JobRepository>,
     thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<HashMap<String, TrackedJob>>>,
 }
@@ -78,22 +75,15 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        thread_repo: Arc<dyn ThreadRepository>,
-        job_repo: Arc<dyn JobRepository>,
-        llm_provider_repo: Arc<dyn LlmProviderRepository>,
     ) -> Self {
         let thread_pool = Arc::new(ThreadPool::new(
             template_manager.clone(),
             provider_resolver,
             tool_manager,
-            thread_repo,
-            job_repo.clone(),
-            llm_provider_repo,
         ));
 
         Self {
             template_manager,
-            job_repo,
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
@@ -117,11 +107,6 @@ impl JobManager {
     /// Get the currently bound execution thread for a job, if any.
     pub fn thread_binding(&self, job_id: &str) -> Option<ThreadId> {
         self.thread_pool.get_thread_binding(job_id)
-    }
-
-    /// Get the persisted execution thread for a job, even if the runtime is no longer resident.
-    pub async fn persisted_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>, JobError> {
-        self.thread_pool.persisted_thread_binding(job_id).await
     }
 
     /// Collect a point-in-time thread-pool snapshot.
@@ -197,7 +182,6 @@ impl JobManager {
             context,
         };
 
-        self.create_job_record(&request).await?;
         self.record_dispatched_job(originating_thread_id, job_id.clone());
 
         let execution_thread_id = self.thread_pool.enqueue_job(request.clone()).await?;
@@ -258,53 +242,6 @@ impl JobManager {
         });
 
         Ok(())
-    }
-
-    async fn create_job_record(&self, request: &ThreadPoolJobRequest) -> Result<(), JobError> {
-        let record = JobRecord {
-            id: JobId::new(request.job_id.clone()),
-            job_type: JobType::Standalone,
-            name: Self::job_name_for_prompt(&request.prompt),
-            status: WorkflowStatus::Pending,
-            agent_id: request.agent_id,
-            context: request.context.as_ref().map(serde_json::Value::to_string),
-            prompt: request.prompt.clone(),
-            thread_id: None,
-            group_id: None,
-            depends_on: Vec::new(),
-            cron_expr: None,
-            scheduled_at: None,
-            started_at: None,
-            finished_at: None,
-            parent_job_id: None,
-            result: None,
-        };
-
-        match self.job_repo.create(&record).await {
-            Ok(()) => Ok(()),
-            Err(error) if cfg!(test) => {
-                tracing::debug!(
-                    job_id = %request.job_id,
-                    error = %error,
-                    "skipping persisted job creation for test runtime"
-                );
-                Ok(())
-            }
-            Err(error) => Err(JobError::ExecutionFailed(format!(
-                "failed to create persisted job {}: {error}",
-                request.job_id
-            ))),
-        }
-    }
-
-    fn job_name_for_prompt(prompt: &str) -> String {
-        let first_line = prompt.lines().next().unwrap_or("background job").trim();
-        let chars: String = first_line.chars().take(80).collect();
-        if chars.is_empty() {
-            "background job".to_string()
-        } else {
-            chars
-        }
     }
 
     /// Summarize turn output into a brief result message.
@@ -474,9 +411,6 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
         )
     }
 

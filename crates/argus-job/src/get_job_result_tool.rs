@@ -200,9 +200,6 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
         ))
     }
 

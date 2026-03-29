@@ -7,12 +7,8 @@ use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentId, LlmProviderId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId,
-    ThreadJobResult, ThreadMailbox, ThreadPoolSnapshot,
-};
-use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
-use argus_repository::types::{
-    JobId, JobResult as PersistedJobResult, ThreadRecord, WorkflowStatus,
+    AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
+    ThreadMailbox, ThreadPoolSnapshot,
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
@@ -52,9 +48,6 @@ pub struct ThreadPool {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
-    thread_repo: Arc<dyn ThreadRepository>,
-    job_repo: Arc<dyn JobRepository>,
-    llm_provider_repo: Arc<dyn LlmProviderRepository>,
     max_threads: u32,
     store: Arc<StdMutex<ThreadPoolStore>>,
 }
@@ -73,17 +66,11 @@ impl ThreadPool {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        thread_repo: Arc<dyn ThreadRepository>,
-        job_repo: Arc<dyn JobRepository>,
-        llm_provider_repo: Arc<dyn LlmProviderRepository>,
     ) -> Self {
         Self {
             template_manager,
             provider_resolver,
             tool_manager,
-            thread_repo,
-            job_repo,
-            llm_provider_repo,
             max_threads: DEFAULT_MAX_THREADS,
             store: Arc::new(StdMutex::new(ThreadPoolStore::default())),
         }
@@ -91,18 +78,7 @@ impl ThreadPool {
 
     /// Bind a job to a concrete execution thread and mark it queued.
     pub async fn enqueue_job(&self, request: ThreadPoolJobRequest) -> Result<ThreadId, JobError> {
-        let thread_id = match self.ensure_persisted_thread_binding(&request).await {
-            Ok(thread_id) => thread_id,
-            Err(error) if cfg!(test) => {
-                tracing::debug!(
-                    job_id = %request.job_id,
-                    error = %error,
-                    "falling back to in-memory thread binding for test runtime"
-                );
-                ThreadId::new()
-            }
-            Err(error) => return Err(error),
-        };
+        let thread_id = ThreadId::new();
         let now = Utc::now().to_rfc3339();
         let estimated_memory_bytes = request.prompt.len() as u64;
 
@@ -128,23 +104,6 @@ impl ThreadPool {
             .runtimes
             .get(job_id)
             .map(|entry| entry.thread_id)
-    }
-
-    /// Look up the bound execution thread for a job, falling back to persisted state.
-    pub async fn persisted_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>, JobError> {
-        if let Some(thread_id) = self.get_thread_binding(job_id) {
-            return Ok(Some(thread_id));
-        }
-
-        let job = self
-            .job_repo
-            .get(&JobId::new(job_id))
-            .await
-            .map_err(|error| {
-                JobError::ExecutionFailed(format!("failed to load job binding for {job_id}: {error}"))
-            })?;
-
-        Ok(job.and_then(|record| record.thread_id))
     }
 
     /// Mark a queued runtime as running.
@@ -221,9 +180,7 @@ impl ThreadPool {
         pipe_tx: broadcast::Sender<ThreadEvent>,
         control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> ThreadJobResult {
-        let job_id = request.job_id.clone();
         let _ = self.mark_running(&request.job_id);
-        self.persist_job_started(&job_id).await;
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolStarted {
             job_id: request.job_id.clone(),
             thread_id: execution_thread_id,
@@ -252,8 +209,6 @@ impl ThreadPool {
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
             snapshot: self.collect_metrics(),
         });
-        self.persist_job_completion(&job_id, execution_thread_id, &result)
-            .await;
 
         result
     }
@@ -461,192 +416,11 @@ impl ThreadPool {
         });
     }
 
-    async fn ensure_persisted_thread_binding(
-        &self,
-        request: &ThreadPoolJobRequest,
-    ) -> Result<ThreadId, JobError> {
-        let job_id = JobId::new(request.job_id.clone());
-        let existing_thread_id = self
-            .job_repo
-            .get(&job_id)
-            .await
-            .map_err(|error| {
-                JobError::ExecutionFailed(format!("failed to load job {}: {error}", request.job_id))
-            })?
-            .and_then(|record| record.thread_id);
-
-        let thread_id = existing_thread_id.unwrap_or_else(ThreadId::new);
-        let existing_thread = self
-            .thread_repo
-            .get_thread(&thread_id)
-            .await
-            .map_err(|error| {
-                JobError::ExecutionFailed(format!(
-                    "failed to load execution thread {}: {error}",
-                    thread_id
-                ))
-            })?;
-
-        if existing_thread.is_none() {
-            let thread_record = self.build_thread_record(request, thread_id).await?;
-            self.thread_repo
-                .upsert_thread(&thread_record)
-                .await
-                .map_err(|error| {
-                    JobError::ExecutionFailed(format!(
-                        "failed to persist execution thread {}: {error}",
-                        thread_id
-                    ))
-                })?;
-        }
-
-        self.job_repo
-            .update_thread_id(&job_id, &thread_id)
-            .await
-            .map_err(|error| {
-                JobError::ExecutionFailed(format!(
-                    "failed to bind job {} to thread {}: {error}",
-                    request.job_id, thread_id
-                ))
-            })?;
-
-        Ok(thread_id)
-    }
-
-    async fn build_thread_record(
-        &self,
-        request: &ThreadPoolJobRequest,
-        thread_id: ThreadId,
-    ) -> Result<ThreadRecord, JobError> {
-        let agent_record = self
-            .template_manager
-            .get(request.agent_id)
-            .await
-            .map_err(|error| {
-                JobError::ExecutionFailed(format!(
-                    "failed to load agent {} while creating thread {}: {error}",
-                    request.agent_id, thread_id
-                ))
-            })?
-            .ok_or(JobError::AgentNotFound(request.agent_id.into_inner()))?;
-
-        let provider_id = self
-            .resolve_thread_provider_id(agent_record.provider_id)
-            .await?;
-        let now = Utc::now().to_rfc3339();
-
-        Ok(ThreadRecord {
-            id: thread_id,
-            provider_id,
-            title: Some(format!("Job {}", request.job_id)),
-            token_count: 0,
-            turn_count: 0,
-            session_id: None,
-            template_id: Some(request.agent_id),
-            model_override: agent_record.model_id.clone(),
-            created_at: now.clone(),
-            updated_at: now,
-        })
-    }
-
-    async fn resolve_thread_provider_id(
-        &self,
-        provider_id: Option<argus_protocol::ProviderId>,
-    ) -> Result<LlmProviderId, JobError> {
-        if let Some(provider_id) = provider_id {
-            return Ok(LlmProviderId::new(provider_id.inner()));
-        }
-
-        self.llm_provider_repo
-            .get_default_provider_id()
-            .await
-            .map_err(|error| {
-                JobError::ExecutionFailed(format!("failed to load default provider id: {error}"))
-            })?
-            .ok_or_else(|| JobError::ExecutionFailed("no default provider configured".to_string()))
-    }
-
-    async fn persist_job_started(&self, job_id: &str) {
-        let started_at = Utc::now().to_rfc3339();
-        if let Err(error) = self
-            .job_repo
-            .update_status(
-                &JobId::new(job_id),
-                WorkflowStatus::Running,
-                Some(&started_at),
-                None,
-            )
-            .await
-        {
-            tracing::warn!(job_id, error = %error, "failed to persist running job status");
-        }
-    }
-
-    async fn persist_job_completion(
-        &self,
-        job_id: &str,
-        thread_id: ThreadId,
-        result: &ThreadJobResult,
-    ) {
-        let persisted_result = PersistedJobResult {
-            success: result.success,
-            message: result.message.clone(),
-            token_usage: result.token_usage.clone(),
-            agent_id: result.agent_id,
-            agent_display_name: result.agent_display_name.clone(),
-            agent_description: result.agent_description.clone(),
-        };
-        let finished_at = Utc::now().to_rfc3339();
-        let status = if result.success {
-            WorkflowStatus::Succeeded
-        } else {
-            WorkflowStatus::Failed
-        };
-
-        if let Err(error) = self
-            .job_repo
-            .update_result(&JobId::new(job_id), &persisted_result)
-            .await
-        {
-            tracing::warn!(job_id, error = %error, "failed to persist job result");
-        }
-
-        if let Err(error) = self
-            .job_repo
-            .update_status(&JobId::new(job_id), status, None, Some(&finished_at))
-            .await
-        {
-            tracing::warn!(job_id, error = %error, "failed to persist final job status");
-        }
-
-        match self.thread_repo.get_thread(&thread_id).await {
-            Ok(Some(record)) => {
-                let next_token_count = record
-                    .token_count
-                    .saturating_add(result.token_usage.as_ref().map(|usage| usage.total_tokens).unwrap_or(0));
-                let next_turn_count = record.turn_count.saturating_add(1);
-                if let Err(error) = self
-                    .thread_repo
-                    .update_thread_stats(&thread_id, next_token_count, next_turn_count)
-                    .await
-                {
-                    tracing::warn!(job_id, thread_id = %thread_id, error = %error, "failed to persist thread stats");
-                }
-            }
-            Ok(None) => {
-                tracing::warn!(job_id, thread_id = %thread_id, "execution thread missing while persisting stats");
-            }
-            Err(error) => {
-                tracing::warn!(job_id, thread_id = %thread_id, error = %error, "failed to load execution thread while persisting stats");
-            }
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn test_pool() -> Self {
         use argus_protocol::{LlmProvider, ProviderId};
         use argus_repository::ArgusSqlite;
-        use argus_repository::traits::{AgentRepository, JobRepository, LlmProviderRepository, ThreadRepository};
+        use argus_repository::traits::AgentRepository;
         use async_trait::async_trait;
         use sqlx::SqlitePool;
 
@@ -678,13 +452,10 @@ impl ThreadPool {
         Self::new(
             Arc::new(TemplateManager::new(
                 sqlite.clone() as Arc<dyn AgentRepository>,
-                sqlite.clone(),
+                sqlite,
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
         )
     }
 }
