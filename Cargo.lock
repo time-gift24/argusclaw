@@ -383,6 +383,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dashmap",
+ "dirs",
  "glob",
  "once_cell",
  "regex",
