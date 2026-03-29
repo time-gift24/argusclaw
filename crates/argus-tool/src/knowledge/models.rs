@@ -112,6 +112,57 @@ pub struct KnowledgeRelation {
     pub target: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeNodeKind {
+    File,
+    Section,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSource {
+    pub path: String,
+    pub blob_sha: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeNode {
+    pub id: String,
+    pub kind: KnowledgeNodeKind,
+    pub title: String,
+    pub path: String,
+    pub anchor: Option<String>,
+    pub summary: Option<String>,
+    pub aliases: Vec<String>,
+    pub tags: Vec<String>,
+    pub relations: Vec<KnowledgeRelation>,
+    pub children: Vec<String>,
+    pub source: KnowledgeSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExploreTreeEntry {
+    pub path: String,
+    pub title: String,
+    pub child_count: usize,
+    pub summary_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExploreTreeResult {
+    pub entries: Vec<ExploreTreeEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentPage {
+    pub content: String,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub source: KnowledgeSource,
+}
+
 fn default_branch() -> String {
     "main".to_string()
 }
