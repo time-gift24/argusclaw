@@ -571,6 +571,12 @@ impl WorkflowManager {
                     "workflow node key cannot be empty".to_string(),
                 ));
             }
+            if node.prompt.trim().is_empty() {
+                return Err(JobError::ExecutionFailed(format!(
+                    "workflow node {} prompt cannot be empty",
+                    node.node_key
+                )));
+            }
             if node_map.insert(node.node_key.clone(), node).is_some() {
                 return Err(JobError::ExecutionFailed(
                     "duplicate workflow node key".to_string(),
