@@ -118,10 +118,9 @@ impl ThreadPool {
 
     /// Bind a job to a concrete execution thread and mark it queued.
     pub async fn enqueue_job(&self, request: ThreadPoolJobRequest) -> Result<ThreadId, JobError> {
-        let thread_id = ThreadId::new();
         let now = Utc::now().to_rfc3339();
+        let thread_id = self.persist_binding(&request, &now).await?;
         let estimated_memory_bytes = request.prompt.len() as u64;
-        self.persist_binding(&request, thread_id, &now).await?;
 
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         store.runtimes.insert(
@@ -473,11 +472,10 @@ impl ThreadPool {
     async fn persist_binding(
         &self,
         request: &ThreadPoolJobRequest,
-        thread_id: ThreadId,
         now: &str,
-    ) -> Result<(), JobError> {
+    ) -> Result<ThreadId, JobError> {
         let Some(persistence) = &self.persistence else {
-            return Ok(());
+            return Ok(ThreadId::new());
         };
 
         let agent_record = self
@@ -520,6 +518,10 @@ impl ThreadPool {
             .map_err(|err| {
                 JobError::ExecutionFailed(format!("failed to load job record: {err}"))
             })?;
+        let thread_id = existing_job
+            .as_ref()
+            .and_then(|job| job.thread_id)
+            .unwrap_or_else(ThreadId::new);
 
         let thread_record = ThreadRecord {
             id: thread_id,
@@ -542,7 +544,8 @@ impl ThreadPool {
             })?;
 
         if existing_job.is_some() {
-            return Self::persist_existing_job_binding(persistence, &job_id, thread_id).await;
+            Self::persist_existing_job_binding(persistence, &job_id, thread_id).await?;
+            return Ok(thread_id);
         }
 
         let job_record = JobRecord {
@@ -576,7 +579,7 @@ impl ThreadPool {
             .await);
         }
 
-        Ok(())
+        Ok(thread_id)
     }
 
     async fn persist_existing_job_binding(
@@ -762,6 +765,36 @@ mod tests {
                 sqlite.clone() as Arc<dyn LlmProviderRepository>,
             )),
         );
+
+        (thread_pool, sqlite)
+    }
+
+    async fn test_recoverable_persistent_pool() -> (ThreadPool, Arc<ArgusSqlite>) {
+        let (thread_pool, sqlite) = test_persistent_pool().await;
+        let provider_id =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
+
+        thread_pool
+            .template_manager
+            .upsert(AgentRecord {
+                id: argus_protocol::AgentId::new(7),
+                display_name: "Recoverable ThreadPool Agent".to_string(),
+                description: "Used to test thread recovery".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(provider_id.into_inner())),
+                model_id: Some("gpt-4o-mini".to_string()),
+                system_prompt: "You are a test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
 
         (thread_pool, sqlite)
     }
@@ -1058,6 +1091,61 @@ mod tests {
 
         let snapshot = pool.collect_metrics();
         assert_eq!(snapshot.active_threads, 0);
+        assert_eq!(snapshot.evicted_threads, 1);
+    }
+
+    #[tokio::test]
+    async fn collect_metrics_tracks_cooling_then_evicted_transition() {
+        let pool = ThreadPool::test_pool();
+        pool.enqueue_job(super::test_request("job-3-metrics"))
+            .await
+            .expect("enqueue should succeed");
+
+        pool.mark_cooling("job-3-metrics");
+        let cooling = pool.collect_metrics();
+        assert_eq!(cooling.cooling_threads, 1);
+        assert_eq!(cooling.evicted_threads, 0);
+
+        let _ = pool.evict_if_idle("job-3-metrics");
+        let evicted = pool.collect_metrics();
+        assert_eq!(evicted.cooling_threads, 0);
+        assert_eq!(evicted.evicted_threads, 1);
+        assert_eq!(evicted.active_threads, 0);
+    }
+
+    #[tokio::test]
+    async fn evicted_runtime_reuses_persisted_thread_id_on_reenqueue() {
+        let (pool, _sqlite) = test_recoverable_persistent_pool().await;
+        let request = super::test_request("job-recovery");
+
+        let first_thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("first enqueue should succeed");
+        pool.mark_cooling("job-recovery");
+        let evicted_thread_id = pool
+            .evict_if_idle("job-recovery")
+            .expect("cooling runtime should be evicted");
+        assert_eq!(evicted_thread_id, first_thread_id);
+        assert_eq!(pool.collect_metrics().evicted_threads, 1);
+
+        let recovered_thread_id = pool
+            .enqueue_job(request)
+            .await
+            .expect("re-enqueue should recover persisted thread");
+
+        assert_eq!(
+            recovered_thread_id, first_thread_id,
+            "recovered runtime should reuse the persisted thread id"
+        );
+        assert_eq!(
+            pool.get_thread_binding("job-recovery"),
+            Some(first_thread_id)
+        );
+
+        let snapshot = pool.collect_metrics();
+        assert_eq!(snapshot.active_threads, 1);
+        assert_eq!(snapshot.queued_jobs, 1);
         assert_eq!(snapshot.evicted_threads, 1);
     }
 

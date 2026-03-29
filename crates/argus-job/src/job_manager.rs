@@ -347,10 +347,10 @@ impl JobManager {
 mod tests {
     use std::sync::Arc;
 
-    use argus_protocol::{LlmProvider, ProviderId};
     use argus_protocol::llm::LlmProviderRepository;
-    use argus_repository::migrate;
+    use argus_protocol::{LlmProvider, ProviderId};
     use argus_repository::ArgusSqlite;
+    use argus_repository::migrate;
     use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
     use argus_template::TemplateManager;
     use async_trait::async_trait;

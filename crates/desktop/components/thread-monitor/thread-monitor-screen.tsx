@@ -43,6 +43,20 @@ export function ThreadMonitorScreen() {
               <p className="max-w-2xl text-sm text-muted-foreground">
                 监控线程池的总览和最近观测到的线程状态。页面只读，线程列表来自事件流，池级指标来自快照拉取。
               </p>
+              <div className="flex flex-wrap gap-2 pt-1 text-xs">
+                <Badge variant="outline" className="rounded-full border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">
+                  排队中
+                </Badge>
+                <Badge variant="outline" className="rounded-full border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+                  运行中
+                </Badge>
+                <Badge variant="outline" className="rounded-full border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+                  冷却中
+                </Badge>
+                <Badge variant="outline" className="rounded-full border-destructive/30 bg-destructive/10 text-destructive">
+                  已驱逐
+                </Badge>
+              </div>
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {loading ? <Loader2 className="size-4 animate-spin text-primary" /> : <RefreshCw className="size-4 text-muted-foreground/70" />}
