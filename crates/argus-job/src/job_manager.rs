@@ -553,8 +553,22 @@ mod tests {
             .await
             .expect("job should enqueue even if execution later fails");
 
-        assert!(manager.thread_binding(&job_id).is_some());
-        assert_eq!(manager.thread_pool_snapshot().active_threads, 1);
+        let bound_thread_id = manager
+            .thread_binding(&job_id)
+            .expect("job should be bound to a thread");
+        let runtime = manager
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
+            .expect("bound runtime should be tracked in thread pool state");
+        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
+        assert!(matches!(
+            runtime.status,
+            argus_protocol::ThreadRuntimeStatus::Queued
+                | argus_protocol::ThreadRuntimeStatus::Running
+                | argus_protocol::ThreadRuntimeStatus::Cooling
+        ));
     }
 
     #[tokio::test]

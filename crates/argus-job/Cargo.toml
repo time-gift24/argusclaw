@@ -23,3 +23,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+rust_decimal = { workspace = true }

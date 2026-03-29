@@ -34,7 +34,6 @@ const JOB_STATUS_DISPLAY_NAME_LIMIT = 80;
 const JOB_STATUS_DESCRIPTION_LIMIT = 240;
 const JOB_STATUS_PROMPT_LIMIT = 600;
 const JOB_STATUS_MESSAGE_LIMIT = 1600;
-const THREAD_POOL_RECENT_LIMIT = 24;
 
 const truncateDisplayText = (value: string, maxChars: number) => {
   const chars = Array.from(value);
@@ -185,8 +184,7 @@ function sortThreadPoolThreads(
         return right.eventCount - left.eventCount;
       }
       return rightTime.localeCompare(leftTime);
-    })
-    .slice(0, THREAD_POOL_RECENT_LIMIT);
+    });
 }
 
 function touchThreadPoolThread(

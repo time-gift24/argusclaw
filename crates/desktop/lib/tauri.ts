@@ -207,6 +207,7 @@ export interface ThreadSnapshotPayload {
   }>;
   turn_count: number;
   token_count: number;
+  plan_item_count: number;
 }
 
 export type ThreadRuntimeStatus =

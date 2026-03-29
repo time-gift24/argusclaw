@@ -52,6 +52,18 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /errorMessage:/);
 });
 
+test("thread pool store keeps the full authoritative runtime list", () => {
+  const sortHelper = storeSource.match(
+    /function sortThreadPoolThreads\([\s\S]*?\n\}/,
+  );
+  assert.ok(sortHelper?.[0], "sort helper should exist");
+  assert.doesNotMatch(
+    sortHelper[0],
+    /THREAD_POOL_RECENT_LIMIT|slice\(0,\s*THREAD_POOL_RECENT_LIMIT\)/,
+    "authoritative pool state should not be truncated in the store layer",
+  );
+});
+
 test("chat store guards thread-event listener registration against concurrent initialize calls", () => {
   assert.match(
     storeSource,

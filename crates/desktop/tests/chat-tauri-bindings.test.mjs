@@ -12,6 +12,7 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
   assert.match(tauriSource, /export interface ThreadPoolRuntimeRef/);
   assert.match(tauriSource, /export interface ThreadPoolRuntimeSummary/);
   assert.match(tauriSource, /export interface ThreadPoolState/);
+  assert.match(tauriSource, /plan_item_count:\s*number/);
   assert.match(
     tauriSource,
     /createChatSession:\s*\(\s*templateId: number,\s*providerPreferenceId: number \| null,\s*model: string \| null,\s*\)\s*=>\s*invoke<ChatSessionPayload>\("create_chat_session"/,

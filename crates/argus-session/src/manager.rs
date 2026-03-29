@@ -777,6 +777,7 @@ impl SessionManager {
         message: String,
     ) -> Result<()> {
         self.load(session_id).await?;
+        self.ensure_thread_in_session(session_id, thread_id).await?;
         self.thread_pool
             .send_chat_message(session_id, *thread_id, message)
             .await
@@ -953,7 +954,8 @@ impl SessionManager {
         let effective_model = Some(thread.provider().model_name().to_string());
 =======
         self.load(session_id).await?;
-        self.thread_pool.register_chat_thread(session_id, *thread_id);
+        self.thread_pool
+            .register_chat_thread(session_id, *thread_id);
         let effective_model = if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
             Some(thread.read().await.provider().model_name().to_string())
         } else {
@@ -970,9 +972,35 @@ impl SessionManager {
         thread_id: &ThreadId,
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
         let _ = self.load(session_id).await.ok()?;
-        self.thread_pool
-            .subscribe(thread_id)
-            .or_else(|| Some(self.thread_pool.register_chat_thread(session_id, *thread_id)))
+        self.thread_repo
+            .get_thread_in_session(thread_id, &session_id)
+            .await
+            .ok()
+            .flatten()?;
+        self.thread_pool.subscribe(thread_id).or_else(|| {
+            Some(
+                self.thread_pool
+                    .register_chat_thread(session_id, *thread_id),
+            )
+        })
+    }
+
+    async fn ensure_thread_in_session(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<()> {
+        let thread_record = self
+            .thread_repo
+            .get_thread_in_session(thread_id, &session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        if thread_record.is_none() {
+            return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
+        }
+        Ok(())
     }
 }
 

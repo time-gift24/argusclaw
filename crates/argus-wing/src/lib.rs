@@ -1387,6 +1387,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_message_rejects_cross_session_thread_pair_without_rebinding_runtime() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Cross Session Guard Agent".to_string(),
+                description: "Verifies mismatched session/thread pairs fail fast".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help validate runtime ownership.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let owning_session_id = wing
+            .create_session("owning-session")
+            .await
+            .expect("owning session should create");
+        let foreign_session_id = wing
+            .create_session("foreign-session")
+            .await
+            .expect("foreign session should create");
+        let thread_id = wing
+            .create_thread(owning_session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        let runtime_before = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .expect("thread should be registered");
+        assert_eq!(runtime_before.runtime.session_id, Some(owning_session_id));
+
+        let error = wing
+            .send_message(foreign_session_id, thread_id, "should fail".to_string())
+            .await
+            .expect_err("cross-session pair should be rejected");
+        assert!(
+            error.to_string().contains("Thread not found"),
+            "unexpected error: {error}"
+        );
+
+        let runtime_after = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .expect("thread should remain registered");
+        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_cross_session_thread_pair() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Cross Session Subscribe Agent".to_string(),
+                description: "Verifies subscribe checks thread ownership".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help validate subscriptions.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let owning_session_id = wing
+            .create_session("owning-subscribe-session")
+            .await
+            .expect("owning session should create");
+        let foreign_session_id = wing
+            .create_session("foreign-subscribe-session")
+            .await
+            .expect("foreign session should create");
+        let thread_id = wing
+            .create_thread(owning_session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        let receiver = wing.subscribe(foreign_session_id, thread_id).await;
+        assert!(
+            receiver.is_none(),
+            "cross-session subscription should be rejected"
+        );
+
+        let runtime_after = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .expect("thread should remain registered");
+        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+    }
+
+    #[tokio::test]
     async fn dispatch_job_binds_real_thread_id_and_keeps_it_recoverable() {
         use argus_repository::traits::{JobRepository, ThreadRepository};
         use argus_repository::types::JobId;
@@ -1444,8 +1567,19 @@ mod tests {
             .expect("job should be bound to an execution thread");
         assert_ne!(bound_thread_id, originating_thread_id);
 
-        let snapshot = wing.thread_pool_snapshot();
-        assert_eq!(snapshot.active_threads, 1);
+        let runtime = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
+            .expect("bound runtime should be tracked");
+        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
+        assert!(matches!(
+            runtime.status,
+            argus_protocol::ThreadRuntimeStatus::Queued
+                | argus_protocol::ThreadRuntimeStatus::Running
+                | argus_protocol::ThreadRuntimeStatus::Cooling
+        ));
 
         let sqlite = ArgusSqlite::new(wing.pool.clone());
         let persisted_job = JobRepository::get(&sqlite, &JobId::new(job_id.clone()))
