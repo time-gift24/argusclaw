@@ -163,6 +163,7 @@ impl ArgusWing {
             trace_dir,
             job_manager.thread_pool(),
             job_manager.clone(),
+            workflow_manager.clone(),
         ));
 
         // Create approval manager
@@ -233,6 +234,7 @@ impl ArgusWing {
             trace_dir,
             job_manager.thread_pool(),
             job_manager.clone(),
+            workflow_manager.clone(),
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 

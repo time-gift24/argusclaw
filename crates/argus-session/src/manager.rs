@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::{read_jsonl_events, TurnLogEvent};
-use argus_job::{JobManager, ThreadPool};
+use argus_job::{GetWorkflowProgressTool, JobManager, StartWorkflowTool, WorkflowManager};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
@@ -97,6 +96,7 @@ impl SessionManager {
         trace_dir: PathBuf,
         thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
+        workflow_manager: Arc<WorkflowManager>,
     ) -> Self {
         // Register the dispatch_job tool
         let dispatch_tool = job_manager.clone().create_dispatch_tool();
@@ -109,6 +109,10 @@ impl SessionManager {
         // Register the get_job_result tool for proactive job polling
         let get_job_result_tool = job_manager.clone().create_get_job_result_tool();
         tool_manager.register(Arc::new(get_job_result_tool));
+
+        // Register workflow tools for persistent workflow execution
+        tool_manager.register(Arc::new(StartWorkflowTool::new(workflow_manager.clone())));
+        tool_manager.register(Arc::new(GetWorkflowProgressTool::new(workflow_manager)));
 
         Self {
             session_repo,

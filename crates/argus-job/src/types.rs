@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use argus_protocol::{AgentId, ThreadId};
 
+use crate::workflow_manager::{AppendWorkflowNode, WorkflowExecutionProgress};
+
 /// Arguments for dispatching a job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobDispatchArgs {
@@ -24,6 +26,42 @@ pub struct GetJobResultArgs {
     /// Whether to consume the completed result and prevent future auto-replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consume: Option<bool>,
+}
+
+/// Arguments for starting a workflow execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWorkflowArgs {
+    /// The workflow template ID to instantiate.
+    pub template_id: String,
+    /// Optional template version. When omitted, the latest version is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_version: Option<i64>,
+    /// Append-only workflow nodes supplied by the main agent.
+    #[serde(default)]
+    pub extra_nodes: Vec<AppendWorkflowNode>,
+}
+
+/// Result of `start_workflow`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartWorkflowResult {
+    /// The instantiated workflow execution ID.
+    pub workflow_execution_id: String,
+    /// Immediate progress snapshot after instantiation.
+    pub progress: WorkflowExecutionProgress,
+}
+
+/// Arguments for querying workflow progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetWorkflowProgressArgs {
+    /// The workflow execution ID returned by `start_workflow`.
+    pub workflow_execution_id: String,
+}
+
+/// Result of `get_workflow_progress`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetWorkflowProgressResult {
+    /// Latest workflow progress snapshot.
+    pub progress: WorkflowExecutionProgress,
 }
 
 /// Result of a completed job (serialized into tool responses).
