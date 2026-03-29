@@ -23,7 +23,6 @@
 //! ```
 
 mod db;
-mod init;
 mod resolver;
 
 use std::sync::Arc;
@@ -50,7 +49,6 @@ use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
-pub use init::init_tracing;
 pub use resolver::ProviderManagerResolver;
 
 /// Default agent display name for the ArgusWing template.
@@ -90,9 +88,6 @@ impl ArgusWing {
     /// - Migrations fail
     /// - The default template cannot be ensured
     pub async fn init(database_path: Option<&str>) -> Result<Arc<Self>> {
-        // Initialize tracing first
-        init_tracing();
-
         let database_path = resolve_database_target(database_path)?;
         let pool = match &database_path {
             DatabaseTarget::Url(database_url) => connect(database_url).await,
@@ -238,7 +233,7 @@ impl ArgusWing {
     }
 
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
-    pub fn register_default_tools(&self) {
+    pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
             ApplyPatchTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool, ShellTool,
             WriteFileTool,
@@ -252,6 +247,8 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(WriteFileTool::new()));
         self.tool_manager.register(Arc::new(ListDirTool::new()));
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
+
+        Ok(())
     }
 
     /// Get a reference to the approval manager.
@@ -1145,5 +1142,38 @@ mod tests {
             .expect("thread should stay loaded");
         let thread = thread.read().await;
         assert_eq!(thread.provider().model_name(), "gpt-5");
+    }
+
+    #[tokio::test]
+    async fn register_default_tools_registers_builtin_tool_ids() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("sqlite.db");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        wing.register_default_tools()
+            .await
+            .expect("default tool registration should succeed");
+
+        let mut tool_ids = wing.tool_manager().list_ids();
+        tool_ids.sort();
+
+        for expected_tool in [
+            "apply_patch",
+            "glob",
+            "grep",
+            "http",
+            "list_dir",
+            "read",
+            "shell",
+            "write_file",
+        ] {
+            assert!(
+                tool_ids.iter().any(|tool_id| tool_id == expected_tool),
+                "missing expected tool: {expected_tool}"
+            );
+        }
     }
 }
