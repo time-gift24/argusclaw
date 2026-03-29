@@ -8,6 +8,8 @@ import { ThreadMonitorTable } from "@/components/thread-monitor/thread-monitor-t
 import { Badge } from "@/components/ui/badge";
 import { useChatStore } from "@/lib/chat-store";
 
+const THREAD_POOL_POLL_INTERVAL_MS = 5_000;
+
 export function ThreadMonitorScreen() {
   const snapshot = useChatStore((state) => state.threadPoolSnapshot);
   const threads = useChatStore((state) => state.threadPoolThreads);
@@ -17,6 +19,13 @@ export function ThreadMonitorScreen() {
 
   React.useEffect(() => {
     void refresh();
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, THREAD_POOL_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
   }, [refresh]);
 
   return (

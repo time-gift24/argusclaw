@@ -147,6 +147,7 @@ export interface ChatStore {
 }
 
 let threadEventListenerInitPromise: Promise<UnlistenFn> | null = null;
+let threadPoolSnapshotRequestVersion = 0;
 
 function sortThreadPoolThreads(
   threads: ThreadPoolThreadState[],
@@ -168,7 +169,11 @@ function touchThreadPoolThread(
   threads: ThreadPoolThreadState[],
   update: Omit<
     ThreadPoolThreadState,
-    "estimatedMemoryBytes" | "lastActiveAt" | "recoverable" | "eventCount"
+    | "estimatedMemoryBytes"
+    | "lastActiveAt"
+    | "recoverable"
+    | "lastReason"
+    | "eventCount"
   > & {
     estimatedMemoryBytes?: number;
     lastActiveAt?: string;
@@ -596,6 +601,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   async refreshThreadPoolSnapshot() {
+    const requestVersion = ++threadPoolSnapshotRequestVersion;
     set((state) => ({
       threadPoolSnapshotLoading: true,
       threadPoolError: null,
@@ -605,22 +611,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const snapshot = await threadPool.getSnapshot();
       set((state) => ({
-        threadPoolSnapshot: snapshot,
-        threadPoolSnapshotLoading: false,
-        threadPoolError: null,
-        threadPoolThreads: state.threadPoolThreads.map((thread) => ({
-          ...thread,
-          estimatedMemoryBytes:
-            thread.estimatedMemoryBytes > 0
-              ? thread.estimatedMemoryBytes
-              : snapshot.avg_thread_memory_bytes,
-        })),
+        ...(requestVersion === threadPoolSnapshotRequestVersion
+          ? {
+              threadPoolSnapshot: snapshot,
+              threadPoolSnapshotLoading: false,
+              threadPoolError: null,
+              threadPoolThreads: state.threadPoolThreads.map((thread) => ({
+                ...thread,
+                estimatedMemoryBytes:
+                  thread.estimatedMemoryBytes > 0
+                    ? thread.estimatedMemoryBytes
+                    : snapshot.avg_thread_memory_bytes,
+              })),
+            }
+          : {}),
       }));
     } catch (error) {
-      set({
-        threadPoolSnapshotLoading: false,
-        threadPoolError: toErrorMessage(error),
-      });
+      set(() =>
+        requestVersion === threadPoolSnapshotRequestVersion
+          ? {
+              threadPoolSnapshotLoading: false,
+              threadPoolError: toErrorMessage(error),
+            }
+          : {},
+      );
     }
   },
 
