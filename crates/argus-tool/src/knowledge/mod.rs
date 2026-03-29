@@ -1,29 +1,38 @@
+mod cache;
 mod error;
 mod github;
+mod indexer;
 mod manifest;
 mod markdown;
 mod models;
 mod registry;
 
+pub use cache::SnapshotCache;
 pub use error::KnowledgeToolError;
 pub use github::{GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport};
+pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{FileOverride, NodeOverride, RepositoryManifest, DEFAULT_MANIFEST_PATHS};
 pub use markdown::{parse_markdown_sections, ParsedSection};
 pub use models::{
-    GitHubBlob, GitHubSnapshot, GitHubTree, GitHubTreeEntry, GitHubTreeEntryKind,
-    KnowledgeAction, KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeToolArgs,
+    ContentPage, ExploreTreeEntry, ExploreTreeResult, GitHubBlob, GitHubSnapshot, GitHubTree,
+    GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeNode, KnowledgeNodeKind,
+    KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
 pub use registry::KnowledgeRepoRegistry;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_markdown_sections, GitHubKnowledgeClient, GitHubTransport, KnowledgeRepoRegistry,
-        KnowledgeToolArgs, RepositoryManifest,
+        parse_markdown_sections, GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree,
+        GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer,
+        KnowledgeRepoRegistry, KnowledgeToolArgs, RepositoryManifest,
     };
     use async_trait::async_trait;
     use serde_json::Value;
+    use std::collections::HashMap;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::path::Path;
     use std::sync::Mutex;
 
@@ -169,5 +178,172 @@ mod tests {
         let node_id =
             manifest.resolve_section_id("docs/auth.md", "Refresh Flow", "docs/auth.md#refresh-flow");
         assert_eq!(node_id, "auth/refresh-flow");
+    }
+
+    #[derive(Clone)]
+    struct RecordingKnowledgeBackend {
+        tree: GitHubTree,
+        manifest: Option<RepositoryManifest>,
+        blobs: HashMap<String, GitHubBlob>,
+        blob_fetches: Arc<AtomicUsize>,
+    }
+
+    impl RecordingKnowledgeBackend {
+        fn tree_only() -> Self {
+            Self {
+                tree: GitHubTree {
+                    rev: "abc123".to_string(),
+                    entries: vec![
+                        GitHubTreeEntry {
+                            path: "docs/auth.md".to_string(),
+                            sha: "blob-auth".to_string(),
+                            kind: GitHubTreeEntryKind::Blob,
+                        },
+                        GitHubTreeEntry {
+                            path: "docs/login.md".to_string(),
+                            sha: "blob-login".to_string(),
+                            kind: GitHubTreeEntryKind::Blob,
+                        },
+                    ],
+                },
+                manifest: None,
+                blobs: HashMap::new(),
+                blob_fetches: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_auth_docs() -> Self {
+            let mut backend = Self::tree_only();
+            backend.manifest = Some(
+                RepositoryManifest::from_json(serde_json::json!({
+                    "version": 1,
+                    "nodes": [
+                        {
+                            "id": "docs/auth.md#refresh-flow",
+                            "source": { "path": "docs/auth.md", "heading": "Refresh Flow" },
+                            "relations": [
+                                { "type": "related", "target": "auth/login-flow" }
+                            ]
+                        },
+                        {
+                            "id": "auth/login-flow",
+                            "source": { "path": "docs/login.md", "heading": "Login Flow" }
+                        }
+                    ]
+                }))
+                .unwrap(),
+            );
+            backend.blobs.insert(
+                "docs/auth.md".to_string(),
+                GitHubBlob {
+                    sha: "blob-auth".to_string(),
+                    text: "# Auth\n## Refresh Flow\nToken refresh details\n".to_string(),
+                },
+            );
+            backend.blobs.insert(
+                "docs/login.md".to_string(),
+                GitHubBlob {
+                    sha: "blob-login".to_string(),
+                    text: "# Login Flow\nLogin details\n".to_string(),
+                },
+            );
+            backend
+        }
+
+        fn with_large_section() -> Self {
+            let mut backend = Self::with_auth_docs();
+            backend.blobs.insert(
+                "docs/auth.md".to_string(),
+                GitHubBlob {
+                    sha: "blob-auth".to_string(),
+                    text: format!("# Auth\n## Refresh Flow\n{}\n", "token ".repeat(200)),
+                },
+            );
+            backend
+        }
+
+        fn blob_fetch_count(&self) -> usize {
+            self.blob_fetches.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl KnowledgeBackend for RecordingKnowledgeBackend {
+        async fn read_tree(
+            &self,
+            _snapshot_id: &str,
+        ) -> Result<GitHubTree, super::KnowledgeToolError> {
+            Ok(self.tree.clone())
+        }
+
+        async fn read_manifest(
+            &self,
+            _snapshot_id: &str,
+        ) -> Result<Option<RepositoryManifest>, super::KnowledgeToolError> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn read_blob(
+            &self,
+            _snapshot_id: &str,
+            path: &str,
+            _sha: &str,
+        ) -> Result<GitHubBlob, super::KnowledgeToolError> {
+            self.blob_fetches.fetch_add(1, Ordering::SeqCst);
+            self.blobs
+                .get(path)
+                .cloned()
+                .ok_or_else(|| super::KnowledgeToolError::NotFound(path.to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn knowledge_index_explore_tree_lists_entries_without_blob_fetch() {
+        let backend = RecordingKnowledgeBackend::tree_only();
+        let indexer = KnowledgeIndexer::new(backend.clone());
+
+        let tree = indexer.explore_tree("snap-1", "/docs", 1).await.unwrap();
+        assert_eq!(tree.entries.len(), 2);
+        assert_eq!(backend.blob_fetch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn knowledge_index_search_matches_manifest_and_heading_metadata() {
+        let backend = RecordingKnowledgeBackend::with_auth_docs();
+        let indexer = KnowledgeIndexer::new(backend);
+
+        let results = indexer
+            .search_nodes("snap-1", "token refresh", Some("/docs"), 8)
+            .await
+            .unwrap();
+
+        assert!(results.iter().any(|node| node.title == "Refresh Flow"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_index_get_content_is_bounded_and_cursorized() {
+        let backend = RecordingKnowledgeBackend::with_large_section();
+        let indexer = KnowledgeIndexer::new(backend);
+
+        let page = indexer
+            .get_content("snap-1", "docs/auth.md#refresh-flow", Some(120), None)
+            .await
+            .unwrap();
+
+        assert!(page.truncated);
+        assert!(page.next_cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn knowledge_index_get_neighbors_returns_manifest_relations() {
+        let backend = RecordingKnowledgeBackend::with_auth_docs();
+        let indexer = KnowledgeIndexer::new(backend);
+
+        let neighbors = indexer
+            .get_neighbors("snap-1", "docs/auth.md#refresh-flow")
+            .await
+            .unwrap();
+
+        assert!(neighbors.iter().any(|node| node.id == "auth/login-flow"));
     }
 }
