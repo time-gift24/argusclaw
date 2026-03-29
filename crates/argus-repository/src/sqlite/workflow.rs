@@ -308,13 +308,29 @@ impl WorkflowRepository for ArgusSqlite {
     }
 
     async fn delete_workflow_execution(&self, id: &WorkflowId) -> DbResult<bool> {
-        let result = sqlx::query("DELETE FROM workflows WHERE id = ?1")
+        let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        sqlx::query("DELETE FROM jobs WHERE group_id = ?1")
             .bind(id.as_ref())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
             })?;
+
+        let result = sqlx::query("DELETE FROM workflows WHERE id = ?1")
+            .bind(id.as_ref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+
+        tx.commit().await.map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -436,6 +452,7 @@ impl ArgusSqlite {
 mod tests {
     use super::*;
 
+    use argus_protocol::ThreadId;
     use crate::traits::{JobRepository, WorkflowRepository};
     use crate::types::{
         JobId, JobRecord, JobType, WorkflowRecord, WorkflowTemplateNodeRecord,
@@ -482,12 +499,33 @@ mod tests {
         argus_protocol::AgentId::new(7)
     }
 
+    async fn seed_test_thread(repo: &ArgusSqlite) -> ThreadId {
+        let provider_id: i64 =
+            sqlx::query_scalar("SELECT id FROM llm_providers ORDER BY id LIMIT 1")
+                .fetch_one(repo.pool())
+                .await
+                .expect("default provider");
+
+        let thread_id = ThreadId::new();
+        sqlx::query(
+            "INSERT INTO threads (id, provider_id, title, token_count, turn_count, session_id, template_id)
+             VALUES (?1, ?2, ?3, 0, 0, NULL, NULL)",
+        )
+        .bind(thread_id.to_string())
+        .bind(provider_id)
+        .bind("Workflow Test Thread")
+        .execute(repo.pool())
+        .await
+        .expect("seed thread");
+
+        thread_id
+    }
+
     #[tokio::test]
-    async fn list_workflow_execution_progress_counts_grouped_jobs() {
+    async fn workflow_template_node_reads_round_trip() {
         let repo = test_repo().await;
         let agent_id = seed_test_agent(&repo).await;
         let template_id = WorkflowTemplateId::new("tpl-1");
-        let execution_id = WorkflowId::new("wf-1");
 
         repo.create_workflow_template(&WorkflowTemplateRecord {
             id: template_id.clone(),
@@ -533,23 +571,6 @@ mod tests {
         .await
         .unwrap();
 
-        repo.create_workflow_execution(&WorkflowRecord {
-            id: execution_id.clone(),
-            name: "demo".to_string(),
-            status: WorkflowStatus::Pending,
-            template_id: Some(template_id.clone()),
-            template_version: Some(1),
-            initiating_thread_id: None,
-        })
-        .await
-        .unwrap();
-
-        let header = repo.get_workflow_execution(&execution_id).await.unwrap();
-        assert!(header.is_some());
-        let header = header.unwrap();
-        assert_eq!(header.template_id, Some(template_id.clone()));
-        assert_eq!(header.template_version, Some(1));
-
         let template = repo
             .get_workflow_template(&template_id, 1)
             .await
@@ -557,6 +578,90 @@ mod tests {
             .unwrap();
         assert_eq!(template.name, "demo v2");
         assert_eq!(template.description, "updated demo template");
+
+        let collect = repo
+            .get_workflow_template_node(&template_id, 1, "collect")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(collect.depends_on_keys, Vec::<String>::new());
+
+        let summarize = repo
+            .get_workflow_template_node(&template_id, 1, "summarize")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summarize.depends_on_keys, vec!["collect".to_string()]);
+
+        let nodes = repo
+            .list_workflow_template_nodes(&template_id, 1)
+            .await
+            .unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].node_key, "collect");
+        assert_eq!(nodes[1].node_key, "summarize");
+    }
+
+    #[tokio::test]
+    async fn workflow_execution_update_delete_and_thread_lookup_work() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+        let thread_id = seed_test_thread(&repo).await;
+        let template_id = WorkflowTemplateId::new("tpl-1");
+        let execution_id = WorkflowId::new("wf-1");
+
+        repo.create_workflow_template(&WorkflowTemplateRecord {
+            id: template_id.clone(),
+            name: "demo".to_string(),
+            version: 1,
+            description: "demo template".to_string(),
+        })
+        .await
+        .unwrap();
+
+        repo.create_workflow_template_node(&WorkflowTemplateNodeRecord {
+            template_id: template_id.clone(),
+            template_version: 1,
+            node_key: "collect".to_string(),
+            name: "Collect".to_string(),
+            agent_id,
+            prompt: "Collect context".to_string(),
+            context: None,
+            depends_on_keys: vec![],
+        })
+        .await
+        .unwrap();
+
+        repo.create_workflow_template_node(&WorkflowTemplateNodeRecord {
+            template_id: template_id.clone(),
+            template_version: 1,
+            node_key: "summarize".to_string(),
+            name: "Summarize".to_string(),
+            agent_id,
+            prompt: "Summarize context".to_string(),
+            context: None,
+            depends_on_keys: vec!["collect".to_string()],
+        })
+        .await
+        .unwrap();
+
+        repo.create_workflow_execution(&WorkflowRecord {
+            id: execution_id.clone(),
+            name: "demo".to_string(),
+            status: WorkflowStatus::Pending,
+            template_id: Some(template_id.clone()),
+            template_version: Some(1),
+            initiating_thread_id: Some(thread_id.clone()),
+        })
+        .await
+        .unwrap();
+
+        let executions = repo
+            .list_workflow_executions_by_initiating_thread(&thread_id)
+            .await
+            .unwrap();
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0].id, execution_id);
 
         repo.create(&JobRecord {
             id: JobId::new("job-1"),
@@ -602,11 +707,35 @@ mod tests {
         .await
         .unwrap();
 
+        repo.update_workflow_execution_status(&execution_id, WorkflowStatus::Running)
+            .await
+            .unwrap();
+        let updated = repo
+            .get_workflow_execution(&execution_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, WorkflowStatus::Running);
+
         let progress = repo.get_workflow_progress(&execution_id).await.unwrap();
         assert!(progress.is_some());
         let progress = progress.unwrap();
         assert_eq!(progress.total_jobs, 2);
         assert_eq!(progress.pending_jobs, 1);
         assert_eq!(progress.running_jobs, 1);
+
+        let deleted = repo.delete_workflow_execution(&execution_id).await.unwrap();
+        assert!(deleted);
+        assert!(repo.get_workflow_execution(&execution_id).await.unwrap().is_none());
+        assert!(repo
+            .list_by_group(&execution_id.to_string())
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .get_workflow_progress(&execution_id)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

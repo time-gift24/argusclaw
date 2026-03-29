@@ -12,6 +12,36 @@ use super::{ArgusSqlite, DbResult};
 #[async_trait]
 impl JobRepository for ArgusSqlite {
     async fn create(&self, job: &JobRecord) -> DbResult<()> {
+        if job.job_type == JobType::Workflow {
+            if job
+                .group_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err(DbError::QueryFailed {
+                    reason: "workflow jobs require a non-empty group_id".to_string(),
+                });
+            }
+
+            if job
+                .node_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err(DbError::QueryFailed {
+                    reason: "workflow jobs require a non-empty node_key".to_string(),
+                });
+            }
+        } else if job.node_key.is_some() {
+            return Err(DbError::QueryFailed {
+                reason: "node_key is only valid for workflow jobs".to_string(),
+            });
+        }
+
         let depends_on_json = serde_json::to_string(
             &job.depends_on
                 .iter()
@@ -228,5 +258,115 @@ impl ArgusSqlite {
             parent_job_id,
             result,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::traits::JobRepository;
+    use uuid::Uuid;
+
+    async fn test_repo() -> ArgusSqlite {
+        let db_path =
+            std::env::temp_dir().join(format!("argus-repository-job-{}.sqlite", Uuid::new_v4()));
+        let pool = crate::connect_path(&db_path)
+            .await
+            .expect("create sqlite pool");
+        crate::migrate(&pool).await.expect("run migrations");
+        ArgusSqlite::new(pool)
+    }
+
+    async fn seed_test_agent(repo: &ArgusSqlite) -> AgentId {
+        let provider_id: i64 =
+            sqlx::query_scalar("SELECT id FROM llm_providers ORDER BY id LIMIT 1")
+                .fetch_one(repo.pool())
+                .await
+                .expect("default provider");
+
+        sqlx::query(
+            "INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, thinking_config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(7_i64)
+        .bind("Workflow Test Agent")
+        .bind("Test agent")
+        .bind("1.0.0")
+        .bind(provider_id)
+        .bind(Option::<String>::None)
+        .bind("You are a test agent.")
+        .bind("[]")
+        .bind(Option::<i64>::None)
+        .bind(Option::<i64>::None)
+        .bind(r#"{"type":"disabled","clear_thinking":false}"#)
+        .execute(repo.pool())
+        .await
+        .expect("seed agent");
+
+        AgentId::new(7)
+    }
+
+    #[tokio::test]
+    async fn workflow_job_round_trips_node_key() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+        let job_id = JobId::new("job-1");
+
+        repo.create(&JobRecord {
+            id: job_id.clone(),
+            job_type: JobType::Workflow,
+            name: "Collect".to_string(),
+            status: WorkflowStatus::Pending,
+            agent_id,
+            context: None,
+            prompt: "Collect context".to_string(),
+            thread_id: None,
+            group_id: Some("wf-1".to_string()),
+            node_key: Some("collect".to_string()),
+            depends_on: vec![],
+            cron_expr: None,
+            scheduled_at: None,
+            started_at: None,
+            finished_at: None,
+            parent_job_id: None,
+            result: None,
+        })
+        .await
+        .unwrap();
+
+        let job = repo.get(&job_id).await.unwrap().unwrap();
+        assert_eq!(job.node_key, Some("collect".to_string()));
+    }
+
+    #[tokio::test]
+    async fn workflow_job_requires_group_and_node_key() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+
+        let err = repo
+            .create(&JobRecord {
+                id: JobId::new("job-2"),
+                job_type: JobType::Workflow,
+                name: "Broken".to_string(),
+                status: WorkflowStatus::Pending,
+                agent_id,
+                context: None,
+                prompt: "Broken".to_string(),
+                thread_id: None,
+                group_id: None,
+                node_key: None,
+                depends_on: vec![],
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("workflow jobs require"));
     }
 }
