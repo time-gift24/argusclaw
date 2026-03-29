@@ -37,11 +37,14 @@ use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
+    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, SessionRepository,
+    ThreadRepository,
 };
+
+
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
@@ -63,7 +66,6 @@ const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
 /// - Messaging and subscriptions
 /// - Approval management
 pub struct ArgusWing {
-    #[allow(dead_code)]
     pool: SqlitePool,
     provider_manager: Arc<ProviderManager>,
     template_manager: Arc<TemplateManager>,
@@ -131,10 +133,13 @@ impl ArgusWing {
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create job manager with all dependencies
-        let job_manager = Arc::new(JobManager::new(
+        let job_manager = Arc::new(JobManager::new_with_repositories(
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
+            arc_sqlite.clone() as Arc<dyn JobRepository>,
+            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
+            llm_repository.clone(),
         ));
 
         // Create session manager
@@ -193,10 +198,13 @@ impl ArgusWing {
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create job manager with all dependencies
-        let job_manager = Arc::new(JobManager::new(
+        let job_manager = Arc::new(JobManager::new_with_repositories(
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
+            arc_sqlite.clone() as Arc<dyn JobRepository>,
+            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
+            llm_repository.clone(),
         ));
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
@@ -263,6 +271,23 @@ impl ArgusWing {
     #[must_use]
     pub fn compactor_manager(&self) -> &Arc<CompactorManager> {
         &self.compactor_manager
+    }
+
+    /// Get a point-in-time snapshot of aggregate thread-pool metrics.
+    #[must_use]
+    pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
+        self.job_manager.thread_pool_snapshot()
+    }
+
+    /// Resolve the persisted execution thread bound to a job ID, if available.
+    pub async fn job_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>> {
+        if let Some(thread_id) = self.job_manager.thread_binding(job_id) {
+            return Ok(Some(thread_id));
+        }
+
+        let repository = ArgusSqlite::new(self.pool.clone());
+        let persisted = JobRepository::get(&repository, &JobId::new(job_id)).await?;
+        Ok(persisted.and_then(|job| job.thread_id))
     }
 
     /// Get a reference to the account manager.
@@ -1218,5 +1243,91 @@ mod tests {
                 "missing expected tool: {expected_tool}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_binds_real_thread_id_and_keeps_it_recoverable() {
+        use argus_repository::traits::{JobRepository, ThreadRepository};
+        use argus_repository::types::JobId;
+        use argus_repository::ArgusSqlite;
+        use tokio::sync::{broadcast, mpsc};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let agent_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Dispatch Test Agent".to_string(),
+                description: "Used to verify job thread binding persistence".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You are a dispatch test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let originating_thread_id = ThreadId::new();
+        let job_id = "job-binding-recoverable".to_string();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        wing.job_manager
+            .dispatch_job(
+                originating_thread_id,
+                job_id.clone(),
+                agent_id,
+                "execute a recoverable job".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("dispatch should enqueue");
+
+        let bound_thread_id = wing
+            .job_thread_binding(&job_id)
+            .await
+            .expect("job thread binding lookup should succeed")
+            .expect("job should be bound to an execution thread");
+        assert_ne!(bound_thread_id, originating_thread_id);
+
+        let snapshot = wing.thread_pool_snapshot();
+        assert_eq!(snapshot.active_threads, 1);
+
+        let sqlite = ArgusSqlite::new(wing.pool.clone());
+        let persisted_job = JobRepository::get(&sqlite, &JobId::new(job_id.clone()))
+            .await
+            .expect("job lookup should succeed")
+            .expect("job row should exist");
+        assert_eq!(persisted_job.thread_id, Some(bound_thread_id));
+
+        let persisted_thread = ThreadRepository::get_thread(&sqlite, &bound_thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread row should exist");
+        assert!(persisted_thread.session_id.is_none());
+
+        drop(wing);
+
+        let recovered = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should re-initialize");
+        let recovered_binding = recovered
+            .job_thread_binding(&job_id)
+            .await
+            .expect("binding lookup should succeed after restart");
+        assert_eq!(recovered_binding, Some(bound_thread_id));
     }
 }

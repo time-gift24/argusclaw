@@ -11,6 +11,10 @@ use argus_protocol::{
     AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
     ThreadMailbox, ThreadPoolSnapshot,
 };
+use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
+use argus_repository::types::{
+    AgentId as RepoAgentId, JobRecord, JobType, ThreadRecord, WorkflowId, WorkflowStatus,
+};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
@@ -45,11 +49,34 @@ struct ThreadPoolStore {
     peak_process_memory_bytes: Option<u64>,
 }
 
+#[derive(Clone)]
+pub struct ThreadPoolPersistence {
+    job_repository: Arc<dyn JobRepository>,
+    thread_repository: Arc<dyn ThreadRepository>,
+    provider_repository: Arc<dyn LlmProviderRepository>,
+}
+
+impl ThreadPoolPersistence {
+    #[must_use]
+    pub fn new(
+        job_repository: Arc<dyn JobRepository>,
+        thread_repository: Arc<dyn ThreadRepository>,
+        provider_repository: Arc<dyn LlmProviderRepository>,
+    ) -> Self {
+        Self {
+            job_repository,
+            thread_repository,
+            provider_repository,
+        }
+    }
+}
+
 /// Coordinates job-thread bindings, runtime state transitions, and metrics.
 pub struct ThreadPool {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
+    persistence: Option<ThreadPoolPersistence>,
     max_threads: u32,
     store: Arc<StdMutex<ThreadPoolStore>>,
 }
@@ -69,10 +96,21 @@ impl ThreadPool {
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
+        Self::with_persistence(template_manager, provider_resolver, tool_manager, None)
+    }
+
+    /// Create a thread pool with optional repository-backed persistence.
+    pub fn with_persistence(
+        template_manager: Arc<TemplateManager>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        tool_manager: Arc<ToolManager>,
+        persistence: Option<ThreadPoolPersistence>,
+    ) -> Self {
         Self {
             template_manager,
             provider_resolver,
             tool_manager,
+            persistence,
             max_threads: DEFAULT_MAX_THREADS,
             store: Arc::new(StdMutex::new(ThreadPoolStore::default())),
         }
@@ -83,6 +121,7 @@ impl ThreadPool {
         let thread_id = ThreadId::new();
         let now = Utc::now().to_rfc3339();
         let estimated_memory_bytes = request.prompt.len() as u64;
+        self.persist_binding(&request, thread_id, &now).await?;
 
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         store.runtimes.insert(
@@ -195,16 +234,15 @@ impl ThreadPool {
             snapshot: self.collect_metrics(),
         });
 
-        let result = AssertUnwindSafe(self
-            .execute_turn(
-                request.originating_thread_id,
-                request.job_id.clone(),
-                execution_thread_id,
-                request.agent_id,
-                request.prompt,
-                pipe_tx.clone(),
-                control_tx,
-            ))
+        let result = AssertUnwindSafe(self.execute_turn(
+            request.originating_thread_id,
+            request.job_id.clone(),
+            execution_thread_id,
+            request.agent_id,
+            request.prompt,
+            pipe_tx.clone(),
+            control_tx,
+        ))
         .catch_unwind()
         .await;
 
@@ -432,6 +470,102 @@ impl ThreadPool {
         format!("job executor panicked: {detail}")
     }
 
+    async fn persist_binding(
+        &self,
+        request: &ThreadPoolJobRequest,
+        thread_id: ThreadId,
+        now: &str,
+    ) -> Result<(), JobError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+
+        let provider_id = persistence
+            .provider_repository
+            .get_default_provider_id()
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to resolve default provider id: {err}"))
+            })?
+            .ok_or_else(|| {
+                JobError::ExecutionFailed("default provider is not configured".to_string())
+            })?;
+
+        let thread_record = ThreadRecord {
+            id: thread_id,
+            provider_id,
+            title: Some(format!("job:{}", request.job_id)),
+            token_count: 0,
+            turn_count: 0,
+            session_id: None,
+            template_id: Some(RepoAgentId::new(request.agent_id.inner())),
+            model_override: None,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+        };
+        persistence
+            .thread_repository
+            .upsert_thread(&thread_record)
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to persist thread record: {err}"))
+            })?;
+
+        let job_id = WorkflowId::new(request.job_id.clone());
+        let existing_job = persistence
+            .job_repository
+            .get(&job_id)
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?;
+
+        if existing_job.is_some() {
+            persistence
+                .job_repository
+                .update_thread_id(&job_id, &thread_id)
+                .await
+                .map_err(|err| {
+                    JobError::ExecutionFailed(format!(
+                        "failed to persist job-thread binding: {err}"
+                    ))
+                })?;
+            return Ok(());
+        }
+
+        let job_record = JobRecord {
+            id: job_id,
+            job_type: JobType::Standalone,
+            name: format!("job:{}", request.job_id),
+            status: WorkflowStatus::Pending,
+            agent_id: RepoAgentId::new(request.agent_id.inner()),
+            context: request
+                .context
+                .as_ref()
+                .map(std::string::ToString::to_string),
+            prompt: request.prompt.clone(),
+            thread_id: Some(thread_id),
+            group_id: None,
+            depends_on: Vec::new(),
+            cron_expr: None,
+            scheduled_at: None,
+            started_at: None,
+            finished_at: None,
+            parent_job_id: None,
+            result: None,
+        };
+
+        persistence
+            .job_repository
+            .create(&job_record)
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to create job record: {err}"))
+            })?;
+
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn test_pool() -> Self {
         use argus_protocol::{LlmProvider, ProviderId};
@@ -445,7 +579,10 @@ impl ThreadPool {
 
         #[async_trait]
         impl ProviderResolver for DummyProviderResolver {
-            async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            async fn resolve(
+                &self,
+                _id: ProviderId,
+            ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
                 unreachable!("resolver should not be called in thread-pool state tests");
             }
 

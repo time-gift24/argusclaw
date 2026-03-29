@@ -13,6 +13,7 @@ use argus_protocol::{
     AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
     ThreadPoolSnapshot,
 };
+use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use tokio::sync::{broadcast, mpsc};
@@ -21,7 +22,7 @@ use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
 use crate::get_job_result_tool::GetJobResultTool;
 use crate::list_subagents_tool::ListSubagentsTool;
-use crate::thread_pool::ThreadPool;
+use crate::thread_pool::{ThreadPool, ThreadPoolPersistence};
 use crate::types::ThreadPoolJobRequest;
 
 #[derive(Debug, Clone)]
@@ -73,10 +74,21 @@ impl JobManager {
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
     ) -> Self {
-        let thread_pool = Arc::new(ThreadPool::new(
+        Self::new_with_persistence(template_manager, provider_resolver, tool_manager, None)
+    }
+
+    /// Create a new JobManager with optional persistent thread-pool backing.
+    pub fn new_with_persistence(
+        template_manager: Arc<TemplateManager>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        tool_manager: Arc<ToolManager>,
+        persistence: Option<ThreadPoolPersistence>,
+    ) -> Self {
+        let thread_pool = Arc::new(ThreadPool::with_persistence(
             template_manager.clone(),
             provider_resolver,
             tool_manager,
+            persistence,
         ));
 
         Self {
@@ -84,6 +96,27 @@ impl JobManager {
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    /// Create a new JobManager wired with repository-backed persistence.
+    pub fn new_with_repositories(
+        template_manager: Arc<TemplateManager>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        tool_manager: Arc<ToolManager>,
+        job_repository: Arc<dyn JobRepository>,
+        thread_repository: Arc<dyn ThreadRepository>,
+        provider_repository: Arc<dyn LlmProviderRepository>,
+    ) -> Self {
+        Self::new_with_persistence(
+            template_manager,
+            provider_resolver,
+            tool_manager,
+            Some(ThreadPoolPersistence::new(
+                job_repository,
+                thread_repository,
+                provider_repository,
+            )),
+        )
     }
 
     /// Create a DispatchJobTool for this manager.
@@ -202,12 +235,12 @@ impl JobManager {
         tokio::spawn(async move {
             let result = thread_pool
                 .execute_job(
-                request,
-                execution_thread_id,
-                pipe_tx_clone.clone(),
-                control_tx_clone.clone(),
-            )
-            .await;
+                    request,
+                    execution_thread_id,
+                    pipe_tx_clone.clone(),
+                    control_tx_clone.clone(),
+                )
+                .await;
 
             Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
             Self::record_completed_job_result_in_store(
