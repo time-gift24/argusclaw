@@ -136,6 +136,13 @@ mod tests {
         assert!(def.parameters.to_string().contains("search_nodes"));
     }
 
+    #[test]
+    fn knowledge_tool_risk_level_is_medium() {
+        let tool = KnowledgeTool::new_for_test(FakeKnowledgeRuntime::default());
+
+        assert_eq!(tool.risk_level(), argus_protocol::risk_level::RiskLevel::Medium);
+    }
+
     #[tokio::test]
     async fn knowledge_tool_rejects_invalid_action_before_runtime() {
         let runtime = FakeKnowledgeRuntime::default();
