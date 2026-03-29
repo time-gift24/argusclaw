@@ -5,7 +5,7 @@ use std::sync::Arc;
 use argus_protocol::{
     AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
     LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
-    SecretString, SessionId, ThreadId,
+    SecretString, SessionId, ThreadId, ThreadPoolSnapshot,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -235,6 +235,13 @@ pub async fn list_tools(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<ToolInfoP
             parameters: t.parameters,
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn get_thread_pool_snapshot(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<ThreadPoolSnapshot, String> {
+    Ok(wing.thread_pool_snapshot())
 }
 
 // ============================================================================

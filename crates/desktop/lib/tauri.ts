@@ -209,6 +209,39 @@ export interface ThreadSnapshotPayload {
   token_count: number;
 }
 
+export type ThreadRuntimeStatus =
+  | "inactive"
+  | "loading"
+  | "queued"
+  | "running"
+  | "cooling"
+  | "evicted";
+
+export interface ThreadRuntimeSnapshot {
+  thread_id: string;
+  job_id: string | null;
+  status: ThreadRuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+}
+
+export interface ThreadPoolSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_jobs: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
 export type ApprovalDecision = "approved" | "denied" | "timed_out";
 
 export const chat = {
@@ -267,4 +300,8 @@ export const chat = {
       decision,
       resolvedBy,
     }),
+};
+
+export const threadPool = {
+  getSnapshot: () => invoke<ThreadPoolSnapshot>("get_thread_pool_snapshot"),
 };

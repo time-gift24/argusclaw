@@ -39,6 +39,45 @@ export interface ThreadSnapshotPayload {
   plan_item_count: number;
 }
 
+export type ThreadRuntimeStatus =
+  | "inactive"
+  | "loading"
+  | "queued"
+  | "running"
+  | "cooling"
+  | "evicted";
+
+export interface ThreadRuntimeSnapshot {
+  thread_id: string;
+  job_id: string | null;
+  status: ThreadRuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+}
+
+export interface ThreadPoolSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_jobs: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
+export type ThreadPoolEventReason =
+  | "cooling_expired"
+  | "memory_pressure"
+  | "cancelled"
+  | "execution_failed";
+
 export interface ChatSessionPayload {
   session_key: string;
   template_id: number;
@@ -91,6 +130,19 @@ export type ThreadEventPayload =
   | { type: "turn_failed"; error: string }
   | { type: "idle" }
   | { type: "compacted"; new_token_count: number }
+  | { type: "thread_bound_to_job"; job_id: string }
+  | { type: "thread_pool_queued"; job_id: string }
+  | { type: "thread_pool_started"; job_id: string }
+  | { type: "thread_pool_cooling"; job_id: string }
+  | {
+      type: "thread_pool_evicted";
+      job_id: string;
+      reason: ThreadPoolEventReason;
+    }
+  | {
+      type: "thread_pool_metrics_updated";
+      snapshot: ThreadPoolSnapshot;
+    }
   | {
       type: "job_dispatched";
       job_id: string;
