@@ -10,6 +10,7 @@ pub mod job_manager;
 pub mod list_subagents_tool;
 pub mod thread_pool;
 pub mod types;
+pub mod workflow_manager;
 
 pub use dispatch_tool::DispatchJobTool;
 pub use error::JobError;
@@ -18,9 +19,6 @@ pub use job_manager::{JobLookup, JobManager};
 pub use list_subagents_tool::ListSubagentsTool;
 pub use thread_pool::ThreadPool;
 pub use types::{GetJobResultArgs, JobDispatchArgs, JobResult};
-
-#[cfg(test)]
-#[tokio::test]
-async fn enqueue_job_creates_binding_and_updates_metrics() {
-    thread_pool::assert_enqueue_job_creates_binding_and_updates_metrics().await;
-}
+pub use workflow_manager::{
+    AppendWorkflowNode, InstantiateWorkflowInput, WorkflowExecutionProgress, WorkflowManager,
+};

@@ -33,7 +33,7 @@ use argus_agent::CompactorManager;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
-use argus_job::JobManager;
+use argus_job::{JobManager, WorkflowManager};
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
@@ -42,7 +42,7 @@ use argus_protocol::{
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, SessionRepository,
-    ThreadRepository,
+    ThreadRepository, WorkflowRepository,
 };
 
 use argus_repository::types::JobId;
@@ -76,6 +76,8 @@ pub struct ArgusWing {
     compactor_manager: Arc<CompactorManager>,
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
+    #[allow(dead_code)]
+    workflow_manager: Arc<WorkflowManager>,
     pub account_manager: Arc<AccountManager>,
 }
 
@@ -143,6 +145,13 @@ impl ArgusWing {
             arc_sqlite.clone() as Arc<dyn JobRepository>,
         ));
 
+        let workflow_manager = Arc::new(WorkflowManager::new(
+            template_manager.clone(),
+            arc_sqlite.clone() as Arc<dyn WorkflowRepository>,
+            arc_sqlite.clone() as Arc<dyn JobRepository>,
+            job_manager.clone(),
+        ));
+
         // Create session manager
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
@@ -168,6 +177,7 @@ impl ArgusWing {
             tool_manager,
             compactor_manager,
             job_manager,
+            workflow_manager,
             account_manager,
         }))
     }
@@ -205,6 +215,14 @@ impl ArgusWing {
             tool_manager.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
         ));
+        let workflow_manager = Arc::new(WorkflowManager::new(
+            template_manager.clone(),
+            arc_sqlite.clone() as Arc<dyn WorkflowRepository>,
+            arc_sqlite.clone() as Arc<dyn JobRepository>,
+            job_manager.clone(),
+        ));
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -227,6 +245,7 @@ impl ArgusWing {
             tool_manager,
             compactor_manager,
             job_manager,
+            workflow_manager,
             account_manager,
         })
     }
