@@ -178,6 +178,7 @@ pub struct WorkflowTemplateRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowTemplateNodeRecord {
     pub template_id: WorkflowTemplateId,
+    pub template_version: i64,
     pub node_key: String,
     pub name: String,
     pub agent_id: AgentId,
@@ -271,6 +272,7 @@ mod tests {
     fn workflow_template_node_keeps_depends_on_keys() {
         let node = WorkflowTemplateNodeRecord {
             template_id: WorkflowTemplateId::new("tpl-1"),
+            template_version: 1,
             node_key: "summarize".to_string(),
             name: "Summarize".to_string(),
             agent_id: AgentId::new(7),
@@ -280,6 +282,30 @@ mod tests {
         };
 
         assert_eq!(node.depends_on_keys, vec!["collect"]);
+    }
+
+    #[test]
+    fn workflow_template_node_tracks_template_version() {
+        let template = WorkflowTemplateRecord {
+            id: WorkflowTemplateId::new("tpl-1"),
+            name: "Base".to_string(),
+            version: 2,
+            description: "v2".to_string(),
+        };
+
+        let node = WorkflowTemplateNodeRecord {
+            template_id: template.id.clone(),
+            template_version: template.version,
+            node_key: "summarize".to_string(),
+            name: "Summarize".to_string(),
+            agent_id: AgentId::new(7),
+            prompt: "Summarize the repo".to_string(),
+            context: None,
+            depends_on_keys: vec!["collect".to_string()],
+        };
+
+        assert_eq!(node.template_id, template.id);
+        assert_eq!(node.template_version, template.version);
     }
 
     #[test]
