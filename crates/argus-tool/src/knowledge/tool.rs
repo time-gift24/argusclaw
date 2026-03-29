@@ -152,7 +152,7 @@ impl<R: KnowledgeRuntime> NamedTool for KnowledgeTool<R> {
     }
 
     fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Low
+        RiskLevel::Medium
     }
 
     async fn execute(
