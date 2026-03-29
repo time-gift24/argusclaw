@@ -24,6 +24,9 @@ pub enum KnowledgeToolError {
 
     #[error("unexpected GitHub response: {0}")]
     UnexpectedResponse(String),
+
+    #[error("invalid repository manifest: {0}")]
+    ManifestParse(String),
 }
 
 impl KnowledgeToolError {
@@ -33,5 +36,9 @@ impl KnowledgeToolError {
 
     pub fn unexpected_response(err: impl Into<String>) -> Self {
         Self::UnexpectedResponse(err.into())
+    }
+
+    pub fn manifest_parse(err: impl Into<String>) -> Self {
+        Self::ManifestParse(err.into())
     }
 }
