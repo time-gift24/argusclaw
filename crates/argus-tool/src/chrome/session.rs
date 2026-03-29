@@ -172,11 +172,6 @@ impl BrowserSession for ManagedWebDriverSession {
 
 impl Drop for ManagedWebDriverSession {
     fn drop(&mut self) {
-        if let Ok(mut driver) = self.driver.try_lock() {
-            if let Some(driver) = driver.take() {
-                let _ = driver.leak();
-            }
-        }
         if let Ok(mut guard) = self.driver_process.try_lock() {
             if let Some(child) = guard.as_mut() {
                 let _ = child.start_kill();

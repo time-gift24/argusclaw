@@ -303,6 +303,34 @@ impl ChromeManager {
     }
 }
 
+impl Drop for ChromeManager {
+    fn drop(&mut self) {
+        let sessions = std::mem::take(self.sessions.get_mut());
+        self.session_order.get_mut().clear();
+        if sessions.is_empty() {
+            return;
+        }
+
+        let interactions: Vec<_> = sessions
+            .into_values()
+            .map(|session| session.interaction())
+            .collect();
+        let _ = std::thread::spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                runtime.block_on(async move {
+                    for interaction in interactions {
+                        let _ = interaction.shutdown().await;
+                    }
+                });
+            }
+        })
+        .join();
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SystemChromeHost;
 
@@ -756,6 +784,42 @@ mod tests {
         assert_eq!(
             shutdowns.lock().unwrap().as_slice(),
             &["https://example.com/1".to_string()]
+        );
+    }
+
+    #[test]
+    fn manager_drop_shuts_down_live_sessions() {
+        let shutdowns = Arc::new(StdMutex::new(Vec::new()));
+        let manager = ChromeManager::new_for_test(Arc::new(
+            FakeBrowserBackend::default()
+                .with_shutdowns(Arc::clone(&shutdowns))
+                .with_page(
+                    "https://example.com/drop",
+                    "https://example.com/drop",
+                    "Drop",
+                    Vec::new(),
+                    "Drop",
+                ),
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            manager
+                .open(OpenArgs {
+                    url: "https://example.com/drop".to_string(),
+                })
+                .await
+                .unwrap();
+        });
+        drop(runtime);
+        drop(manager);
+
+        assert_eq!(
+            shutdowns.lock().unwrap().as_slice(),
+            &["https://example.com/drop".to_string()]
         );
     }
 
