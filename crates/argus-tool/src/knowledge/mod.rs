@@ -1,20 +1,25 @@
 mod error;
 mod github;
+mod manifest;
+mod markdown;
 mod models;
 mod registry;
 
 pub use error::KnowledgeToolError;
 pub use github::{GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport};
+pub use manifest::{FileOverride, NodeOverride, RepositoryManifest, DEFAULT_MANIFEST_PATHS};
+pub use markdown::{parse_markdown_sections, ParsedSection};
 pub use models::{
     GitHubBlob, GitHubSnapshot, GitHubTree, GitHubTreeEntry, GitHubTreeEntryKind,
-    KnowledgeAction, KnowledgeRepoDescriptor, KnowledgeToolArgs,
+    KnowledgeAction, KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeToolArgs,
 };
 pub use registry::KnowledgeRepoRegistry;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        GitHubKnowledgeClient, GitHubTransport, KnowledgeRepoRegistry, KnowledgeToolArgs,
+        parse_markdown_sections, GitHubKnowledgeClient, GitHubTransport, KnowledgeRepoRegistry,
+        KnowledgeToolArgs, RepositoryManifest,
     };
     use async_trait::async_trait;
     use serde_json::Value;
@@ -115,5 +120,54 @@ mod tests {
 
         let blob = client.read_blob("acme", "docs", "blob-1").await.unwrap();
         assert!(blob.text.contains("# Title"));
+    }
+
+    #[test]
+    fn knowledge_manifest_overrides_file_title_and_aliases() {
+        let manifest = RepositoryManifest::from_json(serde_json::json!({
+            "version": 1,
+            "files": [
+                {
+                    "path": "README.md",
+                    "title": "Overview",
+                    "aliases": ["home"]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let meta = manifest.file_override("README.md").unwrap();
+        assert_eq!(meta.title.as_deref(), Some("Overview"));
+        assert_eq!(meta.aliases, vec!["home"]);
+    }
+
+    #[test]
+    fn knowledge_manifest_extracts_markdown_sections_with_line_spans() {
+        let sections = parse_markdown_sections(
+            "docs/auth.md",
+            "# Auth\nintro\n## Refresh Flow\nbody\n## Login Flow\nbody\n",
+        );
+
+        assert_eq!(sections[0].anchor, "auth");
+        assert_eq!(sections[1].start_line, 3);
+        assert_eq!(sections[1].end_line, 4);
+    }
+
+    #[test]
+    fn knowledge_manifest_declared_id_wins_over_generated_id() {
+        let manifest = RepositoryManifest::from_json(serde_json::json!({
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "auth/refresh-flow",
+                    "source": { "path": "docs/auth.md", "heading": "Refresh Flow" }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let node_id =
+            manifest.resolve_section_id("docs/auth.md", "Refresh Flow", "docs/auth.md#refresh-flow");
+        assert_eq!(node_id, "auth/refresh-flow");
     }
 }

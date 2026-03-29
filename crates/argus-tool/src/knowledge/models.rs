@@ -104,6 +104,14 @@ pub struct GitHubBlob {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeRelation {
+    #[serde(rename = "type")]
+    pub relation_type: String,
+    pub target: String,
+}
+
 fn default_branch() -> String {
     "main".to_string()
 }
