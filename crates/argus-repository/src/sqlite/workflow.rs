@@ -659,7 +659,7 @@ mod tests {
             status: WorkflowStatus::Pending,
             template_id: Some(template_id.clone()),
             template_version: Some(1),
-            initiating_thread_id: Some(thread_id.clone()),
+            initiating_thread_id: Some(thread_id),
         })
         .await
         .unwrap();
@@ -736,7 +736,7 @@ mod tests {
         assert!(deleted);
         assert!(repo.get_workflow_execution(&execution_id).await.unwrap().is_none());
         assert!(repo
-            .list_by_group(&execution_id.to_string())
+            .list_by_group(execution_id.as_ref())
             .await
             .unwrap()
             .is_empty());
