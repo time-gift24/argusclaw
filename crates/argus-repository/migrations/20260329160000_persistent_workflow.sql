@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS workflow_template_nodes (
     FOREIGN KEY (template_id, template_version) REFERENCES workflow_templates(id, version) ON DELETE CASCADE
 );
 
-ALTER TABLE workflows ADD COLUMN template_id TEXT REFERENCES workflow_templates(id);
+ALTER TABLE workflows ADD COLUMN template_id TEXT;
 ALTER TABLE workflows ADD COLUMN template_version INTEGER;
 ALTER TABLE workflows ADD COLUMN initiating_thread_id TEXT REFERENCES threads(id);
 
