@@ -44,8 +44,6 @@ pub struct ChromeToolArgs {
     #[serde(default)]
     pub selector: Option<String>,
     #[serde(default)]
-    pub screenshot_path: Option<String>,
-    #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
 
@@ -59,7 +57,6 @@ impl ChromeToolArgs {
         args.url = normalized_optional_string(args.url);
         args.session_id = normalized_optional_string(args.session_id);
         args.selector = normalized_optional_string(args.selector);
-        args.screenshot_path = normalized_optional_string(args.screenshot_path);
 
         match args.action {
             ChromeAction::Open => {
@@ -70,10 +67,7 @@ impl ChromeToolArgs {
                             action: args.action.as_str().to_string(),
                             field: "url",
                         })?;
-                if args.session_id.is_some()
-                    || args.selector.is_some()
-                    || args.screenshot_path.is_some()
-                    || args.timeout_ms.is_some()
+                if args.session_id.is_some() || args.selector.is_some() || args.timeout_ms.is_some()
                 {
                     return Err(ChromeToolError::InvalidArguments {
                         reason: format!(
@@ -199,10 +193,10 @@ fn require_session_id(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.screenshot_path.is_some() {
+    if args.url.is_some() || args.selector.is_some() {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
-                "fields 'url' and 'screenshot_path' are not allowed for action '{}'",
+                "fields 'url' and 'selector' are not allowed for action '{}'",
                 args.action.as_str()
             ),
         });
@@ -211,10 +205,10 @@ fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_extract_text(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.screenshot_path.is_some() || args.timeout_ms.is_some() {
+    if args.url.is_some() || args.timeout_ms.is_some() {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
-                "fields 'url', 'screenshot_path', and 'timeout_ms' are not allowed for action '{}'",
+                "fields 'url' and 'timeout_ms' are not allowed for action '{}'",
                 args.action.as_str()
             ),
         });
@@ -223,11 +217,7 @@ fn validate_for_extract_text(args: &ChromeToolArgs) -> Result<(), ChromeToolErro
 }
 
 fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some()
-        || args.selector.is_some()
-        || args.screenshot_path.is_some()
-        || args.timeout_ms.is_some()
-    {
+    if args.url.is_some() || args.selector.is_some() || args.timeout_ms.is_some() {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
                 "only 'session_id' is allowed for action '{}'",
@@ -239,11 +229,7 @@ fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError>
 }
 
 fn validate_for_dom_summary(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some()
-        || args.selector.is_some()
-        || args.screenshot_path.is_some()
-        || args.timeout_ms.is_some()
-    {
+    if args.url.is_some() || args.selector.is_some() || args.timeout_ms.is_some() {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
                 "only 'session_id' is allowed for action '{}'",
@@ -263,12 +249,6 @@ fn validate_for_screenshot(args: &ChromeToolArgs) -> Result<(), ChromeToolError>
             ),
         });
     }
-    if args.screenshot_path.is_none() {
-        return Err(ChromeToolError::MissingRequiredField {
-            action: args.action.as_str().to_string(),
-            field: "screenshot_path",
-        });
-    }
     Ok(())
 }
 
@@ -276,7 +256,6 @@ fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     if args.url.is_some()
         || args.session_id.is_some()
         || args.selector.is_some()
-        || args.screenshot_path.is_some()
         || args.timeout_ms.is_some()
     {
         return Err(ChromeToolError::InvalidArguments {

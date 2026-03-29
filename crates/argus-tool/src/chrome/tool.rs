@@ -9,10 +9,16 @@ use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 use super::error::ChromeToolError;
-use super::manager::{BackendOpenResult, BrowserBackend, ChromeManager};
+use super::installer::ChromePaths;
+#[cfg(test)]
+use super::installer::DriverDownloader;
+#[cfg(test)]
+use super::manager::BrowserBackend;
+#[cfg(test)]
+use super::manager::ChromeHost;
+use super::manager::ChromeManager;
 use super::models::{ChromeAction, ChromeToolArgs, OpenArgs};
 use super::policy::ExplorePolicy;
-use std::path::PathBuf;
 
 const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Open,
@@ -37,7 +43,11 @@ impl Default for ChromeTool {
 impl ChromeTool {
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_backend(Arc::new(OfflineChromeBackend))
+        let paths = ChromePaths::from_home(&default_home_dir());
+        Self {
+            manager: Arc::new(ChromeManager::new_production(paths)),
+            policy: ExplorePolicy::readonly(),
+        }
     }
 
     #[must_use]
@@ -46,6 +56,22 @@ impl ChromeTool {
         Self::new_with_backend(backend)
     }
 
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn new_with_managed_components_for_test(
+        host: Arc<dyn ChromeHost>,
+        downloader: Arc<dyn DriverDownloader>,
+        paths: ChromePaths,
+    ) -> Self {
+        Self {
+            manager: Arc::new(ChromeManager::new_with_managed_components_for_test(
+                host, downloader, paths,
+            )),
+            policy: ExplorePolicy::readonly(),
+        }
+    }
+
+    #[cfg(test)]
     fn new_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
         Self {
             manager: Arc::new(ChromeManager::new_for_test(backend)),
@@ -74,13 +100,9 @@ impl ChromeTool {
                     "type": "string",
                     "description": "Optional CSS selector for scoped read actions"
                 },
-                "screenshot_path": {
-                    "type": "string",
-                    "description": "Output path for screenshot"
-                },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Optional timeout in milliseconds for wait"
+                    "description": "Optional bounded passive wait in milliseconds for wait"
                 }
             },
             "required": ["action"],
@@ -160,7 +182,8 @@ impl NamedTool for ChromeTool {
                 Ok(json!({
                     "action": "wait",
                     "session_id": session_id,
-                    "status": "ok"
+                    "status": "ok",
+                    "waited_ms": timeout_ms,
                 }))
             }
             ChromeAction::ExtractText => {
@@ -207,15 +230,9 @@ impl NamedTool for ChromeTool {
             }
             ChromeAction::Screenshot => {
                 let session_id = required_session_id(&args)?;
-                let screenshot_path =
-                    args.screenshot_path
-                        .ok_or_else(|| ToolError::ExecutionFailed {
-                            tool_name: "chrome".to_string(),
-                            reason: "missing screenshot_path for screenshot action".to_string(),
-                        })?;
                 let saved_path = self
                     .manager
-                    .screenshot(&session_id, PathBuf::from(&screenshot_path))
+                    .screenshot(&session_id, None)
                     .await
                     .map_err(Self::map_error)?;
 
@@ -236,18 +253,6 @@ impl NamedTool for ChromeTool {
     }
 }
 
-#[derive(Default)]
-struct OfflineChromeBackend;
-
-#[async_trait]
-impl BrowserBackend for OfflineChromeBackend {
-    async fn open(&self, _url: &str) -> Result<BackendOpenResult, ChromeToolError> {
-        Err(ChromeToolError::InvalidArguments {
-            reason: "chrome backend is not configured".to_string(),
-        })
-    }
-}
-
 fn required_session_id(args: &ChromeToolArgs) -> Result<String, ToolError> {
     args.session_id
         .clone()
@@ -255,4 +260,11 @@ fn required_session_id(args: &ChromeToolArgs) -> Result<String, ToolError> {
             tool_name: "chrome".to_string(),
             reason: format!("missing session_id for {} action", args.action.as_str()),
         })
+}
+
+fn default_home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir)
 }

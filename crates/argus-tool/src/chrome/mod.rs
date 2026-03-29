@@ -12,15 +12,18 @@ pub use tool::ChromeTool;
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
-
+    use std::io::{Cursor, Write};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
     use serde_json::json;
+    use tempfile::tempdir;
+    use zip::write::SimpleFileOptions;
 
     use super::error::ChromeToolError;
-    use super::installer::ChromePaths;
-    use super::manager::{BackendOpenResult, BrowserBackend};
+    use super::installer::{ChromePaths, DriverDownloader};
+    use super::manager::{BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome};
     use super::models::{ChromeAction, ChromeToolArgs, LinkSummary, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
@@ -120,6 +123,17 @@ mod tests {
     }
 
     #[test]
+    fn wait_rejects_selector_argument() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "wait",
+            "session_id": "session-1",
+            "selector": "#hero"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
     fn click_is_rejected_by_policy() {
         let err = ExplorePolicy::readonly()
             .validate_action(ChromeAction::Click)
@@ -164,7 +178,7 @@ mod tests {
         assert!(
             def.parameters["properties"]
                 .get("screenshot_path")
-                .is_some()
+                .is_none()
         );
     }
 
@@ -261,14 +275,64 @@ mod tests {
             .execute(
                 json!({
                     "action": "screenshot",
-                    "session_id": session_id,
-                    "screenshot_path": "/tmp/example.png"
+                    "session_id": session_id
                 }),
                 make_ctx(),
             )
             .await
             .expect("screenshot should succeed");
-        assert_eq!(screenshot["screenshot_path"], "/tmp/example.png");
+        let screenshot_path = PathBuf::from(
+            screenshot["screenshot_path"]
+                .as_str()
+                .expect("screenshot path should be returned"),
+        );
+        assert!(screenshot_path.is_absolute());
+        assert!(screenshot_path.is_file());
+        assert_eq!(
+            screenshot_path.extension().and_then(|value| value.to_str()),
+            Some("png")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_uses_install_flow_before_open() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let downloader = FakeManagedDownloader::with_zip_bytes(fake_driver_zip());
+        let tool = ChromeTool::new_with_managed_components_for_test(
+            host.clone(),
+            downloader,
+            paths.clone(),
+        );
+
+        let open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("managed open should succeed");
+
+        assert_eq!(open["page_title"], "Managed Example");
+
+        let open_call = host
+            .open_calls
+            .lock()
+            .unwrap()
+            .last()
+            .expect("host should receive an open call")
+            .clone();
+        assert_eq!(open_call.browser_binary, home.path().join("Google Chrome"));
+        assert!(open_call.driver_binary.starts_with(&paths.patched));
+        assert!(open_call.driver_binary.is_file());
     }
 
     #[test]
@@ -290,6 +354,116 @@ mod tests {
         assert_eq!(output, expected);
         assert!(output.starts_with(b"aaaaa"));
         assert!(output.ends_with(b"zz"));
+    }
+
+    #[derive(Debug, Clone)]
+    struct ManagedOpenCall {
+        browser_binary: PathBuf,
+        driver_binary: PathBuf,
+    }
+
+    struct FakeManagedChromeHost {
+        browser_binary: PathBuf,
+        major_version: String,
+        page_title: String,
+        open_calls: StdMutex<Vec<ManagedOpenCall>>,
+    }
+
+    impl FakeManagedChromeHost {
+        fn new(
+            browser_binary: PathBuf,
+            major_version: impl Into<String>,
+            page_title: impl Into<String>,
+        ) -> Self {
+            Self {
+                browser_binary,
+                major_version: major_version.into(),
+                page_title: page_title.into(),
+                open_calls: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChromeHost for FakeManagedChromeHost {
+        async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError> {
+            Ok(DetectedChrome {
+                browser_binary: self.browser_binary.clone(),
+                major_version: self.major_version.clone(),
+            })
+        }
+
+        async fn open_session(
+            &self,
+            url: &str,
+            browser_binary: &Path,
+            driver_binary: &Path,
+        ) -> Result<BackendOpenResult, ChromeToolError> {
+            self.open_calls.lock().unwrap().push(ManagedOpenCall {
+                browser_binary: browser_binary.to_path_buf(),
+                driver_binary: driver_binary.to_path_buf(),
+            });
+
+            let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
+                links: vec![LinkSummary {
+                    href: format!("{url}/docs"),
+                    text: "Docs".to_string(),
+                }],
+                text: "Managed text".to_string(),
+                screenshot: b"managed-png".to_vec(),
+            });
+
+            Ok(BackendOpenResult {
+                metadata: PageMetadata {
+                    final_url: url.to_string(),
+                    page_title: self.page_title.clone(),
+                },
+                session,
+            })
+        }
+    }
+
+    struct FakeManagedDownloader {
+        responses: HashMap<String, Vec<u8>>,
+    }
+
+    impl FakeManagedDownloader {
+        fn with_zip_bytes(zip_bytes: Vec<u8>) -> Arc<Self> {
+            let mut responses = HashMap::new();
+            responses.insert("LATEST_RELEASE_124".to_string(), b"124.0.6367.91".to_vec());
+            responses.insert("chromedriver-".to_string(), zip_bytes);
+            Arc::new(Self { responses })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DriverDownloader for FakeManagedDownloader {
+        async fn fetch(&self, url: &str) -> Result<Vec<u8>, ChromeToolError> {
+            self.responses
+                .iter()
+                .find_map(|(needle, value)| url.contains(needle).then(|| value.clone()))
+                .ok_or_else(|| ChromeToolError::DriverDownloadFailed {
+                    url: url.to_string(),
+                    reason: "missing fake managed response".to_string(),
+                })
+        }
+    }
+
+    fn fake_driver_zip() -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("chromedriver-linux64/chromedriver", options)
+            .unwrap();
+        writer
+            .write_all(b"binary-with-cdc_123456789012345678-marker")
+            .unwrap();
+        writer
+            .start_file("chromedriver-win64/chromedriver.exe", options)
+            .unwrap();
+        writer.write_all(b"windows-binary").unwrap();
+        writer.finish().unwrap().into_inner()
     }
 
     #[derive(Default)]
@@ -325,6 +499,7 @@ mod tests {
                     page_title: page_title.into(),
                     links,
                     text: text.into(),
+                    screenshot: b"fake-png".to_vec(),
                 },
             );
             self
@@ -337,12 +512,14 @@ mod tests {
         page_title: String,
         links: Vec<LinkSummary>,
         text: String,
+        screenshot: Vec<u8>,
     }
 
     #[derive(Debug)]
     struct FakeBrowserSession {
         links: Vec<LinkSummary>,
         text: String,
+        screenshot: Vec<u8>,
     }
 
     #[async_trait::async_trait]
@@ -356,6 +533,10 @@ mod tests {
 
         async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
             Ok(self.links.clone())
+        }
+
+        async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
+            Ok(self.screenshot.clone())
         }
     }
 
@@ -372,6 +553,7 @@ mod tests {
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
                 links: page.links.clone(),
                 text: page.text.clone(),
+                screenshot: page.screenshot.clone(),
             });
 
             Ok(BackendOpenResult {

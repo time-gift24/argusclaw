@@ -1,14 +1,20 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
+use tokio::process::Command;
 use tokio::sync::RwLock;
 
 use super::error::ChromeToolError;
+use super::installer::{ChromeInstaller, ChromePaths, DriverDownloader, ReqwestDriverDownloader};
 use super::models::{LinkSummary, OpenArgs, OpenedSession, PageMetadata};
-use super::session::{BrowserSession, ChromeSession};
+use super::session::{BrowserSession, ChromeSession, ManagedWebDriverSession};
 
 pub struct BackendOpenResult {
     pub metadata: PageMetadata,
@@ -20,28 +26,101 @@ pub trait BrowserBackend: Send + Sync {
     async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedChrome {
+    pub browser_binary: PathBuf,
+    pub major_version: String,
+}
+
+#[async_trait]
+pub trait ChromeHost: Send + Sync {
+    async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError>;
+
+    async fn open_session(
+        &self,
+        url: &str,
+        browser_binary: &Path,
+        driver_binary: &Path,
+    ) -> Result<BackendOpenResult, ChromeToolError>;
+}
+
+struct ManagedChromeBackend {
+    host: Arc<dyn ChromeHost>,
+    installer: Arc<ChromeInstaller>,
+}
+
+impl ManagedChromeBackend {
+    fn new(host: Arc<dyn ChromeHost>, installer: Arc<ChromeInstaller>) -> Self {
+        Self { host, installer }
+    }
+}
+
+#[async_trait]
+impl BrowserBackend for ManagedChromeBackend {
+    async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+        let detected = self.host.discover_chrome().await?;
+        let install = self
+            .installer
+            .ensure_driver(&detected.major_version)
+            .await?;
+        self.host
+            .open_session(url, &detected.browser_binary, &install.patched_driver)
+            .await
+    }
+}
+
 pub struct ChromeManager {
     backend: Arc<dyn BrowserBackend>,
+    paths: ChromePaths,
     sessions: RwLock<HashMap<String, ChromeSession>>,
     next_session_id: AtomicU64,
+    next_screenshot_id: AtomicU64,
 }
 
 impl ChromeManager {
     #[must_use]
-    pub fn new(backend: Arc<dyn BrowserBackend>) -> Self {
+    pub fn new(backend: Arc<dyn BrowserBackend>, paths: ChromePaths) -> Self {
         Self {
             backend,
+            paths,
             sessions: RwLock::new(HashMap::new()),
             next_session_id: AtomicU64::new(0),
+            next_screenshot_id: AtomicU64::new(0),
         }
     }
 
     #[must_use]
+    pub fn new_production(paths: ChromePaths) -> Self {
+        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
+        let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
+        let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(host, installer));
+        Self::new(backend, paths)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new_with_managed_components_for_test(
+        host: Arc<dyn ChromeHost>,
+        downloader: Arc<dyn DriverDownloader>,
+        paths: ChromePaths,
+    ) -> Self {
+        let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(host, installer));
+        Self::new(backend, paths)
+    }
+
+    #[cfg(test)]
+    #[must_use]
     pub fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
-        Self::new(backend)
+        static NEXT_TEST_MANAGER_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_TEST_MANAGER_ID.fetch_add(1, Ordering::Relaxed) + 1;
+        let home = std::env::temp_dir().join(format!("arguswing-chrome-tests-{id}"));
+        Self::new(backend, ChromePaths::from_home(&home))
     }
 
     pub async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {
+        self.paths.ensure_directories()?;
         let opened = self.backend.open(&args.url).await?;
         let session_id = self.next_session_id();
 
@@ -51,7 +130,10 @@ impl ChromeManager {
             opened.metadata.page_title.clone(),
             opened.session,
         );
-        self.sessions.write().await.insert(session_id.clone(), session);
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.clone(), session);
 
         Ok(OpenedSession {
             session_id,
@@ -70,7 +152,10 @@ impl ChromeManager {
     }
 
     pub async fn list_links(&self, session_id: &str) -> Result<Vec<LinkSummary>, ChromeToolError> {
-        self.session_interaction(session_id).await?.list_links().await
+        self.session_interaction(session_id)
+            .await?
+            .list_links()
+            .await
     }
 
     pub async fn extract_text(
@@ -91,8 +176,17 @@ impl ChromeManager {
     pub async fn screenshot(
         &self,
         session_id: &str,
-        screenshot_path: PathBuf,
+        screenshot_name: Option<&str>,
     ) -> Result<PathBuf, ChromeToolError> {
+        self.paths.ensure_directories()?;
+        let interaction = self.session_interaction(session_id).await?;
+        let screenshot_path = self.managed_screenshot_path(session_id, screenshot_name)?;
+        let png = interaction.screenshot_png().await?;
+        std::fs::write(&screenshot_path, png).map_err(|e| ChromeToolError::FileWriteFailed {
+            path: screenshot_path.clone(),
+            reason: e.to_string(),
+        })?;
+
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(session_id)
@@ -104,6 +198,34 @@ impl ChromeManager {
     fn next_session_id(&self) -> String {
         let next = self.next_session_id.fetch_add(1, Ordering::Relaxed) + 1;
         format!("session-{next}")
+    }
+
+    fn managed_screenshot_path(
+        &self,
+        session_id: &str,
+        screenshot_name: Option<&str>,
+    ) -> Result<PathBuf, ChromeToolError> {
+        if let Some(name) = screenshot_name {
+            let candidate = Path::new(name);
+            let is_file_name_only =
+                candidate.file_name().and_then(|value| value.to_str()) == Some(name);
+            let is_png = candidate
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("png"));
+            if !is_file_name_only || !is_png {
+                return Err(ChromeToolError::OutputPathNotAllowed {
+                    path: name.to_string(),
+                });
+            }
+            return Ok(self.paths.screenshots.join(name));
+        }
+
+        let next = self.next_screenshot_id.fetch_add(1, Ordering::Relaxed) + 1;
+        Ok(self
+            .paths
+            .screenshots
+            .join(format!("{session_id}-{next}.png")))
     }
 
     async fn session_interaction(
@@ -125,10 +247,240 @@ impl ChromeManager {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct SystemChromeHost;
+
+#[async_trait]
+impl ChromeHost for SystemChromeHost {
+    async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError> {
+        let browser_binary = find_chrome_binary()?;
+        let output = Command::new(&browser_binary)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|e| ChromeToolError::ChromeVersionDetectFailed {
+                path: browser_binary.clone(),
+                reason: e.to_string(),
+            })?;
+        if !output.status.success() {
+            let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(ChromeToolError::ChromeVersionDetectFailed {
+                path: browser_binary.clone(),
+                reason: if reason.is_empty() {
+                    format!("chrome exited with status {}", output.status)
+                } else {
+                    reason
+                },
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let major_version = parse_major_version(&stdout).ok_or_else(|| {
+            ChromeToolError::ChromeVersionDetectFailed {
+                path: browser_binary.clone(),
+                reason: format!("unexpected version output: {stdout}"),
+            }
+        })?;
+
+        Ok(DetectedChrome {
+            browser_binary,
+            major_version,
+        })
+    }
+
+    async fn open_session(
+        &self,
+        url: &str,
+        browser_binary: &Path,
+        driver_binary: &Path,
+    ) -> Result<BackendOpenResult, ChromeToolError> {
+        let port = reserve_free_port()?;
+        let server_url = format!("http://127.0.0.1:{port}");
+        let mut child = Command::new(driver_binary)
+            .arg(format!("--port={port}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+
+        wait_for_driver_ready(&mut child, port).await?;
+
+        let mut capabilities = DesiredCapabilities::chrome();
+        capabilities
+            .set_binary(browser_binary.to_string_lossy().as_ref())
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+        capabilities
+            .add_arg("--headless=new")
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+        capabilities
+            .add_arg("--disable-gpu")
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+        capabilities
+            .add_arg("--no-first-run")
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+        capabilities
+            .add_arg("--no-default-browser-check")
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+
+        let driver = WebDriver::new(&server_url, capabilities)
+            .await
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?;
+
+        driver
+            .goto(url)
+            .await
+            .map_err(|e| ChromeToolError::NavigationFailed {
+                url: url.to_string(),
+                reason: e.to_string(),
+            })?;
+        let final_url = driver
+            .current_url()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?
+            .to_string();
+        let page_title = driver
+            .title()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+
+        let session: Arc<dyn BrowserSession> =
+            Arc::new(ManagedWebDriverSession::new(driver, child));
+        Ok(BackendOpenResult {
+            metadata: PageMetadata {
+                final_url,
+                page_title,
+            },
+            session,
+        })
+    }
+}
+
+fn parse_major_version(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find_map(|token| {
+            token
+                .split('.')
+                .next()
+                .filter(|value| value.chars().all(|ch| ch.is_ascii_digit()))
+        })
+        .map(str::to_string)
+}
+
+fn reserve_free_port() -> Result<u16, ChromeToolError> {
+    let listener =
+        TcpListener::bind("127.0.0.1:0").map_err(|e| ChromeToolError::DriverStartFailed {
+            reason: e.to_string(),
+        })?;
+    listener
+        .local_addr()
+        .map(|address| address.port())
+        .map_err(|e| ChromeToolError::DriverStartFailed {
+            reason: e.to_string(),
+        })
+}
+
+async fn wait_for_driver_ready(
+    child: &mut tokio::process::Child,
+    port: u16,
+) -> Result<(), ChromeToolError> {
+    let address: SocketAddr = format!("127.0.0.1:{port}")
+        .parse::<SocketAddr>()
+        .map_err(|e| ChromeToolError::DriverStartFailed {
+            reason: e.to_string(),
+        })?;
+    for _ in 0..50 {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| ChromeToolError::DriverStartFailed {
+                reason: e.to_string(),
+            })?
+        {
+            return Err(ChromeToolError::DriverStartFailed {
+                reason: format!("chromedriver exited before accepting connections: {status}"),
+            });
+        }
+        if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    Err(ChromeToolError::DriverStartFailed {
+        reason: format!("timed out waiting for chromedriver on port {port}"),
+    })
+}
+
+fn find_chrome_binary() -> Result<PathBuf, ChromeToolError> {
+    if let Some(path) = std::env::var_os("ARGUS_CHROME_BINARY").map(PathBuf::from) {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    if let Some(path) = std::env::var_os("CHROME_BINARY").map(PathBuf::from) {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    chrome_binary_candidates()
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or(ChromeToolError::ChromeNotInstalled)
+}
+
+fn chrome_binary_candidates() -> Vec<PathBuf> {
+    match std::env::consts::OS {
+        "macos" => vec![
+            PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            PathBuf::from("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        ],
+        "linux" => vec![
+            PathBuf::from("/usr/bin/google-chrome"),
+            PathBuf::from("/usr/bin/google-chrome-stable"),
+            PathBuf::from("/usr/bin/chromium"),
+            PathBuf::from("/usr/bin/chromium-browser"),
+        ],
+        "windows" => {
+            let mut candidates = Vec::new();
+            for key in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+                if let Some(root) = std::env::var_os(key) {
+                    let root = PathBuf::from(root);
+                    candidates.push(
+                        root.join("Google")
+                            .join("Chrome")
+                            .join("Application")
+                            .join("chrome.exe"),
+                    );
+                }
+            }
+            candidates
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use crate::chrome::error::ChromeToolError;
@@ -143,6 +495,7 @@ mod tests {
         page_title: String,
         links: Vec<LinkSummary>,
         text: String,
+        screenshot: Vec<u8>,
     }
 
     #[derive(Debug, Default)]
@@ -166,6 +519,7 @@ mod tests {
                     page_title: page_title.into(),
                     links,
                     text: text.into(),
+                    screenshot: b"fake-png".to_vec(),
                 },
             );
             self
@@ -176,6 +530,7 @@ mod tests {
     struct FakeBrowserSession {
         links: Vec<LinkSummary>,
         text: String,
+        screenshot: Vec<u8>,
     }
 
     #[async_trait::async_trait]
@@ -189,6 +544,10 @@ mod tests {
 
         async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
             Ok(self.links.clone())
+        }
+
+        async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
+            Ok(self.screenshot.clone())
         }
     }
 
@@ -205,6 +564,7 @@ mod tests {
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
                 links: page.links.clone(),
                 text: page.text.clone(),
+                screenshot: page.screenshot.clone(),
             });
 
             Ok(BackendOpenResult {
@@ -328,15 +688,29 @@ mod tests {
             .await
             .unwrap();
 
-        let screenshot_path = PathBuf::from("/tmp/example.png");
-        let returned = manager
-            .screenshot(&opened.session_id, screenshot_path.clone())
-            .await
-            .unwrap();
-        assert_eq!(returned, screenshot_path);
+        let returned = manager.screenshot(&opened.session_id, None).await.unwrap();
+        assert!(returned.starts_with(&manager.paths.screenshots));
+        assert!(returned.is_file());
 
         let session = manager.session(&opened.session_id).await.unwrap();
-        assert_eq!(session.last_screenshot_path, Some(screenshot_path));
+        assert_eq!(session.last_screenshot_path, Some(returned));
+    }
+
+    #[tokio::test]
+    async fn screenshot_rejects_arbitrary_output_path() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let err = manager
+            .screenshot(&opened.session_id, Some("../../escape.png"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not allowed"));
     }
 
     #[tokio::test]
@@ -362,7 +736,7 @@ mod tests {
         ));
 
         let err = manager
-            .screenshot("missing", PathBuf::from("/tmp/missing.png"))
+            .screenshot("missing", Some("missing.png"))
             .await
             .unwrap_err();
         assert!(matches!(
