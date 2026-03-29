@@ -74,7 +74,8 @@ pub struct NodeSource {
 
 impl RepositoryManifest {
     pub fn from_json(value: Value) -> Result<Self, KnowledgeToolError> {
-        serde_json::from_value(value).map_err(|err| KnowledgeToolError::manifest_parse(err.to_string()))
+        serde_json::from_value(value)
+            .map_err(|err| KnowledgeToolError::manifest_parse(err.to_string()))
     }
 
     pub fn file_override(&self, path: &str) -> Option<&FileOverride> {
@@ -84,7 +85,9 @@ impl RepositoryManifest {
     pub fn resolve_section_id(&self, path: &str, heading: &str, generated_id: &str) -> String {
         self.nodes
             .iter()
-            .find(|node| node.source.path == path && node.source.heading.as_deref() == Some(heading))
+            .find(|node| {
+                node.source.path == path && node.source.heading.as_deref() == Some(heading)
+            })
             .map(|node| node.id.clone())
             .unwrap_or_else(|| generated_id.to_string())
     }

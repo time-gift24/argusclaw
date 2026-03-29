@@ -11,8 +11,8 @@ pub use cache::SnapshotCache;
 pub use error::KnowledgeToolError;
 pub use github::{GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport};
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
-pub use manifest::{FileOverride, NodeOverride, RepositoryManifest, DEFAULT_MANIFEST_PATHS};
-pub use markdown::{parse_markdown_sections, ParsedSection};
+pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
+pub use markdown::{ParsedSection, parse_markdown_sections};
 pub use models::{
     ContentPage, ExploreTreeEntry, ExploreTreeResult, GitHubBlob, GitHubSnapshot, GitHubTree,
     GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeNode, KnowledgeNodeKind,
@@ -23,18 +23,18 @@ pub use registry::KnowledgeRepoRegistry;
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_markdown_sections, GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree,
-        GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer,
-        KnowledgeRepoRegistry, KnowledgeToolArgs, RepositoryManifest,
+        GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree, GitHubTreeEntry,
+        GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer, KnowledgeRepoRegistry,
+        KnowledgeToolArgs, RepositoryManifest, parse_markdown_sections,
     };
     use async_trait::async_trait;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     use std::path::Path;
+    use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct FakeGitHubTransport {
@@ -98,7 +98,10 @@ mod tests {
             serde_json::json!({ "object": { "sha": "abc123" } }),
         ]));
 
-        let snapshot = client.resolve_snapshot("acme", "docs", "main").await.unwrap();
+        let snapshot = client
+            .resolve_snapshot("acme", "docs", "main")
+            .await
+            .unwrap();
         assert_eq!(snapshot.rev, "abc123");
     }
 
@@ -106,9 +109,30 @@ mod tests {
     async fn knowledge_github_read_tree_maps_entries() {
         let client = GitHubKnowledgeClient::new_for_test(FakeGitHubTransport::with_json(vec![
             serde_json::json!({
+                "tree": { "sha": "tree-1" }
+            }),
+            serde_json::json!({
                 "tree": [
                     { "path": "README.md", "type": "blob", "sha": "blob-1" },
                     { "path": "docs", "type": "tree", "sha": "tree-1" }
+                ]
+            }),
+        ]));
+
+        let tree = client.read_tree("acme", "docs", "abc123").await.unwrap();
+        assert_eq!(tree.entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn knowledge_github_read_tree_resolves_commit_to_tree_sha() {
+        let client = GitHubKnowledgeClient::new_for_test(FakeGitHubTransport::with_json(vec![
+            serde_json::json!({
+                "tree": { "sha": "tree-1" }
+            }),
+            serde_json::json!({
+                "tree": [
+                    { "path": "README.md", "type": "blob", "sha": "blob-1" },
+                    { "path": "docs", "type": "tree", "sha": "tree-2" }
                 ]
             }),
         ]));
@@ -175,8 +199,11 @@ mod tests {
         }))
         .unwrap();
 
-        let node_id =
-            manifest.resolve_section_id("docs/auth.md", "Refresh Flow", "docs/auth.md#refresh-flow");
+        let node_id = manifest.resolve_section_id(
+            "docs/auth.md",
+            "Refresh Flow",
+            "docs/auth.md#refresh-flow",
+        );
         assert_eq!(node_id, "auth/refresh-flow");
     }
 
@@ -250,6 +277,44 @@ mod tests {
             backend
         }
 
+        fn with_nested_tree() -> Self {
+            Self {
+                tree: GitHubTree {
+                    rev: "abc123".to_string(),
+                    entries: vec![
+                        GitHubTreeEntry {
+                            path: "README.md".to_string(),
+                            sha: "blob-readme".to_string(),
+                            kind: GitHubTreeEntryKind::Blob,
+                        },
+                        GitHubTreeEntry {
+                            path: "docs".to_string(),
+                            sha: "tree-docs".to_string(),
+                            kind: GitHubTreeEntryKind::Tree,
+                        },
+                        GitHubTreeEntry {
+                            path: "docs/auth.md".to_string(),
+                            sha: "blob-auth".to_string(),
+                            kind: GitHubTreeEntryKind::Blob,
+                        },
+                        GitHubTreeEntry {
+                            path: "docs/guides".to_string(),
+                            sha: "tree-guides".to_string(),
+                            kind: GitHubTreeEntryKind::Tree,
+                        },
+                        GitHubTreeEntry {
+                            path: "docs/guides/setup.md".to_string(),
+                            sha: "blob-setup".to_string(),
+                            kind: GitHubTreeEntryKind::Blob,
+                        },
+                    ],
+                },
+                manifest: None,
+                blobs: HashMap::new(),
+                blob_fetches: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
         fn with_large_section() -> Self {
             let mut backend = Self::with_auth_docs();
             backend.blobs.insert(
@@ -305,6 +370,25 @@ mod tests {
         let tree = indexer.explore_tree("snap-1", "/docs", 1).await.unwrap();
         assert_eq!(tree.entries.len(), 2);
         assert_eq!(backend.blob_fetch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn knowledge_index_explore_tree_includes_directories_with_child_counts() {
+        let backend = RecordingKnowledgeBackend::with_nested_tree();
+        let indexer = KnowledgeIndexer::new(backend);
+
+        let tree = indexer.explore_tree("snap-1", "/", 1).await.unwrap();
+
+        assert!(
+            tree.entries
+                .iter()
+                .any(|entry| entry.path == "/docs" && entry.child_count == 2)
+        );
+        assert!(
+            tree.entries
+                .iter()
+                .any(|entry| entry.path == "/README.md" && entry.child_count == 0)
+        );
     }
 
     #[tokio::test]
