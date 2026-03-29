@@ -11,6 +11,9 @@ pub enum ChromeToolError {
     #[error("action '{action}' is not allowed")]
     ActionNotAllowed { action: String },
 
+    #[error("session not found: {session_id}")]
+    SessionNotFound { session_id: String },
+
     #[error("failed to create directory '{path:?}': {reason}")]
     DirectoryCreateFailed { path: PathBuf, reason: String },
 }

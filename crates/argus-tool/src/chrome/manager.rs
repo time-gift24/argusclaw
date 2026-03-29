@@ -8,13 +8,16 @@ use tokio::sync::RwLock;
 
 use super::error::ChromeToolError;
 use super::models::{LinkSummary, OpenArgs, OpenedSession, PageMetadata};
-use super::session::ChromeSession;
+use super::session::{BrowserSession, ChromeSession};
+
+pub struct BackendOpenResult {
+    pub metadata: PageMetadata,
+    pub session: Arc<dyn BrowserSession>,
+}
 
 #[async_trait]
 pub trait BrowserBackend: Send + Sync {
-    async fn open(&self, url: &str) -> Result<PageMetadata, ChromeToolError>;
-    async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
-    async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError>;
+    async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError>;
 }
 
 pub struct ChromeManager {
@@ -39,20 +42,21 @@ impl ChromeManager {
     }
 
     pub async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {
-        let metadata = self.backend.open(&args.url).await?;
+        let opened = self.backend.open(&args.url).await?;
         let session_id = self.next_session_id();
 
         let session = ChromeSession::new(
             session_id.clone(),
-            metadata.final_url.clone(),
-            metadata.page_title.clone(),
+            opened.metadata.final_url.clone(),
+            opened.metadata.page_title.clone(),
+            opened.session,
         );
         self.sessions.write().await.insert(session_id.clone(), session);
 
         Ok(OpenedSession {
             session_id,
-            final_url: metadata.final_url,
-            page_title: metadata.page_title,
+            final_url: opened.metadata.final_url,
+            page_title: opened.metadata.page_title,
         })
     }
 
@@ -66,8 +70,7 @@ impl ChromeManager {
     }
 
     pub async fn list_links(&self, session_id: &str) -> Result<Vec<LinkSummary>, ChromeToolError> {
-        self.ensure_session_exists(session_id).await?;
-        self.backend.list_links().await
+        self.session_interaction(session_id).await?.list_links().await
     }
 
     pub async fn extract_text(
@@ -75,8 +78,10 @@ impl ChromeManager {
         session_id: &str,
         selector: Option<&str>,
     ) -> Result<String, ChromeToolError> {
-        self.ensure_session_exists(session_id).await?;
-        self.backend.extract_text(selector).await
+        self.session_interaction(session_id)
+            .await?
+            .extract_text(selector)
+            .await
     }
 
     pub async fn get_dom_summary(&self, session_id: &str) -> Result<String, ChromeToolError> {
@@ -92,7 +97,7 @@ impl ChromeManager {
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| Self::session_not_found(session_id))?;
-        session.last_screenshot_path = Some(screenshot_path.clone());
+        session.set_last_screenshot_path(Some(screenshot_path.clone()));
         Ok(screenshot_path)
     }
 
@@ -101,67 +106,146 @@ impl ChromeManager {
         format!("session-{next}")
     }
 
-    async fn ensure_session_exists(&self, session_id: &str) -> Result<(), ChromeToolError> {
-        if self.sessions.read().await.contains_key(session_id) {
-            Ok(())
-        } else {
-            Err(Self::session_not_found(session_id))
-        }
+    async fn session_interaction(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<dyn BrowserSession>, ChromeToolError> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(ChromeSession::interaction)
+            .ok_or_else(|| Self::session_not_found(session_id))
     }
 
     fn session_not_found(session_id: &str) -> ChromeToolError {
-        ChromeToolError::InvalidArguments {
-            reason: format!("SessionNotFound: session '{session_id}' does not exist"),
+        ChromeToolError::SessionNotFound {
+            session_id: session_id.to_string(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use crate::chrome::error::ChromeToolError;
     use crate::chrome::models::{LinkSummary, OpenArgs, PageMetadata};
+    use crate::chrome::session::BrowserSession;
 
-    use super::{BrowserBackend, ChromeManager};
+    use super::{BackendOpenResult, BrowserBackend, ChromeManager};
+
+    #[derive(Debug, Clone)]
+    struct FakePage {
+        final_url: String,
+        page_title: String,
+        links: Vec<LinkSummary>,
+        text: String,
+    }
 
     #[derive(Debug, Default)]
     struct FakeBrowserBackend {
-        final_url: String,
-        page_title: String,
+        pages: HashMap<String, FakePage>,
     }
 
     impl FakeBrowserBackend {
-        fn new(final_url: impl Into<String>, page_title: impl Into<String>) -> Self {
-            Self {
-                final_url: final_url.into(),
-                page_title: page_title.into(),
-            }
+        fn with_page(
+            mut self,
+            requested_url: impl Into<String>,
+            final_url: impl Into<String>,
+            page_title: impl Into<String>,
+            links: Vec<LinkSummary>,
+            text: impl Into<String>,
+        ) -> Self {
+            self.pages.insert(
+                requested_url.into(),
+                FakePage {
+                    final_url: final_url.into(),
+                    page_title: page_title.into(),
+                    links,
+                    text: text.into(),
+                },
+            );
+            self
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeBrowserSession {
+        links: Vec<LinkSummary>,
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserSession for FakeBrowserSession {
+        async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
+            Ok(match selector {
+                Some(selector) => format!("{} [{selector}]", self.text),
+                None => self.text.clone(),
+            })
+        }
+
+        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
+            Ok(self.links.clone())
         }
     }
 
     #[async_trait::async_trait]
     impl BrowserBackend for FakeBrowserBackend {
-        async fn open(&self, _url: &str) -> Result<PageMetadata, ChromeToolError> {
-            Ok(PageMetadata {
-                final_url: self.final_url.clone(),
-                page_title: self.page_title.clone(),
+        async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            let page = self
+                .pages
+                .get(url)
+                .ok_or_else(|| ChromeToolError::InvalidArguments {
+                    reason: format!("no fake page for url '{url}'"),
+                })?;
+
+            let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
+                links: page.links.clone(),
+                text: page.text.clone(),
+            });
+
+            Ok(BackendOpenResult {
+                metadata: PageMetadata {
+                    final_url: page.final_url.clone(),
+                    page_title: page.page_title.clone(),
+                },
+                session,
             })
         }
+    }
 
-        async fn extract_text(&self, _selector: Option<&str>) -> Result<String, ChromeToolError> {
-            Ok("fake text".to_string())
-        }
-
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(Vec::new())
-        }
+    fn sample_backend() -> Arc<FakeBrowserBackend> {
+        Arc::new(
+            FakeBrowserBackend::default()
+                .with_page(
+                    "https://example.com",
+                    "https://example.com",
+                    "Example",
+                    vec![LinkSummary {
+                        href: "https://example.com/about".to_string(),
+                        text: "About".to_string(),
+                    }],
+                    "Example text",
+                )
+                .with_page(
+                    "https://example.org",
+                    "https://example.org/home",
+                    "Example Org",
+                    vec![LinkSummary {
+                        href: "https://example.org/docs".to_string(),
+                        text: "Docs".to_string(),
+                    }],
+                    "Org text",
+                ),
+        )
     }
 
     #[tokio::test]
     async fn manager_creates_session_and_returns_metadata() {
-        let backend = Arc::new(FakeBrowserBackend::new("https://example.com", "Example"));
-        let manager = ChromeManager::new_for_test(backend);
+        let manager = ChromeManager::new_for_test(sample_backend());
 
         let opened = manager
             .open(OpenArgs {
@@ -176,9 +260,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_rejects_unknown_session() {
-        let manager = ChromeManager::new_for_test(Arc::new(FakeBrowserBackend::default()));
+    async fn manager_stores_opened_session_and_returns_it() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let session = manager.session(&opened.session_id).await.unwrap();
+
+        assert_eq!(session.session_id, opened.session_id);
+        assert_eq!(session.current_url, "https://example.com");
+        assert_eq!(session.page_title, "Example");
+        assert_eq!(session.last_screenshot_path, None);
+    }
+
+    #[tokio::test]
+    async fn manager_rejects_unknown_session_with_variant() {
+        let manager = ChromeManager::new_for_test(sample_backend());
         let err = manager.session("missing").await.unwrap_err();
-        assert!(err.to_string().contains("SessionNotFound"));
+        assert!(matches!(
+            err,
+            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn manager_uses_session_handle_for_read_operations() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+        let first = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+        let second = manager
+            .open(OpenArgs {
+                url: "https://example.org".into(),
+            })
+            .await
+            .unwrap();
+
+        let first_links = manager.list_links(&first.session_id).await.unwrap();
+        let second_links = manager.list_links(&second.session_id).await.unwrap();
+        assert_eq!(first_links[0].href, "https://example.com/about");
+        assert_eq!(second_links[0].href, "https://example.org/docs");
+
+        let first_text = manager
+            .extract_text(&first.session_id, Some("#hero"))
+            .await
+            .unwrap();
+        let second_summary = manager.get_dom_summary(&second.session_id).await.unwrap();
+        assert_eq!(first_text, "Example text [#hero]");
+        assert_eq!(second_summary, "Org text");
+    }
+
+    #[tokio::test]
+    async fn manager_screenshot_updates_session_state() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let screenshot_path = PathBuf::from("/tmp/example.png");
+        let returned = manager
+            .screenshot(&opened.session_id, screenshot_path.clone())
+            .await
+            .unwrap();
+        assert_eq!(returned, screenshot_path);
+
+        let session = manager.session(&opened.session_id).await.unwrap();
+        assert_eq!(session.last_screenshot_path, Some(screenshot_path));
+    }
+
+    #[tokio::test]
+    async fn manager_api_rejects_missing_session_for_all_session_ops() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+
+        let err = manager.list_links("missing").await.unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
+        ));
+
+        let err = manager.extract_text("missing", None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
+        ));
+
+        let err = manager.get_dom_summary("missing").await.unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
+        ));
+
+        let err = manager
+            .screenshot("missing", PathBuf::from("/tmp/missing.png"))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
+        ));
     }
 }
