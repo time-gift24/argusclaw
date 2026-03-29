@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use crate::error::DbError;
 use crate::traits::WorkflowRepository;
 use crate::types::{
-    WorkflowExecutionHeader, WorkflowId, WorkflowProgressRecord, WorkflowRecord, WorkflowStatus,
-    WorkflowTemplateId, WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
+    WorkflowId, WorkflowProgressRecord, WorkflowRecord, WorkflowStatus, WorkflowTemplateId,
+    WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
 };
 
 use super::{ArgusSqlite, DbResult};
@@ -69,6 +69,34 @@ impl WorkflowRepository for ArgusSqlite {
         rows.into_iter()
             .map(|row| self.map_workflow_template_record(row))
             .collect()
+    }
+
+    async fn update_workflow_template(&self, template: &WorkflowTemplateRecord) -> DbResult<()> {
+        let result = sqlx::query(
+            "UPDATE workflow_templates
+             SET name = ?3, description = ?4, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND version = ?2",
+        )
+        .bind(template.id.as_ref())
+        .bind(template.version)
+        .bind(&template.name)
+        .bind(&template.description)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::QueryFailed {
+                reason: format!(
+                    "workflow template not found: {}@{}",
+                    template.id, template.version
+                ),
+            });
+        }
+
+        Ok(())
     }
 
     async fn delete_workflow_template(
@@ -167,13 +195,14 @@ impl WorkflowRepository for ArgusSqlite {
             .collect()
     }
 
-    async fn create_workflow_execution(
-        &self,
-        workflow: &(dyn WorkflowExecutionHeader + Sync),
-    ) -> DbResult<()> {
-        let template_id = workflow.template_id().map(|id| id.as_ref().to_string());
+    async fn create_workflow_execution(&self, workflow: &WorkflowRecord) -> DbResult<()> {
+        let template_id = workflow
+            .template_id
+            .as_ref()
+            .map(|id| id.as_ref().to_string());
         let initiating_thread_id = workflow
-            .initiating_thread_id()
+            .initiating_thread_id
+            .as_ref()
             .map(|thread_id| thread_id.to_string());
 
         sqlx::query(
@@ -181,11 +210,11 @@ impl WorkflowRepository for ArgusSqlite {
                 id, name, status, template_id, template_version, initiating_thread_id
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
-        .bind(workflow.id().as_ref())
-        .bind(workflow.name())
-        .bind(workflow.status().as_str())
+        .bind(workflow.id.as_ref())
+        .bind(&workflow.name)
+        .bind(workflow.status.as_str())
         .bind(&template_id)
-        .bind(workflow.template_version())
+        .bind(workflow.template_version)
         .bind(&initiating_thread_id)
         .execute(&self.pool)
         .await
@@ -409,7 +438,7 @@ mod tests {
 
     use crate::traits::{JobRepository, WorkflowRepository};
     use crate::types::{
-        JobId, JobRecord, JobType, WorkflowExecutionRecord, WorkflowTemplateNodeRecord,
+        JobId, JobRecord, JobType, WorkflowRecord, WorkflowTemplateNodeRecord,
         WorkflowTemplateRecord,
     };
     use uuid::Uuid;
@@ -469,6 +498,15 @@ mod tests {
         .await
         .unwrap();
 
+        repo.update_workflow_template(&WorkflowTemplateRecord {
+            id: template_id.clone(),
+            name: "demo v2".to_string(),
+            version: 1,
+            description: "updated demo template".to_string(),
+        })
+        .await
+        .unwrap();
+
         repo.create_workflow_template_node(&WorkflowTemplateNodeRecord {
             template_id: template_id.clone(),
             template_version: 1,
@@ -495,7 +533,7 @@ mod tests {
         .await
         .unwrap();
 
-        repo.create_workflow_execution(&WorkflowExecutionRecord {
+        repo.create_workflow_execution(&WorkflowRecord {
             id: execution_id.clone(),
             name: "demo".to_string(),
             status: WorkflowStatus::Pending,
@@ -511,6 +549,14 @@ mod tests {
         let header = header.unwrap();
         assert_eq!(header.template_id, Some(template_id.clone()));
         assert_eq!(header.template_version, Some(1));
+
+        let template = repo
+            .get_workflow_template(&template_id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(template.name, "demo v2");
+        assert_eq!(template.description, "updated demo template");
 
         repo.create(&JobRecord {
             id: JobId::new("job-1"),

@@ -6,8 +6,8 @@ use argus_protocol::ThreadId;
 
 use crate::error::DbError;
 use crate::types::{
-    WorkflowExecutionHeader, WorkflowId, WorkflowProgressRecord, WorkflowRecord, WorkflowStatus,
-    WorkflowTemplateId, WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
+    WorkflowId, WorkflowProgressRecord, WorkflowRecord, WorkflowStatus, WorkflowTemplateId,
+    WorkflowTemplateNodeRecord, WorkflowTemplateRecord,
 };
 
 /// Repository for workflow persistence.
@@ -25,6 +25,12 @@ pub trait WorkflowRepository: Send + Sync {
         id: &WorkflowTemplateId,
         version: i64,
     ) -> Result<Option<WorkflowTemplateRecord>, DbError>;
+
+    /// Update a workflow template version.
+    async fn update_workflow_template(
+        &self,
+        template: &WorkflowTemplateRecord,
+    ) -> Result<(), DbError>;
 
     /// List all workflow template versions.
     async fn list_workflow_templates(&self) -> Result<Vec<WorkflowTemplateRecord>, DbError>;
@@ -58,10 +64,7 @@ pub trait WorkflowRepository: Send + Sync {
     ) -> Result<Vec<WorkflowTemplateNodeRecord>, DbError>;
 
     /// Create a workflow execution header.
-    async fn create_workflow_execution(
-        &self,
-        workflow: &(dyn WorkflowExecutionHeader + Sync),
-    ) -> Result<(), DbError>;
+    async fn create_workflow_execution(&self, workflow: &WorkflowRecord) -> Result<(), DbError>;
 
     /// Read a workflow execution header.
     async fn get_workflow_execution(

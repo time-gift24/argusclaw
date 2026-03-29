@@ -231,68 +231,6 @@ pub struct WorkflowProgressRecord {
     pub cancelled_jobs: i64,
 }
 
-/// Shared read-only accessors for workflow execution headers.
-pub trait WorkflowExecutionHeader {
-    fn id(&self) -> &WorkflowId;
-    fn name(&self) -> &str;
-    fn status(&self) -> WorkflowStatus;
-    fn template_id(&self) -> Option<&WorkflowTemplateId>;
-    fn template_version(&self) -> Option<i64>;
-    fn initiating_thread_id(&self) -> Option<&ThreadId>;
-}
-
-impl WorkflowExecutionHeader for WorkflowRecord {
-    fn id(&self) -> &WorkflowId {
-        &self.id
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn status(&self) -> WorkflowStatus {
-        self.status
-    }
-
-    fn template_id(&self) -> Option<&WorkflowTemplateId> {
-        self.template_id.as_ref()
-    }
-
-    fn template_version(&self) -> Option<i64> {
-        self.template_version
-    }
-
-    fn initiating_thread_id(&self) -> Option<&ThreadId> {
-        self.initiating_thread_id.as_ref()
-    }
-}
-
-impl WorkflowExecutionHeader for WorkflowExecutionRecord {
-    fn id(&self) -> &WorkflowId {
-        &self.id
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn status(&self) -> WorkflowStatus {
-        self.status
-    }
-
-    fn template_id(&self) -> Option<&WorkflowTemplateId> {
-        self.template_id.as_ref()
-    }
-
-    fn template_version(&self) -> Option<i64> {
-        self.template_version
-    }
-
-    fn initiating_thread_id(&self) -> Option<&ThreadId> {
-        self.initiating_thread_id.as_ref()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
