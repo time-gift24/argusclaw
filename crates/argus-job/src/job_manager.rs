@@ -15,7 +15,7 @@ use argus_protocol::{
     ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_repository::traits::JobRepository;
-use argus_repository::types::{JobId, JobResult as PersistedJobResult, WorkflowStatus};
+use argus_repository::types::{JobId, JobResult as PersistedJobResult, JobType, WorkflowStatus};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
@@ -229,6 +229,28 @@ impl JobManager {
         pipe_tx: broadcast::Sender<ThreadEvent>,
         control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> Result<(), JobError> {
+        if let Some(job_repo) = &self.job_repo {
+            match job_repo.get(&JobId::new(job_id.clone())).await {
+                Ok(Some(job)) if job.job_type == JobType::Workflow => {
+                    return self
+                        .spawn_persisted_job_executor(
+                            originating_thread_id,
+                            job.id,
+                            pipe_tx,
+                            control_tx,
+                        )
+                        .await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        job_id,
+                        "failed to inspect persisted job before ad hoc execution: {error}"
+                    );
+                }
+            }
+        }
+
         if prompt.trim().is_empty() {
             return Err(JobError::ExecutionFailed(
                 "prompt cannot be empty".to_string(),
@@ -1168,6 +1190,70 @@ mod tests {
         let persisted_result = completed_job.result.expect("job result should be stored");
         assert!(persisted_result.success);
         assert_eq!(persisted_result.message, "Workflow complete");
+        assert_eq!(persisted_result.agent_id, agent_id);
+    }
+
+    #[tokio::test]
+    async fn spawn_job_executor_routes_persisted_workflow_jobs() {
+        let repo = seeded_repo().await;
+        let agent_id = seed_test_agent(repo.as_ref()).await;
+        let job_id = JobId::new("job-routed");
+        let originating_thread_id = ThreadId::new();
+        seed_persisted_workflow_job(repo.as_ref(), &job_id, agent_id).await;
+
+        let (release_tx, release_rx) = oneshot::channel();
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(ControlledProvider::new("Workflow complete", release_rx));
+        let manager = JobManager::with_job_repository(
+            Arc::new(TemplateManager::new(
+                repo.clone() as Arc<dyn AgentRepository>,
+                repo.clone(),
+            )),
+            Arc::new(StaticProviderResolver { provider }),
+            Arc::new(ToolManager::new()),
+            repo.clone() as Arc<dyn JobRepository>,
+        );
+        let (pipe_tx, mut pipe_rx) = broadcast::channel(8);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        manager
+            .spawn_job_executor(
+                originating_thread_id,
+                job_id.to_string(),
+                AgentId::new(999),
+                String::new(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("spawn_job_executor should route persisted workflow jobs");
+
+        wait_for_running_status(repo.as_ref(), &job_id).await;
+        release_tx.send(()).expect("release provider");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match pipe_rx.recv().await.expect("receive job event") {
+                    ThreadEvent::JobResult { job_id: event_job_id, .. }
+                        if event_job_id == job_id.to_string() =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("job result event should arrive");
+
+        let completed_job = JobRepository::get(repo.as_ref(), &job_id)
+            .await
+            .expect("load completed job")
+            .expect("job should exist");
+        assert_eq!(completed_job.status, WorkflowStatus::Succeeded);
+        let persisted_result = completed_job.result.expect("job result should be stored");
+        assert!(persisted_result.success);
         assert_eq!(persisted_result.agent_id, agent_id);
     }
 
