@@ -183,12 +183,18 @@ impl JobRepository for ArgusSqlite {
              WHERE j.status = 'pending' AND j.job_type != 'cron'
                AND (
                    j.job_type != 'workflow'
-                   OR EXISTS (SELECT 1 FROM workflows w WHERE w.id = j.group_id)
+                   OR (
+                       j.group_id IS NOT NULL
+                       AND trim(j.group_id) != ''
+                       AND j.node_key IS NOT NULL
+                       AND trim(j.node_key) != ''
+                       AND EXISTS (SELECT 1 FROM workflows w WHERE w.id = j.group_id)
+                   )
                )
                AND NOT EXISTS (
-                   SELECT 1 FROM jobs dep
-                   WHERE dep.id IN (SELECT value FROM json_each(j.depends_on))
-                     AND dep.status != 'succeeded'
+                    SELECT 1 FROM jobs dep
+                    WHERE dep.id IN (SELECT value FROM json_each(j.depends_on))
+                      AND dep.status != 'succeeded'
                )
              ORDER BY j.created_at ASC LIMIT ?1",
         )
@@ -470,6 +476,41 @@ mod tests {
         .bind(Option::<String>::None)
         .bind("wf-missing")
         .bind("collect")
+        .bind("[]")
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .bind(Option::<String>::None)
+        .execute(repo.pool())
+        .await
+        .unwrap();
+
+        let ready_jobs = repo.find_ready_jobs(10).await.unwrap();
+        assert!(ready_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_ready_jobs_skips_malformed_workflow_jobs() {
+        let repo = test_repo().await;
+        let agent_id = seed_test_agent(&repo).await;
+        let workflow_id = WorkflowId::new("wf-2");
+        seed_workflow_execution(&repo, &workflow_id).await;
+
+        sqlx::query(
+            "INSERT INTO jobs (id, job_type, name, status, agent_id, context, prompt, thread_id, group_id, node_key, depends_on, cron_expr, scheduled_at, started_at, finished_at, parent_job_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )
+        .bind("job-malformed")
+        .bind(JobType::Workflow.as_str())
+        .bind("Malformed")
+        .bind(WorkflowStatus::Pending.as_str())
+        .bind(agent_id.into_inner())
+        .bind(Option::<String>::None)
+        .bind("Collect context")
+        .bind(Option::<String>::None)
+        .bind(workflow_id.as_ref())
+        .bind(Option::<String>::None)
         .bind("[]")
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
