@@ -327,14 +327,32 @@ impl ThreadMailbox {
 }
 
 /// Snapshot of a single thread tracked by the thread pool.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadRuntimeStatus {
+    /// Runtime has not been loaded into memory.
+    Inactive,
+    /// Runtime is being loaded.
+    Loading,
+    /// Runtime is queued for execution.
+    Queued,
+    /// Runtime is actively executing.
+    Running,
+    /// Runtime completed recently and is in cooling period.
+    Cooling,
+    /// Runtime was evicted from memory.
+    Evicted,
+}
+
+/// Snapshot of a single thread tracked by the thread pool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadRuntimeSnapshot {
     /// Thread ID.
     pub thread_id: ThreadId,
     /// Bound job ID if this runtime is associated with a dispatched job.
     pub job_id: Option<String>,
-    /// Human-readable runtime status (for example: queued/running/cooling/evicted).
-    pub status: String,
+    /// Runtime status.
+    pub status: ThreadRuntimeStatus,
     /// Estimated memory usage for this runtime.
     pub estimated_memory_bytes: u64,
     /// Last activity timestamp (RFC3339).
@@ -566,6 +584,30 @@ pub enum ThreadEvent {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_thread_pool_snapshot_round_trip() {
+    let snapshot = ThreadPoolSnapshot {
+        max_threads: 8,
+        active_threads: 2,
+        queued_jobs: 1,
+        running_threads: 1,
+        cooling_threads: 1,
+        evicted_threads: 3,
+        estimated_memory_bytes: 4096,
+        peak_estimated_memory_bytes: 8192,
+        process_memory_bytes: Some(16_384),
+        peak_process_memory_bytes: Some(32_768),
+        resident_thread_count: 2,
+        avg_thread_memory_bytes: 2048,
+        captured_at: "2026-03-29T00:00:00Z".to_string(),
+    };
+
+    let value = serde_json::to_value(&snapshot).unwrap();
+    let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.max_threads, 8);
+    assert_eq!(restored.queued_jobs, 1);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -608,25 +650,6 @@ mod tests {
 
     #[test]
     fn thread_pool_snapshot_round_trips_through_json() {
-        let snapshot = ThreadPoolSnapshot {
-            max_threads: 8,
-            active_threads: 2,
-            queued_jobs: 1,
-            running_threads: 1,
-            cooling_threads: 1,
-            evicted_threads: 3,
-            estimated_memory_bytes: 4096,
-            peak_estimated_memory_bytes: 8192,
-            process_memory_bytes: Some(16_384),
-            peak_process_memory_bytes: Some(32_768),
-            resident_thread_count: 2,
-            avg_thread_memory_bytes: 2048,
-            captured_at: "2026-03-29T00:00:00Z".to_string(),
-        };
-
-        let value = serde_json::to_value(&snapshot).unwrap();
-        let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.max_threads, 8);
-        assert_eq!(restored.queued_jobs, 1);
+        assert_thread_pool_snapshot_round_trip();
     }
 }

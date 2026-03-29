@@ -23,7 +23,7 @@ pub use error::{ArgusError, Result};
 pub use events::{
     QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadInbox,
     ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolSnapshot,
-    ThreadRuntimeSnapshot, ThreadRuntimeState, TurnControlInput,
+    ThreadRuntimeSnapshot, ThreadRuntimeState, ThreadRuntimeStatus, TurnControlInput,
 };
 pub use hooks::{
     BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,
@@ -83,24 +83,5 @@ pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
 #[cfg(test)]
 #[test]
 fn thread_pool_snapshot_round_trips_through_json() {
-    let snapshot = ThreadPoolSnapshot {
-        max_threads: 8,
-        active_threads: 2,
-        queued_jobs: 1,
-        running_threads: 1,
-        cooling_threads: 1,
-        evicted_threads: 3,
-        estimated_memory_bytes: 4096,
-        peak_estimated_memory_bytes: 8192,
-        process_memory_bytes: Some(16_384),
-        peak_process_memory_bytes: Some(32_768),
-        resident_thread_count: 2,
-        avg_thread_memory_bytes: 2048,
-        captured_at: "2026-03-29T00:00:00Z".to_string(),
-    };
-
-    let value = serde_json::to_value(&snapshot).unwrap();
-    let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
-    assert_eq!(restored.max_threads, 8);
-    assert_eq!(restored.queued_jobs, 1);
+    events::assert_thread_pool_snapshot_round_trip();
 }
