@@ -1,3 +1,6 @@
+use std::net::IpAddr;
+
+use argus_protocol::is_blocked_ip;
 use serde::Deserialize;
 use url::Url;
 
@@ -40,7 +43,7 @@ pub struct ChromeToolArgs {
 
 impl ChromeToolArgs {
     pub fn validate(input: serde_json::Value) -> Result<Self, ChromeToolError> {
-        let args: Self =
+        let mut args: Self =
             serde_json::from_value(input).map_err(|e| ChromeToolError::InvalidArguments {
                 reason: e.to_string(),
             })?;
@@ -52,12 +55,50 @@ impl ChromeToolArgs {
                     action: args.action.as_str().to_string(),
                     field: "url",
                 })?;
-                Url::parse(url).map_err(|e| ChromeToolError::InvalidArguments {
+                let parsed = Url::parse(url).map_err(|e| ChromeToolError::InvalidArguments {
                     reason: format!(
                         "field 'url' is invalid for action '{}': {e}",
                         args.action.as_str()
                     ),
                 })?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    return Err(ChromeToolError::InvalidArguments {
+                        reason: format!(
+                            "field 'url' is invalid for action '{}': scheme '{}' is not allowed",
+                            args.action.as_str(),
+                            parsed.scheme()
+                        ),
+                    });
+                }
+                let host = parsed
+                    .host_str()
+                    .ok_or_else(|| ChromeToolError::InvalidArguments {
+                        reason: format!(
+                            "field 'url' is invalid for action '{}': host is missing",
+                            args.action.as_str()
+                        ),
+                    })?;
+                if host.eq_ignore_ascii_case("localhost") {
+                    return Err(ChromeToolError::InvalidArguments {
+                        reason: format!(
+                            "field 'url' is invalid for action '{}': host '{}' is not allowed",
+                            args.action.as_str(),
+                            host
+                        ),
+                    });
+                }
+                if let Ok(ip) = host.parse::<IpAddr>()
+                    && is_blocked_ip(ip)
+                {
+                    return Err(ChromeToolError::InvalidArguments {
+                        reason: format!(
+                            "field 'url' is invalid for action '{}': host '{}' is not allowed",
+                            args.action.as_str(),
+                            host
+                        ),
+                    });
+                }
+                args.url = Some(url.to_string());
             }
             _ => {
                 if args.url.is_some() {
