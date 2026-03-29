@@ -490,9 +490,11 @@ impl ThreadPool {
                     request.agent_id.inner()
                 ))
             })?;
+        let agent_record = agent_record.ok_or_else(|| {
+            JobError::ExecutionFailed(format!("agent {} not found", request.agent_id.inner()))
+        })?;
         let template_provider_id = agent_record
-            .as_ref()
-            .and_then(|agent| agent.provider_id)
+            .provider_id
             .map(|id| argus_protocol::LlmProviderId::new(id.inner()));
         let provider_id = match template_provider_id {
             Some(provider_id) => provider_id,
@@ -509,7 +511,7 @@ impl ThreadPool {
                     JobError::ExecutionFailed("default provider is not configured".to_string())
                 })?,
         };
-        let model_override = agent_record.and_then(|agent| agent.model_id);
+        let model_override = agent_record.model_id;
 
         let thread_record = ThreadRecord {
             id: thread_id,
@@ -659,10 +661,44 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::ThreadEvent;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use argus_protocol::LlmProviderRecord;
+    use argus_protocol::{LlmProvider, ProviderId, ProviderResolver, ThreadEvent};
+    use argus_protocol::llm::LlmProviderRepository;
+    use argus_repository::{ArgusSqlite, migrate};
+    use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
+    use argus_repository::types::JobId;
+    use argus_template::TemplateManager;
+    use argus_tool::ToolManager;
+    use async_trait::async_trait;
+    use sqlx::SqlitePool;
     use tokio::sync::{broadcast, mpsc};
 
-    use super::ThreadPool;
+    use super::{ThreadPool, ThreadPoolPersistence};
+
+    #[derive(Debug)]
+    struct DummyProviderResolver;
+
+    #[async_trait]
+    impl ProviderResolver for DummyProviderResolver {
+        async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            unreachable!("resolver should not be called in thread-pool state tests");
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            unreachable!("resolver should not be called in thread-pool state tests");
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            unreachable!("resolver should not be called in thread-pool state tests");
+        }
+    }
 
     fn drain_events(rx: &mut broadcast::Receiver<ThreadEvent>) -> Vec<ThreadEvent> {
         let mut events = Vec::new();
@@ -670,6 +706,29 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    async fn test_persistent_pool() -> (ThreadPool, Arc<ArgusSqlite>) {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        let thread_pool = ThreadPool::with_persistence(
+            Arc::new(TemplateManager::new(
+                sqlite.clone() as Arc<dyn AgentRepository>,
+                sqlite.clone(),
+            )),
+            Arc::new(DummyProviderResolver),
+            Arc::new(ToolManager::new()),
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        (thread_pool, sqlite)
     }
 
     #[tokio::test]
@@ -767,5 +826,45 @@ mod tests {
                     if snapshot.cooling_threads == 1 && snapshot.running_threads == 0
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_missing_agent_fails_without_persisting_rows() {
+        let (pool, sqlite) = test_persistent_pool().await;
+        let provider = LlmProviderRecord {
+            id: argus_protocol::LlmProviderId::new(0),
+            display_name: "thread-pool-default-provider".to_string(),
+            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key: argus_protocol::SecretString::new("test-key"),
+            models: vec!["gpt-4o-mini".to_string()],
+            model_config: HashMap::new(),
+            default_model: "gpt-4o-mini".to_string(),
+            is_default: true,
+            extra_headers: HashMap::new(),
+            secret_status: argus_protocol::ProviderSecretStatus::Ready,
+            meta_data: HashMap::new(),
+        };
+        let _ = LlmProviderRepository::upsert_provider(sqlite.as_ref(), &provider)
+            .await
+            .expect("provider upsert should succeed");
+
+        let request = super::test_request("job-missing-agent-persist");
+
+        let result = pool.enqueue_job(request).await;
+
+        let error = result.expect_err("enqueue should fail for missing agent");
+        assert!(
+            error.to_string().contains("agent 7 not found"),
+            "unexpected error: {error}"
+        );
+        let persisted_job = JobRepository::get(sqlite.as_ref(), &JobId::new("job-missing-agent-persist"))
+            .await
+            .expect("job lookup should succeed");
+        assert!(persisted_job.is_none());
+        let persisted_threads = ThreadRepository::list_threads(sqlite.as_ref(), 100)
+            .await
+            .expect("thread list should succeed");
+        assert!(persisted_threads.is_empty());
     }
 }

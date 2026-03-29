@@ -212,9 +212,8 @@ impl JobManager {
             context,
         };
 
-        self.record_dispatched_job(originating_thread_id, job_id.clone());
-
         let execution_thread_id = self.thread_pool.enqueue_job(request.clone()).await?;
+        self.record_dispatched_job(originating_thread_id, job_id.clone());
         let _ = pipe_tx.send(ThreadEvent::ThreadBoundToJob {
             job_id: job_id.clone(),
             thread_id: execution_thread_id,
@@ -349,8 +348,10 @@ mod tests {
     use std::sync::Arc;
 
     use argus_protocol::{LlmProvider, ProviderId};
+    use argus_protocol::llm::LlmProviderRepository;
+    use argus_repository::migrate;
     use argus_repository::ArgusSqlite;
-    use argus_repository::traits::AgentRepository;
+    use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
     use sqlx::SqlitePool;
@@ -393,6 +394,35 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+        )
+    }
+
+    async fn test_persistent_job_manager_without_default_provider() -> JobManager {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let providers = LlmProviderRepository::list_providers(sqlite.as_ref())
+            .await
+            .expect("provider list should load");
+        for provider in providers {
+            LlmProviderRepository::delete_provider(sqlite.as_ref(), &provider.id)
+                .await
+                .expect("provider should delete");
+        }
+
+        JobManager::new_with_repositories(
+            Arc::new(TemplateManager::new(
+                sqlite.clone() as Arc<dyn AgentRepository>,
+                sqlite.clone(),
+            )),
+            Arc::new(DummyProviderResolver),
+            Arc::new(ToolManager::new()),
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite as Arc<dyn LlmProviderRepository>,
         )
     }
 
@@ -486,5 +516,32 @@ mod tests {
 
         assert!(manager.thread_binding(&job_id).is_some());
         assert_eq!(manager.thread_pool_snapshot().active_threads, 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_enqueue_failure_does_not_leave_pending_tracking() {
+        let manager = test_persistent_job_manager_without_default_provider().await;
+        let originating_thread_id = ThreadId::new();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(16);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let job_id = "job-enqueue-failure".to_string();
+
+        let dispatch_result = manager
+            .dispatch_job(
+                originating_thread_id,
+                job_id.clone(),
+                AgentId::new(999_999),
+                "run this".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await;
+
+        assert!(dispatch_result.is_err());
+        assert!(matches!(
+            manager.get_job_result_status(originating_thread_id, &job_id, false),
+            JobLookup::NotFound
+        ));
     }
 }
