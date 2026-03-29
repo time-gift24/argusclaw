@@ -22,7 +22,8 @@ pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalRes
 pub use error::{ArgusError, Result};
 pub use events::{
     QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadInbox,
-    ThreadJobResult, ThreadMailbox, ThreadRuntimeState, TurnControlInput,
+    ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolSnapshot,
+    ThreadRuntimeSnapshot, ThreadRuntimeState, TurnControlInput,
 };
 pub use hooks::{
     BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,
