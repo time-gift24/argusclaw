@@ -642,7 +642,9 @@ mod tests {
     #[tokio::test]
     async fn register_default_tools_includes_chrome() {
         let wing = make_test_wing();
-        wing.register_default_tools();
+        wing.register_default_tools()
+            .await
+            .expect("default tool registration should succeed");
         assert!(wing.tool_manager().get("chrome").is_some());
     }
 
@@ -1178,6 +1180,7 @@ mod tests {
 
         for expected_tool in [
             "apply_patch",
+            "chrome",
             "glob",
             "grep",
             "http",
