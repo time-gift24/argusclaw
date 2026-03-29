@@ -31,6 +31,29 @@ pub trait KnowledgeBackend: Send + Sync {
     ) -> Result<GitHubBlob, KnowledgeToolError>;
 }
 
+#[async_trait]
+impl<T: KnowledgeBackend + ?Sized> KnowledgeBackend for Arc<T> {
+    async fn read_tree(&self, snapshot_id: &str) -> Result<GitHubTree, KnowledgeToolError> {
+        (**self).read_tree(snapshot_id).await
+    }
+
+    async fn read_manifest(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<RepositoryManifest>, KnowledgeToolError> {
+        (**self).read_manifest(snapshot_id).await
+    }
+
+    async fn read_blob(
+        &self,
+        snapshot_id: &str,
+        path: &str,
+        sha: &str,
+    ) -> Result<GitHubBlob, KnowledgeToolError> {
+        (**self).read_blob(snapshot_id, path, sha).await
+    }
+}
+
 pub struct KnowledgeIndexer<B> {
     backend: Arc<B>,
     snapshots: DashMap<String, Arc<SnapshotCache>>,
