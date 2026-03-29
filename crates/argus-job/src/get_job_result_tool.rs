@@ -156,7 +156,9 @@ mod tests {
 
     use argus_protocol::{AgentId, LlmProvider, ProviderId, ProviderResolver, ThreadId};
     use argus_repository::ArgusSqlite;
-    use argus_repository::traits::AgentRepository;
+    use argus_repository::traits::{
+        AgentRepository, JobRepository, LlmProviderRepository, ThreadRepository,
+    };
     use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
@@ -198,6 +200,9 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite as Arc<dyn LlmProviderRepository>,
         ))
     }
 
