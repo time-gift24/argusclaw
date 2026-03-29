@@ -5,18 +5,41 @@ pub mod models;
 pub mod patcher;
 pub mod policy;
 pub mod session;
+pub mod tool;
+
+pub use tool::ChromeTool;
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use std::path::{Path, PathBuf};
 
     use serde_json::json;
 
     use super::error::ChromeToolError;
     use super::installer::ChromePaths;
+    use super::manager::{BackendOpenResult, BrowserBackend};
     use super::models::{ChromeAction, ChromeToolArgs};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
+    use super::tool::ChromeTool;
+    use argus_protocol::NamedTool;
+    use argus_protocol::ToolExecutionContext;
+    use argus_protocol::ids::ThreadId;
+    use argus_protocol::tool::ToolError;
+    use tokio::sync::broadcast;
+    use tokio::sync::mpsc;
+
+    fn make_ctx() -> Arc<ToolExecutionContext> {
+        let (pipe_tx, _) = broadcast::channel(16);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        Arc::new(ToolExecutionContext {
+            thread_id: ThreadId::new(),
+            pipe_tx,
+            control_tx,
+        })
+    }
 
     #[test]
     fn open_requires_url() {
@@ -37,14 +60,12 @@ mod tests {
 
     #[test]
     fn open_rejects_non_http_scheme() {
-        let err =
-            ChromeToolArgs::validate(json!({ "action": "open", "url": "file:///tmp/a.txt" }))
-                .unwrap_err();
+        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "file:///tmp/a.txt" }))
+            .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
 
-        let err =
-            ChromeToolArgs::validate(json!({ "action": "open", "url": "chrome://settings" }))
-                .unwrap_err();
+        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "chrome://settings" }))
+            .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
@@ -91,8 +112,8 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_is_enforced() {
-        let err =
-            ChromeToolArgs::validate(json!({ "action": "wait", "unexpected": "value" })).unwrap_err();
+        let err = ChromeToolArgs::validate(json!({ "action": "wait", "unexpected": "value" }))
+            .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
@@ -115,6 +136,24 @@ mod tests {
     }
 
     #[test]
+    fn chrome_tool_definition_lists_only_readonly_actions() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager::default()));
+        let def = tool.definition();
+        assert_eq!(def.name, "chrome");
+        assert!(def.description.contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_rejects_denied_action_before_backend() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager::default()));
+        let err = tool
+            .execute(json!({ "action": "click" }), make_ctx())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::NotAuthorized(_)));
+    }
+
+    #[test]
     fn chrome_paths_use_arguswing_root() {
         let paths = ChromePaths::from_home(Path::new("/tmp/home"));
         assert_eq!(paths.root, PathBuf::from("/tmp/home/.arguswing/chrome"));
@@ -133,5 +172,17 @@ mod tests {
         assert_eq!(output, expected);
         assert!(output.starts_with(b"aaaaa"));
         assert!(output.ends_with(b"zz"));
+    }
+
+    #[derive(Default)]
+    struct FakeChromeManager;
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for FakeChromeManager {
+        async fn open(&self, _url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            Err(ChromeToolError::InvalidArguments {
+                reason: "fake chrome backend should not be used".to_string(),
+            })
+        }
     }
 }
