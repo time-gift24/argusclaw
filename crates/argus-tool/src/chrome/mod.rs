@@ -55,6 +55,10 @@ mod tests {
         let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "http://10.0.0.1" }))
             .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "http://0.0.0.0" }))
+            .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
     #[test]
