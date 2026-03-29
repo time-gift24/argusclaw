@@ -124,6 +124,7 @@ impl ChromeInstaller {
             })?;
             atomic_write_file(&self.paths.tmp, &patched_driver, &patched_bytes)?;
             ensure_executable(&patched_driver)?;
+            repair_macos_code_signature(&patched_driver)?;
         }
 
         Ok(InstalledDriver {
@@ -302,7 +303,11 @@ fn extract_driver_binary(
                 .map_err(|e| ChromeToolError::DriverArchiveInvalid {
                     reason: e.to_string(),
                 })?;
-        if !file.name().ends_with(driver_name) {
+        let matches_driver = Path::new(file.name())
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(driver_name);
+        if !matches_driver {
             continue;
         }
 
@@ -363,6 +368,36 @@ fn ensure_executable(path: &Path) -> Result<(), ChromeToolError> {
             }
         })?;
     }
+
+    Ok(())
+}
+
+fn repair_macos_code_signature(path: &Path) -> Result<(), ChromeToolError> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(path)
+            .output()
+            .map_err(|e| ChromeToolError::DriverPatchFailed {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+        if !output.status.success() {
+            let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(ChromeToolError::DriverPatchFailed {
+                path: path.to_path_buf(),
+                reason: if reason.is_empty() {
+                    format!("codesign exited with status {}", output.status)
+                } else {
+                    reason
+                },
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = path;
 
     Ok(())
 }
@@ -596,6 +631,40 @@ mod tests {
             .unwrap();
         writer.write_all(b"windows-binary").unwrap();
         writer.finish().unwrap().into_inner()
+    }
+
+    fn fake_driver_zip_with_license_trap() -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("chromedriver-mac-arm64/LICENSE.chromedriver", options)
+            .unwrap();
+        writer
+            .write_all(b"license-text-that-must-not-be-installed")
+            .unwrap();
+        writer
+            .start_file("chromedriver-mac-arm64/chromedriver", options)
+            .unwrap();
+        writer.write_all(b"real-mac-driver-binary").unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn extract_driver_binary_ignores_license_entries() {
+        let home = tempdir().unwrap();
+        let output_path = home.path().join("chromedriver");
+
+        extract_driver_binary(
+            &fake_driver_zip_with_license_trap(),
+            home.path(),
+            &ChromePlatform::MacArm64,
+            &output_path,
+        )
+        .unwrap();
+
+        let installed_bytes = std::fs::read(&output_path).unwrap();
+        assert_eq!(installed_bytes, b"real-mac-driver-binary");
     }
 
     #[tokio::test]
