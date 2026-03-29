@@ -364,16 +364,42 @@ impl JobManager {
                 ),
             };
 
-            if let Err(error) = Self::persist_job_completion(
-                &job_repo_clone,
-                &job_id,
-                &started_at,
-                &result,
-            )
-            .await
+            let result = match Self::persist_job_completion(&job_repo_clone, &job_id, &started_at, &result)
+                .await
             {
-                tracing::error!(job_id = %job_id, "failed to persist job completion: {error}");
-            }
+                Ok(()) => Some(result),
+                Err(error) => {
+                    let failure_result = Self::failure_result(
+                        job_id.to_string(),
+                        result.agent_id,
+                        result.agent_display_name.clone(),
+                        result.agent_description.clone(),
+                        format!("failed to persist job completion: {error}"),
+                    );
+
+                    match Self::persist_job_completion(
+                        &job_repo_clone,
+                        &job_id,
+                        &started_at,
+                        &failure_result,
+                    )
+                    .await
+                    {
+                        Ok(()) => Some(failure_result),
+                        Err(recovery_error) => {
+                            tracing::error!(
+                                job_id = %job_id,
+                                "failed to persist fallback job failure: {recovery_error}"
+                            );
+                            None
+                        }
+                    }
+                }
+            };
+
+            let Some(result) = result else {
+                return;
+            };
 
             Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
             Self::record_completed_job_result_in_store(
@@ -675,6 +701,7 @@ impl JobManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -685,7 +712,7 @@ mod tests {
     use argus_protocol::{LlmProvider, ProviderId, ThreadEvent, ThreadId};
     use argus_repository::traits::{AgentRepository, JobRepository, WorkflowRepository};
     use argus_repository::types::{JobId, JobRecord, JobType, WorkflowId, WorkflowRecord};
-    use argus_repository::{ArgusSqlite, connect_path, migrate};
+    use argus_repository::{ArgusSqlite, DbError, connect_path, migrate};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
     use rust_decimal::Decimal;
@@ -794,6 +821,80 @@ mod tests {
             _model: &str,
         ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
             Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    struct FailFirstResultWriteRepo {
+        inner: Arc<ArgusSqlite>,
+        fail_next_result_write: AtomicBool,
+    }
+
+    impl FailFirstResultWriteRepo {
+        fn new(inner: Arc<ArgusSqlite>) -> Self {
+            Self {
+                inner,
+                fail_next_result_write: AtomicBool::new(true),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl JobRepository for FailFirstResultWriteRepo {
+        async fn create(&self, job: &JobRecord) -> Result<(), DbError> {
+            JobRepository::create(self.inner.as_ref(), job).await
+        }
+
+        async fn get(&self, id: &JobId) -> Result<Option<JobRecord>, DbError> {
+            JobRepository::get(self.inner.as_ref(), id).await
+        }
+
+        async fn update_status(
+            &self,
+            id: &JobId,
+            status: WorkflowStatus,
+            started_at: Option<&str>,
+            finished_at: Option<&str>,
+        ) -> Result<(), DbError> {
+            JobRepository::update_status(self.inner.as_ref(), id, status, started_at, finished_at)
+                .await
+        }
+
+        async fn update_result(
+            &self,
+            id: &JobId,
+            result: &PersistedJobResult,
+        ) -> Result<(), DbError> {
+            if self.fail_next_result_write.swap(false, Ordering::SeqCst) {
+                return Err(DbError::QueryFailed {
+                    reason: format!("injected result persistence failure for job {}", id),
+                });
+            }
+
+            JobRepository::update_result(self.inner.as_ref(), id, result).await
+        }
+
+        async fn update_thread_id(&self, id: &JobId, thread_id: &ThreadId) -> Result<(), DbError> {
+            JobRepository::update_thread_id(self.inner.as_ref(), id, thread_id).await
+        }
+
+        async fn find_ready_jobs(&self, limit: usize) -> Result<Vec<JobRecord>, DbError> {
+            JobRepository::find_ready_jobs(self.inner.as_ref(), limit).await
+        }
+
+        async fn find_due_cron_jobs(&self, now: &str) -> Result<Vec<JobRecord>, DbError> {
+            JobRepository::find_due_cron_jobs(self.inner.as_ref(), now).await
+        }
+
+        async fn update_scheduled_at(&self, id: &JobId, next: &str) -> Result<(), DbError> {
+            JobRepository::update_scheduled_at(self.inner.as_ref(), id, next).await
+        }
+
+        async fn list_by_group(&self, group_id: &str) -> Result<Vec<JobRecord>, DbError> {
+            JobRepository::list_by_group(self.inner.as_ref(), group_id).await
+        }
+
+        async fn delete(&self, id: &JobId) -> Result<bool, DbError> {
+            JobRepository::delete(self.inner.as_ref(), id).await
         }
     }
 
@@ -1068,5 +1169,81 @@ mod tests {
         assert!(persisted_result.success);
         assert_eq!(persisted_result.message, "Workflow complete");
         assert_eq!(persisted_result.agent_id, agent_id);
+    }
+
+    #[tokio::test]
+    async fn persisted_workflow_job_reports_failure_when_completion_persistence_fails() {
+        let repo = seeded_repo().await;
+        let agent_id = seed_test_agent(repo.as_ref()).await;
+        let job_id = JobId::new("job-2");
+        let originating_thread_id = ThreadId::new();
+        seed_persisted_workflow_job(repo.as_ref(), &job_id, agent_id).await;
+
+        let (release_tx, release_rx) = oneshot::channel();
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(ControlledProvider::new("Workflow complete", release_rx));
+        let manager = JobManager::with_job_repository(
+            Arc::new(TemplateManager::new(
+                repo.clone() as Arc<dyn AgentRepository>,
+                repo.clone(),
+            )),
+            Arc::new(StaticProviderResolver { provider }),
+            Arc::new(ToolManager::new()),
+            Arc::new(FailFirstResultWriteRepo::new(repo.clone())) as Arc<dyn JobRepository>,
+        );
+        let (pipe_tx, mut pipe_rx) = broadcast::channel(8);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        manager
+            .spawn_persisted_job_executor(
+                originating_thread_id,
+                job_id.clone(),
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("spawn persisted job executor");
+
+        wait_for_running_status(repo.as_ref(), &job_id).await;
+        release_tx.send(()).expect("release provider");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match pipe_rx.recv().await.expect("receive job event") {
+                    ref event @ ThreadEvent::JobResult {
+                        job_id: ref event_job_id,
+                        ..
+                    } if event_job_id == job_id.as_ref() =>
+                    {
+                        break event.clone();
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("job result event should arrive");
+
+        let ThreadEvent::JobResult {
+            success,
+            message,
+            ..
+        } = event
+        else {
+            unreachable!("filtered to job result");
+        };
+        assert!(!success);
+        assert!(message.contains("failed to persist job completion"));
+
+        let completed_job = JobRepository::get(repo.as_ref(), &job_id)
+            .await
+            .expect("load completed job")
+            .expect("job should exist");
+        assert_eq!(completed_job.status, WorkflowStatus::Failed);
+        let persisted_result = completed_job.result.expect("job result should be stored");
+        assert!(!persisted_result.success);
+        assert!(persisted_result
+            .message
+            .contains("failed to persist job completion"));
     }
 }
