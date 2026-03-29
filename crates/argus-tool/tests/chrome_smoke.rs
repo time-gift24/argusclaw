@@ -9,9 +9,18 @@ use tokio::sync::{broadcast, mpsc};
 fn chrome_binary_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
+    for env_name in ["ARGUS_CHROME_BINARY", "CHROME_BINARY"] {
+        if let Some(path) = std::env::var_os(env_name) {
+            candidates.push(PathBuf::from(path));
+        }
+    }
+
     if cfg!(target_os = "macos") {
         candidates.push(PathBuf::from(
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ));
+        candidates.push(PathBuf::from(
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ));
     } else if cfg!(target_os = "linux") {
         candidates.push(PathBuf::from("/usr/bin/google-chrome"));
