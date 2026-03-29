@@ -512,6 +512,14 @@ impl ThreadPool {
                 })?,
         };
         let model_override = agent_record.model_id;
+        let job_id = WorkflowId::new(request.job_id.clone());
+        let existing_job = persistence
+            .job_repository
+            .get(&job_id)
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?;
 
         let thread_record = ThreadRecord {
             id: thread_id,
@@ -533,26 +541,8 @@ impl ThreadPool {
                 JobError::ExecutionFailed(format!("failed to persist thread record: {err}"))
             })?;
 
-        let job_id = WorkflowId::new(request.job_id.clone());
-        let existing_job = persistence
-            .job_repository
-            .get(&job_id)
-            .await
-            .map_err(|err| {
-                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
-            })?;
-
         if existing_job.is_some() {
-            persistence
-                .job_repository
-                .update_thread_id(&job_id, &thread_id)
-                .await
-                .map_err(|err| {
-                    JobError::ExecutionFailed(format!(
-                        "failed to persist job-thread binding: {err}"
-                    ))
-                })?;
-            return Ok(());
+            return Self::persist_existing_job_binding(persistence, &job_id, thread_id).await;
         }
 
         let job_record = JobRecord {
@@ -577,15 +567,54 @@ impl ThreadPool {
             result: None,
         };
 
-        persistence
-            .job_repository
-            .create(&job_record)
-            .await
-            .map_err(|err| {
-                JobError::ExecutionFailed(format!("failed to create job record: {err}"))
-            })?;
+        if let Err(err) = persistence.job_repository.create(&job_record).await {
+            return Err(Self::rollback_thread_record(
+                persistence,
+                thread_id,
+                format!("failed to create job record: {err}"),
+            )
+            .await);
+        }
 
         Ok(())
+    }
+
+    async fn persist_existing_job_binding(
+        persistence: &ThreadPoolPersistence,
+        job_id: &WorkflowId,
+        thread_id: ThreadId,
+    ) -> Result<(), JobError> {
+        if let Err(err) = persistence
+            .job_repository
+            .update_thread_id(job_id, &thread_id)
+            .await
+        {
+            return Err(Self::rollback_thread_record(
+                persistence,
+                thread_id,
+                format!("failed to persist job-thread binding: {err}"),
+            )
+            .await);
+        }
+
+        Ok(())
+    }
+
+    async fn rollback_thread_record(
+        persistence: &ThreadPoolPersistence,
+        thread_id: ThreadId,
+        message: String,
+    ) -> JobError {
+        match persistence
+            .thread_repository
+            .delete_thread(&thread_id)
+            .await
+        {
+            Ok(_) => JobError::ExecutionFailed(message),
+            Err(cleanup_err) => JobError::ExecutionFailed(format!(
+                "{message}; failed to roll back thread record: {cleanup_err}"
+            )),
+        }
     }
 
     #[cfg(test)]
@@ -662,14 +691,20 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
-    use argus_protocol::LlmProviderRecord;
-    use argus_protocol::{LlmProvider, ProviderId, ProviderResolver, ThreadEvent};
-    use argus_protocol::llm::LlmProviderRepository;
-    use argus_repository::{ArgusSqlite, migrate};
+    use argus_protocol::llm::{LlmProviderId, LlmProviderRepository};
+    use argus_protocol::{
+        AgentRecord, AgentType, LlmProvider, LlmProviderKind, LlmProviderRecord, ProviderId,
+        ProviderResolver, ProviderSecretStatus, SecretString, ThinkingConfig, ThreadEvent,
+    };
     use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
-    use argus_repository::types::JobId;
+    use argus_repository::types::{
+        JobId, JobRecord, JobResult, MessageId, MessageRecord, ThreadRecord, WorkflowStatus,
+    };
+    use argus_repository::{ArgusSqlite, DbError, migrate};
     use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
@@ -729,6 +764,261 @@ mod tests {
         );
 
         (thread_pool, sqlite)
+    }
+
+    fn sample_provider_record(is_default: bool) -> LlmProviderRecord {
+        LlmProviderRecord {
+            id: LlmProviderId::new(0),
+            display_name: "thread-pool-provider".to_string(),
+            kind: LlmProviderKind::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key: SecretString::new("test-key"),
+            models: vec!["gpt-4o-mini".to_string()],
+            model_config: HashMap::new(),
+            default_model: "gpt-4o-mini".to_string(),
+            is_default,
+            extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::Ready,
+            meta_data: HashMap::new(),
+        }
+    }
+
+    async fn test_pool_with_failing_job_create() -> (ThreadPool, Arc<RecordingThreadRepository>) {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let provider_id =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        template_manager
+            .upsert(AgentRecord {
+                id: argus_protocol::AgentId::new(7),
+                display_name: "Failing Job Create Agent".to_string(),
+                description: "Used to test rollback".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(provider_id.into_inner())),
+                model_id: Some("gpt-4o-mini".to_string()),
+                system_prompt: "You are a test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
+
+        let thread_repository = Arc::new(RecordingThreadRepository::default());
+        let thread_pool = ThreadPool::with_persistence(
+            template_manager,
+            Arc::new(DummyProviderResolver),
+            Arc::new(ToolManager::new()),
+            Some(ThreadPoolPersistence::new(
+                Arc::new(FailingCreateJobRepository) as Arc<dyn JobRepository>,
+                thread_repository.clone() as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        (thread_pool, thread_repository)
+    }
+
+    #[derive(Default)]
+    struct RecordingThreadRepository {
+        threads: StdMutex<HashMap<String, ThreadRecord>>,
+        deleted_threads: StdMutex<HashSet<String>>,
+    }
+
+    #[async_trait]
+    impl ThreadRepository for RecordingThreadRepository {
+        async fn upsert_thread(&self, thread: &ThreadRecord) -> Result<(), DbError> {
+            self.threads
+                .lock()
+                .expect("thread store mutex poisoned")
+                .insert(thread.id.to_string(), thread.clone());
+            Ok(())
+        }
+
+        async fn get_thread(
+            &self,
+            id: &argus_protocol::ThreadId,
+        ) -> Result<Option<ThreadRecord>, DbError> {
+            Ok(self
+                .threads
+                .lock()
+                .expect("thread store mutex poisoned")
+                .get(&id.to_string())
+                .cloned())
+        }
+
+        async fn list_threads(&self, _limit: u32) -> Result<Vec<ThreadRecord>, DbError> {
+            Ok(self
+                .threads
+                .lock()
+                .expect("thread store mutex poisoned")
+                .values()
+                .cloned()
+                .collect())
+        }
+
+        async fn list_threads_in_session(
+            &self,
+            _session_id: &argus_protocol::SessionId,
+        ) -> Result<Vec<ThreadRecord>, DbError> {
+            unreachable!("list_threads_in_session should not be called")
+        }
+
+        async fn delete_thread(&self, id: &argus_protocol::ThreadId) -> Result<bool, DbError> {
+            let thread_key = id.to_string();
+            let removed = self
+                .threads
+                .lock()
+                .expect("thread store mutex poisoned")
+                .remove(&thread_key)
+                .is_some();
+            self.deleted_threads
+                .lock()
+                .expect("deleted thread mutex poisoned")
+                .insert(thread_key);
+            Ok(removed)
+        }
+
+        async fn delete_threads_in_session(
+            &self,
+            _session_id: &argus_protocol::SessionId,
+        ) -> Result<u64, DbError> {
+            unreachable!("delete_threads_in_session should not be called")
+        }
+
+        async fn add_message(&self, _message: &MessageRecord) -> Result<MessageId, DbError> {
+            unreachable!("add_message should not be called")
+        }
+
+        async fn get_messages(
+            &self,
+            _thread_id: &argus_protocol::ThreadId,
+        ) -> Result<Vec<MessageRecord>, DbError> {
+            unreachable!("get_messages should not be called")
+        }
+
+        async fn get_recent_messages(
+            &self,
+            _thread_id: &argus_protocol::ThreadId,
+            _limit: u32,
+        ) -> Result<Vec<MessageRecord>, DbError> {
+            unreachable!("get_recent_messages should not be called")
+        }
+
+        async fn delete_messages_before(
+            &self,
+            _thread_id: &argus_protocol::ThreadId,
+            _seq: u32,
+        ) -> Result<u64, DbError> {
+            unreachable!("delete_messages_before should not be called")
+        }
+
+        async fn update_thread_stats(
+            &self,
+            _id: &argus_protocol::ThreadId,
+            _token_count: u32,
+            _turn_count: u32,
+        ) -> Result<(), DbError> {
+            unreachable!("update_thread_stats should not be called")
+        }
+
+        async fn rename_thread(
+            &self,
+            _id: &argus_protocol::ThreadId,
+            _session_id: &argus_protocol::SessionId,
+            _title: Option<&str>,
+        ) -> Result<bool, DbError> {
+            unreachable!("rename_thread should not be called")
+        }
+
+        async fn update_thread_model(
+            &self,
+            _id: &argus_protocol::ThreadId,
+            _session_id: &argus_protocol::SessionId,
+            _provider_id: LlmProviderId,
+            _model_override: Option<&str>,
+        ) -> Result<bool, DbError> {
+            unreachable!("update_thread_model should not be called")
+        }
+
+        async fn get_thread_in_session(
+            &self,
+            _thread_id: &argus_protocol::ThreadId,
+            _session_id: &argus_protocol::SessionId,
+        ) -> Result<Option<ThreadRecord>, DbError> {
+            unreachable!("get_thread_in_session should not be called")
+        }
+    }
+
+    struct FailingCreateJobRepository;
+
+    #[async_trait]
+    impl JobRepository for FailingCreateJobRepository {
+        async fn create(&self, _job: &JobRecord) -> Result<(), DbError> {
+            Err(DbError::QueryFailed {
+                reason: "simulated job create failure".to_string(),
+            })
+        }
+
+        async fn get(&self, _id: &JobId) -> Result<Option<JobRecord>, DbError> {
+            Ok(None)
+        }
+
+        async fn update_status(
+            &self,
+            _id: &JobId,
+            _status: WorkflowStatus,
+            _started_at: Option<&str>,
+            _finished_at: Option<&str>,
+        ) -> Result<(), DbError> {
+            unreachable!("update_status should not be called")
+        }
+
+        async fn update_result(&self, _id: &JobId, _result: &JobResult) -> Result<(), DbError> {
+            unreachable!("update_result should not be called")
+        }
+
+        async fn update_thread_id(
+            &self,
+            _id: &JobId,
+            _thread_id: &argus_protocol::ThreadId,
+        ) -> Result<(), DbError> {
+            unreachable!("update_thread_id should not be called")
+        }
+
+        async fn find_ready_jobs(&self, _limit: usize) -> Result<Vec<JobRecord>, DbError> {
+            unreachable!("find_ready_jobs should not be called")
+        }
+
+        async fn find_due_cron_jobs(&self, _now: &str) -> Result<Vec<JobRecord>, DbError> {
+            unreachable!("find_due_cron_jobs should not be called")
+        }
+
+        async fn update_scheduled_at(&self, _id: &JobId, _next: &str) -> Result<(), DbError> {
+            unreachable!("update_scheduled_at should not be called")
+        }
+
+        async fn list_by_group(&self, _group_id: &str) -> Result<Vec<JobRecord>, DbError> {
+            unreachable!("list_by_group should not be called")
+        }
+
+        async fn delete(&self, _id: &JobId) -> Result<bool, DbError> {
+            unreachable!("delete should not be called")
+        }
     }
 
     #[tokio::test]
@@ -831,23 +1121,10 @@ mod tests {
     #[tokio::test]
     async fn enqueue_job_missing_agent_fails_without_persisting_rows() {
         let (pool, sqlite) = test_persistent_pool().await;
-        let provider = LlmProviderRecord {
-            id: argus_protocol::LlmProviderId::new(0),
-            display_name: "thread-pool-default-provider".to_string(),
-            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
-            base_url: "http://localhost:11434/v1".to_string(),
-            api_key: argus_protocol::SecretString::new("test-key"),
-            models: vec!["gpt-4o-mini".to_string()],
-            model_config: HashMap::new(),
-            default_model: "gpt-4o-mini".to_string(),
-            is_default: true,
-            extra_headers: HashMap::new(),
-            secret_status: argus_protocol::ProviderSecretStatus::Ready,
-            meta_data: HashMap::new(),
-        };
-        let _ = LlmProviderRepository::upsert_provider(sqlite.as_ref(), &provider)
-            .await
-            .expect("provider upsert should succeed");
+        let _ =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
 
         let request = super::test_request("job-missing-agent-persist");
 
@@ -858,13 +1135,44 @@ mod tests {
             error.to_string().contains("agent 7 not found"),
             "unexpected error: {error}"
         );
-        let persisted_job = JobRepository::get(sqlite.as_ref(), &JobId::new("job-missing-agent-persist"))
-            .await
-            .expect("job lookup should succeed");
+        let persisted_job =
+            JobRepository::get(sqlite.as_ref(), &JobId::new("job-missing-agent-persist"))
+                .await
+                .expect("job lookup should succeed");
         assert!(persisted_job.is_none());
         let persisted_threads = ThreadRepository::list_threads(sqlite.as_ref(), 100)
             .await
             .expect("thread list should succeed");
         assert!(persisted_threads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_rolls_back_thread_when_job_create_fails() {
+        let (pool, thread_repository) = test_pool_with_failing_job_create().await;
+
+        let result = pool
+            .enqueue_job(super::test_request("job-create-fails"))
+            .await;
+
+        let error = result.expect_err("enqueue should fail when job create fails");
+        assert!(
+            error.to_string().contains(
+                "failed to create job record: database query failed: simulated job create failure"
+            ),
+            "unexpected error: {error}"
+        );
+        let persisted_threads = thread_repository
+            .list_threads(100)
+            .await
+            .expect("thread list should succeed");
+        assert!(persisted_threads.is_empty());
+        assert_eq!(
+            thread_repository
+                .deleted_threads
+                .lock()
+                .expect("deleted thread mutex poisoned")
+                .len(),
+            1
+        );
     }
 }
