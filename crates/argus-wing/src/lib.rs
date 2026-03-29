@@ -1330,4 +1330,107 @@ mod tests {
             .expect("binding lookup should succeed after restart");
         assert_eq!(recovered_binding, Some(bound_thread_id));
     }
+
+    #[tokio::test]
+    async fn dispatch_job_uses_agent_provider_without_default_provider() {
+        use argus_protocol::LlmProviderRecord;
+        use argus_repository::traits::ThreadRepository;
+        use argus_repository::ArgusSqlite;
+        use std::collections::HashMap;
+        use tokio::sync::{broadcast, mpsc};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let providers = wing
+            .list_providers()
+            .await
+            .expect("provider list should succeed");
+        let default_provider = providers
+            .into_iter()
+            .find(|provider| provider.is_default)
+            .expect("migration should seed one default provider");
+
+        let dedicated_provider_id = wing
+            .upsert_provider(LlmProviderRecord {
+                id: argus_protocol::LlmProviderId::new(0),
+                display_name: "dedicated-job-provider".to_string(),
+                kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+                base_url: "http://localhost:11434/v1".to_string(),
+                api_key: argus_protocol::SecretString::new("test-key"),
+                models: vec!["gpt-4o-mini".to_string()],
+                model_config: HashMap::new(),
+                default_model: "gpt-4o-mini".to_string(),
+                is_default: false,
+                extra_headers: HashMap::new(),
+                secret_status: argus_protocol::ProviderSecretStatus::Ready,
+                meta_data: HashMap::new(),
+            })
+            .await
+            .expect("dedicated provider should upsert");
+
+        wing.delete_provider(default_provider.id)
+            .await
+            .expect("deleting default provider should succeed");
+
+        let agent_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Agent Specific Provider".to_string(),
+                description: "Dispatch should work without a default provider".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(argus_protocol::ProviderId::new(
+                    dedicated_provider_id.into_inner(),
+                )),
+                model_id: Some("gpt-4o-mini".to_string()),
+                system_prompt: "You are a dispatch test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let job_id = "job-agent-provider-without-default".to_string();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        wing.job_manager
+            .dispatch_job(
+                ThreadId::new(),
+                job_id.clone(),
+                agent_id,
+                "execute a recoverable job".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("dispatch should succeed using agent-specific provider");
+
+        let bound_thread_id = wing
+            .job_thread_binding(&job_id)
+            .await
+            .expect("job thread binding lookup should succeed")
+            .expect("job should be bound to an execution thread");
+
+        let sqlite = ArgusSqlite::new(wing.pool.clone());
+        let persisted_thread = ThreadRepository::get_thread(&sqlite, &bound_thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread row should exist");
+        assert_eq!(persisted_thread.provider_id, dedicated_provider_id);
+        assert_eq!(
+            persisted_thread.model_override.as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert!(persisted_thread.session_id.is_none());
+    }
 }

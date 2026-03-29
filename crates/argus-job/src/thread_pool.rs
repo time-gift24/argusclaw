@@ -480,16 +480,36 @@ impl ThreadPool {
             return Ok(());
         };
 
-        let provider_id = persistence
-            .provider_repository
-            .get_default_provider_id()
+        let agent_record = self
+            .template_manager
+            .get(request.agent_id)
             .await
             .map_err(|err| {
-                JobError::ExecutionFailed(format!("failed to resolve default provider id: {err}"))
-            })?
-            .ok_or_else(|| {
-                JobError::ExecutionFailed("default provider is not configured".to_string())
+                JobError::ExecutionFailed(format!(
+                    "failed to load agent {}: {err}",
+                    request.agent_id.inner()
+                ))
             })?;
+        let template_provider_id = agent_record
+            .as_ref()
+            .and_then(|agent| agent.provider_id)
+            .map(|id| argus_protocol::LlmProviderId::new(id.inner()));
+        let provider_id = match template_provider_id {
+            Some(provider_id) => provider_id,
+            None => persistence
+                .provider_repository
+                .get_default_provider_id()
+                .await
+                .map_err(|err| {
+                    JobError::ExecutionFailed(format!(
+                        "failed to resolve default provider id: {err}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    JobError::ExecutionFailed("default provider is not configured".to_string())
+                })?,
+        };
+        let model_override = agent_record.and_then(|agent| agent.model_id);
 
         let thread_record = ThreadRecord {
             id: thread_id,
@@ -499,7 +519,7 @@ impl ThreadPool {
             turn_count: 0,
             session_id: None,
             template_id: Some(RepoAgentId::new(request.agent_id.inner())),
-            model_override: None,
+            model_override,
             created_at: now.to_string(),
             updated_at: now.to_string(),
         };
