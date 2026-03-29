@@ -20,6 +20,7 @@ once_cell = { workspace = true }
 url = { workspace = true }
 thirtyfour = { workspace = true }
 zip = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

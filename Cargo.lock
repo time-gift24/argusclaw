@@ -378,6 +378,7 @@ dependencies = [
  "argus-protocol",
  "async-trait",
  "dashmap",
+ "dirs",
  "glob",
  "once_cell",
  "regex",

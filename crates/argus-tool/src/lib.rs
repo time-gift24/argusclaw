@@ -17,6 +17,7 @@ mod chrome;
 pub mod glob;
 pub mod grep;
 pub mod http;
+pub mod knowledge;
 pub mod list;
 pub mod patch;
 pub mod path_utils;
