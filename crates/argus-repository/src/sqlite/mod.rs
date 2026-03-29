@@ -327,4 +327,34 @@ mod tests {
             "build.rs should watch the migrations directory so embedded sqlx migrations stay fresh after rebases"
         );
     }
+
+    #[test]
+    fn persistent_workflow_migration_rebuilds_workflows_with_composite_template_fk() {
+        let migration =
+            std::fs::read_to_string(format!("{}/migrations/20260329160000_persistent_workflow.sql", env!("CARGO_MANIFEST_DIR")))
+                .expect("persistent workflow migration should exist");
+
+        assert!(
+            migration.contains("CREATE TABLE workflows_new"),
+            "workflows should be rebuilt instead of altered in place"
+        );
+        assert!(
+            migration.contains("CHECK (")
+                && migration.contains("template_id IS NULL AND template_version IS NULL")
+                && migration.contains("template_id IS NOT NULL AND template_version IS NOT NULL"),
+            "workflows should require template_id/template_version to be both null or both set"
+        );
+        assert!(
+            migration.contains("FOREIGN KEY (template_id, template_version) REFERENCES workflow_templates(id, version)"),
+            "workflows should reference the exact immutable template version"
+        );
+        assert!(
+            migration.contains("INSERT INTO workflows_new"),
+            "existing workflow rows should be copied into the rebuilt table"
+        );
+        assert!(
+            migration.contains("ALTER TABLE workflows_new RENAME TO workflows"),
+            "rebuilt workflows table should replace the old table"
+        );
+    }
 }

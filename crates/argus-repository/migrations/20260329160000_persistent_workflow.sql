@@ -25,12 +25,34 @@ CREATE TABLE IF NOT EXISTS workflow_template_nodes (
     FOREIGN KEY (template_id, template_version) REFERENCES workflow_templates(id, version) ON DELETE CASCADE
 );
 
-ALTER TABLE workflows ADD COLUMN template_id TEXT;
-ALTER TABLE workflows ADD COLUMN template_version INTEGER;
-ALTER TABLE workflows ADD COLUMN initiating_thread_id TEXT REFERENCES threads(id);
+CREATE TABLE workflows_new (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    template_id TEXT,
+    template_version INTEGER,
+    initiating_thread_id TEXT REFERENCES threads(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (template_id IS NULL AND template_version IS NULL)
+        OR (template_id IS NOT NULL AND template_version IS NOT NULL)
+    ),
+    FOREIGN KEY (template_id, template_version)
+        REFERENCES workflow_templates(id, version)
+        ON DELETE RESTRICT
+);
+
+INSERT INTO workflows_new (id, name, status, created_at, updated_at)
+SELECT id, name, status, created_at, updated_at
+FROM workflows;
+
+DROP TABLE workflows;
+ALTER TABLE workflows_new RENAME TO workflows;
 
 ALTER TABLE jobs ADD COLUMN node_key TEXT;
 
+CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
 CREATE INDEX IF NOT EXISTS idx_workflows_template_id ON workflows(template_id);
 CREATE INDEX IF NOT EXISTS idx_workflows_initiating_thread_id ON workflows(initiating_thread_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_template_nodes_template_id_version ON workflow_template_nodes(template_id, template_version);
