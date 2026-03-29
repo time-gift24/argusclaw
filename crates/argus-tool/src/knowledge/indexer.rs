@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -55,28 +56,65 @@ where
         let cache = self.ensure_snapshot(snapshot_id).await?;
         let normalized = normalize_path(path);
 
-        let entries = cache
-            .tree
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == GitHubTreeEntryKind::Blob)
-            .filter_map(|entry| {
-                relative_path(&entry.path, &normalized).and_then(|relative| {
-                    if relative.split('/').count() > depth {
-                        return None;
-                    }
+        let mut aggregates = BTreeMap::<String, TreeEntryAggregate>::new();
 
-                    Some(ExploreTreeEntry {
-                        path: format!("/{}", entry.path),
-                        title: file_title(&entry.path),
-                        child_count: 0,
-                        summary_hint: cache
-                            .manifest
-                            .as_ref()
-                            .and_then(|manifest| manifest.file_override(&entry.path))
-                            .and_then(|file| file.summary.clone()),
-                    })
-                })
+        for entry in &cache.tree.entries {
+            let Some(relative) = relative_path(&entry.path, &normalized) else {
+                continue;
+            };
+
+            let segments = relative
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>();
+            if segments.is_empty() {
+                continue;
+            }
+
+            let max_level = depth.min(segments.len());
+            for level in 1..=max_level {
+                let path_segments = segments[..level].join("/");
+                let full_path = join_scope_and_path(&normalized, &path_segments);
+                let is_last_level = level == segments.len();
+                let is_directory = !is_last_level || entry.kind == GitHubTreeEntryKind::Tree;
+
+                let aggregate =
+                    aggregates
+                        .entry(full_path.clone())
+                        .or_insert_with(|| TreeEntryAggregate {
+                            title: file_title(&full_path),
+                            summary_hint: None,
+                            is_directory: false,
+                            direct_children: BTreeSet::new(),
+                        });
+
+                aggregate.is_directory |= is_directory;
+
+                if level < segments.len() {
+                    aggregate
+                        .direct_children
+                        .insert(segments[level].to_string());
+                } else if entry.kind == GitHubTreeEntryKind::Blob {
+                    aggregate.summary_hint = cache
+                        .manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.file_override(&entry.path))
+                        .and_then(|file| file.summary.clone());
+                }
+            }
+        }
+
+        let entries = aggregates
+            .into_iter()
+            .map(|(full_path, aggregate)| ExploreTreeEntry {
+                path: format!("/{full_path}"),
+                title: aggregate.title,
+                child_count: if aggregate.is_directory {
+                    aggregate.direct_children.len()
+                } else {
+                    0
+                },
+                summary_hint: aggregate.summary_hint,
             })
             .collect();
 
@@ -116,7 +154,8 @@ where
         node_id: &str,
     ) -> Result<KnowledgeNode, KnowledgeToolError> {
         let cache = self.ensure_snapshot(snapshot_id).await?;
-        self.ensure_sections_loaded(snapshot_id, cache.as_ref(), None).await?;
+        self.ensure_sections_loaded(snapshot_id, cache.as_ref(), None)
+            .await?;
         cache
             .nodes
             .get(node_id)
@@ -132,7 +171,8 @@ where
         cursor: Option<&str>,
     ) -> Result<ContentPage, KnowledgeToolError> {
         let cache = self.ensure_snapshot(snapshot_id).await?;
-        self.ensure_sections_loaded(snapshot_id, cache.as_ref(), None).await?;
+        self.ensure_sections_loaded(snapshot_id, cache.as_ref(), None)
+            .await?;
         let node = cache
             .nodes
             .get(node_id)
@@ -169,7 +209,8 @@ where
         node_id: &str,
     ) -> Result<Vec<KnowledgeNode>, KnowledgeToolError> {
         let cache = self.ensure_snapshot(snapshot_id).await?;
-        self.ensure_sections_loaded(snapshot_id, cache.as_ref(), None).await?;
+        self.ensure_sections_loaded(snapshot_id, cache.as_ref(), None)
+            .await?;
         let node = cache
             .nodes
             .get(node_id)
@@ -279,10 +320,11 @@ where
                     .unwrap_or_else(|| generated_id.clone());
 
                 let node_override = cache.manifest.as_ref().and_then(|manifest| {
-                    manifest
-                        .nodes
-                        .iter()
-                        .find(|node| node.id == node_id || node.source.path == entry.path && node.source.heading.as_deref() == Some(section.title.as_str()))
+                    manifest.nodes.iter().find(|node| {
+                        node.id == node_id
+                            || node.source.path == entry.path
+                                && node.source.heading.as_deref() == Some(section.title.as_str())
+                    })
                 });
 
                 cache.nodes.insert(
@@ -327,6 +369,14 @@ where
 
 fn normalize_path(path: &str) -> String {
     path.trim_matches('/').to_string()
+}
+
+fn join_scope_and_path(scope: &str, relative: &str) -> String {
+    if scope.is_empty() {
+        relative.to_string()
+    } else {
+        format!("{scope}/{relative}")
+    }
 }
 
 fn relative_path<'a>(path: &'a str, scope: &str) -> Option<&'a str> {
@@ -380,4 +430,11 @@ fn extract_excerpt(content: &str, start_line: usize, end_line: usize) -> String 
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+struct TreeEntryAggregate {
+    title: String,
+    summary_hint: Option<String>,
+    is_directory: bool,
+    direct_children: BTreeSet<String>,
 }

@@ -94,9 +94,7 @@ impl<T: GitHubTransport> GitHubKnowledgeClient<T> {
         repo: &str,
         ref_name: &str,
     ) -> Result<GitHubSnapshot, KnowledgeToolError> {
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{ref_name}"
-        );
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{ref_name}");
         let value = self.transport.get_json(&url).await?;
         check_api_error(&value)?;
 
@@ -117,8 +115,18 @@ impl<T: GitHubTransport> GitHubKnowledgeClient<T> {
         repo: &str,
         rev: &str,
     ) -> Result<GitHubTree, KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{rev}");
-        let value = self.transport.get_json(&url).await?;
+        let commit_url = format!("https://api.github.com/repos/{owner}/{repo}/git/commits/{rev}");
+        let commit_value = self.transport.get_json(&commit_url).await?;
+        check_api_error(&commit_value)?;
+
+        let commit_response: GitHubCommitResponse = serde_json::from_value(commit_value)
+            .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))?;
+
+        let tree_url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/git/trees/{}?recursive=1",
+            commit_response.tree.sha
+        );
+        let value = self.transport.get_json(&tree_url).await?;
         check_api_error(&value)?;
 
         let response: GitHubTreeResponse = serde_json::from_value(value)
@@ -194,6 +202,16 @@ struct GitHubRefResponse {
 
 #[derive(Debug, Deserialize)]
 struct GitHubRefObject {
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCommitResponse {
+    tree: GitHubCommitTree,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubCommitTree {
     sha: String,
 }
 
