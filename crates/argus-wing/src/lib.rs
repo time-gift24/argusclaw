@@ -248,7 +248,7 @@ impl ArgusWing {
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
     pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
-            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
+            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, KnowledgeTool, ListDirTool, ReadTool,
             ShellTool, WriteFileTool,
         };
 
@@ -262,6 +262,7 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
+        self.tool_manager.register(Arc::new(KnowledgeTool::new()));
 
         Ok(())
     }
@@ -1372,6 +1373,7 @@ mod tests {
             "glob",
             "grep",
             "http",
+            "knowledge",
             "list_dir",
             "read",
             "shell",

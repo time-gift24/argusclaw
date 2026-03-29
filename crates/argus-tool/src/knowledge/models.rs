@@ -45,6 +45,20 @@ pub struct KnowledgeToolArgs {
     pub cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub depth: Option<usize>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub scope_path: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+    #[serde(default)]
+    pub relation_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
