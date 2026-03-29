@@ -1105,7 +1105,10 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::{KeepRecentCompactor, ThreadBuilder};
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
         ThreadEvent, ThreadId, ThreadJobResult,
