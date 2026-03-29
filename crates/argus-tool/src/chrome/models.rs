@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use url::Url;
 
 use super::error::ChromeToolError;
 
@@ -44,18 +45,30 @@ impl ChromeToolArgs {
                 reason: e.to_string(),
             })?;
 
-        if matches!(args.action, ChromeAction::Open)
-            && args
-                .url
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-        {
-            return Err(ChromeToolError::MissingRequiredField {
-                action: args.action.as_str().to_string(),
-                field: "url",
-            });
+        let url = args.url.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        match args.action {
+            ChromeAction::Open => {
+                let url = url.ok_or_else(|| ChromeToolError::MissingRequiredField {
+                    action: args.action.as_str().to_string(),
+                    field: "url",
+                })?;
+                Url::parse(url).map_err(|e| ChromeToolError::InvalidArguments {
+                    reason: format!(
+                        "field 'url' is invalid for action '{}': {e}",
+                        args.action.as_str()
+                    ),
+                })?;
+            }
+            _ => {
+                if args.url.is_some() {
+                    return Err(ChromeToolError::InvalidArguments {
+                        reason: format!(
+                            "field 'url' is not allowed for action '{}'",
+                            args.action.as_str()
+                        ),
+                    });
+                }
+            }
         }
 
         Ok(args)
