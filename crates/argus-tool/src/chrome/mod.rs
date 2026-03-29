@@ -1,16 +1,17 @@
-pub mod error;
-pub mod installer;
-pub mod manager;
-pub mod models;
-pub mod patcher;
-pub mod policy;
-pub mod session;
-pub mod tool;
+mod error;
+mod installer;
+mod manager;
+mod models;
+mod patcher;
+mod policy;
+mod session;
+mod tool;
 
 pub use tool::ChromeTool;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use std::path::{Path, PathBuf};
@@ -20,9 +21,10 @@ mod tests {
     use super::error::ChromeToolError;
     use super::installer::ChromePaths;
     use super::manager::{BackendOpenResult, BrowserBackend};
-    use super::models::{ChromeAction, ChromeToolArgs};
+    use super::models::{ChromeAction, ChromeToolArgs, LinkSummary, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
+    use super::session::BrowserSession;
     use super::tool::ChromeTool;
     use argus_protocol::NamedTool;
     use argus_protocol::ToolExecutionContext;
@@ -141,6 +143,29 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("read-only"));
+
+        let action_enum = def.parameters["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum should be present");
+        let action_values: Vec<&str> = action_enum
+            .iter()
+            .map(|value| value.as_str().expect("enum value should be a string"))
+            .collect();
+        assert!(action_values.contains(&"open"));
+        assert!(action_values.contains(&"wait"));
+        assert!(action_values.contains(&"extract_text"));
+        assert!(action_values.contains(&"list_links"));
+        assert!(action_values.contains(&"get_dom_summary"));
+        assert!(action_values.contains(&"screenshot"));
+        assert!(!action_values.contains(&"click"));
+
+        assert!(def.parameters["properties"].get("session_id").is_some());
+        assert!(def.parameters["properties"].get("selector").is_some());
+        assert!(
+            def.parameters["properties"]
+                .get("screenshot_path")
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -151,6 +176,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::NotAuthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_dispatches_read_actions_through_manager() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default().with_page(
+            "https://example.com",
+            "https://example.com/landing",
+            "Example Title",
+            vec![LinkSummary {
+                href: "https://example.com/docs".to_string(),
+                text: "Docs".to_string(),
+            }],
+            "Visible page text",
+        )));
+
+        let open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("open should succeed");
+
+        let session_id = open["session_id"]
+            .as_str()
+            .expect("open should return a session id")
+            .to_string();
+
+        let wait = tool
+            .execute(
+                json!({
+                    "action": "wait",
+                    "session_id": session_id
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("wait should succeed");
+        assert_eq!(wait["status"], "ok");
+
+        let extract = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                    "session_id": session_id,
+                    "selector": "main"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("extract_text should succeed");
+        assert_eq!(extract["content"], "Visible page text [main]");
+
+        let links = tool
+            .execute(
+                json!({
+                    "action": "list_links",
+                    "session_id": session_id
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("list_links should succeed");
+        assert_eq!(links["links"].as_array().map(|links| links.len()), Some(1));
+        assert_eq!(links["links"][0]["text"], "Docs");
+
+        let summary = tool
+            .execute(
+                json!({
+                    "action": "get_dom_summary",
+                    "session_id": session_id
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("get_dom_summary should succeed");
+        assert_eq!(summary["summary"], "Visible page text");
+
+        let screenshot = tool
+            .execute(
+                json!({
+                    "action": "screenshot",
+                    "session_id": session_id,
+                    "screenshot_path": "/tmp/example.png"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("screenshot should succeed");
+        assert_eq!(screenshot["screenshot_path"], "/tmp/example.png");
     }
 
     #[test]
@@ -182,6 +300,86 @@ mod tests {
         async fn open(&self, _url: &str) -> Result<BackendOpenResult, ChromeToolError> {
             Err(ChromeToolError::InvalidArguments {
                 reason: "fake chrome backend should not be used".to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeChromeBackend {
+        pages: HashMap<String, FakePage>,
+    }
+
+    impl FakeChromeBackend {
+        fn with_page(
+            mut self,
+            requested_url: impl Into<String>,
+            final_url: impl Into<String>,
+            page_title: impl Into<String>,
+            links: Vec<LinkSummary>,
+            text: impl Into<String>,
+        ) -> Self {
+            self.pages.insert(
+                requested_url.into(),
+                FakePage {
+                    final_url: final_url.into(),
+                    page_title: page_title.into(),
+                    links,
+                    text: text.into(),
+                },
+            );
+            self
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakePage {
+        final_url: String,
+        page_title: String,
+        links: Vec<LinkSummary>,
+        text: String,
+    }
+
+    #[derive(Debug)]
+    struct FakeBrowserSession {
+        links: Vec<LinkSummary>,
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserSession for FakeBrowserSession {
+        async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
+            Ok(match selector {
+                Some(selector) => format!("{} [{selector}]", self.text),
+                None => self.text.clone(),
+            })
+        }
+
+        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
+            Ok(self.links.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for FakeChromeBackend {
+        async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            let page = self
+                .pages
+                .get(url)
+                .ok_or_else(|| ChromeToolError::InvalidArguments {
+                    reason: format!("no fake page for url '{url}'"),
+                })?;
+
+            let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
+                links: page.links.clone(),
+                text: page.text.clone(),
+            });
+
+            Ok(BackendOpenResult {
+                metadata: PageMetadata {
+                    final_url: page.final_url.clone(),
+                    page_title: page.page_title.clone(),
+                },
+                session,
             })
         }
     }
