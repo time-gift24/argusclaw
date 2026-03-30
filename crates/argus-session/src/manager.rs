@@ -161,17 +161,14 @@ impl SessionManager {
 
     /// Load a session into memory.
     pub async fn load(&self, session_id: SessionId) -> Result<Arc<Session>> {
-        // Check if already loaded
         if let Some(existing) = self.sessions.get(&session_id) {
             return Ok(existing.clone());
         }
 
-        // Ensure session trace directory exists (for recovery)
         if let Err(e) = self.ensure_session_dir(session_id).await {
             tracing::warn!(session_id = %session_id, error = %e, "Failed to ensure session directory");
         }
 
-        // Load from DB
         let session_record =
             self.session_repo
                 .get(&session_id)
@@ -184,9 +181,33 @@ impl SessionManager {
             Some(record) => Arc::new(Session::new(session_id, record.name)),
             None => return Err(ArgusError::SessionNotFound(session_id)),
         };
+        let thread_records = self
+            .thread_repo
+            .list_threads_in_session(&session_id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
 
-        // Store in memory
         self.sessions.insert(session_id, session.clone());
+        for thread_record in thread_records {
+            self.thread_pool.register_chat_thread(session_id, thread_record.id);
+            match self
+                .thread_pool
+                .ensure_chat_runtime(session_id, thread_record.id)
+                .await
+            {
+                Ok(thread) => session.add_thread(thread),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        thread_id = %thread_record.id,
+                        error = %error,
+                        "Failed to load thread runtime into session"
+                    );
+                }
+            }
+        }
 
         Ok(session)
     }
@@ -329,7 +350,7 @@ impl SessionManager {
         explicit_provider_id: Option<ProviderId>,
         model_override: Option<&str>,
     ) -> Result<ThreadId> {
-        self.load(session_id).await?;
+        let session = self.load(session_id).await?;
 
         // Get agent record (template)
         let agent_record = self
@@ -425,6 +446,21 @@ impl SessionManager {
                 reason: e.to_string(),
             })?;
         self.thread_pool.register_chat_thread(session_id, thread_id);
+        let thread = match self
+            .thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.thread_pool.remove_runtime(&thread_id);
+                let _ = self.thread_repo.delete_thread(&thread_id).await;
+                return Err(ArgusError::LlmError {
+                    reason: error.to_string(),
+                });
+            }
+        };
+        session.add_thread(thread);
 
         Ok(thread_id)
     }
@@ -942,24 +978,30 @@ async fn resolve_turn_numbers(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fs;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use argus_agent::{KeepRecentCompactor, ThreadBuilder};
-    use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
-        ToolCompletionResponse,
-    };
+    use argus_agent::{CompactorManager, KeepRecentCompactor, ThreadBuilder};
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
     use argus_protocol::{
-        AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
-        ThreadEvent, ThreadId, ThreadJobResult,
+        AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, ProviderId,
+        ProviderResolver, ProviderSecretStatus, Role, SecretString, SessionId,
+        ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThinkingConfig,
     };
+    use argus_repository::traits::{
+        AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
+    };
+    use argus_repository::{ArgusSqlite, migrate};
+    use argus_template::TemplateManager;
+    use argus_tool::ToolManager;
     use async_trait::async_trait;
     use rust_decimal::Decimal;
+    use sqlx::SqlitePool;
     use tokio::time::{sleep, timeout};
 
-    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session};
+    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager};
 
     #[derive(Debug)]
     struct CapturingProvider {
@@ -1021,6 +1063,121 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         }
+    }
+
+    struct FixedProviderResolver {
+        provider: Arc<dyn argus_protocol::LlmProvider>,
+    }
+
+    impl FixedProviderResolver {
+        fn new(provider: Arc<dyn argus_protocol::LlmProvider>) -> Self {
+            Self { provider }
+        }
+    }
+
+    #[async_trait]
+    impl ProviderResolver for FixedProviderResolver {
+        async fn resolve(
+            &self,
+            _id: ProviderId,
+        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    fn sample_provider_record(is_default: bool) -> LlmProviderRecord {
+        LlmProviderRecord {
+            id: argus_protocol::LlmProviderId::new(0),
+            display_name: "session-manager-provider".to_string(),
+            kind: LlmProviderKind::OpenAiCompatible,
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key: SecretString::new("test-key"),
+            models: vec!["capturing".to_string()],
+            model_config: HashMap::new(),
+            default_model: "capturing".to_string(),
+            is_default,
+            extra_headers: HashMap::new(),
+            secret_status: ProviderSecretStatus::Ready,
+            meta_data: HashMap::new(),
+        }
+    }
+
+    async fn test_session_manager() -> SessionManager {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        let provider_id = LlmProviderRepository::upsert_provider(
+            sqlite.as_ref(),
+            &sample_provider_record(true),
+        )
+        .await
+        .expect("provider upsert should succeed");
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(7),
+                display_name: "Session Test Agent".to_string(),
+                description: "Used to verify session loading".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(provider_id.into_inner())),
+                model_id: Some("capturing".to_string()),
+                system_prompt: "You are a test session agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
+
+        let provider = Arc::new(CapturingProvider::new("hello", Duration::from_millis(5)));
+        let provider_resolver =
+            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
+        let tool_manager = Arc::new(ToolManager::new());
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            template_manager.clone(),
+            Arc::clone(&provider_resolver),
+            tool_manager.clone(),
+            Arc::new(CompactorManager::with_defaults()),
+            trace_dir.clone(),
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+        ));
+
+        SessionManager::new(
+            sqlite.clone() as Arc<dyn SessionRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite as Arc<dyn LlmProviderRepository>,
+            template_manager,
+            provider_resolver,
+            tool_manager,
+            trace_dir,
+            job_manager.thread_pool(),
+            job_manager,
+        )
     }
 
     fn test_agent_record() -> Arc<AgentRecord> {
@@ -1381,5 +1538,32 @@ mod tests {
         assert_eq!(captured[0], "initial request");
         assert!(captured[1].contains("Job: job-late"));
         assert!(captured[1].contains("Subagent: Builder"));
+    }
+
+    #[tokio::test]
+    async fn load_restores_persisted_threads_into_session_runtime_map() {
+        let manager = test_session_manager().await;
+        let session_id = manager
+            .create("restorable session".to_string())
+            .await
+            .expect("session should create");
+        let thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None)
+            .await
+            .expect("thread should create");
+
+        manager
+            .unload(session_id)
+            .await
+            .expect("session should unload");
+        let session = manager
+            .load(session_id)
+            .await
+            .expect("session should load");
+
+        assert!(
+            session.get_thread(&thread_id).is_some(),
+            "loaded session should expose persisted live threads"
+        );
     }
 }

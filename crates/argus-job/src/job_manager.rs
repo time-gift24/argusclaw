@@ -393,6 +393,7 @@ mod tests {
 
     use argus_protocol::TokenUsage;
     use argus_tool::ToolManager;
+    use tokio::time::{Duration, timeout};
 
     use super::*;
 
@@ -569,6 +570,94 @@ mod tests {
                 | argus_protocol::ThreadRuntimeStatus::Running
                 | argus_protocol::ThreadRuntimeStatus::Cooling
         ));
+    }
+
+    #[tokio::test]
+    async fn alpha_dispatch_job_emits_binding_queue_metrics_and_result_events() {
+        let manager = test_job_manager();
+        let originating_thread_id = ThreadId::new();
+        let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let job_id = "alpha-job-event-flow".to_string();
+
+        manager
+            .dispatch_job(
+                originating_thread_id,
+                job_id.clone(),
+                AgentId::new(99),
+                "run alpha event flow".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("job should enqueue even if execution later fails");
+
+        let mut bound_thread_id = None;
+        let mut saw_queued = false;
+        let mut saw_metrics = false;
+        let mut saw_result = false;
+
+        timeout(Duration::from_secs(5), async {
+            while !saw_result {
+                match pipe_rx.recv().await {
+                    Ok(ThreadEvent::ThreadBoundToJob {
+                        job_id: event_job_id,
+                        thread_id: execution_thread_id,
+                    }) if event_job_id == job_id => {
+                        assert_ne!(execution_thread_id, originating_thread_id);
+                        bound_thread_id = Some(execution_thread_id);
+                    }
+                    Ok(ThreadEvent::ThreadPoolQueued { runtime })
+                        if runtime.job_id.as_deref() == Some(job_id.as_str()) =>
+                    {
+                        assert_eq!(runtime.kind, ThreadPoolRuntimeKind::Job);
+                        if let Some(execution_thread_id) = bound_thread_id {
+                            assert_eq!(runtime.thread_id, execution_thread_id);
+                        }
+                        saw_queued = true;
+                    }
+                    Ok(ThreadEvent::ThreadPoolMetricsUpdated { .. }) => {
+                        saw_metrics = true;
+                    }
+                    Ok(ThreadEvent::JobResult {
+                        thread_id,
+                        job_id: event_job_id,
+                        success,
+                        ..
+                    }) if event_job_id == job_id => {
+                        assert_eq!(thread_id, originating_thread_id);
+                        assert!(
+                            !success,
+                            "alpha flow should surface execution failure when the agent record is missing"
+                        );
+                        saw_result = true;
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("thread event channel should remain open");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("job result event should arrive");
+
+        let control_event = timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("forwarded control event should arrive")
+            .expect("control channel should stay open");
+        assert!(matches!(
+            control_event,
+            ThreadControlEvent::JobResult(result)
+                if result.job_id == job_id && !result.success
+        ));
+
+        let execution_thread_id = bound_thread_id.expect("job should bind to an execution thread");
+        assert_eq!(manager.thread_binding(&job_id), Some(execution_thread_id));
+        assert!(saw_queued, "queued event should be observed");
+        assert!(saw_metrics, "metrics update should be observed");
     }
 
     #[tokio::test]

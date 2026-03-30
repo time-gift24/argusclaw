@@ -1,6 +1,6 @@
 //! ThreadPool for coordinating unified job and chat runtimes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,26 +8,28 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::{
-    CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnBuilder,
-    TurnConfig, TurnLogEvent, TurnOutput, read_jsonl_events,
+    CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig,
+    TurnCancellation, TurnConfig, TurnLogEvent, TurnOutput, read_jsonl_events,
 };
-use argus_protocol::llm::{ChatMessage, Role};
-use argus_protocol::tool::NamedTool;
+use argus_protocol::llm::{
+    ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
+};
 use argus_protocol::{
     AgentId, ProviderId, ProviderResolver, SessionId, ThreadControlEvent, ThreadEvent, ThreadId,
-    ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
-    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeStatus,
+    ThreadJobResult, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef,
+    ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
-    AgentId as RepoAgentId, JobRecord, JobType, ThreadRecord, WorkflowId, WorkflowStatus,
+    AgentId as RepoAgentId, JobRecord, JobResult, JobType, ThreadRecord, WorkflowId,
+    WorkflowStatus,
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
 use futures_util::FutureExt;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc};
+use rust_decimal::Decimal;
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc};
 
 use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
@@ -48,10 +50,54 @@ struct RecoveredThreadState {
 }
 
 #[derive(Debug)]
+struct UnavailableChatProvider {
+    model_name: String,
+    reason: String,
+}
+
+impl UnavailableChatProvider {
+    fn new(model_name: String, reason: String) -> Self {
+        Self { model_name, reason }
+    }
+
+    fn llm_error(&self) -> LlmError {
+        LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl argus_protocol::LlmProvider for UnavailableChatProvider {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> std::result::Result<CompletionResponse, LlmError> {
+        Err(self.llm_error())
+    }
+
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> std::result::Result<LlmEventStream, LlmError> {
+        Err(self.llm_error())
+    }
+}
+
+#[derive(Debug)]
 struct RuntimeEntry {
     summary: ThreadPoolRuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
-    chat_thread: Option<Arc<RwLock<argus_agent::Thread>>>,
+    thread: Option<Arc<RwLock<argus_agent::Thread>>>,
     slot_permit: Option<OwnedSemaphorePermit>,
 }
 
@@ -207,7 +253,11 @@ impl ThreadPool {
             .expect("thread-pool mutex poisoned")
             .runtimes
             .get(&thread_id.to_string())
-            .and_then(|entry| entry.chat_thread.clone())
+            .and_then(|entry| {
+                (entry.summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+                    .then(|| entry.thread.clone())
+                    .flatten()
+            })
     }
 
     /// Return the authoritative pool state used by external observers.
@@ -227,6 +277,8 @@ impl ThreadPool {
     pub async fn enqueue_job(&self, request: ThreadPoolJobRequest) -> Result<ThreadId, JobError> {
         let now = Utc::now().to_rfc3339();
         let thread_id = self.persist_binding(&request, &now).await?;
+        self.persist_job_status(&request.job_id, WorkflowStatus::Queued, None, None)
+            .await?;
         let runtime = ThreadPoolRuntimeRef {
             thread_id,
             kind: ThreadPoolRuntimeKind::Job,
@@ -300,7 +352,7 @@ impl ThreadPool {
         self.register_chat_thread(session_id, thread_id);
         let thread = self.ensure_chat_runtime(session_id, thread_id).await?;
         let estimated_memory_bytes =
-            Self::estimate_chat_thread_memory(&thread).await + message.len() as u64;
+            Self::estimate_thread_memory(&thread).await + message.len() as u64;
         let sender = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let sender = {
@@ -351,7 +403,7 @@ impl ThreadPool {
             .expect("thread-pool mutex poisoned")
             .runtimes
             .get(&thread_id.to_string())
-            .and_then(|entry| entry.chat_thread.clone())
+            .and_then(|entry| entry.thread.clone())
         {
             return Ok(thread);
         }
@@ -386,9 +438,9 @@ impl ThreadPool {
             let guard = thread.read().await;
             guard.subscribe()
         };
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
         self.attach_chat_runtime(thread_id, session_id, Arc::clone(&thread), runtime_rx)
-            .await;
+            .await?;
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
         Ok(thread)
     }
 
@@ -399,23 +451,53 @@ impl ThreadPool {
         request: ThreadPoolJobRequest,
         execution_thread_id: ThreadId,
         pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+        _control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> ThreadJobResult {
         let fallback_job_id = request.job_id.clone();
         let fallback_agent_id = request.agent_id;
         let fallback_display_name = format!("Agent {}", fallback_agent_id.inner());
-
-        if let Err(error) = self.ensure_runtime_slot(&execution_thread_id).await {
-            return Self::failure_result(
-                fallback_job_id,
-                fallback_agent_id,
-                fallback_display_name,
-                String::new(),
-                error.to_string(),
+        let thread = match self.ensure_job_runtime(&request, execution_thread_id).await {
+            Ok(thread) => thread,
+            Err(error) => {
+                let result = Self::failure_result(
+                    fallback_job_id,
+                    fallback_agent_id,
+                    fallback_display_name,
+                    String::new(),
+                    error.to_string(),
+                );
+                self.persist_job_completion(&request.job_id, &result, None).await;
+                return result;
+            }
+        };
+        let started_at = Utc::now().to_rfc3339();
+        let estimated_memory_bytes =
+            Self::estimate_thread_memory(&thread).await + request.prompt.len() as u64;
+        {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            if let Some(entry) = store.runtimes.get_mut(&execution_thread_id.to_string()) {
+                entry.summary.status = ThreadRuntimeStatus::Running;
+                entry.summary.estimated_memory_bytes = estimated_memory_bytes;
+                entry.summary.last_active_at = Some(started_at.clone());
+                entry.summary.last_reason = None;
+            }
+            Self::refresh_peaks(&mut store);
+        }
+        if let Err(error) = self
+            .persist_job_status(
+                &request.job_id,
+                WorkflowStatus::Running,
+                Some(started_at.as_str()),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                job_id = %request.job_id,
+                error = %error,
+                "Failed to persist running job status"
             );
         }
-
-        let _ = self.mark_running(&request.job_id);
         let _ = pipe_tx.send(ThreadEvent::ThreadPoolStarted {
             runtime: ThreadPoolRuntimeRef {
                 thread_id: execution_thread_id,
@@ -428,18 +510,13 @@ impl ThreadPool {
             snapshot: self.collect_metrics(),
         });
 
-        let result = AssertUnwindSafe(self.execute_turn(
-            request.originating_thread_id,
+        let result = AssertUnwindSafe(self.execute_thread_turn(
+            &thread,
             request.job_id.clone(),
-            execution_thread_id,
-            request.agent_id,
             request.prompt,
-            pipe_tx.clone(),
-            control_tx,
         ))
         .catch_unwind()
         .await;
-
         let result = match result {
             Ok(result) => result,
             Err(payload) => Self::failure_result(
@@ -450,9 +527,14 @@ impl ThreadPool {
                 Self::panic_message(payload),
             ),
         };
+        self.persist_thread_stats(&execution_thread_id, &thread).await;
+        self.persist_job_completion(&request.job_id, &result, Some(started_at.as_str()))
+            .await;
+
+        let cooling_memory = Self::estimate_thread_memory(&thread).await;
 
         if let Some((runtime, _sender, snapshot)) =
-            self.transition_runtime_to_cooling(&execution_thread_id, None)
+            self.transition_runtime_to_cooling(&execution_thread_id, Some(cooling_memory))
         {
             if self.admission_waiters.load(Ordering::SeqCst) > 0
                 && let Some((runtime, snapshot)) = Self::evict_runtime_from_shared_store(
@@ -476,130 +558,100 @@ impl ThreadPool {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_turn(
+    async fn execute_thread_turn(
         &self,
-        originating_thread_id: ThreadId,
+        thread: &Arc<RwLock<argus_agent::Thread>>,
         job_id: String,
-        execution_thread_id: ThreadId,
-        agent_id: AgentId,
         prompt: String,
-        pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> ThreadJobResult {
         #[cfg(test)]
         if prompt == "__panic_thread_pool_execute_turn__" {
             panic!("thread pool panic test hook");
         }
-
-        let default_display_name = format!("Agent {}", agent_id.inner());
-
-        let agent_record = match self.template_manager.get(agent_id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    default_display_name,
-                    String::new(),
-                    format!("agent {} not found", agent_id.inner()),
-                );
-            }
-            Err(e) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    default_display_name,
-                    String::new(),
-                    format!("failed to load agent: {}", e),
-                );
-            }
+        let (agent_id, agent_display_name, agent_description) = {
+            let guard = thread.read().await;
+            let agent_record = guard.agent_record();
+            (
+                agent_record.id,
+                agent_record.display_name.clone(),
+                agent_record.description.clone(),
+            )
         };
-        let agent_display_name = agent_record.display_name.clone();
-        let agent_description = agent_record.description.clone();
-
-        let provider = match agent_record.provider_id {
-            Some(pid) => match self.provider_resolver.resolve(pid).await {
-                Ok(provider) => provider,
-                Err(e) => {
+        let turn = {
+            let mut guard = thread.write().await;
+            match guard
+                .begin_turn(prompt, None, TurnCancellation::new())
+                .await
+            {
+                Ok(turn) => turn,
+                Err(error) => {
                     return Self::failure_result(
                         job_id,
                         agent_id,
-                        agent_display_name.clone(),
-                        agent_description.clone(),
-                        format!("failed to resolve provider: {}", e),
+                        agent_display_name,
+                        agent_description,
+                        error.to_string(),
                     );
                 }
-            },
-            None => match self.provider_resolver.default_provider().await {
-                Ok(provider) => provider,
-                Err(e) => {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name.clone(),
-                        agent_description.clone(),
-                        format!("no provider configured: {}", e),
-                    );
-                }
-            },
-        };
-
-        let enabled_tool_names: HashSet<_> = agent_record.tool_names.iter().collect();
-        let tools: Vec<Arc<dyn NamedTool>> = self
-            .tool_manager
-            .list_ids()
-            .iter()
-            .filter(|name| enabled_tool_names.contains(*name))
-            .filter_map(|name| self.tool_manager.get(name))
-            .collect();
-
-        let (stream_tx, _stream_rx) = broadcast::channel(256);
-        let turn = match TurnBuilder::default()
-            .turn_number(1)
-            .thread_id(execution_thread_id.to_string())
-            .messages(vec![ChatMessage::user(&prompt)])
-            .provider(provider)
-            .tools(tools)
-            .hooks(Vec::new())
-            .config(TurnConfig::new())
-            .agent_record(Arc::new(agent_record))
-            .stream_tx(stream_tx)
-            .thread_event_tx(pipe_tx)
-            .originating_thread_id(originating_thread_id)
-            .control_tx(control_tx)
-            .mailbox(Arc::new(Mutex::new(ThreadMailbox::default())))
-            .build()
-        {
-            Ok(turn) => turn,
-            Err(e) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    agent_display_name.clone(),
-                    agent_description.clone(),
-                    format!("failed to build turn: {}", e),
-                );
             }
         };
 
-        match turn.execute().await {
-            Ok(output) => ThreadJobResult {
-                job_id,
-                success: true,
-                message: Self::summarize_output(&output),
-                token_usage: Some(output.token_usage),
-                agent_id,
-                agent_display_name,
-                agent_description,
-            },
-            Err(e) => Self::failure_result(
-                job_id,
-                agent_id,
-                agent_display_name,
-                agent_description,
-                e.to_string(),
-            ),
+        let execution_result = AssertUnwindSafe(turn.execute()).catch_unwind().await;
+        match execution_result {
+            Ok(Ok(output)) => {
+                let finish_result = {
+                    let mut guard = thread.write().await;
+                    guard.finish_turn(Ok(output.clone()))
+                };
+                if let Err(error) = finish_result {
+                    return Self::failure_result(
+                        job_id,
+                        agent_id,
+                        agent_display_name,
+                        agent_description,
+                        error.to_string(),
+                    );
+                }
+                ThreadJobResult {
+                    job_id,
+                    success: true,
+                    message: Self::summarize_output(&output),
+                    token_usage: Some(output.token_usage),
+                    agent_id,
+                    agent_display_name,
+                    agent_description,
+                }
+            }
+            Ok(Err(error)) => {
+                let message = error.to_string();
+                let _ = {
+                    let mut guard = thread.write().await;
+                    guard.finish_turn(Err(error.into()))
+                };
+                Self::failure_result(
+                    job_id,
+                    agent_id,
+                    agent_display_name,
+                    agent_description,
+                    message,
+                )
+            }
+            Err(payload) => {
+                let message = Self::panic_message(payload);
+                let _ = {
+                    let mut guard = thread.write().await;
+                    guard.finish_turn(Err(argus_agent::ThreadError::TurnBuildFailed(
+                        message.clone(),
+                    )))
+                };
+                Self::failure_result(
+                    job_id,
+                    agent_id,
+                    agent_display_name,
+                    agent_description,
+                    message,
+                )
+            }
         }
     }
 
@@ -694,17 +746,13 @@ impl ThreadPool {
         last_active_at: Option<String>,
         recoverable: bool,
         last_reason: Option<ThreadPoolEventReason>,
-        chat_thread: Option<Arc<RwLock<argus_agent::Thread>>>,
+        thread: Option<Arc<RwLock<argus_agent::Thread>>>,
     ) -> broadcast::Sender<ThreadEvent> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let runtime_key = runtime.thread_id.to_string();
-        let (sender, existing_chat_thread, existing_slot_permit) =
+        let (sender, existing_thread, existing_slot_permit) =
             if let Some(entry) = store.runtimes.get_mut(&runtime_key) {
-                (
-                    entry.sender.clone(),
-                    entry.chat_thread.clone(),
-                    entry.slot_permit.take(),
-                )
+                (entry.sender.clone(), entry.thread.clone(), entry.slot_permit.take())
             } else {
                 let (sender, _rx) = broadcast::channel(256);
                 (sender, None, None)
@@ -721,7 +769,7 @@ impl ThreadPool {
                     last_reason,
                 },
                 sender: sender.clone(),
-                chat_thread: chat_thread.or(existing_chat_thread),
+                thread: thread.or(existing_thread),
                 slot_permit: existing_slot_permit,
             },
         );
@@ -823,7 +871,7 @@ impl ThreadPool {
             entry.summary.estimated_memory_bytes = 0;
             entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
             entry.summary.last_reason = Some(reason);
-            entry.chat_thread = None;
+            entry.thread = None;
             entry.slot_permit = None;
             Self::refresh_peaks(&mut store);
         }
@@ -851,20 +899,25 @@ impl ThreadPool {
         _session_id: SessionId,
         thread: Arc<RwLock<argus_agent::Thread>>,
         mut runtime_rx: broadcast::Receiver<ThreadEvent>,
-    ) {
-        let estimated_memory_bytes = Self::estimate_chat_thread_memory(&thread).await;
+    ) -> Result<(), JobError> {
+        let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
         let sender = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let sender = {
-                let entry = store
+                let Some(entry) = store
                     .runtimes
                     .get_mut(&thread_id.to_string())
-                    .expect("chat runtime should be registered");
+                else {
+                    return Err(JobError::ExecutionFailed(format!(
+                        "thread {} was removed while loading",
+                        thread_id
+                    )));
+                };
                 entry.summary.status = ThreadRuntimeStatus::Inactive;
                 entry.summary.estimated_memory_bytes = estimated_memory_bytes;
                 entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
                 entry.summary.last_reason = None;
-                entry.chat_thread = Some(Arc::clone(&thread));
+                entry.thread = Some(Arc::clone(&thread));
                 entry.sender.clone()
             };
             Self::refresh_peaks(&mut store);
@@ -882,33 +935,15 @@ impl ThreadPool {
                     Ok(event) => {
                         let _ = sender.send(event.clone());
                         if matches!(event, ThreadEvent::Idle { .. }) {
-                            let (estimated_memory_bytes, token_count, turn_count) = {
-                                let guard = thread_for_metrics.read().await;
-                                (
-                                    guard
-                                        .history()
-                                        .iter()
-                                        .map(|message| message.content.len() as u64)
-                                        .sum::<u64>()
-                                        + guard.plan().len() as u64 * 128
-                                        + u64::from(guard.token_count()),
-                                    guard.token_count(),
-                                    guard.turn_count(),
-                                )
-                            };
-
-                            if let Some(persistence) = &persistence
-                                && let Err(error) = persistence
-                                    .thread_repository
-                                    .update_thread_stats(&thread_id, token_count, turn_count)
-                                    .await
-                            {
-                                tracing::warn!(
-                                    thread_id = %thread_id,
-                                    error = %error,
-                                    "Failed to persist chat thread stats after idle"
-                                );
-                            }
+                            let estimated_memory_bytes =
+                                ThreadPool::estimate_thread_memory(&thread_for_metrics).await;
+                            ThreadPool::persist_thread_stats_with_persistence(
+                                persistence.as_ref(),
+                                &thread_id,
+                                &thread_for_metrics,
+                                "chat thread",
+                            )
+                            .await;
 
                             let (runtime, snapshot) = {
                                 let mut store = store.lock().expect("thread-pool mutex poisoned");
@@ -955,6 +990,76 @@ impl ThreadPool {
                 }
             }
         });
+        Ok(())
+    }
+
+    async fn ensure_job_runtime(
+        &self,
+        request: &ThreadPoolJobRequest,
+        thread_id: ThreadId,
+    ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
+        if let Some(thread) = self
+            .store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .and_then(|entry| entry.thread.clone())
+        {
+            return Ok(thread);
+        }
+
+        self.ensure_runtime_slot(&thread_id).await?;
+        {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
+                return Err(JobError::ExecutionFailed(format!(
+                    "thread {} is not registered",
+                    thread_id
+                )));
+            };
+            entry.summary.status = ThreadRuntimeStatus::Loading;
+            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+            entry.summary.last_reason = None;
+        }
+
+        let thread = match self.build_job_thread(request, thread_id).await {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.reset_runtime_after_load_failure(
+                    &thread_id,
+                    ThreadPoolEventReason::ExecutionFailed,
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.attach_job_runtime(thread_id, Arc::clone(&thread)).await {
+            self.reset_runtime_after_load_failure(&thread_id, ThreadPoolEventReason::ExecutionFailed);
+            return Err(error);
+        }
+        Ok(thread)
+    }
+
+    async fn attach_job_runtime(
+        &self,
+        thread_id: ThreadId,
+        thread: Arc<RwLock<argus_agent::Thread>>,
+    ) -> Result<(), JobError> {
+        let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
+            return Err(JobError::ExecutionFailed(format!(
+                "thread {} was removed while loading",
+                thread_id
+            )));
+        };
+        entry.summary.status = ThreadRuntimeStatus::Inactive;
+        entry.summary.estimated_memory_bytes = estimated_memory_bytes;
+        entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+        entry.summary.last_reason = None;
+        entry.thread = Some(thread);
+        Self::refresh_peaks(&mut store);
+        Ok(())
     }
 
     fn evict_runtime(
@@ -997,7 +1102,7 @@ impl ThreadPool {
         entry.summary.status = ThreadRuntimeStatus::Evicted;
         entry.summary.last_reason = Some(reason);
         entry.summary.estimated_memory_bytes = 0;
-        entry.chat_thread = None;
+        entry.thread = None;
         entry.slot_permit = None;
         let runtime = entry.summary.runtime.clone();
         Self::refresh_peaks(&mut store);
@@ -1089,6 +1194,10 @@ impl ThreadPool {
                 JobError::ExecutionFailed(format!("agent {} not found", template_id.inner()))
             })?;
         let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
+        let requested_model = thread_record
+            .model_override
+            .clone()
+            .unwrap_or_else(|| format!("provider-{}", provider_id.inner()));
         let provider = match thread_record.model_override.as_deref() {
             Some(model) => match self
                 .provider_resolver
@@ -1099,8 +1208,22 @@ impl ThreadPool {
                 Err(_) => self.provider_resolver.resolve(provider_id).await,
             },
             None => self.provider_resolver.resolve(provider_id).await,
-        }
-        .map_err(|err| JobError::ExecutionFailed(format!("failed to resolve provider: {err}")))?;
+        };
+        let provider = match provider {
+            Ok(provider) => provider,
+            Err(error) => {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    provider_id = %provider_id,
+                    error = %error,
+                    "Failed to resolve chat provider, using unavailable placeholder provider"
+                );
+                Arc::new(UnavailableChatProvider::new(
+                    requested_model,
+                    format!("failed to resolve provider: {error}"),
+                )) as Arc<dyn argus_protocol::LlmProvider>
+            }
+        };
 
         let trace_cfg = TraceConfig::new(true, self.chat_runtime_config.trace_dir.clone())
             .with_session_id(session_id)
@@ -1163,6 +1286,131 @@ impl ThreadPool {
         Ok(thread)
     }
 
+    async fn build_job_thread(
+        &self,
+        request: &ThreadPoolJobRequest,
+        thread_id: ThreadId,
+    ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
+        let thread_record = if let Some(persistence) = &self.persistence {
+            persistence
+                .thread_repository
+                .get_thread(&thread_id)
+                .await
+                .map_err(|err| {
+                    JobError::ExecutionFailed(format!("failed to load thread record: {err}"))
+                })?
+        } else {
+            None
+        };
+        let template_id = thread_record
+            .as_ref()
+            .and_then(|record| record.template_id)
+            .unwrap_or_else(|| RepoAgentId::new(request.agent_id.inner()));
+        let agent_record = self
+            .template_manager
+            .get(AgentId::new(template_id.inner()))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!(
+                    "failed to load agent {}: {err}",
+                    template_id.inner()
+                ))
+            })?
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("agent {} not found", template_id.inner()))
+            })?;
+        let provider = if let Some(thread_record) = thread_record.as_ref() {
+            let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
+            match thread_record.model_override.as_deref() {
+                Some(model) => match self
+                    .provider_resolver
+                    .resolve_with_model(provider_id, model)
+                    .await
+                {
+                    Ok(provider) => Ok(provider),
+                    Err(_) => self.provider_resolver.resolve(provider_id).await,
+                },
+                None => self.provider_resolver.resolve(provider_id).await,
+            }
+        } else if let Some(provider_id) = agent_record.provider_id {
+            match agent_record.model_id.as_deref() {
+                Some(model) => match self
+                    .provider_resolver
+                    .resolve_with_model(provider_id, model)
+                    .await
+                {
+                    Ok(provider) => Ok(provider),
+                    Err(_) => self.provider_resolver.resolve(provider_id).await,
+                },
+                None => self.provider_resolver.resolve(provider_id).await,
+            }
+        } else {
+            self.provider_resolver.default_provider().await
+        }
+        .map_err(|err| JobError::ExecutionFailed(format!("failed to resolve provider: {err}")))?;
+
+        let trace_cfg = TraceConfig::new(true, self.chat_runtime_config.trace_dir.clone())
+            .with_turn_start(
+                Some(agent_record.system_prompt.clone()),
+                Some(provider.model_name().to_string()),
+            );
+        let mut turn_config = TurnConfig::new();
+        turn_config.trace_config = Some(trace_cfg);
+        let config = ThreadConfigBuilder::default()
+            .turn_config(turn_config)
+            .build()
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let plan_store = FilePlanStore::new(
+            self.chat_runtime_config.trace_dir.clone(),
+            &thread_id.to_string(),
+        );
+        let thread_title = thread_record
+            .as_ref()
+            .and_then(|record| record.title.clone())
+            .or_else(|| Some(format!("job:{}", request.job_id)));
+        let thread = ThreadBuilder::new()
+            .id(thread_id)
+            .session_id(Self::job_runtime_session_id(thread_id))
+            .agent_record(Arc::new(agent_record))
+            .title(thread_title)
+            .provider(provider)
+            .tool_manager(self.tool_manager.clone())
+            .compactor(
+                self.chat_runtime_config
+                    .compactor_manager
+                    .default_compactor()
+                    .clone(),
+            )
+            .plan_store(plan_store)
+            .config(config)
+            .build()
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let thread = Arc::new(RwLock::new(thread));
+
+        if let Some(thread_record) = thread_record {
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            let recovered = Self::recover_job_thread_state_from_trace(
+                &self.chat_runtime_config.trace_dir,
+                &thread_id,
+                (thread_record.turn_count > 0).then_some(thread_record.turn_count),
+            )
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+            if recovered.turn_count > 0 {
+                thread.write().await.hydrate_from_persisted_state(
+                    recovered.messages,
+                    thread_record.token_count.max(recovered.token_count),
+                    thread_record.turn_count.max(recovered.turn_count),
+                    updated_at,
+                );
+            }
+        }
+
+        Ok(thread)
+    }
+
     fn build_on_turn_complete(trace_dir: PathBuf) -> OnTurnComplete {
         Arc::new(move |sid: SessionId, turn_num: u32| {
             let trace_dir = trace_dir.clone();
@@ -1172,7 +1420,11 @@ impl ThreadPool {
         })
     }
 
-    async fn estimate_chat_thread_memory(thread: &Arc<RwLock<argus_agent::Thread>>) -> u64 {
+    fn job_runtime_session_id(thread_id: ThreadId) -> SessionId {
+        SessionId(*thread_id.inner())
+    }
+
+    async fn estimate_thread_memory(thread: &Arc<RwLock<argus_agent::Thread>>) -> u64 {
         let guard = thread.read().await;
         let history_bytes = guard
             .history()
@@ -1181,6 +1433,114 @@ impl ThreadPool {
             .sum::<u64>();
         let plan_bytes = guard.plan().len() as u64 * 128;
         history_bytes + plan_bytes + u64::from(guard.token_count())
+    }
+
+    async fn persist_thread_stats(&self, thread_id: &ThreadId, thread: &Arc<RwLock<argus_agent::Thread>>) {
+        Self::persist_thread_stats_with_persistence(
+            self.persistence.as_ref(),
+            thread_id,
+            thread,
+            "job thread",
+        )
+        .await;
+    }
+
+    async fn persist_thread_stats_with_persistence(
+        persistence: Option<&ThreadPoolPersistence>,
+        thread_id: &ThreadId,
+        thread: &Arc<RwLock<argus_agent::Thread>>,
+        runtime_label: &str,
+    ) {
+        let Some(persistence) = persistence else {
+            return;
+        };
+        let (token_count, turn_count) = {
+            let guard = thread.read().await;
+            (guard.token_count(), guard.turn_count())
+        };
+        if let Err(error) = persistence
+            .thread_repository
+            .update_thread_stats(thread_id, token_count, turn_count)
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                runtime_label,
+                error = %error,
+                "Failed to persist runtime stats after idle"
+            );
+        }
+    }
+
+    async fn persist_job_status(
+        &self,
+        job_id: &str,
+        status: WorkflowStatus,
+        started_at: Option<&str>,
+        finished_at: Option<&str>,
+    ) -> Result<(), JobError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        persistence
+            .job_repository
+            .update_status(&WorkflowId::new(job_id), status, started_at, finished_at)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(format!("failed to persist job status: {err}")))
+    }
+
+    async fn persist_job_completion(
+        &self,
+        job_id: &str,
+        result: &ThreadJobResult,
+        started_at: Option<&str>,
+    ) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let persisted_result = JobResult {
+            success: result.success,
+            message: result.message.clone(),
+            token_usage: result.token_usage.clone(),
+            agent_id: RepoAgentId::new(result.agent_id.inner()),
+            agent_display_name: result.agent_display_name.clone(),
+            agent_description: result.agent_description.clone(),
+        };
+        if let Err(error) = persistence
+            .job_repository
+            .update_result(&WorkflowId::new(job_id), &persisted_result)
+            .await
+        {
+            tracing::warn!(
+                job_id,
+                error = %error,
+                "Failed to persist job result"
+            );
+            return;
+        }
+
+        let finished_at = Utc::now().to_rfc3339();
+        let status = if result.success {
+            WorkflowStatus::Succeeded
+        } else {
+            WorkflowStatus::Failed
+        };
+        if let Err(error) = persistence
+            .job_repository
+            .update_status(
+                &WorkflowId::new(job_id),
+                status,
+                started_at,
+                Some(finished_at.as_str()),
+            )
+            .await
+        {
+            tracing::warn!(
+                job_id,
+                error = %error,
+                "Failed to persist final job status"
+            );
+        }
     }
 
     async fn persist_binding(
@@ -1458,6 +1818,77 @@ impl ThreadPool {
         })
     }
 
+    async fn recover_job_thread_state_from_trace(
+        trace_dir: &Path,
+        thread_id: &ThreadId,
+        turn_count_hint: Option<u32>,
+    ) -> Result<RecoveredThreadState, std::io::Error> {
+        let turns_dir = trace_dir.join(thread_id.to_string()).join("turns");
+        let mut turn_numbers = Vec::new();
+        if let Some(turn_count) = turn_count_hint {
+            turn_numbers.extend(1..=turn_count);
+        } else if turns_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&turns_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                    && let Ok(number) = stem.parse::<u32>()
+                {
+                    turn_numbers.push(number);
+                }
+            }
+            turn_numbers.sort_unstable();
+        }
+
+        let mut messages = Vec::new();
+        let mut token_count = 0;
+        for turn_number in &turn_numbers {
+            let path = turns_dir.join(format!("{turn_number}.jsonl"));
+            let events = read_jsonl_events(&path)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            for event in events {
+                match event {
+                    TurnLogEvent::UserInput { content, .. } => {
+                        if !content.trim().is_empty() {
+                            messages.push(ChatMessage::user(content));
+                        }
+                    }
+                    TurnLogEvent::LlmResponse {
+                        content,
+                        reasoning_content,
+                        tool_calls,
+                        ..
+                    } => {
+                        if tool_calls.is_empty() {
+                            if !content.trim().is_empty()
+                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty()
+                            {
+                                messages.push(ChatMessage::assistant_with_reasoning(
+                                    content,
+                                    reasoning_content,
+                                ));
+                            }
+                        }
+                    }
+                    TurnLogEvent::TurnEnd { token_usage, .. } => {
+                        token_count = token_usage.total_tokens;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(RecoveredThreadState {
+            messages,
+            turn_count: turn_numbers.len() as u32,
+            token_count,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn test_pool() -> Self {
         use argus_protocol::{LlmProvider, ProviderId};
@@ -1542,12 +1973,12 @@ mod tests {
     use argus_agent::CompactorManager;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
-        LlmProviderRepository, ToolCompletionRequest, ToolCompletionResponse,
+        LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentRecord, AgentType, LlmProvider, LlmProviderKind, LlmProviderRecord, ProviderId,
-        ProviderResolver, ProviderSecretStatus, SecretString, SessionId, ThinkingConfig,
-        ThreadEvent, ThreadId, ThreadPoolEventReason, ThreadRuntimeStatus,
+        AgentId, AgentRecord, AgentType, LlmProvider, LlmProviderKind, LlmProviderRecord,
+        ProviderId, ProviderResolver, ProviderSecretStatus, SecretString, SessionId,
+        ThinkingConfig, ThreadEvent, ThreadId, ThreadPoolEventReason, ThreadRuntimeStatus,
     };
     use argus_repository::traits::{
         AgentRepository, JobRepository, SessionRepository, ThreadRepository,
@@ -1562,7 +1993,7 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
-    use tokio::sync::{Semaphore, broadcast, mpsc};
+    use tokio::sync::{RwLock, Semaphore, broadcast, mpsc};
     use tokio::time::{sleep, timeout};
 
     use super::{ThreadPool, ThreadPoolPersistence};
@@ -1649,18 +2080,8 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> std::result::Result<CompletionResponse, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: "capturing".to_string(),
-                reason: "streaming only in tests".to_string(),
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> std::result::Result<ToolCompletionResponse, LlmError> {
             sleep(self.delay).await;
-            Ok(ToolCompletionResponse {
+            Ok(CompletionResponse {
                 content: Some(self.response.clone()),
                 reasoning_content: None,
                 tool_calls: Vec::new(),
@@ -2165,7 +2586,7 @@ mod tests {
             _started_at: Option<&str>,
             _finished_at: Option<&str>,
         ) -> Result<(), DbError> {
-            unreachable!("update_status should not be called")
+            Ok(())
         }
 
         async fn update_result(&self, _id: &JobId, _result: &JobResult) -> Result<(), DbError> {
@@ -2251,7 +2672,7 @@ mod tests {
             _started_at: Option<&str>,
             _finished_at: Option<&str>,
         ) -> Result<(), DbError> {
-            unreachable!("update_status should not be called")
+            Ok(())
         }
 
         async fn update_result(&self, _id: &JobId, _result: &JobResult) -> Result<(), DbError> {
@@ -2479,7 +2900,12 @@ mod tests {
 
     #[tokio::test]
     async fn execute_job_emits_running_metrics_snapshot() {
-        let pool = ThreadPool::test_pool();
+        let provider = Arc::new(CapturingProvider::new(
+            "running metrics reply",
+            Duration::from_millis(25),
+            24,
+        ));
+        let (pool, _sqlite, _provider_id) = test_runtime_pool_with_limit(1, provider).await;
         let request = super::test_request("job-running-metrics");
         let execution_thread_id = pool
             .enqueue_job(request.clone())
@@ -2505,8 +2931,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_job_persists_queued_and_succeeded_states_with_result() {
+        let provider = Arc::new(CapturingProvider::new(
+            "persisted success reply",
+            Duration::from_millis(25),
+            48,
+        ));
+        let (pool, sqlite, _provider_id) = test_runtime_pool_with_limit(1, provider).await;
+        let request = super::test_request("job-persist-success");
+        let execution_thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("enqueue should succeed");
+
+        let queued_job = JobRepository::get(sqlite.as_ref(), &JobId::new("job-persist-success"))
+            .await
+            .expect("queued job lookup should succeed")
+            .expect("queued job should persist");
+        assert_eq!(queued_job.status, WorkflowStatus::Queued);
+        assert_eq!(queued_job.thread_id, Some(execution_thread_id));
+
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let result = pool
+            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .await;
+
+        assert!(result.success);
+        let persisted_job = JobRepository::get(sqlite.as_ref(), &JobId::new("job-persist-success"))
+            .await
+            .expect("completed job lookup should succeed")
+            .expect("completed job should persist");
+        assert_eq!(persisted_job.status, WorkflowStatus::Succeeded);
+        assert!(persisted_job.started_at.is_some());
+        assert!(persisted_job.finished_at.is_some());
+        let persisted_result = persisted_job.result.expect("job result should persist");
+        assert!(persisted_result.success);
+        assert_eq!(persisted_result.message, result.message);
+    }
+
+    #[tokio::test]
     async fn execute_job_panic_cleans_up_to_cooling_and_emits_metrics() {
-        let pool = ThreadPool::test_pool();
+        let provider = Arc::new(CapturingProvider::new(
+            "panic cleanup reply",
+            Duration::from_millis(25),
+            24,
+        ));
+        let (pool, sqlite, _provider_id) = test_runtime_pool_with_limit(1, provider).await;
         let mut request = super::test_request("job-panic-cleanup");
         request.prompt = "__panic_thread_pool_execute_turn__".to_string();
         let execution_thread_id = pool
@@ -2532,6 +3003,14 @@ mod tests {
                     if snapshot.cooling_threads == 1 && snapshot.running_threads == 0
             )
         }));
+        let persisted_job = JobRepository::get(sqlite.as_ref(), &JobId::new("job-panic-cleanup"))
+            .await
+            .expect("failed job lookup should succeed")
+            .expect("failed job should persist");
+        assert_eq!(persisted_job.status, WorkflowStatus::Failed);
+        let persisted_result = persisted_job.result.expect("failed result should persist");
+        assert!(!persisted_result.success);
+        assert!(persisted_result.message.contains("job executor panicked"));
     }
 
     #[tokio::test]
@@ -2718,6 +3197,57 @@ mod tests {
             .expect("second job should join");
         assert!(first.success);
         assert!(second.success);
+    }
+
+    #[tokio::test]
+    async fn attach_chat_runtime_returns_error_when_runtime_was_removed_mid_load() {
+        use argus_agent::{KeepRecentCompactor, ThreadBuilder};
+
+        let provider = Arc::new(CapturingProvider::new(
+            "attach race reply",
+            Duration::from_millis(5),
+            8,
+        ));
+        let pool = ThreadPool::test_pool();
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let thread = Arc::new(RwLock::new(
+            ThreadBuilder::new()
+                .id(thread_id)
+                .session_id(session_id)
+                .agent_record(Arc::new(AgentRecord {
+                    id: AgentId::new(7),
+                    display_name: "Attach Race Agent".to_string(),
+                    description: "Used to test load/delete races".to_string(),
+                    version: "1.0.0".to_string(),
+                    provider_id: Some(ProviderId::new(1)),
+                    model_id: Some("capturing".to_string()),
+                    system_prompt: "You are a race test agent.".to_string(),
+                    tool_names: vec![],
+                    max_tokens: None,
+                    temperature: None,
+                    thinking_config: Some(ThinkingConfig::enabled()),
+                    parent_agent_id: None,
+                    agent_type: AgentType::Standard,
+                }))
+                .provider(provider)
+                .compactor(Arc::new(KeepRecentCompactor::with_defaults()))
+                .build()
+                .expect("thread should build"),
+        ));
+        let runtime_rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+
+        pool.register_chat_thread(session_id, thread_id);
+        assert!(pool.remove_runtime(&thread_id));
+
+        let result = pool
+            .attach_chat_runtime(thread_id, session_id, thread, runtime_rx)
+            .await;
+
+        assert!(result.is_err(), "removed runtime should fail to attach cleanly");
     }
 
     #[tokio::test]
