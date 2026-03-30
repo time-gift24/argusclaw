@@ -257,6 +257,12 @@ export interface ThreadPoolState {
   runtimes: ThreadPoolRuntimeSummary[];
 }
 
+export type ThreadPoolEventReason =
+  | "cooling_expired"
+  | "memory_pressure"
+  | "cancelled"
+  | "execution_failed";
+
 export type ApprovalDecision = "approved" | "denied" | "timed_out";
 
 export const chat = {
