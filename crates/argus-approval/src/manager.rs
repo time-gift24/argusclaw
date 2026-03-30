@@ -60,6 +60,12 @@ impl ApprovalManager {
         let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
         policy.requires_approval(tool_name)
     }
+
+    /// Get approval timeout from current policy.
+    pub fn timeout_secs(&self) -> u64 {
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+        policy.timeout_secs
+    }
     /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
     ///
     /// # Errors
@@ -166,6 +172,10 @@ impl ApprovalManager {
 impl argus_protocol::approval::ApprovalManager for ApprovalManager {
     fn requires_approval(&self, tool_name: &str) -> bool {
         ApprovalManager::requires_approval(self, tool_name)
+    }
+
+    fn approval_timeout_secs(&self) -> u64 {
+        ApprovalManager::timeout_secs(self)
     }
 
     async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {

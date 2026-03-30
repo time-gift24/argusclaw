@@ -25,6 +25,14 @@ export function ApprovalPrompt() {
     );
   };
 
+  const handleApproveSession = () => {
+    void chat.resolveApproval(
+      pendingRequest.id,
+      "approved_session",
+      "desktop-user",
+    );
+  };
+
   const handleDeny = () => {
     void chat.resolveApproval(
       pendingRequest.id,
@@ -49,6 +57,9 @@ export function ApprovalPrompt() {
       <CardFooter className="gap-2">
         <Button size="sm" onClick={handleApprove}>
           批准
+        </Button>
+        <Button size="sm" variant="secondary" onClick={handleApproveSession}>
+          本会话总是批准
         </Button>
         <Button size="sm" variant="outline" onClick={handleDeny}>
           拒绝

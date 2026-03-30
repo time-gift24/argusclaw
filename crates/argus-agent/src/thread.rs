@@ -113,7 +113,7 @@ pub struct Thread {
 
     /// Per-thread approval state tracking which tools have been approved.
     #[builder(default)]
-    approval_state: ApprovalState,
+    approval_state: Arc<Mutex<ApprovalState>>,
 
     /// Approval manager for requesting and resolving approvals.
     #[builder(default, setter(strip_option))]
@@ -187,7 +187,9 @@ impl ThreadBuilder {
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
             turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
-            approval_state: ApprovalState::new(),
+            approval_state: self
+                .approval_state
+                .unwrap_or_else(|| Arc::new(Mutex::new(ApprovalState::new()))),
             approval_manager: self.approval_manager.flatten(),
         })
     }
@@ -325,18 +327,18 @@ impl Thread {
     }
 
     /// Check if a tool has been approved for this session.
-    pub fn is_tool_approved(&self, tool_name: &str) -> bool {
-        self.approval_state.is_approved(tool_name)
+    pub async fn is_tool_approved(&self, tool_name: &str) -> bool {
+        self.approval_state.lock().await.is_approved(tool_name)
     }
 
     /// Approve a specific tool for the rest of this session.
-    pub fn approve_tool(&mut self, tool_name: &str) {
-        self.approval_state.approve_tool(tool_name);
+    pub async fn approve_tool(&self, tool_name: &str) {
+        self.approval_state.lock().await.approve_tool(tool_name);
     }
 
     /// Approve all tools for the rest of this session.
-    pub fn approve_all_tools(&mut self) {
-        self.approval_state.approve_all();
+    pub async fn approve_all_tools(&self) {
+        self.approval_state.lock().await.approve_all();
     }
 
     /// Get mutable access to messages (for Compactor).
@@ -558,7 +560,7 @@ impl Thread {
             .thread_event_tx(self.pipe_tx.clone())
             .control_tx(self.control_tx.clone())
             .mailbox(Arc::clone(&self.mailbox))
-            .approval_state(Arc::new(Mutex::new(self.approval_state.clone())));
+            .approval_state(Arc::clone(&self.approval_state));
 
         if let Some(ref approval_mgr) = self.approval_manager {
             turn_builder = turn_builder.approval_manager(approval_mgr.clone());
