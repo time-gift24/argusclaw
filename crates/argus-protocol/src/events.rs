@@ -85,7 +85,8 @@ pub enum ThreadControlEvent {
     JobResult(ThreadJobResult),
     /// Claim a queued job result by job ID so it is not replayed as a future turn.
     ///
-    /// This is an internal runtime-actor query path used by `get_job_result(consume=true)`.
+    /// This is an internal runtime-actor query path used by
+    /// `scheduler { action: "get_job_result", consume: true }`.
     ClaimQueuedJobResult {
         /// Job ID to remove from the runtime inbox.
         job_id: String,
@@ -527,7 +528,7 @@ pub enum ThreadEvent {
         /// The approval response.
         response: ApprovalResponse,
     },
-    /// A job was dispatched by the dispatch_job tool.
+    /// A job was dispatched by the scheduler tool.
     JobDispatched {
         /// Thread ID of the originating thread (for routing to the correct session).
         thread_id: ThreadId,

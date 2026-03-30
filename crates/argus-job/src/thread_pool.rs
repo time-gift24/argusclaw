@@ -1661,6 +1661,7 @@ impl ThreadPool {
             prompt: request.prompt.clone(),
             thread_id: Some(thread_id),
             group_id: None,
+            node_key: None,
             depends_on: Vec::new(),
             cron_expr: None,
             scheduled_at: None,

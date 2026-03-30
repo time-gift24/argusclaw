@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_job::{GetWorkflowProgressTool, JobManager, StartWorkflowTool, ThreadPool, WorkflowManager};
+use argus_job::{JobManager, SchedulerTool, ThreadPool, WorkflowManager};
+use argus_agent::{read_jsonl_events, TurnLogEvent};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
@@ -98,21 +99,12 @@ impl SessionManager {
         job_manager: Arc<JobManager>,
         workflow_manager: Arc<WorkflowManager>,
     ) -> Self {
-        // Register the dispatch_job tool
-        let dispatch_tool = job_manager.clone().create_dispatch_tool();
-        tool_manager.register(Arc::new(dispatch_tool));
-
-        // Register the list_subagents tool for querying subagents
-        let list_subagents_tool = job_manager.clone().create_list_subagents_tool();
-        tool_manager.register(Arc::new(list_subagents_tool));
-
-        // Register the get_job_result tool for proactive job polling
-        let get_job_result_tool = job_manager.clone().create_get_job_result_tool();
-        tool_manager.register(Arc::new(get_job_result_tool));
-
-        // Register workflow tools for persistent workflow execution
-        tool_manager.register(Arc::new(StartWorkflowTool::new(workflow_manager.clone())));
-        tool_manager.register(Arc::new(GetWorkflowProgressTool::new(workflow_manager)));
+        // Register the unified scheduler tool for subagent dispatch and workflow orchestration.
+        tool_manager.register(Arc::new(SchedulerTool::new(
+            template_manager.clone(),
+            job_manager.clone(),
+            workflow_manager,
+        )));
 
         Self {
             session_repo,
@@ -837,7 +829,7 @@ async fn recover_thread_state_from_trace(
 
     for turn_number in &turn_numbers {
         let path = turns_dir.join(format!("{turn_number}.jsonl"));
-        let events = read_jsonl_events(&path)
+        let events: Vec<TurnLogEvent> = read_jsonl_events(&path)
             .await
             .map_err(|error| ArgusError::DatabaseError {
                 reason: format!(
