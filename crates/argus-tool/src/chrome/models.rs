@@ -19,7 +19,6 @@ pub enum ChromeAction {
     Type,
     GetUrl,
     GetCookies,
-    ExecuteScript,
 }
 
 impl ChromeAction {
@@ -36,7 +35,6 @@ impl ChromeAction {
             Self::Type => "type",
             Self::GetUrl => "get_url",
             Self::GetCookies => "get_cookies",
-            Self::ExecuteScript => "execute_script",
         }
     }
 }
@@ -55,8 +53,6 @@ pub struct ChromeToolArgs {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub text: Option<String>,
-    #[serde(default)]
-    pub script: Option<String>,
 }
 
 impl ChromeToolArgs {
@@ -70,7 +66,6 @@ impl ChromeToolArgs {
         args.session_id = normalized_optional_string(args.session_id);
         args.selector = normalized_optional_string(args.selector);
         args.text = normalized_optional_string(args.text);
-        args.script = normalized_optional_string(args.script);
 
         match args.action {
             ChromeAction::Open => {
@@ -170,10 +165,6 @@ impl ChromeToolArgs {
             ChromeAction::GetCookies => {
                 require_session_id(&args)?;
                 validate_for_get_cookies(&args)?;
-            }
-            ChromeAction::ExecuteScript => {
-                require_session_id(&args)?;
-                validate_for_execute_script(&args)?;
             }
         }
 
@@ -295,7 +286,7 @@ fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("selector", &args.selector, args.action.as_str())?;
     reject_fields(
         args,
-        &["url", "text", "script", "timeout_ms"],
+        &["url", "text", "timeout_ms"],
         "only 'session_id' and 'selector' are allowed",
     )
 }
@@ -305,7 +296,7 @@ fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("text", &args.text, args.action.as_str())?;
     reject_fields(
         args,
-        &["url", "script", "timeout_ms"],
+        &["url", "timeout_ms"],
         "only 'session_id', 'selector', and 'text' are allowed",
     )
 }
@@ -313,7 +304,7 @@ fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     reject_fields(
         args,
-        &["url", "selector", "text", "script", "timeout_ms"],
+        &["url", "selector", "text", "timeout_ms"],
         "only 'session_id' is allowed",
     )
 }
@@ -321,17 +312,8 @@ fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 fn validate_for_get_cookies(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     reject_fields(
         args,
-        &["url", "selector", "text", "script", "timeout_ms"],
-        "only 'session_id' is allowed",
-    )
-}
-
-fn validate_for_execute_script(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    require_field("script", &args.script, args.action.as_str())?;
-    reject_fields(
-        args,
         &["url", "selector", "text", "timeout_ms"],
-        "only 'session_id' and 'script' are allowed",
+        "only 'session_id' is allowed",
     )
 }
 
@@ -341,7 +323,10 @@ fn require_field(
     action: &str,
 ) -> Result<(), ChromeToolError> {
     if value.is_none() {
-        return Err(ChromeToolError::MissingRequiredField { action: action.to_string(), field });
+        return Err(ChromeToolError::MissingRequiredField {
+            action: action.to_string(),
+            field,
+        });
     }
     Ok(())
 }
@@ -357,7 +342,6 @@ fn reject_fields(
             "url" => args.url.is_some(),
             "selector" => args.selector.is_some(),
             "text" => args.text.is_some(),
-            "script" => args.script.is_some(),
             "timeout_ms" => args.timeout_ms.is_some(),
             _ => false,
         })

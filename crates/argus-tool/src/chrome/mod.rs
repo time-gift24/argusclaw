@@ -23,7 +23,9 @@ mod tests {
 
     use super::error::ChromeToolError;
     use super::installer::{ChromePaths, DriverDownloader};
-    use super::manager::{BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome};
+    use super::manager::{
+        BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
+    };
     use super::models::{ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
@@ -199,6 +201,28 @@ mod tests {
                 .get("screenshot_path")
                 .is_none()
         );
+        assert!(def.parameters["properties"].get("text").is_none());
+    }
+
+    #[test]
+    fn chrome_tool_definition_lists_interactive_actions() {
+        let tool = ChromeTool::new_interactive_with_backend(Arc::new(FakeChromeManager));
+        let def = tool.definition();
+        assert_eq!(def.name, "chrome");
+        assert!(def.description.contains("interactive"));
+
+        let action_enum = def.parameters["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum should be present");
+        let action_values: Vec<&str> = action_enum
+            .iter()
+            .map(|value| value.as_str().expect("enum value should be a string"))
+            .collect();
+        assert!(action_values.contains(&"click"));
+        assert!(action_values.contains(&"type"));
+        assert!(action_values.contains(&"get_url"));
+        assert!(action_values.contains(&"get_cookies"));
+        assert!(def.parameters["properties"].get("text").is_some());
     }
 
     #[tokio::test]
@@ -360,6 +384,42 @@ mod tests {
         assert_eq!(open_call.browser_binary, home.path().join("Google Chrome"));
         assert!(open_call.driver_binary.starts_with(&paths.patched));
         assert!(open_call.driver_binary.is_file());
+        assert_eq!(open_call.session_mode, SessionMode::Readonly);
+    }
+
+    #[tokio::test]
+    async fn interactive_managed_constructor_uses_interactive_session_mode() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let tool = ChromeTool::new_interactive_with_managed_components_for_test(
+            host.clone(),
+            FakeManagedDownloader::with_zip_bytes(fake_driver_zip()),
+            paths,
+        );
+
+        tool.execute(
+            json!({
+                "action": "open",
+                "url": "https://example.com"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("interactive open should succeed");
+
+        let open_call = host
+            .open_calls
+            .lock()
+            .unwrap()
+            .last()
+            .expect("host should receive an open call")
+            .clone();
+        assert_eq!(open_call.session_mode, SessionMode::Interactive);
     }
 
     #[tokio::test]
@@ -443,6 +503,7 @@ mod tests {
     struct ManagedOpenCall {
         browser_binary: PathBuf,
         driver_binary: PathBuf,
+        session_mode: SessionMode,
     }
 
     struct FakeManagedChromeHost {
@@ -481,10 +542,12 @@ mod tests {
             url: &str,
             browser_binary: &Path,
             driver_binary: &Path,
+            session_mode: SessionMode,
         ) -> Result<BackendOpenResult, ChromeToolError> {
             self.open_calls.lock().unwrap().push(ManagedOpenCall {
                 browser_binary: browser_binary.to_path_buf(),
                 driver_binary: driver_binary.to_path_buf(),
+                session_mode,
             });
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
@@ -515,7 +578,10 @@ mod tests {
     impl FakeManagedDownloader {
         fn with_zip_bytes(zip_bytes: Vec<u8>) -> Arc<Self> {
             let mut responses = HashMap::new();
-            responses.insert("LATEST_RELEASE_124".to_string(), b"124.0.6367.91".to_vec());
+            responses.insert(
+                "latest-versions-per-milestone.json".to_string(),
+                br#"{"milestones":{"124":{"version":"124.0.6367.91"}}}"#.to_vec(),
+            );
             responses.insert("chromedriver-".to_string(), zip_bytes);
             Arc::new(Self { responses })
         }
@@ -644,13 +710,6 @@ mod tests {
 
         async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
             Ok(self.cookies.clone())
-        }
-
-        async fn execute_script(
-            &self,
-            _script: &str,
-        ) -> Result<serde_json::Value, ChromeToolError> {
-            Ok(serde_json::json!({"result": "ok"}))
         }
     }
 

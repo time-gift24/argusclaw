@@ -40,7 +40,6 @@ const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Type,
     ChromeAction::GetUrl,
     ChromeAction::GetCookies,
-    ChromeAction::ExecuteScript,
 ];
 
 pub struct ChromeTool {
@@ -70,7 +69,7 @@ impl ChromeTool {
     pub fn new_interactive() -> Self {
         let paths = ChromePaths::from_home(&default_home_dir());
         Self {
-            manager: Arc::new(ChromeManager::new_production(paths)),
+            manager: Arc::new(ChromeManager::new_interactive_production(paths)),
             policy: ExplorePolicy::interactive(),
             interactive: true,
         }
@@ -98,6 +97,24 @@ impl ChromeTool {
         }
     }
 
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn new_interactive_with_managed_components_for_test(
+        host: Arc<dyn ChromeHost>,
+        downloader: Arc<dyn DriverDownloader>,
+        paths: ChromePaths,
+    ) -> Self {
+        Self {
+            manager: Arc::new(
+                ChromeManager::new_interactive_with_managed_components_for_test(
+                    host, downloader, paths,
+                ),
+            ),
+            policy: ExplorePolicy::interactive(),
+            interactive: true,
+        }
+    }
+
     #[cfg(test)]
     fn new_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
         Self {
@@ -108,7 +125,7 @@ impl ChromeTool {
     }
 
     #[cfg(test)]
-    fn new_interactive_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
+    pub(crate) fn new_interactive_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
         Self {
             manager: Arc::new(ChromeManager::new_for_test(backend)),
             policy: ExplorePolicy::interactive(),
@@ -155,13 +172,6 @@ impl ChromeTool {
                     "text".to_string(),
                     json!({"type": "string", "description": "Text to type into element (for type action)"}),
                 );
-            properties
-                .as_object_mut()
-                .expect("properties is always an object")
-                .insert(
-                    "script".to_string(),
-                    json!({"type": "string", "description": "JavaScript to execute (for execute_script action)"}),
-                );
         }
 
         json!({
@@ -194,8 +204,7 @@ impl NamedTool for ChromeTool {
             "Chrome browser tool with interactive capabilities for navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
                 .to_string()
         } else {
-            "read-only Chrome explore tool for opening pages and inspecting page state."
-                .to_string()
+            "read-only Chrome explore tool for opening pages and inspecting page state.".to_string()
         };
         ToolDefinition {
             name: "chrome".to_string(),
@@ -365,20 +374,6 @@ impl NamedTool for ChromeTool {
                     "action": "get_cookies",
                     "session_id": session_id,
                     "cookies": cookies,
-                }))
-            }
-            ChromeAction::ExecuteScript => {
-                let session_id = required_session_id(&args)?;
-                let script = required_field(&args, "script", args.script.as_deref())?;
-                let result = self
-                    .manager
-                    .execute_script(&session_id, script)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "execute_script",
-                    "session_id": session_id,
-                    "result": result,
                 }))
             }
         }

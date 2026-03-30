@@ -34,7 +34,6 @@ impl ExplorePolicy {
             ChromeAction::Type,
             ChromeAction::GetUrl,
             ChromeAction::GetCookies,
-            ChromeAction::ExecuteScript,
         ]);
         Self { allowed }
     }

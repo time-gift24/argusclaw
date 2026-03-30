@@ -20,7 +20,6 @@ pub trait BrowserSession: Send + Sync {
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
     async fn current_url(&self) -> Result<String, ChromeToolError>;
     async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError>;
-    async fn execute_script(&self, script: &str) -> Result<serde_json::Value, ChromeToolError>;
 }
 
 #[derive(Clone)]
@@ -161,12 +160,11 @@ impl BrowserSession for ManagedWebDriverSession {
 
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
         let driver = self.live_driver().await?;
-        let element = driver
-            .find(By::Css(selector))
-            .await
-            .map_err(|e| ChromeToolError::InteractionFailed {
+        let element = driver.find(By::Css(selector)).await.map_err(|e| {
+            ChromeToolError::InteractionFailed {
                 reason: format!("element not found for selector '{selector}': {e}"),
-            })?;
+            }
+        })?;
         element
             .click()
             .await
@@ -177,12 +175,11 @@ impl BrowserSession for ManagedWebDriverSession {
 
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError> {
         let driver = self.live_driver().await?;
-        let element = driver
-            .find(By::Css(selector))
-            .await
-            .map_err(|e| ChromeToolError::InteractionFailed {
+        let element = driver.find(By::Css(selector)).await.map_err(|e| {
+            ChromeToolError::InteractionFailed {
                 reason: format!("element not found for selector '{selector}': {e}"),
-            })?;
+            }
+        })?;
         element
             .send_keys(text)
             .await
@@ -204,12 +201,13 @@ impl BrowserSession for ManagedWebDriverSession {
 
     async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
         let driver = self.live_driver().await?;
-        let cookies = driver
-            .get_all_cookies()
-            .await
-            .map_err(|e| ChromeToolError::PageReadFailed {
-                reason: format!("failed to get cookies: {e}"),
-            })?;
+        let cookies =
+            driver
+                .get_all_cookies()
+                .await
+                .map_err(|e| ChromeToolError::PageReadFailed {
+                    reason: format!("failed to get cookies: {e}"),
+                })?;
         Ok(cookies
             .into_iter()
             .map(|c| CookieSummary {
@@ -219,17 +217,6 @@ impl BrowserSession for ManagedWebDriverSession {
                 path: c.path,
             })
             .collect())
-    }
-
-    async fn execute_script(&self, script: &str) -> Result<serde_json::Value, ChromeToolError> {
-        let driver = self.live_driver().await?;
-        let result = driver
-            .execute(script, Vec::<serde_json::Value>::new())
-            .await
-            .map_err(|e| ChromeToolError::ScriptExecutionFailed {
-                reason: e.to_string(),
-            })?;
-        Ok(result.json().clone())
     }
 
     async fn shutdown(&self) -> Result<(), ChromeToolError> {

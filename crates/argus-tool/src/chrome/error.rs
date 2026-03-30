@@ -61,7 +61,4 @@ pub enum ChromeToolError {
 
     #[error("failed to interact with element: {reason}")]
     InteractionFailed { reason: String },
-
-    #[error("failed to execute script: {reason}")]
-    ScriptExecutionFailed { reason: String },
 }
