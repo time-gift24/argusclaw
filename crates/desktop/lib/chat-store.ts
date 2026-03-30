@@ -389,10 +389,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         pendingApprovalRequest: null,
-        jobStatuses: existingSession?.jobStatuses ?? {},
+        jobStatuses: {},
         error: null,
         tokenCount: snapshot.token_count,
-        contextWindow: existingSession?.contextWindow ?? null,
+        contextWindow: null,
       };
 
       set((currentState) => ({
