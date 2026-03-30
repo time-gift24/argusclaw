@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_job::{GetWorkflowProgressTool, JobManager, StartWorkflowTool, WorkflowManager};
+use argus_job::{GetWorkflowProgressTool, JobManager, StartWorkflowTool, ThreadPool, WorkflowManager};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,

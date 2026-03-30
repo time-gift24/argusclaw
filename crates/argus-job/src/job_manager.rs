@@ -8,8 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::{TurnBuilder, TurnConfig, TurnOutput};
-use argus_protocol::llm::{ChatMessage, Role};
+use argus_agent::CompactorManager;
 use argus_protocol::{
     AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
     ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot, ThreadPoolState,
@@ -19,8 +18,7 @@ use argus_repository::types::{JobId, JobResult as PersistedJobResult, JobType, W
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
-use futures_util::FutureExt;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
@@ -58,9 +56,9 @@ pub enum JobLookup {
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
     template_manager: Arc<TemplateManager>,
-    provider_resolver: Arc<dyn ProviderResolver>,
-    tool_manager: Arc<ToolManager>,
+    thread_pool: Arc<ThreadPool>,
     job_repo: Option<Arc<dyn JobRepository>>,
+    mirror_persisted_job_lifecycle: bool,
     tracked_jobs: Arc<StdMutex<HashMap<String, TrackedJob>>>,
 }
 
@@ -71,9 +69,6 @@ impl fmt::Debug for JobManager {
 }
 
 impl JobManager {
-    #[cfg(test)]
-    const JOB_RESULT_SUMMARY_CHAR_LIMIT: usize = 4000;
-
     /// Create a new JobManager.
     pub fn new(
         template_manager: Arc<TemplateManager>,
@@ -82,35 +77,64 @@ impl JobManager {
         compactor_manager: Arc<CompactorManager>,
         trace_dir: PathBuf,
     ) -> Self {
-        Self::build(template_manager, provider_resolver, tool_manager, None)
+        Self::new_with_persistence(
+            template_manager,
+            provider_resolver,
+            tool_manager,
+            compactor_manager,
+            trace_dir,
+            None,
+        )
     }
 
-    /// Create a new JobManager with a repository-backed execution path.
+    /// Create a new JobManager with repository access and an ephemeral thread pool.
     pub fn with_job_repository(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         job_repo: Arc<dyn JobRepository>,
     ) -> Self {
-        Self::build(
+        let trace_dir = std::env::temp_dir().join("argus-job-thread-pool");
+        let thread_pool = Arc::new(ThreadPool::new(
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
+            Arc::new(CompactorManager::with_defaults()),
+            trace_dir,
+        ));
+
+        Self {
             template_manager,
-            provider_resolver,
-            tool_manager,
+            thread_pool,
             Some(job_repo),
-        )
+            mirror_persisted_job_lifecycle: true,
+            tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
+        }
     }
 
-    fn build(
+    /// Create a new JobManager with optional persistent thread-pool backing.
+    pub fn new_with_persistence(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        job_repo: Option<Arc<dyn JobRepository>>,
+        compactor_manager: Arc<CompactorManager>,
+        trace_dir: PathBuf,
+        persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
+        let thread_pool = Arc::new(ThreadPool::with_persistence(
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
+            compactor_manager,
+            trace_dir,
+            persistence,
+        ));
+
         Self {
             template_manager,
-            provider_resolver,
-            tool_manager,
-            job_repo,
+            thread_pool,
+            job_repo: None,
+            mirror_persisted_job_lifecycle: false,
             tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -126,18 +150,26 @@ impl JobManager {
         thread_repository: Arc<dyn ThreadRepository>,
         provider_repository: Arc<dyn LlmProviderRepository>,
     ) -> Self {
-        Self::new_with_persistence(
-            template_manager,
-            provider_resolver,
-            tool_manager,
+        let thread_pool = Arc::new(ThreadPool::with_persistence(
+            template_manager.clone(),
+            provider_resolver.clone(),
+            tool_manager.clone(),
             compactor_manager,
             trace_dir,
             Some(ThreadPoolPersistence::new(
-                job_repository,
+                job_repository.clone(),
                 thread_repository,
                 provider_repository,
             )),
-        )
+        ));
+
+        Self {
+            template_manager,
+            thread_pool,
+            job_repo: Some(job_repository),
+            mirror_persisted_job_lifecycle: false,
+            tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
+        }
     }
 
     /// Create a DispatchJobTool for this manager.
@@ -265,7 +297,89 @@ impl JobManager {
             context,
         };
 
+        self.spawn_thread_pool_job(request, None, pipe_tx, control_tx)
+            .await
+    }
+
+    /// Spawn a repository-backed workflow job executor.
+    pub async fn spawn_persisted_job_executor(
+        &self,
+        originating_thread_id: ThreadId,
+        job_id: JobId,
+        pipe_tx: broadcast::Sender<ThreadEvent>,
+        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+    ) -> Result<(), JobError> {
+        let job_repo = self
+            .job_repo
+            .clone()
+            .ok_or_else(|| JobError::Internal("job repository not configured".to_string()))?;
+        let job = job_repo
+            .get(&job_id)
+            .await
+            .map_err(|error| JobError::Internal(format!("failed to load job {job_id}: {error}")))?
+            .ok_or_else(|| JobError::JobNotFound(job_id.to_string()))?;
+        if job.job_type != JobType::Workflow {
+            return Err(JobError::ExecutionFailed(format!(
+                "job {} is not a workflow job",
+                job_id
+            )));
+        }
+
+        if job.prompt.trim().is_empty() {
+            return Err(JobError::ExecutionFailed(
+                "prompt cannot be empty".to_string(),
+            ));
+        }
+
+        let request = ThreadPoolJobRequest {
+            originating_thread_id,
+            job_id: job.id.to_string(),
+            agent_id: job.agent_id,
+            prompt: job.prompt,
+            context: job
+                .context
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok()),
+        };
+
+        self.spawn_thread_pool_job(request, Some(job_id), pipe_tx, control_tx)
+            .await
+    }
+
+    async fn spawn_thread_pool_job(
+        &self,
+        request: ThreadPoolJobRequest,
+        persisted_job_id: Option<JobId>,
+        pipe_tx: broadcast::Sender<ThreadEvent>,
+        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+    ) -> Result<(), JobError> {
+        let originating_thread_id = request.originating_thread_id;
+        let job_id = request.job_id.clone();
         let execution_thread_id = self.thread_pool.enqueue_job(request.clone()).await?;
+
+        if self.mirror_persisted_job_lifecycle
+            && let (Some(job_repo), Some(persisted_job_id)) = (&self.job_repo, &persisted_job_id)
+        {
+            job_repo
+                .update_thread_id(persisted_job_id, &execution_thread_id)
+                .await
+                .map_err(|error| {
+                    JobError::Internal(format!(
+                        "failed to persist thread binding for job {}: {}",
+                        persisted_job_id, error
+                    ))
+                })?;
+            job_repo
+                .update_status(persisted_job_id, WorkflowStatus::Queued, None, None)
+                .await
+                .map_err(|error| {
+                    JobError::Internal(format!(
+                        "failed to mark job {} queued: {}",
+                        persisted_job_id, error
+                    ))
+                })?;
+        }
+
         self.record_dispatched_job(originating_thread_id, job_id.clone());
         let _ = pipe_tx.send(ThreadEvent::ThreadBoundToJob {
             job_id: job_id.clone(),
@@ -287,8 +401,21 @@ impl JobManager {
         let tracked_jobs = Arc::clone(&self.tracked_jobs);
         let pipe_tx_clone = pipe_tx.clone();
         let control_tx_clone = control_tx.clone();
+        let job_repo = self.job_repo.clone();
+        let mirror_persisted_job_lifecycle = self.mirror_persisted_job_lifecycle;
 
         tokio::spawn(async move {
+            let started_at = mirror_persisted_job_lifecycle.then(|| Utc::now().to_rfc3339());
+            if mirror_persisted_job_lifecycle
+                && let (Some(job_repo), Some(persisted_job_id), Some(started_at)) =
+                    (&job_repo, &persisted_job_id, started_at.as_deref())
+                && let Err(error) = job_repo
+                    .update_status(persisted_job_id, WorkflowStatus::Running, Some(started_at), None)
+                    .await
+            {
+                tracing::warn!(job_id = %persisted_job_id, "failed to mark mirrored job running: {error}");
+            }
+
             let result = thread_pool
                 .execute_job(
                     request,
@@ -298,130 +425,21 @@ impl JobManager {
                 )
                 .await;
 
-            Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
-            Self::record_completed_job_result_in_store(
-                &tracked_jobs,
-                originating_thread_id,
-                result.clone(),
-            );
-            Self::broadcast_job_result(&pipe_tx_clone, originating_thread_id, result);
-        });
-
-        Ok(())
-    }
-
-    /// Spawn a repository-backed workflow job executor.
-    pub async fn spawn_persisted_job_executor(
-        &self,
-        originating_thread_id: ThreadId,
-        job_id: JobId,
-        pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
-    ) -> Result<(), JobError> {
-        let job_repo = self
-            .job_repo
-            .clone()
-            .ok_or_else(|| JobError::Internal("job repository not configured".to_string()))?;
-        let job = job_repo
-            .get(&job_id)
-            .await
-            .map_err(|error| JobError::Internal(format!("failed to load job {job_id}: {error}")))?
-            .ok_or_else(|| JobError::JobNotFound(job_id.to_string()))?;
-
-        if job.prompt.trim().is_empty() {
-            return Err(JobError::ExecutionFailed(
-                "prompt cannot be empty".to_string(),
-            ));
-        }
-
-        let started_at = Utc::now().to_rfc3339();
-        job_repo
-            .update_status(&job_id, WorkflowStatus::Running, Some(&started_at), None)
-            .await
-            .map_err(|error| {
-                JobError::Internal(format!(
-                    "failed to mark job {} running: {}",
-                    job_id, error
-                ))
-            })?;
-
-        self.record_dispatched_job(originating_thread_id, job_id.to_string());
-
-        let template_manager = Arc::clone(&self.template_manager);
-        let provider_resolver = Arc::clone(&self.provider_resolver);
-        let tool_manager = Arc::clone(&self.tool_manager);
-        let tracked_jobs = Arc::clone(&self.tracked_jobs);
-        let pipe_tx_clone = pipe_tx.clone();
-        let control_tx_clone = control_tx.clone();
-        let job_repo_clone = Arc::clone(&job_repo);
-        let job_id_string = job_id.to_string();
-        let agent_id = job.agent_id;
-        let prompt = job.prompt;
-
-        tokio::spawn(async move {
-            let fallback_job_id = job_id_string.clone();
-            let fallback_display_name = format!("Agent {}", agent_id.inner());
-            let result = AssertUnwindSafe(Self::execute_job(
-                template_manager,
-                provider_resolver,
-                tool_manager,
-                originating_thread_id,
-                job_id_string,
-                agent_id,
-                prompt,
-                pipe_tx_clone.clone(),
-                control_tx_clone.clone(),
-            ))
-            .catch_unwind()
-            .await;
-
-            let result = match result {
-                Ok(result) => result,
-                Err(payload) => Self::failure_result(
-                    fallback_job_id,
-                    agent_id,
-                    fallback_display_name,
-                    String::new(),
-                    Self::panic_message(payload),
-                ),
-            };
-
-            let result = match Self::persist_job_completion(&job_repo_clone, &job_id, &started_at, &result)
+            if mirror_persisted_job_lifecycle
+                && let (Some(job_repo), Some(persisted_job_id)) = (&job_repo, &persisted_job_id)
+                && let Err(error) = Self::persist_mirrored_job_completion(
+                    job_repo,
+                    persisted_job_id,
+                    started_at.as_deref(),
+                    &result,
+                )
                 .await
             {
-                Ok(()) => Some(result),
-                Err(error) => {
-                    let failure_result = Self::failure_result(
-                        job_id.to_string(),
-                        result.agent_id,
-                        result.agent_display_name.clone(),
-                        result.agent_description.clone(),
-                        format!("failed to persist job completion: {error}"),
-                    );
-
-                    match Self::persist_job_completion(
-                        &job_repo_clone,
-                        &job_id,
-                        &started_at,
-                        &failure_result,
-                    )
-                    .await
-                    {
-                        Ok(()) => Some(failure_result),
-                        Err(recovery_error) => {
-                            tracing::error!(
-                                job_id = %job_id,
-                                "failed to persist fallback job failure: {recovery_error}"
-                            );
-                            None
-                        }
-                    }
-                }
-            };
-
-            let Some(result) = result else {
-                return;
-            };
+                tracing::warn!(
+                    job_id = %persisted_job_id,
+                    "failed to mirror persisted job completion from thread pool result: {error}"
+                );
+            }
 
             Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
             Self::record_completed_job_result_in_store(
@@ -435,193 +453,10 @@ impl JobManager {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_job(
-        template_manager: Arc<TemplateManager>,
-        provider_resolver: Arc<dyn ProviderResolver>,
-        tool_manager: Arc<ToolManager>,
-        originating_thread_id: ThreadId,
-        job_id: String,
-        agent_id: AgentId,
-        prompt: String,
-        pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
-    ) -> ThreadJobResult {
-        let thread_id = format!("job-{}", job_id);
-        let default_display_name = format!("Agent {}", agent_id.inner());
-
-        let agent_record = match template_manager.get(agent_id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    default_display_name,
-                    String::new(),
-                    format!("agent {} not found", agent_id.inner()),
-                );
-            }
-            Err(e) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    default_display_name,
-                    String::new(),
-                    format!("failed to load agent: {}", e),
-                );
-            }
-        };
-        let agent_display_name = agent_record.display_name.clone();
-        let agent_description = agent_record.description.clone();
-
-        let provider = match agent_record.provider_id {
-            Some(pid) => match provider_resolver.resolve(pid).await {
-                Ok(p) => p,
-                Err(e) => {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name.clone(),
-                        agent_description.clone(),
-                        format!("failed to resolve provider: {}", e),
-                    );
-                }
-            },
-            None => match provider_resolver.default_provider().await {
-                Ok(p) => p,
-                Err(e) => {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name.clone(),
-                        agent_description.clone(),
-                        format!("no provider configured: {}", e),
-                    );
-                }
-            },
-        };
-
-        let enabled_tool_names: HashSet<_> = agent_record.tool_names.iter().collect();
-        let tools: Vec<Arc<dyn NamedTool>> = tool_manager
-            .list_ids()
-            .iter()
-            .filter(|name| enabled_tool_names.contains(*name))
-            .filter_map(|name| tool_manager.get(name))
-            .collect();
-
-        let (stream_tx, _stream_rx) = broadcast::channel(256);
-
-        let turn = match TurnBuilder::default()
-            .turn_number(1)
-            .thread_id(thread_id)
-            .messages(vec![ChatMessage::user(&prompt)])
-            .provider(provider)
-            .tools(tools)
-            .hooks(Vec::new())
-            .config(TurnConfig::new())
-            .agent_record(Arc::new(agent_record))
-            .stream_tx(stream_tx)
-            .thread_event_tx(pipe_tx)
-            .originating_thread_id(originating_thread_id)
-            .control_tx(control_tx)
-            .mailbox(Arc::new(Mutex::new(ThreadMailbox::default())))
-            .build()
-        {
-            Ok(turn) => turn,
-            Err(e) => {
-                return Self::failure_result(
-                    job_id,
-                    agent_id,
-                    agent_display_name.clone(),
-                    agent_description.clone(),
-                    format!("failed to build turn: {}", e),
-                );
-            }
-        };
-
-        match turn.execute().await {
-            Ok(output) => ThreadJobResult {
-                job_id,
-                success: true,
-                message: Self::summarize_output(&output),
-                token_usage: Some(output.token_usage),
-                agent_id,
-                agent_display_name,
-                agent_description,
-            },
-            Err(e) => Self::failure_result(
-                job_id,
-                agent_id,
-                agent_display_name,
-                agent_description,
-                e.to_string(),
-            ),
-        }
-    }
-
-    /// Summarize turn output into a brief result message.
-    #[cfg(test)]
-    fn summarize_output(output: &TurnOutput) -> String {
-        for msg in output.messages.iter().rev() {
-            if let ChatMessage {
-                role: Role::Assistant,
-                content,
-                ..
-            } = msg
-                && !content.is_empty()
-            {
-                return Self::truncate_summary(content);
-            }
-        }
-        format!("job completed, {} messages in turn", output.messages.len())
-    }
-
-    #[cfg(test)]
-    fn truncate_summary(content: &str) -> String {
-        let mut chars = content.chars();
-        let summary: String = chars
-            .by_ref()
-            .take(Self::JOB_RESULT_SUMMARY_CHAR_LIMIT)
-            .collect();
-        if chars.next().is_some() {
-            format!("{summary}...")
-        } else {
-            content.to_string()
-        }
-    }
-
-    fn failure_result(
-        job_id: String,
-        agent_id: AgentId,
-        agent_display_name: String,
-        agent_description: String,
-        message: String,
-    ) -> ThreadJobResult {
-        ThreadJobResult {
-            job_id,
-            success: false,
-            message,
-            token_usage: None,
-            agent_id,
-            agent_display_name,
-            agent_description,
-        }
-    }
-
-    fn panic_message(payload: Box<dyn Any + Send>) -> String {
-        let payload = payload.as_ref();
-        let detail = payload
-            .downcast_ref::<&'static str>()
-            .map(|msg| (*msg).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic payload".to_string());
-        format!("job executor panicked: {detail}")
-    }
-
-    async fn persist_job_completion(
+    async fn persist_mirrored_job_completion(
         job_repo: &Arc<dyn JobRepository>,
         job_id: &JobId,
-        started_at: &str,
+        started_at: Option<&str>,
         result: &ThreadJobResult,
     ) -> Result<(), JobError> {
         let persisted_result = PersistedJobResult {
@@ -644,17 +479,17 @@ impl JobManager {
             .await
             .map_err(|error| {
                 JobError::Internal(format!(
-                    "failed to persist result for job {}: {}",
+                    "failed to persist mirrored result for job {}: {}",
                     job_id, error
                 ))
             })?;
 
         job_repo
-            .update_status(job_id, final_status, Some(started_at), Some(&finished_at))
+            .update_status(job_id, final_status, started_at, Some(&finished_at))
             .await
             .map_err(|error| {
                 JobError::Internal(format!(
-                    "failed to persist terminal status for job {}: {}",
+                    "failed to persist mirrored terminal status for job {}: {}",
                     job_id, error
                 ))
             })?;
