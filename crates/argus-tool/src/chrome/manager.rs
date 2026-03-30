@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 
 use super::error::ChromeToolError;
 use super::installer::{ChromeInstaller, ChromePaths, DriverDownloader, ReqwestDriverDownloader};
-use super::models::{LinkSummary, OpenArgs, OpenedSession, PageMetadata};
+use super::models::{CookieSummary, LinkSummary, OpenArgs, OpenedSession, PageMetadata};
 use super::session::{
     BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
 };
@@ -229,6 +229,53 @@ impl ChromeManager {
             .ok_or_else(|| Self::session_not_found(session_id))?;
         session.set_last_screenshot_path(Some(screenshot_path.clone()));
         Ok(screenshot_path)
+    }
+
+    pub async fn click(&self, session_id: &str, selector: &str) -> Result<(), ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .click(selector)
+            .await
+    }
+
+    pub async fn type_text(
+        &self,
+        session_id: &str,
+        selector: &str,
+        text: &str,
+    ) -> Result<(), ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .type_text(selector, text)
+            .await
+    }
+
+    pub async fn current_url(&self, session_id: &str) -> Result<String, ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .current_url()
+            .await
+    }
+
+    pub async fn get_cookies(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .get_cookies()
+            .await
+    }
+
+    pub async fn execute_script(
+        &self,
+        session_id: &str,
+        script: &str,
+    ) -> Result<serde_json::Value, ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .execute_script(script)
+            .await
     }
 
     fn next_session_id(&self) -> String {
@@ -589,7 +636,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use crate::chrome::error::ChromeToolError;
-    use crate::chrome::models::{LinkSummary, OpenArgs, PageMetadata};
+    use crate::chrome::models::{CookieSummary, LinkSummary, OpenArgs, PageMetadata};
     use crate::chrome::session::BrowserSession;
 
     use super::{BackendOpenResult, BrowserBackend, ChromeManager};
@@ -647,6 +694,8 @@ mod tests {
         screenshot: Vec<u8>,
         shutdown_label: String,
         shutdowns: Arc<StdMutex<Vec<String>>>,
+        url: String,
+        cookies: Vec<CookieSummary>,
     }
 
     #[async_trait::async_trait]
@@ -673,6 +722,26 @@ mod tests {
                 .push(self.shutdown_label.clone());
             Ok(())
         }
+
+        async fn click(&self, _selector: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _selector: &str, _text: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn current_url(&self) -> Result<String, ChromeToolError> {
+            Ok(self.url.clone())
+        }
+
+        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+            Ok(self.cookies.clone())
+        }
+
+        async fn execute_script(&self, _script: &str) -> Result<serde_json::Value, ChromeToolError> {
+            Ok(serde_json::json!({"result": "ok"}))
+        }
     }
 
     #[async_trait::async_trait]
@@ -691,6 +760,8 @@ mod tests {
                 screenshot: page.screenshot.clone(),
                 shutdown_label: page.shutdown_label.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
+                url: page.final_url.clone(),
+                cookies: vec![],
             });
 
             Ok(BackendOpenResult {

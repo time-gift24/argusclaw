@@ -24,7 +24,7 @@ mod tests {
     use super::error::ChromeToolError;
     use super::installer::{ChromePaths, DriverDownloader};
     use super::manager::{BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome};
-    use super::models::{ChromeAction, ChromeToolArgs, LinkSummary, PageMetadata};
+    use super::models::{ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
     use super::session::BrowserSession;
@@ -106,9 +106,28 @@ mod tests {
     }
 
     #[test]
-    fn click_rejects_url_argument() {
+    fn click_requires_session_id_and_selector() {
+        // Missing session_id
         let err = ChromeToolArgs::validate(json!({
             "action": "click",
+            "selector": "#btn",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::MissingRequiredField { .. }));
+
+        // Missing selector
+        let err = ChromeToolArgs::validate(json!({
+            "action": "click",
+            "session_id": "session-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::MissingRequiredField { .. }));
+
+        // url not allowed
+        let err = ChromeToolArgs::validate(json!({
+            "action": "click",
+            "session_id": "session-1",
+            "selector": "#btn",
             "url": "https://example.com"
         }))
         .unwrap_err();
@@ -185,8 +204,16 @@ mod tests {
     #[tokio::test]
     async fn chrome_tool_rejects_denied_action_before_backend() {
         let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager));
+        // Click is blocked by readonly policy even with valid args
         let err = tool
-            .execute(json!({ "action": "click" }), make_ctx())
+            .execute(
+                json!({
+                    "action": "click",
+                    "session_id": "session-1",
+                    "selector": "#btn",
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::NotAuthorized(_)));
@@ -467,6 +494,8 @@ mod tests {
                 }],
                 text: "Managed text".to_string(),
                 screenshot: b"managed-png".to_vec(),
+                url: url.to_string(),
+                cookies: vec![],
             });
 
             Ok(BackendOpenResult {
@@ -576,6 +605,8 @@ mod tests {
         links: Vec<LinkSummary>,
         text: String,
         screenshot: Vec<u8>,
+        url: String,
+        cookies: Vec<CookieSummary>,
     }
 
     #[async_trait::async_trait]
@@ -598,6 +629,29 @@ mod tests {
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
             Ok(())
         }
+
+        async fn click(&self, _selector: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _selector: &str, _text: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn current_url(&self) -> Result<String, ChromeToolError> {
+            Ok(self.url.clone())
+        }
+
+        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+            Ok(self.cookies.clone())
+        }
+
+        async fn execute_script(
+            &self,
+            _script: &str,
+        ) -> Result<serde_json::Value, ChromeToolError> {
+            Ok(serde_json::json!({"result": "ok"}))
+        }
     }
 
     #[async_trait::async_trait]
@@ -614,6 +668,8 @@ mod tests {
                 links: page.links.clone(),
                 text: page.text.clone(),
                 screenshot: page.screenshot.clone(),
+                url: page.final_url.clone(),
+                cookies: vec![],
             });
 
             Ok(BackendOpenResult {

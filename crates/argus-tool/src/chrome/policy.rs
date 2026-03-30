@@ -21,6 +21,24 @@ impl ExplorePolicy {
         Self { allowed }
     }
 
+    #[must_use]
+    pub fn interactive() -> Self {
+        let allowed = HashSet::from([
+            ChromeAction::Open,
+            ChromeAction::Wait,
+            ChromeAction::ExtractText,
+            ChromeAction::ListLinks,
+            ChromeAction::GetDomSummary,
+            ChromeAction::Screenshot,
+            ChromeAction::Click,
+            ChromeAction::Type,
+            ChromeAction::GetUrl,
+            ChromeAction::GetCookies,
+            ChromeAction::ExecuteScript,
+        ]);
+        Self { allowed }
+    }
+
     pub fn validate_action(&self, action: ChromeAction) -> Result<(), ChromeToolError> {
         if self.allowed.contains(&action) {
             Ok(())
