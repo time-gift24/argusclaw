@@ -245,6 +245,9 @@ export const chat = {
   sendMessage: (sessionId: string, threadId: string, content: string) =>
     invoke<void>("send_message", { sessionId, threadId, content }),
 
+  cancelTurn: (sessionId: string, threadId: string) =>
+    invoke<void>("cancel_turn", { sessionId, threadId }),
+
   getThreadSnapshot: (sessionId: string, threadId: string) =>
     invoke<ThreadSnapshotPayload>("get_thread_snapshot", {
       sessionId,

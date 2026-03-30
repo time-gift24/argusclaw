@@ -82,6 +82,7 @@ pub fn run() {
             commands::activate_existing_thread,
             commands::update_thread_model,
             commands::send_message,
+            commands::cancel_turn,
             commands::get_thread_snapshot,
             commands::resolve_approval,
             commands::list_sessions,

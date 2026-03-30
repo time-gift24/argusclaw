@@ -7,7 +7,8 @@ use argus_agent::{CompactorManager, FilePlanStore, ThreadBuilder};
 use argus_job::JobManager;
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
-    AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadEvent, ThreadId,
+    AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
+    ThreadEvent, ThreadId,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -831,6 +832,31 @@ impl SessionManager {
                 reason: e.to_string(),
             });
         result
+    }
+
+    /// Send a cancel/interrupt signal to a specific thread's active turn.
+    pub async fn cancel_thread(
+        &self,
+        session_id: SessionId,
+        thread_id: &ThreadId,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .ok_or(ArgusError::SessionNotFound(session_id))?;
+
+        let thread = session
+            .get_thread(thread_id)
+            .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
+
+        let result = thread.read().await.send_control_event(
+            ThreadControlEvent::UserInterrupt {
+                content: "stop".to_string(),
+            },
+        );
+        result.map_err(|e| ArgusError::LlmError {
+            reason: e.to_string(),
+        })
     }
 
     /// Get the thread message history, falling back to turn trace recovery when

@@ -459,6 +459,19 @@ pub async fn send_message(
 }
 
 #[tauri::command]
+pub async fn cancel_turn(
+    wing: State<'_, Arc<ArgusWing>>,
+    session_id: String,
+    thread_id: String,
+) -> Result<(), String> {
+    let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
+    let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
+    wing.cancel_turn(session_id, thread_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_thread_snapshot(
     wing: State<'_, Arc<ArgusWing>>,
     session_id: String,

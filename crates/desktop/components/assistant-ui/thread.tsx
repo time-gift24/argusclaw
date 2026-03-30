@@ -80,7 +80,17 @@ const ComposerAction: FC = () => {
   }, [session?.effectiveProviderId, session?.contextWindow]);
 
   const handleCancel = () => {
-    aui.thread().cancelRun();
+    void useChatStore.getState().cancelTurn();
+    try {
+      aui.thread().cancelRun();
+    } catch (error) {
+      // External store runtime may not implement cancelRun; backend cancelTurn is authoritative.
+      const message =
+        error instanceof Error ? error.message : String(error ?? "");
+      if (!message.includes("does not support cancelling runs")) {
+        console.error("取消运行失败:", error);
+      }
+    }
   };
 
   return (
