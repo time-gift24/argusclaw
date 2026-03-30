@@ -9,6 +9,7 @@ use super::error::ChromeToolError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChromeAction {
+    Install,
     Open,
     Wait,
     ExtractText,
@@ -25,6 +26,7 @@ impl ChromeAction {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Install => "install",
             Self::Open => "open",
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
@@ -68,6 +70,9 @@ impl ChromeToolArgs {
         args.text = normalized_optional_string(args.text);
 
         match args.action {
+            ChromeAction::Install => {
+                validate_for_install(&args)?;
+            }
             ChromeAction::Open => {
                 let url =
                     args.url
@@ -227,6 +232,23 @@ fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
                 "fields 'url' and 'selector' are not allowed for action '{}'",
+                args.action.as_str()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    if args.url.is_some()
+        || args.session_id.is_some()
+        || args.selector.is_some()
+        || args.timeout_ms.is_some()
+        || args.text.is_some()
+    {
+        return Err(ChromeToolError::InvalidArguments {
+            reason: format!(
+                "only 'action' is allowed for action '{}'",
                 args.action.as_str()
             ),
         });

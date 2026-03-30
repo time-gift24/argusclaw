@@ -84,6 +84,15 @@ async fn smoke_test_skips_without_env_flag() {
     let manager = ToolManager::new();
     manager.register(Arc::new(ChromeTool::new()));
 
+    manager
+        .execute(
+            "chrome",
+            serde_json::json!({ "action": "install" }),
+            make_ctx(),
+        )
+        .await
+        .expect("chrome install should succeed");
+
     let open = manager
         .execute(
             "chrome",

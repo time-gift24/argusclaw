@@ -45,7 +45,6 @@ use argus_repository::traits::{
     ThreadRepository,
 };
 
-
 use argus_repository::types::JobId;
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
@@ -580,11 +579,7 @@ impl ArgusWing {
     }
 
     /// Cancel the active turn on a thread.
-    pub async fn cancel_turn(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-    ) -> Result<()> {
+    pub async fn cancel_turn(&self, session_id: SessionId, thread_id: ThreadId) -> Result<()> {
         self.session_manager
             .cancel_thread(session_id, &thread_id)
             .await
@@ -718,7 +713,9 @@ mod tests {
 
         assert!(action_values.contains(&"click"));
         assert!(action_values.contains(&"type"));
+        assert!(action_values.contains(&"install"));
         assert!(definition.parameters["properties"].get("text").is_some());
+        assert!(wing.tool_manager().get("chrome_install").is_none());
     }
 
     #[tokio::test]

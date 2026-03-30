@@ -22,7 +22,7 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::error::ChromeToolError;
-    use super::installer::{ChromePaths, DriverDownloader};
+    use super::installer::{ChromeInstaller, ChromePaths, DriverDownloader};
     use super::manager::{
         BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
     };
@@ -173,11 +173,18 @@ mod tests {
     }
 
     #[test]
+    fn install_is_allowed_by_readonly_policy() {
+        ExplorePolicy::readonly()
+            .validate_action(ChromeAction::Install)
+            .unwrap();
+    }
+
+    #[test]
     fn chrome_tool_definition_lists_only_readonly_actions() {
         let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager));
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
-        assert!(def.description.contains("read-only"));
+        assert!(def.description.contains("explicit driver install"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
             .as_array()
@@ -192,6 +199,7 @@ mod tests {
         assert!(action_values.contains(&"list_links"));
         assert!(action_values.contains(&"get_dom_summary"));
         assert!(action_values.contains(&"screenshot"));
+        assert!(action_values.contains(&"install"));
         assert!(!action_values.contains(&"click"));
 
         assert!(def.parameters["properties"].get("session_id").is_some());
@@ -222,6 +230,7 @@ mod tests {
         assert!(action_values.contains(&"type"));
         assert!(action_values.contains(&"get_url"));
         assert!(action_values.contains(&"get_cookies"));
+        assert!(action_values.contains(&"install"));
         assert!(def.parameters["properties"].get("text").is_some());
     }
 
@@ -346,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_constructor_uses_install_flow_before_open() {
+    async fn chrome_tool_install_installs_and_reports_result() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -354,10 +363,107 @@ mod tests {
             "124",
             "Managed Example",
         ));
-        let downloader = FakeManagedDownloader::with_zip_bytes(fake_driver_zip());
+        let downloader = SpyManagedDownloader::with_zip_bytes(fake_driver_zip());
+        let tool =
+            ChromeTool::new_with_managed_components_for_test(host, downloader, paths.clone());
+
+        let result = tool
+            .execute(json!({ "action": "install" }), make_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result["browser_version"], "124");
+        assert_eq!(result["driver_version"], "124.0.6367.91");
+        assert_eq!(result["cache_hit"], false);
+        let driver_path = PathBuf::from(result["driver_path"].as_str().unwrap());
+        assert!(driver_path.starts_with(&paths.patched));
+        assert!(driver_path.is_file());
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_install_reuses_cached_driver_without_network() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        ChromeInstaller::new(
+            paths.clone(),
+            SpyManagedDownloader::with_zip_bytes(fake_driver_zip()),
+        )
+        .ensure_driver("124")
+        .await
+        .unwrap();
+        let downloader = SpyManagedDownloader::new(HashMap::new());
+        let tool =
+            ChromeTool::new_with_managed_components_for_test(host, downloader.clone(), paths);
+
+        let result = tool
+            .execute(json!({ "action": "install" }), make_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result["cache_hit"], true);
+        assert!(downloader.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_requires_explicit_install_before_open() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let downloader = SpyManagedDownloader::new(HashMap::new());
         let tool = ChromeTool::new_with_managed_components_for_test(
             host.clone(),
-            downloader,
+            downloader.clone(),
+            paths,
+        );
+
+        let err = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect_err("managed open should require explicit install");
+
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { tool_name, reason }
+                if tool_name == "chrome"
+                    && reason.contains("action: install")
+                    && reason.contains("not installed")
+        ));
+        assert!(host.open_calls.lock().unwrap().is_empty());
+        assert!(downloader.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_uses_cached_driver_after_explicit_install() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let installer = ChromeInstaller::new(
+            paths.clone(),
+            SpyManagedDownloader::with_zip_bytes(fake_driver_zip()),
+        );
+        installer.ensure_driver("124").await.unwrap();
+        let tool = ChromeTool::new_with_managed_components_for_test(
+            host.clone(),
+            SpyManagedDownloader::new(HashMap::new()),
             paths.clone(),
         );
 
@@ -370,7 +476,7 @@ mod tests {
                 make_ctx(),
             )
             .await
-            .expect("managed open should succeed");
+            .expect("managed open should succeed with cached driver");
 
         assert_eq!(open["page_title"], "Managed Example");
 
@@ -398,9 +504,17 @@ mod tests {
         ));
         let tool = ChromeTool::new_interactive_with_managed_components_for_test(
             host.clone(),
-            FakeManagedDownloader::with_zip_bytes(fake_driver_zip()),
-            paths,
+            SpyManagedDownloader::new(HashMap::new()),
+            paths.clone(),
         );
+
+        ChromeInstaller::new(
+            paths,
+            SpyManagedDownloader::with_zip_bytes(fake_driver_zip()),
+        )
+        .ensure_driver("124")
+        .await
+        .unwrap();
 
         tool.execute(
             json!({
@@ -433,9 +547,17 @@ mod tests {
         ));
         let tool = ChromeTool::new_with_managed_components_for_test(
             host,
-            FakeManagedDownloader::with_zip_bytes(fake_driver_zip()),
-            paths,
+            SpyManagedDownloader::new(HashMap::new()),
+            paths.clone(),
         );
+
+        ChromeInstaller::new(
+            paths,
+            SpyManagedDownloader::with_zip_bytes(fake_driver_zip()),
+        )
+        .ensure_driver("124")
+        .await
+        .unwrap();
 
         let first_open = tool
             .execute(
@@ -572,11 +694,19 @@ mod tests {
         }
     }
 
-    struct FakeManagedDownloader {
+    struct SpyManagedDownloader {
         responses: HashMap<String, Vec<u8>>,
+        requests: StdMutex<Vec<String>>,
     }
 
-    impl FakeManagedDownloader {
+    impl SpyManagedDownloader {
+        fn new(responses: HashMap<String, Vec<u8>>) -> Arc<Self> {
+            Arc::new(Self {
+                responses,
+                requests: StdMutex::new(Vec::new()),
+            })
+        }
+
         fn with_zip_bytes(zip_bytes: Vec<u8>) -> Arc<Self> {
             let mut responses = HashMap::new();
             responses.insert(
@@ -584,13 +714,14 @@ mod tests {
                 br#"{"milestones":{"124":{"version":"124.0.6367.91"}}}"#.to_vec(),
             );
             responses.insert("chromedriver-".to_string(), zip_bytes);
-            Arc::new(Self { responses })
+            Self::new(responses)
         }
     }
 
     #[async_trait::async_trait]
-    impl DriverDownloader for FakeManagedDownloader {
+    impl DriverDownloader for SpyManagedDownloader {
         async fn fetch(&self, url: &str) -> Result<Vec<u8>, ChromeToolError> {
+            self.requests.lock().unwrap().push(url.to_string());
             self.responses
                 .iter()
                 .find_map(|(needle, value)| url.contains(needle).then(|| value.clone()))
