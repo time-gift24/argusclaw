@@ -508,7 +508,7 @@ mod tests {
 
     struct FakeManagedChromeHost {
         browser_binary: PathBuf,
-        major_version: String,
+        browser_version: String,
         page_title: String,
         open_calls: StdMutex<Vec<ManagedOpenCall>>,
     }
@@ -516,12 +516,12 @@ mod tests {
     impl FakeManagedChromeHost {
         fn new(
             browser_binary: PathBuf,
-            major_version: impl Into<String>,
+            browser_version: impl Into<String>,
             page_title: impl Into<String>,
         ) -> Self {
             Self {
                 browser_binary,
-                major_version: major_version.into(),
+                browser_version: browser_version.into(),
                 page_title: page_title.into(),
                 open_calls: StdMutex::new(Vec::new()),
             }
@@ -533,7 +533,7 @@ mod tests {
         async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError> {
             Ok(DetectedChrome {
                 browser_binary: self.browser_binary.clone(),
-                major_version: self.major_version.clone(),
+                browser_version: self.browser_version.clone(),
             })
         }
 
@@ -541,6 +541,7 @@ mod tests {
             &self,
             url: &str,
             browser_binary: &Path,
+            _browser_version: &str,
             driver_binary: &Path,
             session_mode: SessionMode,
         ) -> Result<BackendOpenResult, ChromeToolError> {

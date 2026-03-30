@@ -20,8 +20,6 @@ use super::session::{
     BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
 };
 
-const INTERACTIVE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36";
-
 pub struct BackendOpenResult {
     pub metadata: PageMetadata,
     pub session: Arc<dyn BrowserSession>,
@@ -41,7 +39,7 @@ pub trait BrowserBackend: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedChrome {
     pub browser_binary: PathBuf,
-    pub major_version: String,
+    pub browser_version: String,
 }
 
 #[async_trait]
@@ -52,6 +50,7 @@ pub trait ChromeHost: Send + Sync {
         &self,
         url: &str,
         browser_binary: &Path,
+        browser_version: &str,
         driver_binary: &Path,
         session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError>;
@@ -83,12 +82,13 @@ impl BrowserBackend for ManagedChromeBackend {
         let detected = self.host.discover_chrome().await?;
         let install = self
             .installer
-            .ensure_driver(&detected.major_version)
+            .ensure_driver(&detected.browser_version)
             .await?;
         self.host
             .open_session(
                 url,
                 &detected.browser_binary,
+                &detected.browser_version,
                 &install.patched_driver,
                 self.session_mode,
             )
@@ -441,11 +441,11 @@ pub struct SystemChromeHost;
 impl ChromeHost for SystemChromeHost {
     async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError> {
         let browser_binary = find_chrome_binary()?;
-        let major_version = detect_browser_version(&browser_binary).await?;
+        let browser_version = detect_browser_version(&browser_binary).await?;
 
         Ok(DetectedChrome {
             browser_binary,
-            major_version,
+            browser_version,
         })
     }
 
@@ -453,6 +453,7 @@ impl ChromeHost for SystemChromeHost {
         &self,
         url: &str,
         browser_binary: &Path,
+        browser_version: &str,
         driver_binary: &Path,
         session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError> {
@@ -472,7 +473,8 @@ impl ChromeHost for SystemChromeHost {
             return Err(err);
         }
 
-        let capabilities = build_chrome_capabilities(browser_binary, session_mode)?;
+        let capabilities =
+            build_chrome_capabilities(browser_binary, browser_version, session_mode)?;
 
         let driver = match WebDriver::new(&server_url, capabilities).await {
             Ok(driver) => driver,
@@ -581,17 +583,13 @@ fn parse_browser_version_output(output: &str) -> Option<String> {
     output
         .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
         .filter(|token| !token.is_empty())
-        .find_map(|token| {
-            token
-                .split('.')
-                .next()
-                .filter(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
-        })
+        .find(|token| token.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
         .map(str::to_string)
 }
 
 fn build_chrome_capabilities(
     browser_binary: &Path,
+    browser_version: &str,
     session_mode: SessionMode,
 ) -> Result<ChromeCapabilities, ChromeToolError> {
     let mut capabilities = DesiredCapabilities::chrome();
@@ -625,7 +623,7 @@ fn build_chrome_capabilities(
                 })?;
         }
         SessionMode::Interactive => {
-            let user_agent_arg = format!("user-agent={INTERACTIVE_USER_AGENT}");
+            let user_agent_arg = format!("user-agent={}", interactive_user_agent(browser_version));
             capabilities
                 .set_page_load_strategy(PageLoadStrategy::Eager)
                 .map_err(|e| ChromeToolError::DriverStartFailed {
@@ -680,6 +678,21 @@ fn build_chrome_capabilities(
     }
 
     Ok(capabilities)
+}
+
+fn interactive_user_agent(browser_version: &str) -> String {
+    interactive_user_agent_for_os(std::env::consts::OS, browser_version)
+}
+
+fn interactive_user_agent_for_os(os: &str, browser_version: &str) -> String {
+    let platform = match os {
+        "macos" => "Macintosh; Intel Mac OS X 10_15_7",
+        "windows" => "Windows NT 10.0; Win64; x64",
+        _ => "X11; Linux x86_64",
+    };
+    format!(
+        "Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{browser_version} Safari/537.36"
+    )
 }
 
 fn reserve_free_port() -> Result<u16, ChromeToolError> {
@@ -790,7 +803,7 @@ mod tests {
 
     use super::{
         BackendOpenResult, BrowserBackend, ChromeManager, SessionMode, build_chrome_capabilities,
-        parse_browser_version_output,
+        interactive_user_agent_for_os, parse_browser_version_output,
     };
 
     #[derive(Debug, Clone)]
@@ -1193,7 +1206,7 @@ mod tests {
     fn parse_browser_version_output_supports_macos_format() {
         assert_eq!(
             parse_browser_version_output("Google Chrome 124.0.6367.91"),
-            Some("124".to_string())
+            Some("124.0.6367.91".to_string())
         );
     }
 
@@ -1201,7 +1214,7 @@ mod tests {
     fn parse_browser_version_output_supports_windows_format() {
         assert_eq!(
             parse_browser_version_output("ProductVersion\r\n124.0.6367.91\r\n"),
-            Some("124".to_string())
+            Some("124.0.6367.91".to_string())
         );
     }
 
@@ -1209,6 +1222,7 @@ mod tests {
     fn interactive_capabilities_use_visible_browser_arguments() {
         let caps = build_chrome_capabilities(
             Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
             SessionMode::Interactive,
         )
         .unwrap();
@@ -1232,9 +1246,34 @@ mod tests {
     }
 
     #[test]
+    fn interactive_capabilities_use_detected_browser_version_in_user_agent() {
+        let caps = build_chrome_capabilities(
+            Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
+            SessionMode::Interactive,
+        )
+        .unwrap();
+        let caps_json = serde_json::to_value(caps).unwrap();
+        let args = caps_json["goog:chromeOptions"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        let user_agent = args
+            .iter()
+            .find(|value| value.starts_with("user-agent="))
+            .copied()
+            .unwrap();
+
+        assert!(user_agent.contains("Chrome/124.0.6367.91"));
+    }
+
+    #[test]
     fn interactive_capabilities_use_eager_page_load_strategy() {
         let caps = build_chrome_capabilities(
             Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
             SessionMode::Interactive,
         )
         .unwrap();
@@ -1247,6 +1286,7 @@ mod tests {
     fn readonly_capabilities_keep_headless_configuration() {
         let caps = build_chrome_capabilities(
             Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
             SessionMode::Readonly,
         )
         .unwrap();
@@ -1261,5 +1301,17 @@ mod tests {
         assert!(args.contains(&"--headless=new"));
         assert!(!args.contains(&"--disable-blink-features=AutomationControlled"));
         assert!(caps_json["goog:chromeOptions"]["excludeSwitches"].is_null());
+    }
+
+    #[test]
+    fn interactive_user_agent_uses_platform_specific_template() {
+        assert!(
+            interactive_user_agent_for_os("macos", "124.0.6367.91")
+                .contains("Macintosh; Intel Mac OS X 10_15_7")
+        );
+        assert!(
+            interactive_user_agent_for_os("windows", "124.0.6367.91")
+                .contains("Windows NT 10.0; Win64; x64")
+        );
     }
 }
