@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+mock-oauth2 = ["dep:oauth2-test-server", "dep:axum", "dep:clap", "dep:anyhow"]
+
+[[bin]]
+name = "mock-oauth2"
+path = "src/bin/mock-oauth2.rs"
+required-features = ["mock-oauth2"]
+
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
 async-trait = { workspace = true }
@@ -20,6 +29,12 @@ once_cell = { workspace = true }
 url = { workspace = true }
 thirtyfour = { workspace = true }
 zip = { workspace = true }
+
+# Optional: mock-oauth2 bin dependencies
+oauth2-test-server = { version = "0.2", optional = true }
+axum = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
