@@ -2,6 +2,7 @@ pub mod account;
 pub mod agent;
 pub mod approval;
 pub mod config;
+pub mod envelope;
 pub mod error;
 pub mod events;
 pub mod hooks;
@@ -19,6 +20,7 @@ pub mod tool;
 pub use account::{AccountCredentials, AccountRepository};
 pub use agent::{AgentRecord, AgentType};
 pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalResponse};
+pub use envelope::{ThreadEventEnvelope, ThreadEventPayload};
 pub use error::{ArgusError, Result};
 pub use events::{
     QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadInbox,
