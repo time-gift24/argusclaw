@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
+use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
 use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
 use tokio::process::Command;
 use tokio::sync::RwLock;
@@ -626,6 +627,11 @@ fn build_chrome_capabilities(
         SessionMode::Interactive => {
             let user_agent_arg = format!("user-agent={INTERACTIVE_USER_AGENT}");
             capabilities
+                .set_page_load_strategy(PageLoadStrategy::Eager)
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+            capabilities
                 .set_no_sandbox()
                 .map_err(|e| ChromeToolError::DriverStartFailed {
                     reason: e.to_string(),
@@ -1223,6 +1229,18 @@ mod tests {
             caps_json["goog:chromeOptions"]["excludeSwitches"],
             json!(["enable-automation"])
         );
+    }
+
+    #[test]
+    fn interactive_capabilities_use_eager_page_load_strategy() {
+        let caps = build_chrome_capabilities(
+            Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            SessionMode::Interactive,
+        )
+        .unwrap();
+        let caps_json = serde_json::to_value(caps).unwrap();
+
+        assert_eq!(caps_json["pageLoadStrategy"], json!("eager"));
     }
 
     #[test]
