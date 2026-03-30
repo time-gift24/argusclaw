@@ -13,6 +13,7 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use async_trait::async_trait;
 
 use super::error::CompactError;
+use crate::tokenizer::{count_total_tokens, estimate_tokens};
 
 /// Context for compaction operations.
 ///
@@ -60,12 +61,9 @@ impl<'a> CompactContext<'a> {
     }
 
     /// Recalculate token count from messages.
-    pub fn recalculate_token_count(&mut self) {
-        *self.token_count = self
-            .messages
-            .iter()
-            .map(|m| estimate_tokens(&m.content))
-            .sum();
+    pub fn recalculate_token_count(&mut self) -> Result<(), CompactError> {
+        *self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
+        Ok(())
     }
 
     /// Set the token count.
@@ -89,11 +87,6 @@ pub trait Compactor: Send + Sync {
 
     /// Name of the compactor strategy.
     fn name(&self) -> &'static str;
-}
-
-/// Estimate token count for a string (simple heuristic).
-pub fn estimate_tokens(content: &str) -> u32 {
-    (content.len() / 4).max(1) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -167,7 +160,7 @@ impl Compactor for KeepRecentCompactor {
         *messages = [system_msgs, recent].concat();
 
         // Update token count
-        context.recalculate_token_count();
+        context.recalculate_token_count()?;
 
         tracing::debug!(
             compactor = self.name(),
@@ -250,7 +243,7 @@ impl Compactor for KeepTokensCompactor {
             if msg.role == Role::System {
                 continue;
             }
-            let msg_tokens = estimate_tokens(&msg.content);
+            let msg_tokens = estimate_tokens(&msg.content)?;
             if current_tokens + msg_tokens > target_tokens as u32 {
                 break;
             }
@@ -262,7 +255,7 @@ impl Compactor for KeepTokensCompactor {
         *messages = [system_msgs, kept].concat();
 
         // Update token count
-        context.set_token_count(current_tokens);
+        context.recalculate_token_count()?;
 
         tracing::debug!(
             compactor = self.name(),
@@ -415,12 +408,14 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedContextProvider {
             context_window: 100,
         });
-        let mut token_count = 30;
+        let repeated = ["test"; 10].join(" ");
         let mut messages = vec![
-            ChatMessage::user("a".repeat(40)),
-            ChatMessage::user("b".repeat(40)),
-            ChatMessage::user("c".repeat(40)),
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated.clone()),
         ];
+        let mut token_count = count_total_tokens(messages.iter().map(|m| m.content.as_str()))
+            .expect("tokenization should succeed");
         let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
             .with_threshold_ratio_override(0.2);
 
@@ -430,8 +425,11 @@ mod tests {
             .expect("override should force compaction");
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, "c".repeat(40));
-        assert_eq!(token_count, 10);
+        assert_eq!(messages[0].content, repeated);
+        assert_eq!(
+            token_count,
+            estimate_tokens(&messages[0].content).expect("tokenization should succeed")
+        );
     }
 
     #[tokio::test]
@@ -439,12 +437,14 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedContextProvider {
             context_window: 100,
         });
-        let mut token_count = 30;
+        let repeated = ["test"; 10].join(" ");
         let mut messages = vec![
-            ChatMessage::user("a".repeat(40)),
-            ChatMessage::user("b".repeat(40)),
-            ChatMessage::user("c".repeat(40)),
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::user(repeated.clone()),
         ];
+        let mut token_count = count_total_tokens(messages.iter().map(|m| m.content.as_str()))
+            .expect("tokenization should succeed");
         let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
             .with_threshold_ratio_override(0.2);
 
@@ -454,8 +454,12 @@ mod tests {
             .expect("override should force compaction");
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].content, "b".repeat(40));
-        assert_eq!(messages[1].content, "c".repeat(40));
-        assert_eq!(token_count, 20);
+        assert_eq!(messages[0].content, repeated);
+        assert_eq!(messages[1].content, repeated);
+        assert_eq!(
+            token_count,
+            count_total_tokens(messages.iter().map(|m| m.content.as_str()))
+                .expect("tokenization should succeed")
+        );
     }
 }
