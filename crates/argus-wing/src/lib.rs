@@ -46,6 +46,7 @@ use argus_repository::traits::{
 };
 
 
+use argus_repository::types::JobId;
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;

@@ -187,188 +187,7 @@ impl SessionManager {
             None => return Err(ArgusError::SessionNotFound(session_id)),
         };
 
-<<<<<<< HEAD
-        // Capture self as Arc for use in callbacks (Clone impl uses Arc fields internally)
-        let sm = self.clone();
-
-        // Load threads metadata from DB
-        let thread_records = self
-            .thread_repo
-            .list_threads_in_session(&session_id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })?;
-
-        for thread_record in thread_records {
-            let thread_id = thread_record.id;
-            let thread_id_str = thread_id.to_string();
-            let template_id = thread_record.template_id;
-            let provider_id_val = thread_record.provider_id.into_inner();
-            let token_count = thread_record.token_count;
-            let turn_count = thread_record.turn_count;
-            let model_override = thread_record.model_override.clone();
-            let title: Option<String> = thread_record.title;
-            let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
-
-            // Get agent record (template)
-            let agent_record = match template_id {
-                Some(tid) => match self.template_manager.get(tid).await {
-                    Ok(Some(record)) => record,
-                    Ok(None) => {
-                        tracing::warn!(
-                            thread_id = %thread_id_str,
-                            template_id = %tid.inner(),
-                            "Template not found for thread, skipping"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            thread_id = %thread_id_str,
-                            template_id = %tid.inner(),
-                            error = %e,
-                            "Failed to get template for thread, skipping"
-                        );
-                        continue;
-                    }
-                },
-                None => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        "No template_id for thread, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            let provider_id = ProviderId::new(provider_id_val);
-            let requested_model = model_override
-                .as_deref()
-                .or(agent_record.model_id.as_deref());
-
-            // Resolve provider using the persisted thread model when available,
-            // otherwise fall back to the agent's configured default model.
-            let provider = match requested_model {
-                Some(model) => match self
-                    .provider_resolver
-                    .resolve_with_model(provider_id, model)
-                    .await
-                {
-                    Ok(provider) => provider,
-                    Err(model_error) => {
-                        tracing::warn!(
-                            thread_id = %thread_id_str,
-                            provider_id = %provider_id_val,
-                            model_override = %model,
-                            error = %model_error,
-                            "Failed to resolve provider with model override, falling back to provider default model"
-                        );
-                        match self.provider_resolver.resolve(provider_id).await {
-                            Ok(provider) => provider,
-                            Err(resolve_error) => {
-                                tracing::warn!(
-                                    thread_id = %thread_id_str,
-                                    provider_id = %provider_id_val,
-                                    error = %resolve_error,
-                                    "Failed to resolve provider for thread, skipping"
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                },
-                None => match self.provider_resolver.resolve(provider_id).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            thread_id = %thread_id_str,
-                            provider_id = %provider_id_val,
-                            error = %e,
-                            "Failed to resolve provider for thread, skipping"
-                        );
-                        continue;
-                    }
-                },
-            };
-
-            // Get compactor
-            let compactor = self.compactor_manager.default_compactor().clone();
-
-            // Build Thread directly
-            let trace_cfg = TraceConfig::new(true, self.trace_dir.clone())
-                .with_session_id(session_id)
-                .with_turn_start(
-                    Some(agent_record.system_prompt.clone()),
-                    Some(provider.model_name().to_string()),
-                );
-            let on_turn_complete = {
-                let sm = sm.clone();
-                Arc::new(move |sid: argus_protocol::SessionId, turn_num: u32| {
-                    let sm = sm.clone();
-                    tokio::spawn(async move {
-                        let _ = sm.update_session_turn(sid, turn_num).await;
-                    });
-                }) as OnTurnComplete
-            };
-            let mut turn_config = TurnConfig::new();
-            turn_config.trace_config = Some(trace_cfg);
-            turn_config.on_turn_complete = Some(on_turn_complete);
-            let config = ThreadConfigBuilder::default()
-                .turn_config(turn_config)
-                .build()
-                .expect("ThreadConfigBuilder should not fail with defaults");
-            let thread = match ThreadBuilder::new()
-                .id(thread_id)
-                .session_id(session_id)
-                .agent_record(Arc::new(agent_record))
-                .title(title)
-                .provider(provider)
-                .tool_manager(self.tool_manager.clone())
-                .compactor(compactor)
-                .config(config)
-                .build()
-            {
-                Ok(mut t) => {
-                    if let Ok(recovered) = recover_thread_state_from_trace(
-                        &self.trace_dir,
-                        &session_id,
-                        &thread_id,
-                        (turn_count > 0).then_some(turn_count),
-                    )
-                    .await
-                    {
-                        if recovered.turn_count > 0 {
-                            t.hydrate_from_persisted_state(
-                                recovered.messages,
-                                token_count.max(recovered.token_count),
-                                turn_count.max(recovered.turn_count),
-                                updated_at,
-                            );
-                        }
-                    }
-
-                    Arc::new(RwLock::new(t))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id = %thread_id_str,
-                        error = %e,
-                        "Failed to build Thread, skipping"
-                    );
-                    continue;
-                }
-            };
-
-            argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
-            session.add_thread(thread);
-        }
-
         // Store in memory
-=======
->>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
         self.sessions.insert(session_id, session.clone());
 
         Ok(session)
@@ -607,18 +426,7 @@ impl SessionManager {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })?;
-<<<<<<< HEAD
-
-        // Wrap in Arc<RwLock<>> for safe concurrent read access
-        let thread_arc = Arc::new(RwLock::new(thread));
-
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread_arc));
-
-        // Add to in-memory session
-        session.add_thread(thread_arc);
-=======
         self.thread_pool.register_chat_thread(session_id, thread_id);
->>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
 
         Ok(thread_id)
     }
@@ -632,10 +440,7 @@ impl SessionManager {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })?;
-<<<<<<< HEAD
-=======
         self.thread_pool.remove_runtime(thread_id);
->>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -914,45 +719,6 @@ impl SessionManager {
             AgentId::new(0)
         });
         let provider_id = Some(ProviderId::new(thread_record.provider_id.into_inner()));
-<<<<<<< HEAD
-        let token_count = thread_record.token_count;
-        let turn_count = thread_record.turn_count;
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
-
-        let session = self.load(session_id).await?;
-        let thread = session
-            .get_thread(thread_id)
-            .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-
-        let mut thread = thread.write().await;
-        if !thread.history().is_empty() {
-            let effective_model = Some(thread.provider().model_name().to_string());
-            return Ok((template_id, provider_id, effective_model));
-        }
-
-        let recovered = recover_thread_state_from_trace(
-            &self.trace_dir,
-            &session_id,
-            thread_id,
-            (turn_count > 0).then_some(turn_count),
-        )
-        .await?;
-        if recovered.turn_count == 0 {
-            let effective_model = Some(thread.provider().model_name().to_string());
-            return Ok((template_id, provider_id, effective_model));
-        }
-
-        thread.hydrate_from_persisted_state(
-            recovered.messages,
-            token_count.max(recovered.token_count),
-            turn_count.max(recovered.turn_count),
-            updated_at,
-        );
-
-        let effective_model = Some(thread.provider().model_name().to_string());
-=======
         self.load(session_id).await?;
         self.thread_pool
             .register_chat_thread(session_id, *thread_id);
@@ -961,7 +727,6 @@ impl SessionManager {
         } else {
             thread_record.model_override.clone()
         };
->>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
         Ok((template_id, provider_id, effective_model))
     }
 
@@ -1184,14 +949,10 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::{KeepRecentCompactor, ThreadBuilder};
-<<<<<<< HEAD
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
-=======
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, ToolCompletionRequest,
         ToolCompletionResponse,
     };
->>>>>>> bb1085f (feat(thread-pool): unify chat and job runtimes)
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, ProviderId, Role, SessionId, ThreadControlEvent,
         ThreadEvent, ThreadId, ThreadJobResult,
