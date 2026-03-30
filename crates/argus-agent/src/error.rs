@@ -130,6 +130,20 @@ pub enum CompactError {
     /// Summarize strategy not implemented.
     #[error("Summarize strategy not implemented")]
     SummarizeNotImplemented,
+
+    /// LLM call for summarization failed.
+    #[error("Summarization LLM call failed: {reason}")]
+    SummarizationFailed {
+        /// Reason for the failure.
+        reason: String,
+    },
+
+    /// Summarization LLM call timed out.
+    #[error("Summarization LLM call timed out after {timeout_secs}s")]
+    SummarizationTimeout {
+        /// Timeout in seconds.
+        timeout_secs: u64,
+    },
 }
 
 /// Errors that can occur during Thread operations.

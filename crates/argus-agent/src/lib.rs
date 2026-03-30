@@ -86,6 +86,7 @@ pub use turn::{Turn, TurnBuilder, TurnCancellation};
 pub use command::ThreadRuntimeSnapshot;
 pub use compact::{
     CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
+    SummarizeCompactor,
 };
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError, TokenizationError};
