@@ -14,6 +14,23 @@ test("switchToThread activates an existing thread before fetching its snapshot",
   assert.match(storeSource, /await chat\.getThreadSnapshot\(sessionId,\s*threadId\)/);
 });
 
+test("switchToThread resets per-thread UI state instead of reusing the previous thread state", () => {
+  const switchBranch = storeSource.match(
+    /async switchToThread\(sessionId: string, threadId: string\) \{(?<branch>[\s\S]*?)\n  \},/,
+  );
+  assert.ok(switchBranch?.groups?.branch, "switchToThread branch should exist");
+  assert.match(
+    switchBranch.groups.branch,
+    /jobStatuses:\s*\{\}/,
+    "switching threads should clear ephemeral job statuses from the previously viewed thread",
+  );
+  assert.match(
+    switchBranch.groups.branch,
+    /contextWindow:\s*null/,
+    "switching threads should force a fresh context window fetch for the activated thread",
+  );
+});
+
 test("existing thread activation reuses a stable session-based forwarder key", () => {
   assert.match(commandSource, /start_forwarder\(\s*session_id\.to_string\(\)/);
   assert.match(subscriptionSource, /subscriptions: HashMap<String, CancellationToken>/);

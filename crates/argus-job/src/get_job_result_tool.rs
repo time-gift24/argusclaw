@@ -198,6 +198,8 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
+            Arc::new(argus_agent::CompactorManager::with_defaults()),
+            std::env::temp_dir().join("argus-job-tests"),
         ))
     }
 

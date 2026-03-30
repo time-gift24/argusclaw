@@ -4,11 +4,12 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
-use crate::ids::{AgentId, ThreadId};
+use crate::ids::{AgentId, SessionId, ThreadId};
 use crate::llm::LlmStreamEvent;
 use crate::message_override::MessageOverride;
 
@@ -325,6 +326,121 @@ impl ThreadMailbox {
     }
 }
 
+/// Snapshot of a single thread tracked by the thread pool.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadRuntimeStatus {
+    /// Runtime has not been loaded into memory.
+    Inactive,
+    /// Runtime is being loaded.
+    Loading,
+    /// Runtime is queued for execution.
+    Queued,
+    /// Runtime is actively executing.
+    Running,
+    /// Runtime completed recently and is in cooling period.
+    Cooling,
+    /// Runtime was evicted from memory.
+    Evicted,
+}
+
+/// Runtime source classification inside the unified thread pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadPoolRuntimeKind {
+    /// User-facing conversational runtime.
+    Chat,
+    /// Background job runtime.
+    Job,
+}
+
+/// Stable identifier for a runtime tracked by the unified thread pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolRuntimeRef {
+    /// Thread ID.
+    pub thread_id: ThreadId,
+    /// Runtime category.
+    pub kind: ThreadPoolRuntimeKind,
+    /// Bound session ID when the runtime belongs to a user chat thread.
+    pub session_id: Option<SessionId>,
+    /// Bound job ID if this runtime is associated with a dispatched job.
+    pub job_id: Option<String>,
+}
+
+/// Snapshot of a single thread tracked by the thread pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolRuntimeSummary {
+    /// Stable runtime identity.
+    pub runtime: ThreadPoolRuntimeRef,
+    /// Runtime status.
+    pub status: ThreadRuntimeStatus,
+    /// Estimated memory usage for this runtime.
+    pub estimated_memory_bytes: u64,
+    /// Last activity timestamp (RFC3339).
+    pub last_active_at: Option<String>,
+    /// Whether the runtime can be reloaded after in-memory eviction.
+    pub recoverable: bool,
+    /// Last eviction/cooling reason when available.
+    pub last_reason: Option<ThreadPoolEventReason>,
+}
+
+/// Backward-compatible alias for older thread-pool consumers.
+pub type ThreadRuntimeSnapshot = ThreadPoolRuntimeSummary;
+
+/// Aggregated thread-pool telemetry snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolSnapshot {
+    /// Configured max number of concurrently loaded runtimes.
+    pub max_threads: u32,
+    /// Total active (loaded) runtimes.
+    pub active_threads: u32,
+    /// Runtimes waiting in the queue.
+    pub queued_threads: u32,
+    /// Runtimes currently executing.
+    pub running_threads: u32,
+    /// Runtimes in cooling state.
+    pub cooling_threads: u32,
+    /// Number of evictions observed since process start.
+    pub evicted_threads: u64,
+    /// Estimated pool memory usage.
+    pub estimated_memory_bytes: u64,
+    /// Peak estimated pool memory usage.
+    pub peak_estimated_memory_bytes: u64,
+    /// Process-level memory usage when available.
+    pub process_memory_bytes: Option<u64>,
+    /// Peak process-level memory usage when available.
+    pub peak_process_memory_bytes: Option<u64>,
+    /// Number of currently resident runtime records.
+    pub resident_thread_count: u32,
+    /// Average estimated memory usage per resident runtime.
+    pub avg_thread_memory_bytes: u64,
+    /// Snapshot timestamp (RFC3339).
+    pub captured_at: String,
+}
+
+/// Authoritative thread-pool query payload used by external observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadPoolState {
+    /// Aggregated pool metrics.
+    pub snapshot: ThreadPoolSnapshot,
+    /// Current runtime summaries.
+    pub runtimes: Vec<ThreadPoolRuntimeSummary>,
+}
+
+/// Reason associated with thread-pool lifecycle transitions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadPoolEventReason {
+    /// Runtime naturally cooled down and aged out.
+    CoolingExpired,
+    /// Runtime was evicted due to memory pressure.
+    MemoryPressure,
+    /// Runtime was cancelled explicitly.
+    Cancelled,
+    /// Runtime failed while executing.
+    ExecutionFailed,
+}
+
 /// Thread event broadcast to subscribers (CLI, Tauri).
 #[derive(Debug, Clone)]
 pub enum ThreadEvent {
@@ -443,6 +559,40 @@ pub enum ThreadEvent {
         /// Subagent description.
         agent_description: String,
     },
+    /// Job has been bound to a concrete thread runtime.
+    ThreadBoundToJob {
+        /// Job ID.
+        job_id: String,
+        /// Thread ID.
+        thread_id: ThreadId,
+    },
+    /// Job/thread has entered queued state inside the thread pool.
+    ThreadPoolQueued {
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
+    },
+    /// Job/thread has started running inside the thread pool.
+    ThreadPoolStarted {
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
+    },
+    /// Job/thread has entered cooling state inside the thread pool.
+    ThreadPoolCooling {
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
+    },
+    /// Job/thread runtime has been evicted from memory.
+    ThreadPoolEvicted {
+        /// Runtime reference.
+        runtime: ThreadPoolRuntimeRef,
+        /// Eviction reason.
+        reason: ThreadPoolEventReason,
+    },
+    /// Aggregated thread-pool metrics update.
+    ThreadPoolMetricsUpdated {
+        /// Current thread-pool telemetry snapshot.
+        snapshot: ThreadPoolSnapshot,
+    },
     /// User wants to interrupt the current turn.
     ///
     /// Production semantics: this is an immediate stop signal. Redirect-style
@@ -458,6 +608,30 @@ pub enum ThreadEvent {
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
+}
+
+#[cfg(test)]
+pub(crate) fn assert_thread_pool_snapshot_round_trip() {
+    let snapshot = ThreadPoolSnapshot {
+        max_threads: 8,
+        active_threads: 2,
+        queued_threads: 1,
+        running_threads: 1,
+        cooling_threads: 1,
+        evicted_threads: 3,
+        estimated_memory_bytes: 4096,
+        peak_estimated_memory_bytes: 8192,
+        process_memory_bytes: Some(16_384),
+        peak_process_memory_bytes: Some(32_768),
+        resident_thread_count: 2,
+        avg_thread_memory_bytes: 2048,
+        captured_at: "2026-03-29T00:00:00Z".to_string(),
+    };
+
+    let value = serde_json::to_value(&snapshot).unwrap();
+    let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.max_threads, 8);
+    assert_eq!(restored.queued_threads, 1);
 }
 
 #[cfg(test)]
@@ -499,5 +673,10 @@ mod tests {
             &remaining[1],
             TurnControlInput::JobResult(result) if result.job_id == "job-2"
         ));
+    }
+
+    #[test]
+    fn thread_pool_snapshot_round_trips_through_json() {
+        assert_thread_pool_snapshot_round_trip();
     }
 }

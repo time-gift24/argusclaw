@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use argus_protocol::AgentId;
+use argus_protocol::{AgentId, ThreadId};
 
 /// Arguments for dispatching a job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,4 +42,19 @@ pub struct JobResult {
     pub agent_display_name: String,
     /// Subagent description.
     pub agent_description: String,
+}
+
+/// In-memory request model used by ThreadPool orchestration.
+#[derive(Debug, Clone)]
+pub struct ThreadPoolJobRequest {
+    /// Source thread where dispatch_job was invoked.
+    pub originating_thread_id: ThreadId,
+    /// Stable job ID for lookup and result correlation.
+    pub job_id: String,
+    /// Agent selected to execute the background task.
+    pub agent_id: AgentId,
+    /// Prompt that drives the subagent execution.
+    pub prompt: String,
+    /// Optional context payload.
+    pub context: Option<serde_json::Value>,
 }

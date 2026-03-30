@@ -22,7 +22,9 @@ pub use approval::{ApprovalDecision, ApprovalEvent, ApprovalRequest, ApprovalRes
 pub use error::{ArgusError, Result};
 pub use events::{
     QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadInbox,
-    ThreadJobResult, ThreadMailbox, ThreadRuntimeState, TurnControlInput,
+    ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
+    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
+    ThreadRuntimeSnapshot, ThreadRuntimeState, ThreadRuntimeStatus, TurnControlInput,
 };
 pub use hooks::{
     BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookContext, HookEvent, HookHandler,
@@ -78,3 +80,9 @@ pub mod provider_resolver;
 pub use provider_resolver::ProviderResolver;
 
 pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
+
+#[cfg(test)]
+#[test]
+fn thread_pool_snapshot_round_trips_through_json() {
+    events::assert_thread_pool_snapshot_round_trip();
+}

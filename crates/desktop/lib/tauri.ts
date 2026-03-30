@@ -207,7 +207,61 @@ export interface ThreadSnapshotPayload {
   }>;
   turn_count: number;
   token_count: number;
+  plan_item_count: number;
 }
+
+export type ThreadRuntimeStatus =
+  | "inactive"
+  | "loading"
+  | "queued"
+  | "running"
+  | "cooling"
+  | "evicted";
+
+export type ThreadPoolRuntimeKind = "chat" | "job";
+
+export interface ThreadPoolRuntimeRef {
+  thread_id: string;
+  kind: ThreadPoolRuntimeKind;
+  session_id: string | null;
+  job_id: string | null;
+}
+
+export interface ThreadPoolRuntimeSummary {
+  runtime: ThreadPoolRuntimeRef;
+  status: ThreadRuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+  last_reason: ThreadPoolEventReason | null;
+}
+
+export interface ThreadPoolSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_threads: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
+export interface ThreadPoolState {
+  snapshot: ThreadPoolSnapshot;
+  runtimes: ThreadPoolRuntimeSummary[];
+}
+
+export type ThreadPoolEventReason =
+  | "cooling_expired"
+  | "memory_pressure"
+  | "cancelled"
+  | "execution_failed";
 
 export type ApprovalDecision = "approved" | "denied" | "timed_out";
 
@@ -267,4 +321,9 @@ export const chat = {
       decision,
       resolvedBy,
     }),
+};
+
+export const threadPool = {
+  getSnapshot: () => invoke<ThreadPoolSnapshot>("get_thread_pool_snapshot"),
+  getState: () => invoke<ThreadPoolState>("get_thread_pool_state"),
 };

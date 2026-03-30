@@ -246,6 +246,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sqlx",

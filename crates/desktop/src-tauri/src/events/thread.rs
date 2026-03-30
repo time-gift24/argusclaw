@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use argus_protocol::{LlmStreamEvent, ThreadEvent};
+use argus_protocol::{
+    LlmStreamEvent, ThreadEvent, ThreadPoolEventReason, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+};
 
 /// Envelope for thread events sent to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +180,42 @@ impl ThreadEventEnvelope {
                     agent_description,
                 },
             }),
+            ThreadEvent::ThreadBoundToJob { job_id, thread_id } => Some(Self {
+                session_id,
+                thread_id: thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::ThreadBoundToJob { job_id },
+            }),
+            ThreadEvent::ThreadPoolQueued { runtime } => Some(Self {
+                session_id,
+                thread_id: runtime.thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::ThreadPoolQueued { runtime },
+            }),
+            ThreadEvent::ThreadPoolStarted { runtime } => Some(Self {
+                session_id,
+                thread_id: runtime.thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::ThreadPoolStarted { runtime },
+            }),
+            ThreadEvent::ThreadPoolCooling { runtime } => Some(Self {
+                session_id,
+                thread_id: runtime.thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::ThreadPoolCooling { runtime },
+            }),
+            ThreadEvent::ThreadPoolEvicted { runtime, reason } => Some(Self {
+                session_id,
+                thread_id: runtime.thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::ThreadPoolEvicted { runtime, reason },
+            }),
+            ThreadEvent::ThreadPoolMetricsUpdated { snapshot } => Some(Self {
+                session_id,
+                thread_id: String::new(),
+                turn_number: None,
+                payload: ThreadEventPayload::ThreadPoolMetricsUpdated { snapshot },
+            }),
             ThreadEvent::UserInterrupt { .. } => None,
             ThreadEvent::UserMessage { .. } => None,
         }
@@ -238,6 +276,25 @@ pub enum ThreadEventPayload {
     ApprovalResolved {
         response: serde_json::Value,
     },
+    ThreadBoundToJob {
+        job_id: String,
+    },
+    ThreadPoolQueued {
+        runtime: ThreadPoolRuntimeRef,
+    },
+    ThreadPoolStarted {
+        runtime: ThreadPoolRuntimeRef,
+    },
+    ThreadPoolCooling {
+        runtime: ThreadPoolRuntimeRef,
+    },
+    ThreadPoolEvicted {
+        runtime: ThreadPoolRuntimeRef,
+        reason: ThreadPoolEventReason,
+    },
+    ThreadPoolMetricsUpdated {
+        snapshot: ThreadPoolSnapshot,
+    },
     JobDispatched {
         job_id: String,
         agent_id: i64,
@@ -291,7 +348,7 @@ impl ThreadEventPayload {
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::{LlmStreamEvent, ThreadId};
+    use argus_protocol::{LlmStreamEvent, ThreadEvent, ThreadId, ThreadPoolSnapshot};
 
     use super::{ThreadEventEnvelope, ThreadEventPayload};
 
@@ -344,6 +401,42 @@ mod tests {
             } if tool_call_id == "call-1"
                 && tool_name == "shell"
                 && result == &serde_json::Value::String("command failed".to_string())
+        ));
+    }
+
+    #[test]
+    fn thread_pool_metrics_updated_event_conversion_preserves_snapshot() {
+        let snapshot = ThreadPoolSnapshot {
+            max_threads: 8,
+            active_threads: 2,
+            queued_threads: 1,
+            running_threads: 1,
+            cooling_threads: 1,
+            evicted_threads: 3,
+            estimated_memory_bytes: 4096,
+            peak_estimated_memory_bytes: 8192,
+            process_memory_bytes: Some(16_384),
+            peak_process_memory_bytes: Some(32_768),
+            resident_thread_count: 2,
+            avg_thread_memory_bytes: 2048,
+            captured_at: "2026-03-29T00:00:00Z".to_string(),
+        };
+
+        let envelope = ThreadEventEnvelope::from_thread_event(
+            "session-1".to_string(),
+            ThreadEvent::ThreadPoolMetricsUpdated {
+                snapshot: snapshot.clone(),
+            },
+        )
+        .expect("snapshot updates should forward");
+
+        assert_eq!(envelope.session_id, "session-1");
+        assert_eq!(envelope.thread_id, String::new());
+        assert_eq!(envelope.turn_number, None);
+        assert!(matches!(
+            envelope.payload,
+            ThreadEventPayload::ThreadPoolMetricsUpdated { snapshot: ref forwarded }
+                if forwarded == &snapshot
         ));
     }
 }

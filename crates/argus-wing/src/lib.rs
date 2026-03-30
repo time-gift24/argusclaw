@@ -37,11 +37,16 @@ use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_protocol::{
     AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId,
+    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
+    ThreadPoolState,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, SessionRepository,
+    ThreadRepository,
 };
+
+
+use argus_repository::types::JobId;
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
@@ -63,7 +68,6 @@ const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
 /// - Messaging and subscriptions
 /// - Approval management
 pub struct ArgusWing {
-    #[allow(dead_code)]
     pool: SqlitePool,
     provider_manager: Arc<ProviderManager>,
     template_manager: Arc<TemplateManager>,
@@ -126,20 +130,25 @@ impl ArgusWing {
 
         // Create compactor manager
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
 
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create job manager with all dependencies
-        let job_manager = Arc::new(JobManager::new(
+        let job_manager = Arc::new(JobManager::new_with_repositories(
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
+            compactor_manager.clone(),
+            trace_dir.clone(),
+            arc_sqlite.clone() as Arc<dyn JobRepository>,
+            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
+            llm_repository.clone(),
         ));
 
         // Create session manager
-        let trace_dir = default_trace_dir();
-        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -147,8 +156,8 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
-            compactor_manager.clone(),
             trace_dir,
+            job_manager.thread_pool(),
             job_manager.clone(),
         ));
 
@@ -189,17 +198,22 @@ impl ArgusWing {
         ));
         let tool_manager = Arc::new(ToolManager::new());
         let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let trace_dir = default_trace_dir();
+        std::fs::create_dir_all(&trace_dir).ok();
         // Create provider resolver wrapper FIRST
         let provider_resolver = Arc::new(ProviderManagerResolver::new(provider_manager.clone()));
 
         // Create job manager with all dependencies
-        let job_manager = Arc::new(JobManager::new(
+        let job_manager = Arc::new(JobManager::new_with_repositories(
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
+            compactor_manager.clone(),
+            trace_dir.clone(),
+            arc_sqlite.clone() as Arc<dyn JobRepository>,
+            arc_sqlite.clone() as Arc<dyn ThreadRepository>,
+            llm_repository.clone(),
         ));
-        let trace_dir = default_trace_dir();
-        std::fs::create_dir_all(&trace_dir).ok();
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -207,8 +221,8 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver,
             tool_manager.clone(),
-            compactor_manager.clone(),
             trace_dir,
+            job_manager.thread_pool(),
             job_manager.clone(),
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
@@ -263,6 +277,28 @@ impl ArgusWing {
     #[must_use]
     pub fn compactor_manager(&self) -> &Arc<CompactorManager> {
         &self.compactor_manager
+    }
+
+    /// Get a point-in-time snapshot of aggregate thread-pool metrics.
+    #[must_use]
+    pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
+        self.job_manager.thread_pool_snapshot()
+    }
+
+    /// Return the authoritative thread-pool state including runtime summaries.
+    pub fn thread_pool_state(&self) -> ThreadPoolState {
+        self.job_manager.thread_pool_state()
+    }
+
+    /// Resolve the persisted execution thread bound to a job ID, if available.
+    pub async fn job_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>> {
+        if let Some(thread_id) = self.job_manager.thread_binding(job_id) {
+            return Ok(Some(thread_id));
+        }
+
+        let repository = ArgusSqlite::new(self.pool.clone());
+        let persisted = JobRepository::get(&repository, &JobId::new(job_id)).await?;
+        Ok(persisted.and_then(|job| job.thread_id))
     }
 
     /// Get a reference to the account manager.
@@ -562,6 +598,17 @@ impl ArgusWing {
     ) -> Result<Vec<argus_protocol::llm::ChatMessage>> {
         self.session_manager
             .get_thread_messages(session_id, &thread_id)
+            .await
+    }
+
+    /// Get a thread snapshot without forcing the runtime to stay resident.
+    pub async fn get_thread_snapshot(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<(Vec<argus_protocol::llm::ChatMessage>, u32, u32, u32)> {
+        self.session_manager
+            .get_thread_snapshot(session_id, &thread_id)
             .await
     }
 
@@ -1084,6 +1131,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_thread_removes_chat_runtime_from_thread_pool_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Pool Cleanup Agent".to_string(),
+                description: "Verifies chat runtimes are removed on delete".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help verify pool cleanup.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("pool-cleanup-session")
+            .await
+            .expect("session should create");
+        let thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        assert!(wing
+            .thread_pool_state()
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == thread_id));
+
+        wing.delete_thread(session_id, thread_id)
+            .await
+            .expect("thread delete should succeed");
+
+        assert!(!wing
+            .thread_pool_state()
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == thread_id));
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_registered_chat_runtimes_from_thread_pool_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Session Cleanup Agent".to_string(),
+                description: "Verifies session delete clears pooled chat runtimes".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help verify session cleanup.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let session_id = wing
+            .create_session("session-cleanup-session")
+            .await
+            .expect("session should create");
+        let first_thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("first thread should create");
+        let second_thread_id = wing
+            .create_thread(session_id, template_id, None, None)
+            .await
+            .expect("second thread should create");
+
+        let before_delete = wing.thread_pool_state();
+        assert!(before_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+        assert!(before_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+
+        wing.delete_session(session_id)
+            .await
+            .expect("session delete should succeed");
+
+        let after_delete = wing.thread_pool_state();
+        assert!(!after_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == first_thread_id));
+        assert!(!after_delete
+            .runtimes
+            .iter()
+            .any(|runtime| runtime.runtime.thread_id == second_thread_id));
+    }
+
+    #[tokio::test]
     async fn update_thread_model_rebinds_existing_thread() {
         use argus_protocol::LlmProviderRecord;
         use std::collections::HashMap;
@@ -1175,15 +1342,15 @@ mod tests {
         );
         assert_eq!(updated_model, "gpt-5");
 
-        let session = wing
-            .load_session(session_id)
+        let (_template_id, rebound_provider_id, rebound_model) = wing
+            .activate_thread(session_id, thread_id)
             .await
-            .expect("session should load");
-        let thread = session
-            .get_thread(&thread_id)
-            .expect("thread should stay loaded");
-        let thread = thread.read().await;
-        assert_eq!(thread.provider().model_name(), "gpt-5");
+            .expect("thread should remain activatable");
+        assert_eq!(
+            rebound_provider_id,
+            Some(argus_protocol::ProviderId::new(provider_id.into_inner()))
+        );
+        assert_eq!(rebound_model.as_deref(), Some("gpt-5"));
     }
 
     #[tokio::test]
@@ -1218,5 +1385,328 @@ mod tests {
                 "missing expected tool: {expected_tool}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_cross_session_thread_pair_without_rebinding_runtime() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Cross Session Guard Agent".to_string(),
+                description: "Verifies mismatched session/thread pairs fail fast".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help validate runtime ownership.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let owning_session_id = wing
+            .create_session("owning-session")
+            .await
+            .expect("owning session should create");
+        let foreign_session_id = wing
+            .create_session("foreign-session")
+            .await
+            .expect("foreign session should create");
+        let thread_id = wing
+            .create_thread(owning_session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        let runtime_before = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .expect("thread should be registered");
+        assert_eq!(runtime_before.runtime.session_id, Some(owning_session_id));
+
+        let error = wing
+            .send_message(foreign_session_id, thread_id, "should fail".to_string())
+            .await
+            .expect_err("cross-session pair should be rejected");
+        assert!(
+            error.to_string().contains("Thread not found"),
+            "unexpected error: {error}"
+        );
+
+        let runtime_after = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .expect("thread should remain registered");
+        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_cross_session_thread_pair() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let template_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Cross Session Subscribe Agent".to_string(),
+                description: "Verifies subscribe checks thread ownership".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You help validate subscriptions.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let owning_session_id = wing
+            .create_session("owning-subscribe-session")
+            .await
+            .expect("owning session should create");
+        let foreign_session_id = wing
+            .create_session("foreign-subscribe-session")
+            .await
+            .expect("foreign session should create");
+        let thread_id = wing
+            .create_thread(owning_session_id, template_id, None, None)
+            .await
+            .expect("thread should create");
+
+        let receiver = wing.subscribe(foreign_session_id, thread_id).await;
+        assert!(
+            receiver.is_none(),
+            "cross-session subscription should be rejected"
+        );
+
+        let runtime_after = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == thread_id)
+            .expect("thread should remain registered");
+        assert_eq!(runtime_after.runtime.session_id, Some(owning_session_id));
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_binds_real_thread_id_and_keeps_it_recoverable() {
+        use argus_repository::traits::{JobRepository, ThreadRepository};
+        use argus_repository::types::JobId;
+        use argus_repository::ArgusSqlite;
+        use tokio::sync::{broadcast, mpsc};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let agent_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Dispatch Test Agent".to_string(),
+                description: "Used to verify job thread binding persistence".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "You are a dispatch test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let originating_thread_id = ThreadId::new();
+        let job_id = "job-binding-recoverable".to_string();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        wing.job_manager
+            .dispatch_job(
+                originating_thread_id,
+                job_id.clone(),
+                agent_id,
+                "execute a recoverable job".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("dispatch should enqueue");
+
+        let bound_thread_id = wing
+            .job_thread_binding(&job_id)
+            .await
+            .expect("job thread binding lookup should succeed")
+            .expect("job should be bound to an execution thread");
+        assert_ne!(bound_thread_id, originating_thread_id);
+
+        let runtime = wing
+            .thread_pool_state()
+            .runtimes
+            .into_iter()
+            .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
+            .expect("bound runtime should be tracked");
+        assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
+        assert!(matches!(
+            runtime.status,
+            argus_protocol::ThreadRuntimeStatus::Queued
+                | argus_protocol::ThreadRuntimeStatus::Running
+                | argus_protocol::ThreadRuntimeStatus::Cooling
+        ));
+
+        let sqlite = ArgusSqlite::new(wing.pool.clone());
+        let persisted_job = JobRepository::get(&sqlite, &JobId::new(job_id.clone()))
+            .await
+            .expect("job lookup should succeed")
+            .expect("job row should exist");
+        assert_eq!(persisted_job.thread_id, Some(bound_thread_id));
+
+        let persisted_thread = ThreadRepository::get_thread(&sqlite, &bound_thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread row should exist");
+        assert!(persisted_thread.session_id.is_none());
+
+        drop(wing);
+
+        let recovered = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should re-initialize");
+        let recovered_binding = recovered
+            .job_thread_binding(&job_id)
+            .await
+            .expect("binding lookup should succeed after restart");
+        assert_eq!(recovered_binding, Some(bound_thread_id));
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_uses_agent_provider_without_default_provider() {
+        use argus_protocol::LlmProviderRecord;
+        use argus_repository::traits::ThreadRepository;
+        use argus_repository::ArgusSqlite;
+        use std::collections::HashMap;
+        use tokio::sync::{broadcast, mpsc};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let providers = wing
+            .list_providers()
+            .await
+            .expect("provider list should succeed");
+        let default_provider = providers
+            .into_iter()
+            .find(|provider| provider.is_default)
+            .expect("migration should seed one default provider");
+
+        let dedicated_provider_id = wing
+            .upsert_provider(LlmProviderRecord {
+                id: argus_protocol::LlmProviderId::new(0),
+                display_name: "dedicated-job-provider".to_string(),
+                kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
+                base_url: "http://localhost:11434/v1".to_string(),
+                api_key: argus_protocol::SecretString::new("test-key"),
+                models: vec!["gpt-4o-mini".to_string()],
+                model_config: HashMap::new(),
+                default_model: "gpt-4o-mini".to_string(),
+                is_default: false,
+                extra_headers: HashMap::new(),
+                secret_status: argus_protocol::ProviderSecretStatus::Ready,
+                meta_data: HashMap::new(),
+            })
+            .await
+            .expect("dedicated provider should upsert");
+
+        wing.delete_provider(default_provider.id)
+            .await
+            .expect("deleting default provider should succeed");
+
+        let agent_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "Agent Specific Provider".to_string(),
+                description: "Dispatch should work without a default provider".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(argus_protocol::ProviderId::new(
+                    dedicated_provider_id.into_inner(),
+                )),
+                model_id: Some("gpt-4o-mini".to_string()),
+                system_prompt: "You are a dispatch test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template should upsert");
+
+        let job_id = "job-agent-provider-without-default".to_string();
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        wing.job_manager
+            .dispatch_job(
+                ThreadId::new(),
+                job_id.clone(),
+                agent_id,
+                "execute a recoverable job".to_string(),
+                None,
+                pipe_tx,
+                control_tx,
+            )
+            .await
+            .expect("dispatch should succeed using agent-specific provider");
+
+        let bound_thread_id = wing
+            .job_thread_binding(&job_id)
+            .await
+            .expect("job thread binding lookup should succeed")
+            .expect("job should be bound to an execution thread");
+
+        let sqlite = ArgusSqlite::new(wing.pool.clone());
+        let persisted_thread = ThreadRepository::get_thread(&sqlite, &bound_thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread row should exist");
+        assert_eq!(persisted_thread.provider_id, dedicated_provider_id);
+        assert_eq!(
+            persisted_thread.model_override.as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert!(persisted_thread.session_id.is_none());
     }
 }

@@ -92,9 +92,9 @@ impl NamedTool for DispatchJobTool {
             tracing::warn!("failed to send JobDispatched event: {}", e);
         }
 
-        // Spawn background executor using the JobManager's spawn method
+        // Hand off job orchestration to JobManager + ThreadPool
         self.job_manager
-            .spawn_job_executor(
+            .dispatch_job(
                 ctx.thread_id,
                 job_id.clone(),
                 args.agent_id,

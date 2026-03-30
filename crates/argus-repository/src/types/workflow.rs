@@ -53,6 +53,8 @@ pub type JobId = WorkflowId;
 pub enum WorkflowStatus {
     /// Workflow is pending execution.
     Pending,
+    /// Workflow has been admitted to the thread pool and is waiting for execution.
+    Queued,
     /// Workflow is currently running.
     Running,
     /// Workflow completed successfully.
@@ -69,6 +71,7 @@ impl WorkflowStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -80,6 +83,7 @@ impl WorkflowStatus {
     pub fn parse_str(s: &str) -> Result<Self, String> {
         match s {
             "pending" => Ok(Self::Pending),
+            "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
@@ -142,6 +146,7 @@ mod tests {
     #[test]
     fn workflow_status_as_str() {
         assert_eq!(WorkflowStatus::Pending.as_str(), "pending");
+        assert_eq!(WorkflowStatus::Queued.as_str(), "queued");
         assert_eq!(WorkflowStatus::Running.as_str(), "running");
         assert_eq!(WorkflowStatus::Succeeded.as_str(), "succeeded");
         assert_eq!(WorkflowStatus::Failed.as_str(), "failed");
@@ -153,6 +158,10 @@ mod tests {
         assert_eq!(
             WorkflowStatus::parse_str("pending").unwrap(),
             WorkflowStatus::Pending
+        );
+        assert_eq!(
+            WorkflowStatus::parse_str("queued").unwrap(),
+            WorkflowStatus::Queued
         );
         assert_eq!(
             WorkflowStatus::parse_str("running").unwrap(),

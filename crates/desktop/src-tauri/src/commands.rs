@@ -5,7 +5,7 @@ use std::sync::Arc;
 use argus_protocol::{
     AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
     LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
-    SecretString, SessionId, ThreadId,
+    SecretString, SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -235,6 +235,20 @@ pub async fn list_tools(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<ToolInfoP
             parameters: t.parameters,
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn get_thread_pool_snapshot(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<ThreadPoolSnapshot, String> {
+    Ok(wing.thread_pool_snapshot())
+}
+
+#[tauri::command]
+pub async fn get_thread_pool_state(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<ThreadPoolState, String> {
+    Ok(wing.thread_pool_state())
 }
 
 // ============================================================================
@@ -480,22 +494,8 @@ pub async fn get_thread_snapshot(
     let session_id = SessionId::parse(&session_id).map_err(|e| e.to_string())?;
     let thread_id = ThreadId::parse(&thread_id).map_err(|e| e.to_string())?;
 
-    let session = wing
-        .load_session(session_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let thread = session
-        .get_thread(&thread_id)
-        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
-
-    let thread = thread.read().await;
-    let turn_count = thread.turn_count();
-    let token_count = thread.token_count();
-    let plan_item_count = thread.info().plan_item_count;
-    drop(thread);
-
-    let messages = wing
-        .get_thread_messages(session_id, thread_id)
+    let (messages, turn_count, token_count, plan_item_count) = wing
+        .get_thread_snapshot(session_id, thread_id)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -505,7 +505,7 @@ pub async fn get_thread_snapshot(
         messages: messages.iter().map(ChatMessagePayload::from).collect(),
         turn_count,
         token_count,
-        plan_item_count,
+        plan_item_count: plan_item_count as usize,
     })
 }
 

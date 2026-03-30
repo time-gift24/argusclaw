@@ -9,6 +9,20 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /activeSessionKey:\s*string \| null/);
   assert.match(storeSource, /sessionsByKey:\s*Record<string,\s*ChatSessionState>/);
   assert.match(storeSource, /selectedProviderPreferenceId:\s*number \| null/);
+  assert.match(storeSource, /threadPoolSnapshot:\s*ThreadPoolSnapshot \| null/);
+  assert.match(storeSource, /threadPoolSnapshotLoading:\s*boolean/);
+  assert.match(storeSource, /threadPoolError:\s*string \| null/);
+  assert.match(storeSource, /threadPoolThreads:\s*ThreadPoolThreadState\[\]/);
+  assert.match(storeSource, /refreshThreadPoolSnapshot:\s*\(\)\s*=>\s*Promise<void>/);
+  assert.match(storeSource, /ThreadPoolState/);
+  assert.match(storeSource, /ThreadPoolRuntimeSummary/);
+  assert.match(storeSource, /ThreadPoolRuntimeKind/);
+  assert.match(storeSource, /threadPool\.getState\(/);
+  assert.match(storeSource, /threadPool\.getState\(\)[\s\S]*threadPoolThreads:/);
+  assert.match(storeSource, /mapRuntimeSummaryToThreadState/);
+  assert.match(storeSource, /kind:\s*runtime\.runtime\.kind/);
+  assert.match(storeSource, /sessionId:\s*runtime\.runtime\.session_id/);
+  assert.match(storeSource, /jobId:\s*runtime\.runtime\.job_id/);
   assert.match(storeSource, /refreshSnapshot:\s*\([\s\S]*sessionKey:\s*string/);
   assert.match(storeSource, /listen[\s\S]*"thread:event"/);
   assert.match(storeSource, /thread_id|threadId/);
@@ -20,11 +34,34 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /case "waiting_for_approval"/);
   assert.match(storeSource, /case "approval_resolved"/);
   assert.match(storeSource, /case "idle"/);
+  assert.match(storeSource, /case "thread_bound_to_job"/);
+  assert.match(storeSource, /case "thread_pool_queued"/);
+  assert.match(storeSource, /case "thread_pool_started"/);
+  assert.match(storeSource, /case "thread_pool_cooling"/);
+  assert.match(storeSource, /case "thread_pool_evicted"/);
+  assert.match(storeSource, /case "thread_pool_metrics_updated"/);
+  assert.match(storeSource, /payload\.runtime\.kind/);
+  assert.match(storeSource, /payload\.runtime\.session_id/);
+  assert.match(storeSource, /payload\.runtime\.job_id/);
+  assert.match(storeSource, /threadPoolThreads:\s*state\.threadPoolThreads\.map\(/);
+  assert.match(storeSource, /void get\(\)\.refreshThreadPoolSnapshot\(\);/);
   assert.match(storeSource, /await get\(\)\.activateSession\(/);
   assert.match(storeSource, /chat\.createChatSession\(/);
   assert.match(storeSource, /chat\.getThreadSnapshot\(/);
   assert.match(storeSource, /catch \(error\)/);
   assert.match(storeSource, /errorMessage:/);
+});
+
+test("thread pool store keeps the full authoritative runtime list", () => {
+  const sortHelper = storeSource.match(
+    /function sortThreadPoolThreads\([\s\S]*?\n\}/,
+  );
+  assert.ok(sortHelper?.[0], "sort helper should exist");
+  assert.doesNotMatch(
+    sortHelper[0],
+    /THREAD_POOL_RECENT_LIMIT|slice\(0,\s*THREAD_POOL_RECENT_LIMIT\)/,
+    "authoritative pool state should not be truncated in the store layer",
+  );
 });
 
 test("chat store guards thread-event listener registration against concurrent initialize calls", () => {
@@ -43,7 +80,7 @@ test("chat store guards thread-event listener registration against concurrent in
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {
   assert.match(
     storeSource,
-    /pendingAssistant:\s*\{\s*content:\s*string;\s*reasoning:\s*string;\s*toolCalls:\s*PendingToolCall\[\];\s*plan:\s*PlanItem\[\]\s*\|\s*null\s*\}\s*\|\s*null/,
+    /pendingAssistant:[\s\S]*content:\s*string;[\s\S]*reasoning:\s*string;[\s\S]*toolCalls:\s*PendingToolCall\[\];[\s\S]*plan:\s*PlanItem\[\]\s*\|\s*null[\s\S]*\}\s*\|\s*null/,
   );
   assert.match(
     storeSource,
