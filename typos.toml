@@ -1,0 +1,5 @@
+[files]
+extend-exclude = [
+    "crates/argus-agent/assets/gpt2/vocab.json",
+    "crates/argus-agent/assets/gpt2/merges.txt",
+]

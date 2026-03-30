@@ -838,7 +838,7 @@ impl Turn {
                     };
                     // TurnEnd is observe-only, ignore errors
                     let _ = self
-                        .fire_hooks(HookEvent::TurnEnd, &HookContext::ToolEvent(ctx))
+                        .fire_hooks(HookEvent::TurnEnd, &HookContext::ToolEvent(Box::new(ctx)))
                         .await;
 
                     // Record LLM response to trace
@@ -1199,7 +1199,10 @@ impl Turn {
         };
 
         if let Ok(HookAction::Block(ref reason)) = self
-            .fire_hooks(HookEvent::BeforeToolCall, &HookContext::ToolEvent(ctx))
+            .fire_hooks(
+                HookEvent::BeforeToolCall,
+                &HookContext::ToolEvent(Box::new(ctx)),
+            )
             .await
         {
             // Hook blocked the tool call
@@ -1237,7 +1240,10 @@ impl Turn {
                 turn_number: Some(self.turn_number),
             };
             let _ = self
-                .fire_hooks(HookEvent::AfterToolCall, &HookContext::ToolEvent(after_ctx))
+                .fire_hooks(
+                    HookEvent::AfterToolCall,
+                    &HookContext::ToolEvent(Box::new(after_ctx)),
+                )
                 .await;
 
             return ToolExecutionResult {
@@ -1391,7 +1397,10 @@ impl Turn {
             turn_number: Some(self.turn_number),
         };
         let _ = self
-            .fire_hooks(HookEvent::AfterToolCall, &HookContext::ToolEvent(ctx))
+            .fire_hooks(
+                HookEvent::AfterToolCall,
+                &HookContext::ToolEvent(Box::new(ctx)),
+            )
             .await;
 
         // Convert result to string content and measure duration

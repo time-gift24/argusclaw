@@ -120,7 +120,7 @@ pub enum HookContext {
     /// Context for BeforeCallLLM events.
     BeforeCallLLM(BeforeCallLLMContext),
     /// Context for tool-related events (BeforeToolCall, AfterToolCall, TurnEnd).
-    ToolEvent(ToolHookContext),
+    ToolEvent(Box<ToolHookContext>),
 }
 
 /// Registry for hook handlers.

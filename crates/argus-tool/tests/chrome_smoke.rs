@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_protocol::ids::ThreadId;
 use argus_protocol::ToolExecutionContext;
+use argus_protocol::ids::ThreadId;
 use argus_tool::{ChromeTool, ToolManager};
 use tokio::sync::{broadcast, mpsc};
 

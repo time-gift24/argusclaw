@@ -534,15 +534,15 @@ async fn wait_for_driver_ready(
 }
 
 fn find_chrome_binary() -> Result<PathBuf, ChromeToolError> {
-    if let Some(path) = std::env::var_os("ARGUS_CHROME_BINARY").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
+    if let Some(path) = std::env::var_os("ARGUS_CHROME_BINARY").map(PathBuf::from)
+        && path.is_file()
+    {
+        return Ok(path);
     }
-    if let Some(path) = std::env::var_os("CHROME_BINARY").map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
+    if let Some(path) = std::env::var_os("CHROME_BINARY").map(PathBuf::from)
+        && path.is_file()
+    {
+        return Ok(path);
     }
 
     chrome_binary_candidates()

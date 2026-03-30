@@ -108,16 +108,16 @@ impl ChromeToolArgs {
                         ),
                     });
                 }
-                if let Ok(ip) = host.parse::<IpAddr>() {
-                    if ip.is_unspecified() || is_blocked_ip(ip) {
-                        return Err(ChromeToolError::InvalidArguments {
-                            reason: format!(
-                                "field 'url' is invalid for action '{}': host '{}' is not allowed",
-                                args.action.as_str(),
-                                host
-                            ),
-                        });
-                    }
+                if let Ok(ip) = host.parse::<IpAddr>()
+                    && (ip.is_unspecified() || is_blocked_ip(ip))
+                {
+                    return Err(ChromeToolError::InvalidArguments {
+                        reason: format!(
+                            "field 'url' is invalid for action '{}': host '{}' is not allowed",
+                            args.action.as_str(),
+                            host
+                        ),
+                    });
                 }
                 args.url = Some(url.to_string());
             }
