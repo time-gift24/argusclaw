@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use argus_wing::ArgusWing;
 use subscription::ThreadSubscriptions;
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod commands;
@@ -49,6 +50,12 @@ fn init_desktop_tracing() {
         .expect("failed to initialize desktop tracing");
 }
 
+/// Port used by the localhost server in production builds.
+/// Next.js App Router requires HTTP serving for client-side navigation to work
+/// correctly; Tauri's custom protocol on Windows (`https://tauri.localhost/`)
+/// cannot serve the RSC payloads that Next.js fetches during route transitions.
+const LOCALHOST_PORT: u16 = 9527;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_desktop_tracing();
@@ -60,7 +67,7 @@ pub fn run() {
 
     let subscriptions = ThreadSubscriptions::new();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .manage(wing)
         .manage(subscriptions)
         .invoke_handler(tauri::generate_handler![
@@ -100,7 +107,32 @@ pub fn run() {
             commands::login,
             commands::logout,
             commands::get_provider_context_window,
-        ])
+        ]);
+
+    // Production builds use the localhost plugin so Next.js client-side
+    // navigation works on Windows (see tauri-apps/tauri#6762).
+    #[cfg(not(debug_assertions))]
+    {
+        builder =
+            builder.plugin(tauri_plugin_localhost::Builder::new(LOCALHOST_PORT).build());
+    }
+
+    builder
+        .setup(|app| {
+            #[cfg(debug_assertions)]
+            let url = WebviewUrl::External("http://localhost:3000".parse().unwrap());
+            #[cfg(not(debug_assertions))]
+            let url = WebviewUrl::External(
+                format!("http://localhost:{LOCALHOST_PORT}").parse().unwrap(),
+            );
+
+            WebviewWindowBuilder::new(app, "main".to_string(), url)
+                .title("arguswing")
+                .inner_size(1200.0, 900.0)
+                .build()?;
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

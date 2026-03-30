@@ -10,13 +10,7 @@
     "frontendDist": "../out"
   },
   "app": {
-    "windows": [
-      {
-        "title": "arguswing",
-        "width": 1200,
-        "height": 900
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
