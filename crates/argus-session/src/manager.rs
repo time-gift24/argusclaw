@@ -638,6 +638,7 @@ impl SessionManager {
 
         let thread = session
             .get_thread(thread_id)
+            .or_else(|| self.thread_pool.loaded_chat_thread(thread_id))
             .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
 
         let result = thread.read().await.send_control_event(

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use argus_agent::Thread;
 use argus_protocol::{SessionId, ThreadControlEvent, ThreadEvent, ThreadId};
@@ -30,7 +30,7 @@ pub struct ThreadSummary {
 pub struct Session {
     pub id: SessionId,
     pub name: String,
-    threads: DashMap<ThreadId, Arc<RwLock<Thread>>>,
+    threads: DashMap<ThreadId, Weak<RwLock<Thread>>>,
 }
 
 impl Session {
@@ -44,15 +44,21 @@ impl Session {
 
     pub fn add_thread(&self, thread: Arc<RwLock<Thread>>) {
         let thread_id = thread.try_read().map(|t| t.id()).unwrap_or_default();
-        self.threads.insert(thread_id, thread);
+        self.threads.insert(thread_id, Arc::downgrade(&thread));
     }
 
     pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
-        self.threads.remove(thread_id).map(|pair| pair.1)
+        self.threads
+            .remove(thread_id)
+            .and_then(|pair| pair.1.upgrade())
     }
 
     pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
-        self.threads.get(thread_id).map(|r| r.value().clone())
+        let thread = self.threads.get(thread_id).and_then(|r| r.value().upgrade());
+        if thread.is_none() {
+            self.threads.remove(thread_id);
+        }
+        thread
     }
 
     pub fn thread_ids(&self) -> Vec<ThreadId> {
@@ -61,34 +67,51 @@ impl Session {
 
     /// Broadcast a ThreadEvent to all threads in this session.
     pub fn broadcast(&self, event: ThreadEvent) {
+        let mut stale_thread_ids = Vec::new();
         for entry in self.threads.iter() {
-            let thread = entry.value();
-            if let Ok(t) = thread.try_read() {
-                match &event {
-                    ThreadEvent::UserInterrupt { content } => {
-                        let _ = t.send_control_event(ThreadControlEvent::UserInterrupt {
-                            content: content.clone(),
-                        });
+            let thread = entry.value().upgrade();
+            if let Some(thread) = thread {
+                if let Ok(t) = thread.try_read() {
+                    match &event {
+                        ThreadEvent::UserInterrupt { content } => {
+                            let _ = t.send_control_event(ThreadControlEvent::UserInterrupt {
+                                content: content.clone(),
+                            });
+                        }
+                        _ => t.broadcast_to_self(event.clone()),
                     }
-                    _ => t.broadcast_to_self(event.clone()),
                 }
+            } else {
+                stale_thread_ids.push(*entry.key());
             }
+        }
+
+        for thread_id in stale_thread_ids {
+            self.threads.remove(&thread_id);
         }
     }
 
     pub async fn list_threads(&self) -> Vec<ThreadSummary> {
         let mut summaries = Vec::new();
+        let mut stale_thread_ids = Vec::new();
         for entry in self.threads.iter() {
-            let thread = entry.value();
-            if let Ok(t) = thread.try_read() {
-                summaries.push(ThreadSummary {
-                    id: t.id(),
-                    title: t.title().map(|s| s.to_string()),
-                    turn_count: t.turn_count() as i64,
-                    token_count: t.token_count() as i64,
-                    updated_at: t.updated_at(),
-                });
+            if let Some(thread) = entry.value().upgrade() {
+                if let Ok(t) = thread.try_read() {
+                    summaries.push(ThreadSummary {
+                        id: t.id(),
+                        title: t.title().map(|s| s.to_string()),
+                        turn_count: t.turn_count() as i64,
+                        token_count: t.token_count() as i64,
+                        updated_at: t.updated_at(),
+                    });
+                }
+            } else {
+                stale_thread_ids.push(*entry.key());
             }
+        }
+
+        for thread_id in stale_thread_ids {
+            self.threads.remove(&thread_id);
         }
         summaries
     }
