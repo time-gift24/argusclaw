@@ -45,7 +45,6 @@ use argus_repository::traits::{
     ThreadRepository,
 };
 
-
 use argus_repository::types::JobId;
 use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
@@ -249,8 +248,8 @@ impl ArgusWing {
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
     pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
-            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
-            ShellTool, WriteFileTool,
+            ApplyPatchTool, ChromeInstallTool, ChromeTool, GlobTool, GrepTool, HttpTool,
+            ListDirTool, ReadTool, ShellTool, WriteFileTool,
         };
 
         self.tool_manager.register(Arc::new(ShellTool::new()));
@@ -261,6 +260,8 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(WriteFileTool::new()));
         self.tool_manager.register(Arc::new(ListDirTool::new()));
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
+        self.tool_manager
+            .register(Arc::new(ChromeInstallTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
 
@@ -580,11 +581,7 @@ impl ArgusWing {
     }
 
     /// Cancel the active turn on a thread.
-    pub async fn cancel_turn(
-        &self,
-        session_id: SessionId,
-        thread_id: ThreadId,
-    ) -> Result<()> {
+    pub async fn cancel_turn(&self, session_id: SessionId, thread_id: ThreadId) -> Result<()> {
         self.session_manager
             .cancel_thread(session_id, &thread_id)
             .await
@@ -719,6 +716,7 @@ mod tests {
         assert!(action_values.contains(&"click"));
         assert!(action_values.contains(&"type"));
         assert!(definition.parameters["properties"].get("text").is_some());
+        assert!(wing.tool_manager().get("chrome_install").is_some());
     }
 
     #[tokio::test]

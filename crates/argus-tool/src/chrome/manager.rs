@@ -82,8 +82,11 @@ impl BrowserBackend for ManagedChromeBackend {
         let detected = self.host.discover_chrome().await?;
         let install = self
             .installer
-            .ensure_driver(&detected.browser_version)
-            .await?;
+            .find_installed_driver(&detected.browser_version)?
+            .ok_or_else(|| ChromeToolError::DriverNotInstalled {
+                browser_version: detected.browser_version.clone(),
+                suggested_tool: "chrome_install".to_string(),
+            })?;
         self.host
             .open_session(
                 url,

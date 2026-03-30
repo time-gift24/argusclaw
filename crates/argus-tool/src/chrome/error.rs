@@ -23,6 +23,14 @@ pub enum ChromeToolError {
     #[error("chrome is not installed")]
     ChromeNotInstalled,
 
+    #[error(
+        "matching chromedriver for chrome '{browser_version}' is not installed; run '{suggested_tool}'"
+    )]
+    DriverNotInstalled {
+        browser_version: String,
+        suggested_tool: String,
+    },
+
     #[error("unsupported chrome platform '{os}/{arch}'")]
     UnsupportedPlatform { os: String, arch: String },
 

@@ -24,7 +24,7 @@ pub mod read;
 pub mod shell;
 pub mod write;
 
-pub use chrome::ChromeTool;
+pub use chrome::{ChromeInstallTool, ChromeTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::HttpTool;

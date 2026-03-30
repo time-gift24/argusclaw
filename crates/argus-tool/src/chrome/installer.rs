@@ -61,6 +61,8 @@ fn create_directory(path: &Path) -> Result<(), ChromeToolError> {
 pub struct InstalledDriver {
     pub original_driver: PathBuf,
     pub patched_driver: PathBuf,
+    pub driver_version: String,
+    pub cache_hit: bool,
 }
 
 #[async_trait]
@@ -130,7 +132,21 @@ impl ChromeInstaller {
         Ok(InstalledDriver {
             original_driver,
             patched_driver,
+            driver_version: version,
+            cache_hit: false,
         })
+    }
+
+    pub fn find_installed_driver(
+        &self,
+        chrome_version: &str,
+    ) -> Result<Option<InstalledDriver>, ChromeToolError> {
+        let platform = ChromePlatform::detect()?;
+        if !self.paths.driver.is_dir() || !self.paths.patched.is_dir() {
+            return Ok(None);
+        }
+
+        self.find_cached_install(chrome_version, &platform)
     }
 
     async fn resolve_driver_version(
@@ -195,6 +211,8 @@ impl ChromeInstaller {
                 return Ok(Some(InstalledDriver {
                     original_driver,
                     patched_driver,
+                    driver_version: version,
+                    cache_hit: true,
                 }));
             }
         }
@@ -754,6 +772,8 @@ mod tests {
         assert!(install.patched_driver.starts_with(&paths.patched));
         assert!(install.original_driver.is_file());
         assert!(install.patched_driver.is_file());
+        assert_eq!(install.driver_version, "124.0.6367.91");
+        assert!(!install.cache_hit);
 
         let patched_bytes = std::fs::read(&install.patched_driver).unwrap();
         assert!(
@@ -782,7 +802,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(second, first);
+        assert_eq!(second.original_driver, first.original_driver);
+        assert_eq!(second.patched_driver, first.patched_driver);
+        assert_eq!(second.driver_version, first.driver_version);
+        assert!(!first.cache_hit);
+        assert!(second.cache_hit);
+    }
+
+    #[test]
+    fn find_installed_driver_returns_none_without_creating_directories() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let installer = ChromeInstaller::new(paths.clone(), FakeDownloader::with_zip_bytes(vec![]));
+
+        let install = installer.find_installed_driver("124.0.6367.91").unwrap();
+
+        assert!(install.is_none());
+        assert!(!paths.root.exists());
     }
 
     #[tokio::test]

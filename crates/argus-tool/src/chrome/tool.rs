@@ -400,7 +400,7 @@ fn required_field<'a>(
     })
 }
 
-fn default_home_dir() -> std::path::PathBuf {
+pub(super) fn default_home_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
