@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::config::ThreadConfigBuilder;
-use argus_agent::{read_jsonl_events, OnTurnComplete, TraceConfig, TurnConfig, TurnLogEvent};
-use argus_agent::{CompactorManager, FilePlanStore, ThreadBuilder};
+use argus_agent::{read_jsonl_events, TurnLogEvent};
 use argus_job::{JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
