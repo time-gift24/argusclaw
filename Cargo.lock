@@ -378,6 +378,7 @@ version = "0.1.0"
 dependencies = [
  "argus-protocol",
  "async-trait",
+ "clap",
  "dashmap",
  "glob",
  "once_cell",
