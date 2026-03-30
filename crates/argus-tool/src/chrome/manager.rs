@@ -7,13 +7,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
+use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
 use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
 use super::error::ChromeToolError;
 use super::installer::{ChromeInstaller, ChromePaths, DriverDownloader, ReqwestDriverDownloader};
-use super::models::{LinkSummary, OpenArgs, OpenedSession, PageMetadata};
+use super::models::{CookieSummary, LinkSummary, OpenArgs, OpenedSession, PageMetadata};
 use super::session::{
     BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
 };
@@ -21,6 +23,12 @@ use super::session::{
 pub struct BackendOpenResult {
     pub metadata: PageMetadata,
     pub session: Arc<dyn BrowserSession>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionMode {
+    Readonly,
+    Interactive,
 }
 
 #[async_trait]
@@ -31,7 +39,7 @@ pub trait BrowserBackend: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedChrome {
     pub browser_binary: PathBuf,
-    pub major_version: String,
+    pub browser_version: String,
 }
 
 #[async_trait]
@@ -42,18 +50,29 @@ pub trait ChromeHost: Send + Sync {
         &self,
         url: &str,
         browser_binary: &Path,
+        browser_version: &str,
         driver_binary: &Path,
+        session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError>;
 }
 
 struct ManagedChromeBackend {
     host: Arc<dyn ChromeHost>,
     installer: Arc<ChromeInstaller>,
+    session_mode: SessionMode,
 }
 
 impl ManagedChromeBackend {
-    fn new(host: Arc<dyn ChromeHost>, installer: Arc<ChromeInstaller>) -> Self {
-        Self { host, installer }
+    fn new(
+        host: Arc<dyn ChromeHost>,
+        installer: Arc<ChromeInstaller>,
+        session_mode: SessionMode,
+    ) -> Self {
+        Self {
+            host,
+            installer,
+            session_mode,
+        }
     }
 }
 
@@ -63,10 +82,16 @@ impl BrowserBackend for ManagedChromeBackend {
         let detected = self.host.discover_chrome().await?;
         let install = self
             .installer
-            .ensure_driver(&detected.major_version)
+            .ensure_driver(&detected.browser_version)
             .await?;
         self.host
-            .open_session(url, &detected.browser_binary, &install.patched_driver)
+            .open_session(
+                url,
+                &detected.browser_binary,
+                &detected.browser_version,
+                &install.patched_driver,
+                self.session_mode,
+            )
             .await
     }
 }
@@ -114,7 +139,24 @@ impl ChromeManager {
         let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
-        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(host, installer));
+        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
+            host,
+            installer,
+            SessionMode::Readonly,
+        ));
+        Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
+    }
+
+    #[must_use]
+    pub fn new_interactive_production(paths: ChromePaths) -> Self {
+        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
+        let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
+        let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
+            host,
+            installer,
+            SessionMode::Interactive,
+        ));
         Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
     }
 
@@ -126,7 +168,27 @@ impl ChromeManager {
         paths: ChromePaths,
     ) -> Self {
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
-        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(host, installer));
+        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
+            host,
+            installer,
+            SessionMode::Readonly,
+        ));
+        Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn new_interactive_with_managed_components_for_test(
+        host: Arc<dyn ChromeHost>,
+        downloader: Arc<dyn DriverDownloader>,
+        paths: ChromePaths,
+    ) -> Self {
+        let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
+            host,
+            installer,
+            SessionMode::Interactive,
+        ));
         Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
     }
 
@@ -229,6 +291,42 @@ impl ChromeManager {
             .ok_or_else(|| Self::session_not_found(session_id))?;
         session.set_last_screenshot_path(Some(screenshot_path.clone()));
         Ok(screenshot_path)
+    }
+
+    pub async fn click(&self, session_id: &str, selector: &str) -> Result<(), ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .click(selector)
+            .await
+    }
+
+    pub async fn type_text(
+        &self,
+        session_id: &str,
+        selector: &str,
+        text: &str,
+    ) -> Result<(), ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .type_text(selector, text)
+            .await
+    }
+
+    pub async fn current_url(&self, session_id: &str) -> Result<String, ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .current_url()
+            .await
+    }
+
+    pub async fn get_cookies(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .get_cookies()
+            .await
     }
 
     fn next_session_id(&self) -> String {
@@ -343,37 +441,11 @@ pub struct SystemChromeHost;
 impl ChromeHost for SystemChromeHost {
     async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError> {
         let browser_binary = find_chrome_binary()?;
-        let output = Command::new(&browser_binary)
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| ChromeToolError::ChromeVersionDetectFailed {
-                path: browser_binary.clone(),
-                reason: e.to_string(),
-            })?;
-        if !output.status.success() {
-            let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(ChromeToolError::ChromeVersionDetectFailed {
-                path: browser_binary.clone(),
-                reason: if reason.is_empty() {
-                    format!("chrome exited with status {}", output.status)
-                } else {
-                    reason
-                },
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let major_version = parse_major_version(&stdout).ok_or_else(|| {
-            ChromeToolError::ChromeVersionDetectFailed {
-                path: browser_binary.clone(),
-                reason: format!("unexpected version output: {stdout}"),
-            }
-        })?;
+        let browser_version = detect_browser_version(&browser_binary).await?;
 
         Ok(DetectedChrome {
             browser_binary,
-            major_version,
+            browser_version,
         })
     }
 
@@ -381,7 +453,9 @@ impl ChromeHost for SystemChromeHost {
         &self,
         url: &str,
         browser_binary: &Path,
+        browser_version: &str,
         driver_binary: &Path,
+        session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError> {
         let port = reserve_free_port()?;
         let server_url = format!("http://127.0.0.1:{port}");
@@ -399,32 +473,8 @@ impl ChromeHost for SystemChromeHost {
             return Err(err);
         }
 
-        let mut capabilities = DesiredCapabilities::chrome();
-        capabilities
-            .set_binary(browser_binary.to_string_lossy().as_ref())
-            .map_err(|e| ChromeToolError::DriverStartFailed {
-                reason: e.to_string(),
-            })?;
-        capabilities
-            .add_arg("--headless=new")
-            .map_err(|e| ChromeToolError::DriverStartFailed {
-                reason: e.to_string(),
-            })?;
-        capabilities
-            .add_arg("--disable-gpu")
-            .map_err(|e| ChromeToolError::DriverStartFailed {
-                reason: e.to_string(),
-            })?;
-        capabilities
-            .add_arg("--no-first-run")
-            .map_err(|e| ChromeToolError::DriverStartFailed {
-                reason: e.to_string(),
-            })?;
-        capabilities
-            .add_arg("--no-default-browser-check")
-            .map_err(|e| ChromeToolError::DriverStartFailed {
-                reason: e.to_string(),
-            })?;
+        let capabilities =
+            build_chrome_capabilities(browser_binary, browser_version, session_mode)?;
 
         let driver = match WebDriver::new(&server_url, capabilities).await {
             Ok(driver) => driver,
@@ -477,16 +527,172 @@ impl ChromeHost for SystemChromeHost {
     }
 }
 
-fn parse_major_version(output: &str) -> Option<String> {
-    output
-        .split_whitespace()
-        .find_map(|token| {
-            token
-                .split('.')
-                .next()
-                .filter(|value| value.chars().all(|ch| ch.is_ascii_digit()))
+async fn detect_browser_version(browser_binary: &Path) -> Result<String, ChromeToolError> {
+    let output = chrome_version_command_output(browser_binary).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(ChromeToolError::ChromeVersionDetectFailed {
+            path: browser_binary.to_path_buf(),
+            reason: if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("chrome exited with status {}", output.status)
+            },
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_browser_version_output(&stdout).ok_or_else(|| {
+        ChromeToolError::ChromeVersionDetectFailed {
+            path: browser_binary.to_path_buf(),
+            reason: format!("unexpected version output: {stdout}"),
+        }
+    })
+}
+
+async fn chrome_version_command_output(
+    browser_binary: &Path,
+) -> Result<std::process::Output, ChromeToolError> {
+    let mut command = if std::env::consts::OS == "windows" {
+        let escaped_path = browser_binary.to_string_lossy().replace('\'', "''");
+        let mut command = Command::new("powershell");
+        command.arg("-NoProfile").arg("-Command").arg(format!(
+            "(Get-Item '{}').VersionInfo.ProductVersion",
+            escaped_path
+        ));
+        command
+    } else {
+        let mut command = Command::new(browser_binary);
+        command.arg("--version");
+        command
+    };
+
+    command
+        .output()
+        .await
+        .map_err(|e| ChromeToolError::ChromeVersionDetectFailed {
+            path: browser_binary.to_path_buf(),
+            reason: e.to_string(),
         })
+}
+
+fn parse_browser_version_output(output: &str) -> Option<String> {
+    output
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .filter(|token| !token.is_empty())
+        .find(|token| token.chars().all(|ch| ch.is_ascii_digit() || ch == '.'))
         .map(str::to_string)
+}
+
+fn build_chrome_capabilities(
+    browser_binary: &Path,
+    browser_version: &str,
+    session_mode: SessionMode,
+) -> Result<ChromeCapabilities, ChromeToolError> {
+    let mut capabilities = DesiredCapabilities::chrome();
+    capabilities
+        .set_binary(browser_binary.to_string_lossy().as_ref())
+        .map_err(|e| ChromeToolError::DriverStartFailed {
+            reason: e.to_string(),
+        })?;
+
+    match session_mode {
+        SessionMode::Readonly => {
+            capabilities.add_arg("--headless=new").map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities.add_arg("--disable-gpu").map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities.add_arg("--no-first-run").map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities
+                .add_arg("--no-default-browser-check")
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+        }
+        SessionMode::Interactive => {
+            let user_agent_arg = format!("user-agent={}", interactive_user_agent(browser_version));
+            capabilities
+                .set_page_load_strategy(PageLoadStrategy::Eager)
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+            capabilities
+                .set_no_sandbox()
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+            capabilities.set_disable_dev_shm_usage().map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities
+                .add_arg("--disable-blink-features=AutomationControlled")
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+            capabilities.add_arg("window-size=1920,1080").map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities.add_arg(&user_agent_arg).map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities.add_arg("--disable-infobars").map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities
+                .add_experimental_option("excludeSwitches", vec!["enable-automation"])
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+            capabilities.add_arg("--no-first-run").map_err(|e| {
+                ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+            capabilities
+                .add_arg("--no-default-browser-check")
+                .map_err(|e| ChromeToolError::DriverStartFailed {
+                    reason: e.to_string(),
+                })?;
+        }
+    }
+
+    Ok(capabilities)
+}
+
+fn interactive_user_agent(browser_version: &str) -> String {
+    interactive_user_agent_for_os(std::env::consts::OS, browser_version)
+}
+
+fn interactive_user_agent_for_os(os: &str, browser_version: &str) -> String {
+    let platform = match os {
+        "macos" => "Macintosh; Intel Mac OS X 10_15_7",
+        "windows" => "Windows NT 10.0; Win64; x64",
+        _ => "X11; Linux x86_64",
+    };
+    format!(
+        "Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{browser_version} Safari/537.36"
+    )
 }
 
 fn reserve_free_port() -> Result<u16, ChromeToolError> {
@@ -585,14 +791,20 @@ fn chrome_binary_candidates() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
+    use serde_json::json;
+
     use crate::chrome::error::ChromeToolError;
-    use crate::chrome::models::{LinkSummary, OpenArgs, PageMetadata};
+    use crate::chrome::models::{CookieSummary, LinkSummary, OpenArgs, PageMetadata};
     use crate::chrome::session::BrowserSession;
 
-    use super::{BackendOpenResult, BrowserBackend, ChromeManager};
+    use super::{
+        BackendOpenResult, BrowserBackend, ChromeManager, SessionMode, build_chrome_capabilities,
+        interactive_user_agent_for_os, parse_browser_version_output,
+    };
 
     #[derive(Debug, Clone)]
     struct FakePage {
@@ -647,6 +859,8 @@ mod tests {
         screenshot: Vec<u8>,
         shutdown_label: String,
         shutdowns: Arc<StdMutex<Vec<String>>>,
+        url: String,
+        cookies: Vec<CookieSummary>,
     }
 
     #[async_trait::async_trait]
@@ -673,6 +887,22 @@ mod tests {
                 .push(self.shutdown_label.clone());
             Ok(())
         }
+
+        async fn click(&self, _selector: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _selector: &str, _text: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn current_url(&self) -> Result<String, ChromeToolError> {
+            Ok(self.url.clone())
+        }
+
+        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+            Ok(self.cookies.clone())
+        }
     }
 
     #[async_trait::async_trait]
@@ -691,6 +921,8 @@ mod tests {
                 screenshot: page.screenshot.clone(),
                 shutdown_label: page.shutdown_label.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
+                url: page.final_url.clone(),
+                cookies: vec![],
             });
 
             Ok(BackendOpenResult {
@@ -968,5 +1200,118 @@ mod tests {
             err,
             ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
         ));
+    }
+
+    #[test]
+    fn parse_browser_version_output_supports_macos_format() {
+        assert_eq!(
+            parse_browser_version_output("Google Chrome 124.0.6367.91"),
+            Some("124.0.6367.91".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_browser_version_output_supports_windows_format() {
+        assert_eq!(
+            parse_browser_version_output("ProductVersion\r\n124.0.6367.91\r\n"),
+            Some("124.0.6367.91".to_string())
+        );
+    }
+
+    #[test]
+    fn interactive_capabilities_use_visible_browser_arguments() {
+        let caps = build_chrome_capabilities(
+            Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
+            SessionMode::Interactive,
+        )
+        .unwrap();
+        let caps_json = serde_json::to_value(caps).unwrap();
+        let args = caps_json["goog:chromeOptions"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!args.contains(&"--headless=new"));
+        assert!(args.contains(&"--disable-blink-features=AutomationControlled"));
+        assert!(args.contains(&"window-size=1920,1080"));
+        assert!(args.iter().any(|value| value.starts_with("user-agent=")));
+        assert!(args.contains(&"--disable-infobars"));
+        assert_eq!(
+            caps_json["goog:chromeOptions"]["excludeSwitches"],
+            json!(["enable-automation"])
+        );
+    }
+
+    #[test]
+    fn interactive_capabilities_use_detected_browser_version_in_user_agent() {
+        let caps = build_chrome_capabilities(
+            Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
+            SessionMode::Interactive,
+        )
+        .unwrap();
+        let caps_json = serde_json::to_value(caps).unwrap();
+        let args = caps_json["goog:chromeOptions"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        let user_agent = args
+            .iter()
+            .find(|value| value.starts_with("user-agent="))
+            .copied()
+            .unwrap();
+
+        assert!(user_agent.contains("Chrome/124.0.6367.91"));
+    }
+
+    #[test]
+    fn interactive_capabilities_use_eager_page_load_strategy() {
+        let caps = build_chrome_capabilities(
+            Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
+            SessionMode::Interactive,
+        )
+        .unwrap();
+        let caps_json = serde_json::to_value(caps).unwrap();
+
+        assert_eq!(caps_json["pageLoadStrategy"], json!("eager"));
+    }
+
+    #[test]
+    fn readonly_capabilities_keep_headless_configuration() {
+        let caps = build_chrome_capabilities(
+            Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "124.0.6367.91",
+            SessionMode::Readonly,
+        )
+        .unwrap();
+        let caps_json = serde_json::to_value(caps).unwrap();
+        let args = caps_json["goog:chromeOptions"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(args.contains(&"--headless=new"));
+        assert!(!args.contains(&"--disable-blink-features=AutomationControlled"));
+        assert!(caps_json["goog:chromeOptions"]["excludeSwitches"].is_null());
+    }
+
+    #[test]
+    fn interactive_user_agent_uses_platform_specific_template() {
+        assert!(
+            interactive_user_agent_for_os("macos", "124.0.6367.91")
+                .contains("Macintosh; Intel Mac OS X 10_15_7")
+        );
+        assert!(
+            interactive_user_agent_for_os("windows", "124.0.6367.91")
+                .contains("Windows NT 10.0; Win64; x64")
+        );
     }
 }

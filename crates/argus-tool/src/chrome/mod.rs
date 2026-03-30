@@ -23,8 +23,10 @@ mod tests {
 
     use super::error::ChromeToolError;
     use super::installer::{ChromePaths, DriverDownloader};
-    use super::manager::{BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome};
-    use super::models::{ChromeAction, ChromeToolArgs, LinkSummary, PageMetadata};
+    use super::manager::{
+        BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
+    };
+    use super::models::{ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
     use super::session::BrowserSession;
@@ -106,9 +108,28 @@ mod tests {
     }
 
     #[test]
-    fn click_rejects_url_argument() {
+    fn click_requires_session_id_and_selector() {
+        // Missing session_id
         let err = ChromeToolArgs::validate(json!({
             "action": "click",
+            "selector": "#btn",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::MissingRequiredField { .. }));
+
+        // Missing selector
+        let err = ChromeToolArgs::validate(json!({
+            "action": "click",
+            "session_id": "session-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::MissingRequiredField { .. }));
+
+        // url not allowed
+        let err = ChromeToolArgs::validate(json!({
+            "action": "click",
+            "session_id": "session-1",
+            "selector": "#btn",
             "url": "https://example.com"
         }))
         .unwrap_err();
@@ -180,13 +201,43 @@ mod tests {
                 .get("screenshot_path")
                 .is_none()
         );
+        assert!(def.parameters["properties"].get("text").is_none());
+    }
+
+    #[test]
+    fn chrome_tool_definition_lists_interactive_actions() {
+        let tool = ChromeTool::new_interactive_with_backend(Arc::new(FakeChromeManager));
+        let def = tool.definition();
+        assert_eq!(def.name, "chrome");
+        assert!(def.description.contains("interactive"));
+
+        let action_enum = def.parameters["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum should be present");
+        let action_values: Vec<&str> = action_enum
+            .iter()
+            .map(|value| value.as_str().expect("enum value should be a string"))
+            .collect();
+        assert!(action_values.contains(&"click"));
+        assert!(action_values.contains(&"type"));
+        assert!(action_values.contains(&"get_url"));
+        assert!(action_values.contains(&"get_cookies"));
+        assert!(def.parameters["properties"].get("text").is_some());
     }
 
     #[tokio::test]
     async fn chrome_tool_rejects_denied_action_before_backend() {
         let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager));
+        // Click is blocked by readonly policy even with valid args
         let err = tool
-            .execute(json!({ "action": "click" }), make_ctx())
+            .execute(
+                json!({
+                    "action": "click",
+                    "session_id": "session-1",
+                    "selector": "#btn",
+                }),
+                make_ctx(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::NotAuthorized(_)));
@@ -333,6 +384,42 @@ mod tests {
         assert_eq!(open_call.browser_binary, home.path().join("Google Chrome"));
         assert!(open_call.driver_binary.starts_with(&paths.patched));
         assert!(open_call.driver_binary.is_file());
+        assert_eq!(open_call.session_mode, SessionMode::Readonly);
+    }
+
+    #[tokio::test]
+    async fn interactive_managed_constructor_uses_interactive_session_mode() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let tool = ChromeTool::new_interactive_with_managed_components_for_test(
+            host.clone(),
+            FakeManagedDownloader::with_zip_bytes(fake_driver_zip()),
+            paths,
+        );
+
+        tool.execute(
+            json!({
+                "action": "open",
+                "url": "https://example.com"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("interactive open should succeed");
+
+        let open_call = host
+            .open_calls
+            .lock()
+            .unwrap()
+            .last()
+            .expect("host should receive an open call")
+            .clone();
+        assert_eq!(open_call.session_mode, SessionMode::Interactive);
     }
 
     #[tokio::test]
@@ -416,11 +503,12 @@ mod tests {
     struct ManagedOpenCall {
         browser_binary: PathBuf,
         driver_binary: PathBuf,
+        session_mode: SessionMode,
     }
 
     struct FakeManagedChromeHost {
         browser_binary: PathBuf,
-        major_version: String,
+        browser_version: String,
         page_title: String,
         open_calls: StdMutex<Vec<ManagedOpenCall>>,
     }
@@ -428,12 +516,12 @@ mod tests {
     impl FakeManagedChromeHost {
         fn new(
             browser_binary: PathBuf,
-            major_version: impl Into<String>,
+            browser_version: impl Into<String>,
             page_title: impl Into<String>,
         ) -> Self {
             Self {
                 browser_binary,
-                major_version: major_version.into(),
+                browser_version: browser_version.into(),
                 page_title: page_title.into(),
                 open_calls: StdMutex::new(Vec::new()),
             }
@@ -445,7 +533,7 @@ mod tests {
         async fn discover_chrome(&self) -> Result<DetectedChrome, ChromeToolError> {
             Ok(DetectedChrome {
                 browser_binary: self.browser_binary.clone(),
-                major_version: self.major_version.clone(),
+                browser_version: self.browser_version.clone(),
             })
         }
 
@@ -453,11 +541,14 @@ mod tests {
             &self,
             url: &str,
             browser_binary: &Path,
+            _browser_version: &str,
             driver_binary: &Path,
+            session_mode: SessionMode,
         ) -> Result<BackendOpenResult, ChromeToolError> {
             self.open_calls.lock().unwrap().push(ManagedOpenCall {
                 browser_binary: browser_binary.to_path_buf(),
                 driver_binary: driver_binary.to_path_buf(),
+                session_mode,
             });
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
@@ -467,6 +558,8 @@ mod tests {
                 }],
                 text: "Managed text".to_string(),
                 screenshot: b"managed-png".to_vec(),
+                url: url.to_string(),
+                cookies: vec![],
             });
 
             Ok(BackendOpenResult {
@@ -486,7 +579,10 @@ mod tests {
     impl FakeManagedDownloader {
         fn with_zip_bytes(zip_bytes: Vec<u8>) -> Arc<Self> {
             let mut responses = HashMap::new();
-            responses.insert("LATEST_RELEASE_124".to_string(), b"124.0.6367.91".to_vec());
+            responses.insert(
+                "latest-versions-per-milestone.json".to_string(),
+                br#"{"milestones":{"124":{"version":"124.0.6367.91"}}}"#.to_vec(),
+            );
             responses.insert("chromedriver-".to_string(), zip_bytes);
             Arc::new(Self { responses })
         }
@@ -576,6 +672,8 @@ mod tests {
         links: Vec<LinkSummary>,
         text: String,
         screenshot: Vec<u8>,
+        url: String,
+        cookies: Vec<CookieSummary>,
     }
 
     #[async_trait::async_trait]
@@ -598,6 +696,22 @@ mod tests {
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
             Ok(())
         }
+
+        async fn click(&self, _selector: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _selector: &str, _text: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn current_url(&self) -> Result<String, ChromeToolError> {
+            Ok(self.url.clone())
+        }
+
+        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+            Ok(self.cookies.clone())
+        }
     }
 
     #[async_trait::async_trait]
@@ -614,6 +728,8 @@ mod tests {
                 links: page.links.clone(),
                 text: page.text.clone(),
                 screenshot: page.screenshot.clone(),
+                url: page.final_url.clone(),
+                cookies: vec![],
             });
 
             Ok(BackendOpenResult {

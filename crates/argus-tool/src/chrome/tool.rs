@@ -29,9 +29,23 @@ const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Screenshot,
 ];
 
+const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
+    ChromeAction::Open,
+    ChromeAction::Wait,
+    ChromeAction::ExtractText,
+    ChromeAction::ListLinks,
+    ChromeAction::GetDomSummary,
+    ChromeAction::Screenshot,
+    ChromeAction::Click,
+    ChromeAction::Type,
+    ChromeAction::GetUrl,
+    ChromeAction::GetCookies,
+];
+
 pub struct ChromeTool {
     manager: Arc<ChromeManager>,
     policy: ExplorePolicy,
+    interactive: bool,
 }
 
 impl Default for ChromeTool {
@@ -47,6 +61,17 @@ impl ChromeTool {
         Self {
             manager: Arc::new(ChromeManager::new_production(paths)),
             policy: ExplorePolicy::readonly(),
+            interactive: false,
+        }
+    }
+
+    #[must_use]
+    pub fn new_interactive() -> Self {
+        let paths = ChromePaths::from_home(&default_home_dir());
+        Self {
+            manager: Arc::new(ChromeManager::new_interactive_production(paths)),
+            policy: ExplorePolicy::interactive(),
+            interactive: true,
         }
     }
 
@@ -68,6 +93,25 @@ impl ChromeTool {
                 host, downloader, paths,
             )),
             policy: ExplorePolicy::readonly(),
+            interactive: false,
+        }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn new_interactive_with_managed_components_for_test(
+        host: Arc<dyn ChromeHost>,
+        downloader: Arc<dyn DriverDownloader>,
+        paths: ChromePaths,
+    ) -> Self {
+        Self {
+            manager: Arc::new(
+                ChromeManager::new_interactive_with_managed_components_for_test(
+                    host, downloader, paths,
+                ),
+            ),
+            policy: ExplorePolicy::interactive(),
+            interactive: true,
         }
     }
 
@@ -76,35 +120,63 @@ impl ChromeTool {
         Self {
             manager: Arc::new(ChromeManager::new_for_test(backend)),
             policy: ExplorePolicy::readonly(),
+            interactive: false,
         }
     }
 
-    fn definition_parameters() -> serde_json::Value {
+    #[cfg(test)]
+    pub(crate) fn new_interactive_with_backend(backend: Arc<dyn BrowserBackend>) -> Self {
+        Self {
+            manager: Arc::new(ChromeManager::new_for_test(backend)),
+            policy: ExplorePolicy::interactive(),
+            interactive: true,
+        }
+    }
+
+    fn definition_parameters(interactive: bool) -> serde_json::Value {
+        let actions: Vec<&str> = if interactive {
+            INTERACTIVE_ACTIONS.iter().map(|a| a.as_str()).collect()
+        } else {
+            RO_ACTIONS.iter().map(|a| a.as_str()).collect()
+        };
+
+        let mut properties = json!({
+            "action": {
+                "type": "string",
+                "enum": actions,
+                "description": if interactive { "Browser action (includes interactive operations)" } else { "Read-only browser action" }
+            },
+            "url": {
+                "type": "string",
+                "description": "Target URL for open"
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Session ID returned by open"
+            },
+            "selector": {
+                "type": "string",
+                "description": "CSS selector for element operations"
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Optional bounded passive wait in milliseconds for wait"
+            }
+        });
+
+        if interactive {
+            properties
+                .as_object_mut()
+                .expect("properties is always an object")
+                .insert(
+                    "text".to_string(),
+                    json!({"type": "string", "description": "Text to type into element (for type action)"}),
+                );
+        }
+
         json!({
             "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": RO_ACTIONS.iter().map(|action| action.as_str()).collect::<Vec<_>>(),
-                    "description": "Read-only browser action"
-                },
-                "url": {
-                    "type": "string",
-                    "description": "Target URL for open"
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Session ID returned by open"
-                },
-                "selector": {
-                    "type": "string",
-                    "description": "Optional CSS selector for scoped read actions"
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Optional bounded passive wait in milliseconds for wait"
-                }
-            },
+            "properties": properties,
             "required": ["action"],
             "additionalProperties": false
         })
@@ -128,17 +200,25 @@ impl NamedTool for ChromeTool {
     }
 
     fn definition(&self) -> ToolDefinition {
+        let description = if self.interactive {
+            "Chrome browser tool with interactive capabilities for navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
+                .to_string()
+        } else {
+            "read-only Chrome explore tool for opening pages and inspecting page state.".to_string()
+        };
         ToolDefinition {
             name: "chrome".to_string(),
-            description:
-                "read-only Chrome explore tool for opening pages and inspecting page state."
-                    .to_string(),
-            parameters: Self::definition_parameters(),
+            description,
+            parameters: Self::definition_parameters(self.interactive),
         }
     }
 
     fn risk_level(&self) -> RiskLevel {
-        RiskLevel::High
+        if self.interactive {
+            RiskLevel::Critical
+        } else {
+            RiskLevel::High
+        }
     }
 
     async fn execute(
@@ -243,12 +323,59 @@ impl NamedTool for ChromeTool {
                     "status": "ok",
                 }))
             }
-            ChromeAction::Click => Err(ToolError::NotAuthorized(
-                ChromeToolError::ActionNotAllowed {
-                    action: ChromeAction::Click.as_str().to_string(),
-                }
-                .to_string(),
-            )),
+            ChromeAction::Click => {
+                let session_id = required_session_id(&args)?;
+                let selector = required_field(&args, "selector", args.selector.as_deref())?;
+                self.manager
+                    .click(&session_id, selector)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "click",
+                    "session_id": session_id,
+                    "status": "ok",
+                }))
+            }
+            ChromeAction::Type => {
+                let session_id = required_session_id(&args)?;
+                let selector = required_field(&args, "selector", args.selector.as_deref())?;
+                let text = required_field(&args, "text", args.text.as_deref())?;
+                self.manager
+                    .type_text(&session_id, selector, text)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "type",
+                    "session_id": session_id,
+                    "status": "ok",
+                }))
+            }
+            ChromeAction::GetUrl => {
+                let session_id = required_session_id(&args)?;
+                let url = self
+                    .manager
+                    .current_url(&session_id)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "get_url",
+                    "session_id": session_id,
+                    "url": url,
+                }))
+            }
+            ChromeAction::GetCookies => {
+                let session_id = required_session_id(&args)?;
+                let cookies = self
+                    .manager
+                    .get_cookies(&session_id)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "get_cookies",
+                    "session_id": session_id,
+                    "cookies": cookies,
+                }))
+            }
         }
     }
 }
@@ -260,6 +387,17 @@ fn required_session_id(args: &ChromeToolArgs) -> Result<String, ToolError> {
             tool_name: "chrome".to_string(),
             reason: format!("missing session_id for {} action", args.action.as_str()),
         })
+}
+
+fn required_field<'a>(
+    args: &ChromeToolArgs,
+    field_name: &str,
+    value: Option<&'a str>,
+) -> Result<&'a str, ToolError> {
+    value.ok_or_else(|| ToolError::ExecutionFailed {
+        tool_name: "chrome".to_string(),
+        reason: format!("missing {field_name} for {} action", args.action.as_str()),
+    })
 }
 
 fn default_home_dir() -> std::path::PathBuf {

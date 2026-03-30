@@ -16,6 +16,9 @@ pub enum ChromeAction {
     GetDomSummary,
     Screenshot,
     Click,
+    Type,
+    GetUrl,
+    GetCookies,
 }
 
 impl ChromeAction {
@@ -29,6 +32,9 @@ impl ChromeAction {
             Self::GetDomSummary => "get_dom_summary",
             Self::Screenshot => "screenshot",
             Self::Click => "click",
+            Self::Type => "type",
+            Self::GetUrl => "get_url",
+            Self::GetCookies => "get_cookies",
         }
     }
 }
@@ -45,6 +51,8 @@ pub struct ChromeToolArgs {
     pub selector: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 impl ChromeToolArgs {
@@ -57,6 +65,7 @@ impl ChromeToolArgs {
         args.url = normalized_optional_string(args.url);
         args.session_id = normalized_optional_string(args.session_id);
         args.selector = normalized_optional_string(args.selector);
+        args.text = normalized_optional_string(args.text);
 
         match args.action {
             ChromeAction::Open => {
@@ -142,7 +151,20 @@ impl ChromeToolArgs {
                 validate_for_screenshot(&args)?;
             }
             ChromeAction::Click => {
+                require_session_id(&args)?;
                 validate_for_click(&args)?;
+            }
+            ChromeAction::Type => {
+                require_session_id(&args)?;
+                validate_for_type(&args)?;
+            }
+            ChromeAction::GetUrl => {
+                require_session_id(&args)?;
+                validate_for_get_url(&args)?;
+            }
+            ChromeAction::GetCookies => {
+                require_session_id(&args)?;
+                validate_for_get_cookies(&args)?;
             }
         }
 
@@ -172,6 +194,14 @@ pub struct OpenedSession {
 pub struct LinkSummary {
     pub href: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CookieSummary {
+    pub name: String,
+    pub value: String,
+    pub domain: Option<String>,
+    pub path: Option<String>,
 }
 
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
@@ -253,17 +283,75 @@ fn validate_for_screenshot(args: &ChromeToolArgs) -> Result<(), ChromeToolError>
 }
 
 fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some()
-        || args.session_id.is_some()
-        || args.selector.is_some()
-        || args.timeout_ms.is_some()
-    {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "no extra fields are allowed for action '{}'",
-                args.action.as_str()
-            ),
+    require_field("selector", &args.selector, args.action.as_str())?;
+    reject_fields(
+        args,
+        &["url", "text", "timeout_ms"],
+        "only 'session_id' and 'selector' are allowed",
+    )
+}
+
+fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_field("selector", &args.selector, args.action.as_str())?;
+    require_field("text", &args.text, args.action.as_str())?;
+    reject_fields(
+        args,
+        &["url", "timeout_ms"],
+        "only 'session_id', 'selector', and 'text' are allowed",
+    )
+}
+
+fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms"],
+        "only 'session_id' is allowed",
+    )
+}
+
+fn validate_for_get_cookies(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms"],
+        "only 'session_id' is allowed",
+    )
+}
+
+fn require_field(
+    field: &'static str,
+    value: &Option<String>,
+    action: &str,
+) -> Result<(), ChromeToolError> {
+    if value.is_none() {
+        return Err(ChromeToolError::MissingRequiredField {
+            action: action.to_string(),
+            field,
         });
     }
     Ok(())
+}
+
+fn reject_fields(
+    args: &ChromeToolArgs,
+    fields: &[&str],
+    message: &str,
+) -> Result<(), ChromeToolError> {
+    let present: Vec<&str> = fields
+        .iter()
+        .filter(|&&f| match f {
+            "url" => args.url.is_some(),
+            "selector" => args.selector.is_some(),
+            "text" => args.text.is_some(),
+            "timeout_ms" => args.timeout_ms.is_some(),
+            _ => false,
+        })
+        .copied()
+        .collect();
+    if present.is_empty() {
+        Ok(())
+    } else {
+        Err(ChromeToolError::InvalidArguments {
+            reason: format!("{message} for action '{}'", args.action.as_str()),
+        })
+    }
 }

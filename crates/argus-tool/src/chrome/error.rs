@@ -58,4 +58,7 @@ pub enum ChromeToolError {
 
     #[error("failed to shut down chrome session: {reason}")]
     SessionShutdownFailed { reason: String },
+
+    #[error("failed to interact with element: {reason}")]
+    InteractionFailed { reason: String },
 }

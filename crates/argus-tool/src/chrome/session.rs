@@ -8,7 +8,7 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use super::error::ChromeToolError;
-use super::models::LinkSummary;
+use super::models::{CookieSummary, LinkSummary};
 
 #[async_trait]
 pub trait BrowserSession: Send + Sync {
@@ -16,6 +16,10 @@ pub trait BrowserSession: Send + Sync {
     async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError>;
     async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
+    async fn click(&self, selector: &str) -> Result<(), ChromeToolError>;
+    async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
+    async fn current_url(&self) -> Result<String, ChromeToolError>;
+    async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError>;
 }
 
 #[derive(Clone)]
@@ -152,6 +156,67 @@ impl BrowserSession for ManagedWebDriverSession {
             .map_err(|e| ChromeToolError::ScreenshotFailed {
                 reason: e.to_string(),
             })
+    }
+
+    async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
+        let driver = self.live_driver().await?;
+        let element = driver.find(By::Css(selector)).await.map_err(|e| {
+            ChromeToolError::InteractionFailed {
+                reason: format!("element not found for selector '{selector}': {e}"),
+            }
+        })?;
+        element
+            .click()
+            .await
+            .map_err(|e| ChromeToolError::InteractionFailed {
+                reason: format!("click failed for selector '{selector}': {e}"),
+            })
+    }
+
+    async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError> {
+        let driver = self.live_driver().await?;
+        let element = driver.find(By::Css(selector)).await.map_err(|e| {
+            ChromeToolError::InteractionFailed {
+                reason: format!("element not found for selector '{selector}': {e}"),
+            }
+        })?;
+        element
+            .send_keys(text)
+            .await
+            .map_err(|e| ChromeToolError::InteractionFailed {
+                reason: format!("type failed for selector '{selector}': {e}"),
+            })
+    }
+
+    async fn current_url(&self) -> Result<String, ChromeToolError> {
+        let driver = self.live_driver().await?;
+        driver
+            .current_url()
+            .await
+            .map(|url| url.to_string())
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: format!("failed to get current URL: {e}"),
+            })
+    }
+
+    async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        let driver = self.live_driver().await?;
+        let cookies =
+            driver
+                .get_all_cookies()
+                .await
+                .map_err(|e| ChromeToolError::PageReadFailed {
+                    reason: format!("failed to get cookies: {e}"),
+                })?;
+        Ok(cookies
+            .into_iter()
+            .map(|c| CookieSummary {
+                name: c.name,
+                value: c.value,
+                domain: c.domain,
+                path: c.path,
+            })
+            .collect())
     }
 
     async fn shutdown(&self) -> Result<(), ChromeToolError> {

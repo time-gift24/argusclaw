@@ -86,16 +86,16 @@ impl ChromeInstaller {
 
     pub async fn ensure_driver(
         &self,
-        chrome_major: &str,
+        chrome_version: &str,
     ) -> Result<InstalledDriver, ChromeToolError> {
         let _guard = self.install_lock.lock().await;
         self.paths.ensure_directories()?;
         let platform = ChromePlatform::detect()?;
         let _file_lock = InstallLockGuard::acquire(&self.paths.root.join(".install.lock"))?;
-        if let Some(cached) = self.find_cached_install(chrome_major, &platform)? {
+        if let Some(cached) = self.find_cached_install(chrome_version, &platform)? {
             return Ok(cached);
         }
-        let version = self.resolve_driver_version(chrome_major).await?;
+        let version = self.resolve_driver_version(chrome_version).await?;
         let original_driver = self
             .paths
             .driver
@@ -133,22 +133,36 @@ impl ChromeInstaller {
         })
     }
 
-    async fn resolve_driver_version(&self, chrome_major: &str) -> Result<String, ChromeToolError> {
-        let url = release_url(chrome_major);
-        let bytes = self.downloader.fetch(&url).await?;
-        String::from_utf8(bytes)
-            .map(|value| value.trim().to_string())
-            .map_err(|e| ChromeToolError::DriverArchiveInvalid {
-                reason: format!("release metadata from '{url}' is not valid utf-8: {e}"),
-            })
+    async fn resolve_driver_version(
+        &self,
+        chrome_version: &str,
+    ) -> Result<String, ChromeToolError> {
+        match driver_version_source(chrome_version)? {
+            DriverVersionSource::ExactVersion => Ok(chrome_version.to_string()),
+            DriverVersionSource::MilestoneJson => {
+                let url = milestone_versions_url();
+                let bytes = self.downloader.fetch(url).await?;
+                parse_milestone_version(&bytes, chrome_major_version(chrome_version)?.as_str())
+            }
+            DriverVersionSource::LegacyLatestRelease => {
+                let url = legacy_release_url(chrome_major_version(chrome_version)?.as_str());
+                let bytes = self.downloader.fetch(&url).await?;
+                String::from_utf8(bytes)
+                    .map(|value| value.trim().to_string())
+                    .map_err(|e| ChromeToolError::DriverArchiveInvalid {
+                        reason: format!("release metadata from '{url}' is not valid utf-8: {e}"),
+                    })
+            }
+        }
     }
 
     fn find_cached_install(
         &self,
-        chrome_major: &str,
+        chrome_version: &str,
         platform: &ChromePlatform,
     ) -> Result<Option<InstalledDriver>, ChromeToolError> {
-        let major_prefix = format!("{chrome_major}.");
+        let major_prefix = format!("{}.", chrome_major_version(chrome_version)?);
+        let exact_match = chrome_version.contains('.');
         let entries = std::fs::read_dir(&self.paths.patched).map_err(|e| {
             ChromeToolError::FileReadFailed {
                 path: self.paths.patched.clone(),
@@ -166,7 +180,12 @@ impl ChromeInstaller {
             let Some(version) = version_from_driver_filename(&file_name, platform) else {
                 continue;
             };
-            if !version.starts_with(&major_prefix) {
+            let version_matches = if exact_match {
+                version == chrome_version
+            } else {
+                version.starts_with(&major_prefix)
+            };
+            if !version_matches {
                 continue;
             }
 
@@ -182,6 +201,13 @@ impl ChromeInstaller {
 
         Ok(None)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverVersionSource {
+    ExactVersion,
+    MilestoneJson,
+    LegacyLatestRelease,
 }
 
 pub struct ReqwestDriverDownloader {
@@ -263,8 +289,53 @@ impl ChromePlatform {
     }
 }
 
-fn release_url(chrome_major: &str) -> String {
+fn chrome_major_version(chrome_version: &str) -> Result<String, ChromeToolError> {
+    chrome_version
+        .split('.')
+        .next()
+        .unwrap_or(chrome_version)
+        .parse::<u32>()
+        .map(|value| value.to_string())
+        .map_err(|e| ChromeToolError::DriverArchiveInvalid {
+            reason: format!("invalid chrome milestone '{chrome_version}': {e}"),
+        })
+}
+
+fn driver_version_source(chrome_version: &str) -> Result<DriverVersionSource, ChromeToolError> {
+    let milestone = chrome_major_version(chrome_version)?
+        .parse::<u32>()
+        .map_err(|e| ChromeToolError::DriverArchiveInvalid {
+            reason: format!("invalid chrome milestone '{chrome_version}': {e}"),
+        })?;
+    if chrome_version.contains('.') && milestone >= 114 {
+        Ok(DriverVersionSource::ExactVersion)
+    } else if milestone >= 114 {
+        Ok(DriverVersionSource::MilestoneJson)
+    } else {
+        Ok(DriverVersionSource::LegacyLatestRelease)
+    }
+}
+
+fn milestone_versions_url() -> &'static str {
+    "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone.json"
+}
+
+fn legacy_release_url(chrome_major: &str) -> String {
     format!("https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_{chrome_major}")
+}
+
+fn parse_milestone_version(body: &[u8], chrome_major: &str) -> Result<String, ChromeToolError> {
+    let json = serde_json::from_slice::<serde_json::Value>(body).map_err(|e| {
+        ChromeToolError::DriverArchiveInvalid {
+            reason: format!("milestone metadata is not valid json: {e}"),
+        }
+    })?;
+    json["milestones"][chrome_major]["version"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| ChromeToolError::DriverArchiveInvalid {
+            reason: format!("milestone metadata does not contain version for '{chrome_major}'"),
+        })
 }
 
 fn driver_archive_url(version: &str, platform: &ChromePlatform) -> String {
@@ -581,7 +652,10 @@ mod tests {
     impl FakeDownloader {
         fn with_zip_bytes(zip_bytes: Vec<u8>) -> Arc<Self> {
             let mut responses = HashMap::new();
-            responses.insert("LATEST_RELEASE_124".to_string(), b"124.0.6367.91".to_vec());
+            responses.insert(
+                "latest-versions-per-milestone.json".to_string(),
+                br#"{"milestones":{"124":{"version":"124.0.6367.91"}}}"#.to_vec(),
+            );
             responses.insert("chromedriver-".to_string(), zip_bytes);
             Arc::new(Self {
                 responses,
@@ -674,7 +748,7 @@ mod tests {
         let downloader = FakeDownloader::with_zip_bytes(fake_driver_zip());
         let installer = ChromeInstaller::new(paths.clone(), downloader);
 
-        let install = installer.ensure_driver("124").await.unwrap();
+        let install = installer.ensure_driver("124.0.6367.91").await.unwrap();
 
         assert!(install.original_driver.starts_with(&paths.driver));
         assert!(install.patched_driver.starts_with(&paths.patched));
@@ -697,12 +771,63 @@ mod tests {
             paths.clone(),
             FakeDownloader::with_zip_bytes(fake_driver_zip()),
         );
-        let first = first_installer.ensure_driver("124").await.unwrap();
+        let first = first_installer
+            .ensure_driver("124.0.6367.91")
+            .await
+            .unwrap();
 
         let cached_installer = ChromeInstaller::new(paths, Arc::new(FailingDownloader));
-        let second = cached_installer.ensure_driver("124").await.unwrap();
+        let second = cached_installer
+            .ensure_driver("124.0.6367.91")
+            .await
+            .unwrap();
 
         assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn resolve_driver_version_uses_exact_browser_version_for_modern_chrome() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let downloader = Arc::new(FakeDownloader {
+            responses: HashMap::new(),
+            requests: StdMutex::new(Vec::new()),
+        });
+        let installer = ChromeInstaller::new(paths, downloader.clone());
+
+        let version = installer
+            .resolve_driver_version("124.0.6367.91")
+            .await
+            .unwrap();
+
+        assert_eq!(version, "124.0.6367.91");
+        assert!(downloader.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_driver_version_uses_legacy_release_endpoint_for_older_chrome() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let downloader = Arc::new(FakeDownloader {
+            responses: HashMap::from([(
+                "LATEST_RELEASE_113".to_string(),
+                b"113.0.5672.63".to_vec(),
+            )]),
+            requests: StdMutex::new(Vec::new()),
+        });
+        let installer = ChromeInstaller::new(paths, downloader.clone());
+
+        let version = installer.resolve_driver_version("113").await.unwrap();
+
+        assert_eq!(version, "113.0.5672.63");
+        assert_eq!(downloader.requests.lock().unwrap().len(), 1);
+        assert!(downloader.requests.lock().unwrap()[0].contains("LATEST_RELEASE_113"));
+    }
+
+    #[test]
+    fn platform_archive_keys_match_primary_targets() {
+        assert_eq!(ChromePlatform::MacArm64.archive_key(), "mac-arm64");
+        assert_eq!(ChromePlatform::Win64.archive_key(), "win64");
     }
 
     #[test]

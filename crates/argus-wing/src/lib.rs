@@ -247,7 +247,8 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(WriteFileTool::new()));
         self.tool_manager.register(Arc::new(ListDirTool::new()));
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
-        self.tool_manager.register(Arc::new(ChromeTool::new()));
+        self.tool_manager
+            .register(Arc::new(ChromeTool::new_interactive()));
 
         Ok(())
     }
@@ -656,7 +657,21 @@ mod tests {
         wing.register_default_tools()
             .await
             .expect("default tool registration should succeed");
-        assert!(wing.tool_manager().get("chrome").is_some());
+        let chrome = wing
+            .tool_manager()
+            .get("chrome")
+            .expect("chrome tool should be registered");
+        let definition = chrome.definition();
+        let action_values: Vec<&str> = definition.parameters["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum should be present")
+            .iter()
+            .map(|value| value.as_str().expect("enum value should be a string"))
+            .collect();
+
+        assert!(action_values.contains(&"click"));
+        assert!(action_values.contains(&"type"));
+        assert!(definition.parameters["properties"].get("text").is_some());
     }
 
     #[tokio::test]
