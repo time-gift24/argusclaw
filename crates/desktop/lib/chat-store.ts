@@ -117,6 +117,7 @@ export interface ChatStore {
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
+  cancelTurn: () => Promise<void>;
   refreshSnapshot: (
     sessionKey: string,
     options?: { preserveError?: boolean },
