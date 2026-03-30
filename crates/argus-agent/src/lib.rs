@@ -50,6 +50,7 @@
 //! thread.send_message("Hello!".to_string()).await.unwrap();
 //! ```
 
+pub mod approval_state;
 pub mod command;
 pub mod compact;
 pub mod config;
@@ -83,6 +84,7 @@ pub use trace::{TraceConfig, TraceWriter, TurnLogState, read_jsonl_events, recov
 pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)
+pub use approval_state::ApprovalState;
 pub use command::ThreadRuntimeSnapshot;
 pub use compact::{
     CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,

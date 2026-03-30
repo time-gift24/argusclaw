@@ -142,6 +142,7 @@ pub struct ThreadPool {
     resident_slots: Arc<Semaphore>,
     admission_waiters: Arc<AtomicUsize>,
     store: Arc<StdMutex<ThreadPoolStore>>,
+    approval_manager: Arc<StdMutex<Option<Arc<dyn argus_protocol::approval::ApprovalManager>>>>,
 }
 
 impl std::fmt::Debug for ThreadPool {
@@ -193,7 +194,13 @@ impl ThreadPool {
             resident_slots: Arc::new(Semaphore::new(DEFAULT_MAX_THREADS as usize)),
             admission_waiters: Arc::new(AtomicUsize::new(0)),
             store: Arc::new(StdMutex::new(ThreadPoolStore::default())),
+            approval_manager: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    /// Set the approval manager for all threads created by this pool.
+    pub fn set_approval_manager(&self, manager: Arc<dyn argus_protocol::approval::ApprovalManager>) {
+        *self.approval_manager.lock().expect("approval_manager mutex") = Some(manager);
     }
 
     /// Register a chat thread in the unified pool without loading its runtime.
@@ -1244,7 +1251,7 @@ impl ThreadPool {
             self.chat_runtime_config.trace_dir.clone(),
             &thread_id.inner().to_string(),
         );
-        let thread = ThreadBuilder::new()
+        let mut builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(session_id)
             .agent_record(Arc::new(agent_record))
@@ -1258,7 +1265,11 @@ impl ThreadPool {
                     .clone(),
             )
             .plan_store(plan_store)
-            .config(config)
+            .config(config);
+        if let Some(mgr) = self.approval_manager.lock().expect("approval_manager mutex poisoned").clone() {
+            builder = builder.approval_manager(mgr);
+        }
+        let thread = builder
             .build()
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         let thread = Arc::new(RwLock::new(thread));
@@ -1368,7 +1379,7 @@ impl ThreadPool {
             .as_ref()
             .and_then(|record| record.title.clone())
             .or_else(|| Some(format!("job:{}", request.job_id)));
-        let thread = ThreadBuilder::new()
+        let mut thread_builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(Self::job_runtime_session_id(thread_id))
             .agent_record(Arc::new(agent_record))
@@ -1382,7 +1393,11 @@ impl ThreadPool {
                     .clone(),
             )
             .plan_store(plan_store)
-            .config(config)
+            .config(config);
+        if let Some(mgr) = self.approval_manager.lock().expect("approval_manager mutex poisoned").clone() {
+            thread_builder = thread_builder.approval_manager(mgr);
+        }
+        let thread = thread_builder
             .build()
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         let thread = Arc::new(RwLock::new(thread));

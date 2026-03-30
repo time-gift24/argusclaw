@@ -73,4 +73,10 @@ pub trait NamedTool: Send + Sync {
     fn risk_level(&self) -> RiskLevel {
         RiskLevel::Low
     }
+
+    /// Returns whether this tool requires approval before execution.
+    /// Default: true for Critical and High risk levels.
+    fn requires_approval(&self) -> bool {
+        matches!(self.risk_level(), RiskLevel::Critical | RiskLevel::High)
+    }
 }

@@ -163,6 +163,9 @@ impl ArgusWing {
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        // Wire approval manager into thread pool
+        job_manager.thread_pool().set_approval_manager(approval_manager.clone());
+
         Ok(Arc::new(Self {
             pool,
             provider_manager,
@@ -225,6 +228,9 @@ impl ArgusWing {
             job_manager.clone(),
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
+
+        // Wire approval manager into thread pool
+        job_manager.thread_pool().set_approval_manager(approval_manager.clone());
 
         Arc::new(Self {
             pool,

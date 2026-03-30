@@ -160,6 +160,22 @@ impl ApprovalManager {
             .clone()
     }
 }
+
+// Implement the argus-protocol ApprovalManager trait for the concrete type
+#[async_trait::async_trait]
+impl argus_protocol::approval::ApprovalManager for ApprovalManager {
+    fn requires_approval(&self, tool_name: &str) -> bool {
+        ApprovalManager::requires_approval(self, tool_name)
+    }
+
+    async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision {
+        ApprovalManager::request_approval(self, req).await
+    }
+
+    fn resolve(&self, request_id: Uuid, decision: ApprovalDecision) {
+        let _ = ApprovalManager::resolve(self, request_id, decision, None);
+    }
+}
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
