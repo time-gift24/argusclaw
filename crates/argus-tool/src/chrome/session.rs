@@ -178,10 +178,10 @@ impl BrowserSession for ManagedWebDriverSession {
 
 impl Drop for ManagedWebDriverSession {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.driver_process.try_lock() {
-            if let Some(child) = guard.as_mut() {
-                let _ = child.start_kill();
-            }
+        if let Ok(mut guard) = self.driver_process.try_lock()
+            && let Some(child) = guard.as_mut()
+        {
+            let _ = child.start_kill();
         }
     }
 }

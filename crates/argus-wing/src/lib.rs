@@ -27,7 +27,7 @@ mod resolver;
 
 use std::sync::Arc;
 
-use crate::db::{DatabaseTarget, default_trace_dir, ensure_parent_dir, resolve_database_target};
+use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
 use argus_agent::CompactorManager;
 use argus_approval::{ApprovalManager, ApprovalPolicy};
@@ -783,11 +783,9 @@ mod tests {
             .expect("template listing should succeed");
 
         assert!(templates.iter().all(|template| template.id.inner() != 0));
-        assert!(
-            templates
-                .iter()
-                .any(|template| template.display_name == "Legacy Zero Agent")
-        );
+        assert!(templates
+            .iter()
+            .any(|template| template.display_name == "Legacy Zero Agent"));
     }
 
     #[tokio::test]

@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn chrome_tool_definition_lists_only_readonly_actions() {
-        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager::default()));
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager));
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("read-only"));
@@ -184,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn chrome_tool_rejects_denied_action_before_backend() {
-        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager::default()));
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager));
         let err = tool
             .execute(json!({ "action": "click" }), make_ctx())
             .await

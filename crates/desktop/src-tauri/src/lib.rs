@@ -9,7 +9,11 @@ mod events;
 mod subscription;
 
 fn default_tracing_directive(is_debug_build: bool) -> &'static str {
-    if is_debug_build { "trace" } else { "info" }
+    if is_debug_build {
+        "trace"
+    } else {
+        "info"
+    }
 }
 
 fn resolve_tracing_filter(rust_log: Option<&str>, is_debug_build: bool) -> EnvFilter {
