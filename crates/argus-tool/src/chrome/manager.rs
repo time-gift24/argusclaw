@@ -14,7 +14,9 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 
 use super::error::ChromeToolError;
-use super::installer::{ChromeInstaller, ChromePaths, DriverDownloader, ReqwestDriverDownloader};
+use super::installer::{
+    ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
+};
 use super::models::{CookieSummary, LinkSummary, OpenArgs, OpenedSession, PageMetadata};
 use super::session::{
     BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
@@ -62,6 +64,12 @@ struct ManagedChromeBackend {
     session_mode: SessionMode,
 }
 
+#[derive(Clone)]
+struct ManagedChromeSupport {
+    host: Arc<dyn ChromeHost>,
+    installer: Arc<ChromeInstaller>,
+}
+
 impl ManagedChromeBackend {
     fn new(
         host: Arc<dyn ChromeHost>,
@@ -85,7 +93,7 @@ impl BrowserBackend for ManagedChromeBackend {
             .find_installed_driver(&detected.browser_version)?
             .ok_or_else(|| ChromeToolError::DriverNotInstalled {
                 browser_version: detected.browser_version.clone(),
-                suggested_tool: "chrome_install".to_string(),
+                suggested_action: "install".to_string(),
             })?;
         self.host
             .open_session(
@@ -101,6 +109,7 @@ impl BrowserBackend for ManagedChromeBackend {
 
 pub struct ChromeManager {
     backend: Arc<dyn BrowserBackend>,
+    managed_support: Option<ManagedChromeSupport>,
     paths: ChromePaths,
     sessions: RwLock<HashMap<String, ChromeSession>>,
     session_order: RwLock<VecDeque<String>>,
@@ -117,17 +126,19 @@ impl ChromeManager {
     #[must_use]
     #[allow(dead_code)]
     pub fn new(backend: Arc<dyn BrowserBackend>, paths: ChromePaths) -> Self {
-        Self::new_with_session_limit(backend, paths, Self::DEFAULT_SESSION_LIMIT)
+        Self::new_with_session_limit(backend, None, paths, Self::DEFAULT_SESSION_LIMIT)
     }
 
     #[must_use]
     fn new_with_session_limit(
         backend: Arc<dyn BrowserBackend>,
+        managed_support: Option<ManagedChromeSupport>,
         paths: ChromePaths,
         session_limit: usize,
     ) -> Self {
         Self {
             backend,
+            managed_support,
             paths,
             sessions: RwLock::new(HashMap::new()),
             session_order: RwLock::new(VecDeque::new()),
@@ -142,12 +153,21 @@ impl ChromeManager {
         let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let managed_support = Some(ManagedChromeSupport {
+            host: host.clone(),
+            installer: installer.clone(),
+        });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
             installer,
             SessionMode::Readonly,
         ));
-        Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
+        Self::new_with_session_limit(
+            backend,
+            managed_support,
+            paths,
+            Self::PRODUCTION_SESSION_LIMIT,
+        )
     }
 
     #[must_use]
@@ -155,12 +175,21 @@ impl ChromeManager {
         let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let managed_support = Some(ManagedChromeSupport {
+            host: host.clone(),
+            installer: installer.clone(),
+        });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
             installer,
             SessionMode::Interactive,
         ));
-        Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
+        Self::new_with_session_limit(
+            backend,
+            managed_support,
+            paths,
+            Self::PRODUCTION_SESSION_LIMIT,
+        )
     }
 
     #[cfg(test)]
@@ -171,12 +200,21 @@ impl ChromeManager {
         paths: ChromePaths,
     ) -> Self {
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let managed_support = Some(ManagedChromeSupport {
+            host: host.clone(),
+            installer: installer.clone(),
+        });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
             installer,
             SessionMode::Readonly,
         ));
-        Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
+        Self::new_with_session_limit(
+            backend,
+            managed_support,
+            paths,
+            Self::PRODUCTION_SESSION_LIMIT,
+        )
     }
 
     #[cfg(test)]
@@ -187,12 +225,21 @@ impl ChromeManager {
         paths: ChromePaths,
     ) -> Self {
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
+        let managed_support = Some(ManagedChromeSupport {
+            host: host.clone(),
+            installer: installer.clone(),
+        });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
             installer,
             SessionMode::Interactive,
         ));
-        Self::new_with_session_limit(backend, paths, Self::PRODUCTION_SESSION_LIMIT)
+        Self::new_with_session_limit(
+            backend,
+            managed_support,
+            paths,
+            Self::PRODUCTION_SESSION_LIMIT,
+        )
     }
 
     #[cfg(test)]
@@ -202,6 +249,21 @@ impl ChromeManager {
         let id = NEXT_TEST_MANAGER_ID.fetch_add(1, Ordering::Relaxed) + 1;
         let home = std::env::temp_dir().join(format!("arguswing-chrome-tests-{id}"));
         Self::new(backend, ChromePaths::from_home(&home))
+    }
+
+    pub async fn install_driver(
+        &self,
+    ) -> Result<(DetectedChrome, InstalledDriver), ChromeToolError> {
+        let support = self
+            .managed_support
+            .as_ref()
+            .ok_or(ChromeToolError::InstallUnavailable)?;
+        let detected = support.host.discover_chrome().await?;
+        let install = support
+            .installer
+            .ensure_driver(&detected.browser_version)
+            .await?;
+        Ok((detected, install))
     }
 
     pub async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {

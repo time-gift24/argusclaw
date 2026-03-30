@@ -21,6 +21,7 @@ use super::models::{ChromeAction, ChromeToolArgs, OpenArgs};
 use super::policy::ExplorePolicy;
 
 const RO_ACTIONS: &[ChromeAction] = &[
+    ChromeAction::Install,
     ChromeAction::Open,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
@@ -30,6 +31,7 @@ const RO_ACTIONS: &[ChromeAction] = &[
 ];
 
 const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
+    ChromeAction::Install,
     ChromeAction::Open,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
@@ -201,10 +203,11 @@ impl NamedTool for ChromeTool {
 
     fn definition(&self) -> ToolDefinition {
         let description = if self.interactive {
-            "Chrome browser tool with interactive capabilities for navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
+            "Chrome browser tool with interactive capabilities for explicit driver install, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
                 .to_string()
         } else {
-            "read-only Chrome explore tool for opening pages and inspecting page state.".to_string()
+            "Chrome explore tool for explicit driver install, opening pages, and inspecting page state."
+                .to_string()
         };
         ToolDefinition {
             name: "chrome".to_string(),
@@ -214,11 +217,7 @@ impl NamedTool for ChromeTool {
     }
 
     fn risk_level(&self) -> RiskLevel {
-        if self.interactive {
-            RiskLevel::Critical
-        } else {
-            RiskLevel::High
-        }
+        RiskLevel::Critical
     }
 
     async fn execute(
@@ -232,6 +231,21 @@ impl NamedTool for ChromeTool {
             .map_err(Self::map_error)?;
 
         match args.action {
+            ChromeAction::Install => {
+                let (detected, install) = self
+                    .manager
+                    .install_driver()
+                    .await
+                    .map_err(Self::map_error)?;
+
+                Ok(json!({
+                    "action": "install",
+                    "browser_version": detected.browser_version,
+                    "driver_version": install.driver_version,
+                    "driver_path": install.patched_driver,
+                    "cache_hit": install.cache_hit,
+                }))
+            }
             ChromeAction::Open => {
                 let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
                     tool_name: "chrome".to_string(),

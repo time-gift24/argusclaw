@@ -1,5 +1,4 @@
 mod error;
-mod install_tool;
 mod installer;
 mod manager;
 mod models;
@@ -8,7 +7,6 @@ mod policy;
 mod session;
 mod tool;
 
-pub use install_tool::ChromeInstallTool;
 pub use tool::ChromeTool;
 
 #[cfg(test)]
@@ -24,7 +22,6 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::error::ChromeToolError;
-    use super::install_tool::ChromeInstallTool;
     use super::installer::{ChromeInstaller, ChromePaths, DriverDownloader};
     use super::manager::{
         BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
@@ -176,11 +173,18 @@ mod tests {
     }
 
     #[test]
+    fn install_is_allowed_by_readonly_policy() {
+        ExplorePolicy::readonly()
+            .validate_action(ChromeAction::Install)
+            .unwrap();
+    }
+
+    #[test]
     fn chrome_tool_definition_lists_only_readonly_actions() {
         let tool = ChromeTool::new_for_test(Arc::new(FakeChromeManager));
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
-        assert!(def.description.contains("read-only"));
+        assert!(def.description.contains("explicit driver install"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
             .as_array()
@@ -195,6 +199,7 @@ mod tests {
         assert!(action_values.contains(&"list_links"));
         assert!(action_values.contains(&"get_dom_summary"));
         assert!(action_values.contains(&"screenshot"));
+        assert!(action_values.contains(&"install"));
         assert!(!action_values.contains(&"click"));
 
         assert!(def.parameters["properties"].get("session_id").is_some());
@@ -225,6 +230,7 @@ mod tests {
         assert!(action_values.contains(&"type"));
         assert!(action_values.contains(&"get_url"));
         assert!(action_values.contains(&"get_cookies"));
+        assert!(action_values.contains(&"install"));
         assert!(def.parameters["properties"].get("text").is_some());
     }
 
@@ -349,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chrome_install_tool_installs_and_reports_result() {
+    async fn chrome_tool_install_installs_and_reports_result() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -358,9 +364,13 @@ mod tests {
             "Managed Example",
         ));
         let downloader = SpyManagedDownloader::with_zip_bytes(fake_driver_zip());
-        let tool = ChromeInstallTool::new_with_components_for_test(host, downloader, paths.clone());
+        let tool =
+            ChromeTool::new_with_managed_components_for_test(host, downloader, paths.clone());
 
-        let result = tool.execute(json!({}), make_ctx()).await.unwrap();
+        let result = tool
+            .execute(json!({ "action": "install" }), make_ctx())
+            .await
+            .unwrap();
 
         assert_eq!(result["browser_version"], "124");
         assert_eq!(result["driver_version"], "124.0.6367.91");
@@ -371,7 +381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chrome_install_tool_reuses_cached_driver_without_network() {
+    async fn chrome_tool_install_reuses_cached_driver_without_network() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -387,9 +397,13 @@ mod tests {
         .await
         .unwrap();
         let downloader = SpyManagedDownloader::new(HashMap::new());
-        let tool = ChromeInstallTool::new_with_components_for_test(host, downloader.clone(), paths);
+        let tool =
+            ChromeTool::new_with_managed_components_for_test(host, downloader.clone(), paths);
 
-        let result = tool.execute(json!({}), make_ctx()).await.unwrap();
+        let result = tool
+            .execute(json!({ "action": "install" }), make_ctx())
+            .await
+            .unwrap();
 
         assert_eq!(result["cache_hit"], true);
         assert!(downloader.requests.lock().unwrap().is_empty());
@@ -426,7 +440,7 @@ mod tests {
             err,
             ToolError::ExecutionFailed { tool_name, reason }
                 if tool_name == "chrome"
-                    && reason.contains("chrome_install")
+                    && reason.contains("action: install")
                     && reason.contains("not installed")
         ));
         assert!(host.open_calls.lock().unwrap().is_empty());

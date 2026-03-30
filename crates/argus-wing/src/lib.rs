@@ -248,8 +248,8 @@ impl ArgusWing {
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
     pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
-            ApplyPatchTool, ChromeInstallTool, ChromeTool, GlobTool, GrepTool, HttpTool,
-            ListDirTool, ReadTool, ShellTool, WriteFileTool,
+            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
+            ShellTool, WriteFileTool,
         };
 
         self.tool_manager.register(Arc::new(ShellTool::new()));
@@ -260,8 +260,6 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(WriteFileTool::new()));
         self.tool_manager.register(Arc::new(ListDirTool::new()));
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
-        self.tool_manager
-            .register(Arc::new(ChromeInstallTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
 
@@ -715,8 +713,9 @@ mod tests {
 
         assert!(action_values.contains(&"click"));
         assert!(action_values.contains(&"type"));
+        assert!(action_values.contains(&"install"));
         assert!(definition.parameters["properties"].get("text").is_some());
-        assert!(wing.tool_manager().get("chrome_install").is_some());
+        assert!(wing.tool_manager().get("chrome_install").is_none());
     }
 
     #[tokio::test]

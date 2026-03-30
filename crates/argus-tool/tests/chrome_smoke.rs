@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::ids::ThreadId;
-use argus_tool::{ChromeInstallTool, ChromeTool, ToolManager};
+use argus_tool::{ChromeTool, ToolManager};
 use tokio::sync::{broadcast, mpsc};
 
 fn chrome_binary_candidates() -> Vec<PathBuf> {
@@ -82,13 +82,16 @@ async fn smoke_test_skips_without_env_flag() {
     }
 
     let manager = ToolManager::new();
-    manager.register(Arc::new(ChromeInstallTool::new()));
     manager.register(Arc::new(ChromeTool::new()));
 
     manager
-        .execute("chrome_install", serde_json::json!({}), make_ctx())
+        .execute(
+            "chrome",
+            serde_json::json!({ "action": "install" }),
+            make_ctx(),
+        )
         .await
-        .expect("chrome_install should succeed");
+        .expect("chrome install should succeed");
 
     let open = manager
         .execute(

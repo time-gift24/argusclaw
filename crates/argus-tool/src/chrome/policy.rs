@@ -11,6 +11,7 @@ impl ExplorePolicy {
     #[must_use]
     pub fn readonly() -> Self {
         let allowed = HashSet::from([
+            ChromeAction::Install,
             ChromeAction::Open,
             ChromeAction::Wait,
             ChromeAction::ExtractText,
@@ -24,6 +25,7 @@ impl ExplorePolicy {
     #[must_use]
     pub fn interactive() -> Self {
         let allowed = HashSet::from([
+            ChromeAction::Install,
             ChromeAction::Open,
             ChromeAction::Wait,
             ChromeAction::ExtractText,
