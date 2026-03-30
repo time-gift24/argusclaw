@@ -81,6 +81,7 @@ const ComposerAction: FC = () => {
 
   const handleCancel = () => {
     aui.thread().cancelRun();
+    useChatStore.getState().cancelTurn();
   };
 
   return (

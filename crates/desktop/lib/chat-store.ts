@@ -517,6 +517,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  async cancelTurn() {
+    const state = get();
+    const sessionKey = state.activeSessionKey;
+    if (!sessionKey) return;
+    const session = state.sessionsByKey[sessionKey];
+    if (!session || session.status !== "running") return;
+
+    try {
+      await chat.cancelTurn(session.sessionId, session.threadId);
+    } catch (error) {
+      console.error("取消 turn 失败:", error);
+    }
+  },
+
   async refreshSnapshot(
     sessionKey: string,
     options?: { preserveError?: boolean },

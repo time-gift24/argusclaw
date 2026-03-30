@@ -542,6 +542,17 @@ impl ArgusWing {
             .await
     }
 
+    /// Cancel the active turn on a thread.
+    pub async fn cancel_turn(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        self.session_manager
+            .cancel_thread(session_id, &thread_id)
+            .await
+    }
+
     /// Get the thread message history, recovering persisted turn summaries when needed.
     pub async fn get_thread_messages(
         &self,
