@@ -13,7 +13,7 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use async_trait::async_trait;
 
 use super::error::CompactError;
-use crate::tokenizer::{count_text_tokens, count_total_tokens};
+use crate::tokenizer::{count_total_tokens, estimate_tokens};
 
 /// Context for compaction operations.
 ///
@@ -87,11 +87,6 @@ pub trait Compactor: Send + Sync {
 
     /// Name of the compactor strategy.
     fn name(&self) -> &'static str;
-}
-
-/// Estimate token count for a string using the shared GPT-2 BPE tokenizer.
-pub fn estimate_tokens(content: &str) -> Result<u32, crate::TokenizationError> {
-    count_text_tokens(content)
 }
 
 // ---------------------------------------------------------------------------

@@ -86,10 +86,10 @@ pub use turn::{Turn, TurnBuilder, TurnCancellation};
 pub use command::ThreadRuntimeSnapshot;
 pub use compact::{
     CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
-    estimate_tokens,
 };
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError, TokenizationError};
+pub use tokenizer::estimate_tokens;
 pub use plan_store::FilePlanStore;
 pub use thread::{Thread, ThreadBuilder};
 pub use thread_handle::ThreadHandle;

@@ -11,7 +11,17 @@ const GPT2_ASSET_DIR: &str = "assets/gpt2";
 const GPT2_VOCAB_FILE: &str = "vocab.json";
 const GPT2_MERGES_FILE: &str = "merges.txt";
 
+/// Global tokenizer singleton.
+///
+/// Uses `OnceLock` so the GPT-2 BPE tokenizer is loaded exactly once.
+/// If initialization fails (e.g. missing assets), the error is permanently cached —
+/// subsequent calls will return the same error without retrying.
 static TOKENIZER: OnceLock<Result<Tokenizer, TokenizationError>> = OnceLock::new();
+
+/// Estimate token count for a string using the shared GPT-2 BPE tokenizer.
+pub fn estimate_tokens(content: &str) -> Result<u32, TokenizationError> {
+    count_text_tokens(content)
+}
 
 pub(crate) fn count_text_tokens(content: &str) -> Result<u32, TokenizationError> {
     let tokenizer = shared_tokenizer()?;
@@ -51,6 +61,7 @@ fn shared_tokenizer() -> Result<&'static Tokenizer, TokenizationError> {
 
 fn build_default_tokenizer() -> Result<Tokenizer, TokenizationError> {
     let (vocab_path, merges_path) = tokenizer_asset_paths();
+    tracing::debug!(vocab = %vocab_path.display(), merges = %merges_path.display(), "loading BPE tokenizer assets");
     build_tokenizer_from_paths(&vocab_path, &merges_path)
 }
 
