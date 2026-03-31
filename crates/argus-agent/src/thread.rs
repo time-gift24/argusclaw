@@ -22,7 +22,6 @@ use super::error::ThreadError;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
-use crate::tokenizer::count_total_tokens;
 
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -349,12 +348,6 @@ impl Thread {
         self.updated_at = updated_at;
     }
 
-    /// Recalculate token count from messages.
-    pub fn recalculate_token_count(&mut self) -> Result<(), ThreadError> {
-        self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
-        Ok(())
-    }
-
     fn apply_turn_output(&mut self, output: TurnOutput) {
         self.messages = output.messages;
         // Use the authoritative token count from LLMProvider's response,
@@ -451,7 +444,6 @@ impl Thread {
         };
 
         self.messages.push(ChatMessage::user(user_input));
-        self.recalculate_token_count()?;
         match self.build_turn(effective_record, cancellation) {
             Ok(turn) => Ok(turn),
             Err(error) => {
@@ -559,7 +551,6 @@ mod tests {
     use crate::error::CompactError;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
-    use crate::tokenizer::count_total_tokens;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
     use async_trait::async_trait;
@@ -750,10 +741,13 @@ mod tests {
         ["test"; 10].join(" ")
     }
 
-    fn token_count_for_messages(messages: &[ChatMessage]) -> u32 {
-        count_total_tokens(messages.iter().map(|message| message.content.as_str()))
-            .expect("tokenization should succeed")
-    }
+    /// Token count sufficient to trigger compaction at a low threshold.
+    /// Used in tests where compaction should fire.
+    const HIGH_TOKEN_COUNT: u32 = 90;
+
+    /// Token count that will not trigger compaction.
+    /// Used in tests where compaction should NOT fire.
+    const LOW_TOKEN_COUNT: u32 = 10;
 
     async fn wait_for_idle_events(
         thread: &Arc<tokio::sync::RwLock<Thread>>,
@@ -820,13 +814,6 @@ mod tests {
             .agent_record(test_agent_record())
             .build();
         assert!(matches!(result, Err(ThreadError::SessionIdNotSet)));
-    }
-
-    #[test]
-    fn estimate_tokens_reasonable() {
-        assert_eq!(crate::estimate_tokens("test").unwrap(), 1);
-        assert_eq!(crate::estimate_tokens("test test").unwrap(), 2);
-        assert_eq!(crate::estimate_tokens("").unwrap(), 0);
     }
 
     #[test]
@@ -1149,11 +1136,10 @@ mod tests {
             ChatMessage::user(repeated.clone()),
             ChatMessage::user(repeated.clone()),
         ];
-        let expected_compacted_token_count =
-            crate::estimate_tokens(&repeated).expect("tokenization should succeed");
+        let expected_compacted_token_count = HIGH_TOKEN_COUNT / 3; // proportional: 90 * 1 / 3 = 30
         thread.hydrate_from_persisted_state(
             persisted_messages.clone(),
-            token_count_for_messages(&persisted_messages),
+            HIGH_TOKEN_COUNT,
             0,
             Utc::now(),
         );
@@ -1197,7 +1183,7 @@ mod tests {
         let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
         thread.hydrate_from_persisted_state(
             persisted_messages.clone(),
-            token_count_for_messages(&persisted_messages),
+            LOW_TOKEN_COUNT,
             0,
             Utc::now(),
         );
@@ -1233,7 +1219,7 @@ mod tests {
         ];
         thread.hydrate_from_persisted_state(
             persisted_messages.clone(),
-            token_count_for_messages(&persisted_messages),
+            HIGH_TOKEN_COUNT,
             0,
             Utc::now(),
         );
