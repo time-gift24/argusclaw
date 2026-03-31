@@ -27,7 +27,8 @@ mod tests {
         BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
     };
     use super::models::{
-        ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, NetworkRequestSummary, PageMetadata,
+        ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, NetworkRequestSummary,
+        PageMetadata,
     };
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
@@ -207,11 +208,7 @@ mod tests {
 
         assert!(def.parameters["properties"].get("session_id").is_some());
         assert!(def.parameters["properties"].get("selector").is_some());
-        assert!(
-            def.parameters["properties"]
-                .get("max_requests")
-                .is_some()
-        );
+        assert!(def.parameters["properties"].get("max_requests").is_some());
         assert!(def.parameters["properties"].get("text").is_none());
     }
 

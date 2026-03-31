@@ -290,7 +290,9 @@ fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError>
 }
 
 fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if let Some(max_requests) = args.max_requests && max_requests == 0 {
+    if let Some(max_requests) = args.max_requests
+        && max_requests == 0
+    {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
                 "field 'max_requests' must be greater than 0 for action '{}'",

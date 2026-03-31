@@ -1222,7 +1222,10 @@ mod tests {
             .await
             .unwrap();
 
-        let requests = manager.network_requests(&opened.session_id, None).await.unwrap();
+        let requests = manager
+            .network_requests(&opened.session_id, None)
+            .await
+            .unwrap();
         assert!(requests.is_empty());
     }
 
@@ -1292,10 +1295,7 @@ mod tests {
             ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
         ));
 
-        let err = manager
-            .network_requests("missing", None)
-            .await
-            .unwrap_err();
+        let err = manager.network_requests("missing", None).await.unwrap_err();
         assert!(matches!(
             err,
             ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
