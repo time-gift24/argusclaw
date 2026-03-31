@@ -300,6 +300,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -343,6 +344,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -359,6 +361,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -382,6 +385,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });

@@ -111,6 +111,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         })

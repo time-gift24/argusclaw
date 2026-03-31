@@ -14,6 +14,7 @@ use argus_protocol::llm::SecretString;
 mod account;
 mod agent;
 mod job;
+mod knowledge_repo;
 mod llm_provider;
 mod session;
 mod thread;

@@ -41,8 +41,8 @@ use argus_protocol::{
     ThreadPoolState,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, SessionRepository,
-    ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, KnowledgeRepoRepository,
+    LlmProviderRepository, SessionRepository, ThreadRepository,
 };
 
 use argus_repository::types::JobId;
@@ -77,6 +77,7 @@ pub struct ArgusWing {
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
     pub account_manager: Arc<AccountManager>,
+    knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository>,
 }
 
 impl ArgusWing {
@@ -163,6 +164,9 @@ impl ArgusWing {
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
+            Arc::new(ArgusSqlite::new(pool.clone()));
+
         Ok(Arc::new(Self {
             pool,
             provider_manager,
@@ -173,6 +177,7 @@ impl ArgusWing {
             compactor_manager,
             job_manager,
             account_manager,
+            knowledge_repo_repo,
         }))
     }
 
@@ -226,6 +231,9 @@ impl ArgusWing {
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
+            Arc::new(ArgusSqlite::new(pool.clone()));
+
         Arc::new(Self {
             pool,
             provider_manager,
@@ -236,6 +244,7 @@ impl ArgusWing {
             compactor_manager,
             job_manager,
             account_manager,
+            knowledge_repo_repo,
         })
     }
 
@@ -668,6 +677,82 @@ impl ArgusWing {
                 parameters: def.parameters,
             })
             .collect()
+    }
+
+    // =========================================================================
+    // Knowledge Repo API
+    // =========================================================================
+
+    /// List all knowledge repos.
+    pub async fn list_knowledge_repos(
+        &self,
+    ) -> Result<Vec<argus_repository::types::KnowledgeRepoRecord>> {
+        self.knowledge_repo_repo
+            .list()
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Add or update a knowledge repo.
+    pub async fn upsert_knowledge_repo(&self, repo: &str, workspace: &str) -> Result<i64> {
+        self.knowledge_repo_repo
+            .upsert(repo, workspace)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Delete a knowledge repo by ID.
+    pub async fn delete_knowledge_repo(&self, id: i64) -> Result<bool> {
+        self.knowledge_repo_repo
+            .delete(id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// List workspace names bound to an agent.
+    pub async fn list_agent_knowledge_workspaces(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<String>> {
+        self.knowledge_repo_repo
+            .list_agent_workspaces(agent_id.inner())
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Set workspace bindings for an agent (replaces existing).
+    pub async fn set_agent_knowledge_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: Vec<String>,
+    ) -> Result<()> {
+        self.knowledge_repo_repo
+            .set_agent_workspaces(agent_id.inner(), &workspaces)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// List repos visible to a specific agent.
+    pub async fn list_knowledge_repos_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<argus_repository::types::KnowledgeRepoRecord>> {
+        self.knowledge_repo_repo
+            .list_repos_for_agent(agent_id.inner())
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
     }
 }
 

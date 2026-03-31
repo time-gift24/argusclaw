@@ -5,6 +5,7 @@ mod indexer;
 mod manifest;
 mod markdown;
 mod models;
+mod provider;
 mod registry;
 mod tool;
 
@@ -21,6 +22,7 @@ pub use models::{
     GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeNode, KnowledgeNodeKind,
     KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
+pub use provider::{FileKnowledgeRepoProvider, StaticKnowledgeRepoProvider};
 pub use registry::KnowledgeRepoRegistry;
 pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeRuntimeBackend, KnowledgeTool};
 
@@ -73,6 +75,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(argus_protocol::ToolExecutionContext {
             thread_id: ThreadId::new(),
+            agent_id: None,
             pipe_tx,
             control_tx,
         })
