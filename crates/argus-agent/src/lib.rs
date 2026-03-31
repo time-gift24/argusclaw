@@ -56,6 +56,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod execution;
+pub mod plan_hook;
 pub mod plan_store;
 pub mod plan_tool;
 mod runtime;
