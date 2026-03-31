@@ -135,7 +135,7 @@ impl KnowledgeRepoRepository for ArgusSqlite {
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
 
-        rows.iter().map(|r| row_to_record(r)).collect()
+        rows.iter().map(row_to_record).collect()
     }
 
     async fn delete(&self, id: i64) -> Result<bool, DbError> {
@@ -169,7 +169,7 @@ impl KnowledgeRepoRepository for ArgusSqlite {
             reason: e.to_string(),
         })?;
 
-        rows.iter().map(|r| row_to_record(r)).collect()
+        rows.iter().map(row_to_record).collect()
     }
 
     async fn set_agent_workspaces(
