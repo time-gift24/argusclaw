@@ -13,11 +13,12 @@ use argus_protocol::risk_level::RiskLevel;
 // Re-export from argus_protocol
 pub use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
-pub mod clap_tool;
 mod chrome;
+pub mod clap_tool;
 pub mod glob;
 pub mod grep;
 pub mod http;
+pub mod knowledge;
 pub mod list;
 pub mod patch;
 pub mod path_utils;
@@ -31,13 +32,13 @@ pub use clap_tool::{ClapExecutor, ClapTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use http::HttpTool;
+pub use knowledge::KnowledgeTool;
 pub use list::ListDirTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadTool;
 pub use scheduler::{
-    DispatchJobTool, GetJobResultTool, ListSubagentsTool, SchedulerBackend,
-    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
-    SchedulerSubagent, SchedulerTool,
+    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
+    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool,
 };
 pub use shell::ShellTool;
 pub use write::WriteFileTool;
@@ -298,6 +299,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -341,6 +343,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -357,6 +360,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -380,6 +384,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });

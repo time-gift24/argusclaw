@@ -111,6 +111,7 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
+            agent_id: None,
             pipe_tx: tx,
             control_tx,
         })
@@ -143,7 +144,12 @@ mod tests {
         let defs = params.get("$defs").unwrap().as_object().unwrap();
         assert!(defs.contains_key("PlanItemArg"));
         let plan_item = defs["PlanItemArg"].as_object().unwrap();
-        assert!(plan_item["properties"].as_object().unwrap().contains_key("status"));
+        assert!(
+            plan_item["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("status")
+        );
     }
 
     #[tokio::test]

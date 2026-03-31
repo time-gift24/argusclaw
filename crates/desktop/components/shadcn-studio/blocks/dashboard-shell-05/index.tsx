@@ -18,6 +18,7 @@ import {
   Sun,
   Moon,
   PanelLeft,
+  BookOpen,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 
@@ -134,6 +135,18 @@ export default function DashboardShell({
             >
               <Cloud className="h-4 w-4 shrink-0" />
               {!isSidebarCollapsed && <span className="whitespace-nowrap">模型配置</span>}
+            </Link>
+            <Link
+              href="/settings/knowledge"
+              className={cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
+                pathname.startsWith("/settings/knowledge")
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground"
+              )}
+            >
+              <BookOpen className="h-4 w-4 shrink-0" />
+              {!isSidebarCollapsed && <span className="whitespace-nowrap">知识仓库</span>}
             </Link>
           </nav>
         </div>
@@ -292,6 +305,14 @@ export default function DashboardShell({
                 >
                   <Cloud className="h-4 w-4" />
                   模型配置
+                </Link>
+                <Link
+                  href="/settings/knowledge"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
+                >
+                  <BookOpen className="h-4 w-4" />
+                  知识仓库
                 </Link>
              </nav>
           </div>

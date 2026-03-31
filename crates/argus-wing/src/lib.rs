@@ -41,8 +41,8 @@ use argus_protocol::{
     ThreadPoolState,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, SessionRepository,
-    ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, KnowledgeRepoRepository,
+    LlmProviderRepository, SessionRepository, ThreadRepository,
 };
 
 use argus_repository::types::JobId;
@@ -53,6 +53,7 @@ use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
+pub use argus_repository::types::KnowledgeRepoRecord;
 pub use resolver::ProviderManagerResolver;
 
 /// Default agent display name for the ArgusWing template.
@@ -77,6 +78,7 @@ pub struct ArgusWing {
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
     pub account_manager: Arc<AccountManager>,
+    knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository>,
 }
 
 impl ArgusWing {
@@ -163,6 +165,9 @@ impl ArgusWing {
         // Create approval manager
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
+            Arc::new(ArgusSqlite::new(pool.clone()));
+
         Ok(Arc::new(Self {
             pool,
             provider_manager,
@@ -173,6 +178,7 @@ impl ArgusWing {
             compactor_manager,
             job_manager,
             account_manager,
+            knowledge_repo_repo,
         }))
     }
 
@@ -226,6 +232,9 @@ impl ArgusWing {
         ));
         let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
 
+        let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
+            Arc::new(ArgusSqlite::new(pool.clone()));
+
         Arc::new(Self {
             pool,
             provider_manager,
@@ -236,6 +245,7 @@ impl ArgusWing {
             compactor_manager,
             job_manager,
             account_manager,
+            knowledge_repo_repo,
         })
     }
 
@@ -248,8 +258,8 @@ impl ArgusWing {
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
     pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
-            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
-            ShellTool, WriteFileTool,
+            ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, KnowledgeTool, ListDirTool,
+            ReadTool, ShellTool, WriteFileTool,
         };
 
         self.tool_manager.register(Arc::new(ShellTool::new()));
@@ -262,6 +272,7 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
+        self.tool_manager.register(Arc::new(KnowledgeTool::new()));
 
         Ok(())
     }
@@ -668,6 +679,82 @@ impl ArgusWing {
             })
             .collect()
     }
+
+    // =========================================================================
+    // Knowledge Repo API
+    // =========================================================================
+
+    /// List all knowledge repos.
+    pub async fn list_knowledge_repos(
+        &self,
+    ) -> Result<Vec<argus_repository::types::KnowledgeRepoRecord>> {
+        self.knowledge_repo_repo
+            .list()
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Add or update a knowledge repo.
+    pub async fn upsert_knowledge_repo(
+        &self,
+        record: argus_repository::types::KnowledgeRepoRecord,
+    ) -> Result<i64> {
+        self.knowledge_repo_repo
+            .upsert(&record)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Delete a knowledge repo by ID.
+    pub async fn delete_knowledge_repo(&self, id: i64) -> Result<bool> {
+        self.knowledge_repo_repo
+            .delete(id)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// List workspace names bound to an agent.
+    pub async fn list_agent_knowledge_workspaces(&self, agent_id: AgentId) -> Result<Vec<String>> {
+        self.knowledge_repo_repo
+            .list_agent_workspaces(agent_id.inner())
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Set workspace bindings for an agent (replaces existing).
+    pub async fn set_agent_knowledge_workspaces(
+        &self,
+        agent_id: AgentId,
+        workspaces: Vec<String>,
+    ) -> Result<()> {
+        self.knowledge_repo_repo
+            .set_agent_workspaces(agent_id.inner(), &workspaces)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
+    /// List repos visible to a specific agent.
+    pub async fn list_knowledge_repos_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<argus_repository::types::KnowledgeRepoRecord>> {
+        self.knowledge_repo_repo
+            .list_repos_for_agent(agent_id.inner())
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
 }
 
 // =========================================================================
@@ -716,6 +803,46 @@ mod tests {
         assert!(action_values.contains(&"install"));
         assert!(definition.parameters["properties"].get("text").is_some());
         assert!(wing.tool_manager().get("chrome_install").is_none());
+    }
+
+    #[tokio::test]
+    async fn knowledge_repo_api_preserves_full_descriptor_fields() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("knowledge.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let record = argus_repository::types::KnowledgeRepoRecord {
+            id: 0,
+            repo: "acme/docs".to_string(),
+            repo_id: "acme-docs".to_string(),
+            provider: "github".to_string(),
+            owner: "acme".to_string(),
+            name: "docs".to_string(),
+            default_branch: "trunk".to_string(),
+            manifest_paths: vec![
+                "knowledge.json".to_string(),
+                "docs/knowledge.json".to_string(),
+            ],
+            workspace: "payments".to_string(),
+        };
+
+        let id = wing
+            .upsert_knowledge_repo(record.clone())
+            .await
+            .expect("knowledge repo should upsert");
+
+        let repos = wing
+            .list_knowledge_repos()
+            .await
+            .expect("knowledge repos should list");
+
+        assert_eq!(
+            repos,
+            vec![argus_repository::types::KnowledgeRepoRecord { id, ..record }]
+        );
     }
 
     #[tokio::test]
@@ -1372,6 +1499,7 @@ mod tests {
             "glob",
             "grep",
             "http",
+            "knowledge",
             "list_dir",
             "read",
             "shell",
