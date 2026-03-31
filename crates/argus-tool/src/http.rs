@@ -24,18 +24,24 @@ use url::Url;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HttpArgs {
+    /// Target URL (HTTPS only, no localhost/private IPs)
     url: String,
+    /// HTTP method (GET/POST/PUT/DELETE/PATCH/HEAD). Default: GET
     #[serde(default = "default_method")]
     method: String,
+    /// HTTP headers as key-value pairs
     #[serde(default)]
     headers: std::collections::HashMap<String, String>,
+    /// Request body. Can be any JSON value. Strings are sent as-is; other values are JSON-serialized.
     #[serde(default)]
     body: Option<serde_json::Value>,
+    /// Timeout in seconds. Default: 30, max: 300
     #[serde(default = "default_timeout")]
     timeout: u64,
+    /// Optional file path to save response body to
     #[serde(default)]
     save_to: Option<String>,
 }
@@ -185,38 +191,8 @@ impl NamedTool for HttpTool {
             description: "Make HTTP requests to URLs with SSRF protection. \
                 Only HTTPS URLs are allowed. Returns status, headers, and body."
                 .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "Target URL (HTTPS only, no localhost/private IPs)",
-                    },
-                    "method": {
-                        "type": "string",
-                        "description": "HTTP method (GET/POST/PUT/DELETE/PATCH/HEAD). Default: GET",
-                        "default": "GET",
-                    },
-                    "headers": {
-                        "type": "object",
-                        "description": "HTTP headers as key-value pairs",
-                        "additionalProperties": { "type": "string" },
-                    },
-                    "body": {
-                        "description": "Request body. Can be any JSON value. Strings are sent as-is; other values are JSON-serialized.",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds. Default: 30, max: 300",
-                        "default": 30,
-                    },
-                    "save_to": {
-                        "type": "string",
-                        "description": "Optional file path to save response body to.",
-                    },
-                },
-                "required": ["url"],
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(HttpArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 
@@ -563,6 +539,6 @@ mod tests {
         let def = tool.definition();
         let params = &def.parameters;
         let props = params.get("properties").and_then(|p| p.as_object());
-        assert!(props.is_some_and(|p| p.contains_key("save_to")));
+        assert!(props.is_some_and(|p| p.contains_key("saveTo")));
     }
 }

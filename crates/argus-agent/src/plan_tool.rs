@@ -47,36 +47,8 @@ impl NamedTool for UpdatePlanTool {
         ToolDefinition {
             name: "update_plan".to_string(),
             description: "Update the task plan for this thread. The LLM sends the complete plan on each call, which fully overwrites the previous state. Use this to track and report progress on multi-step tasks.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "explanation": {
-                        "type": "string",
-                        "description": "Optional explanation for this plan update (logged but not stored)"
-                    },
-                    "plan": {
-                        "type": "array",
-                        "description": "The complete plan snapshot",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "step": {
-                                    "type": "string",
-                                    "description": "Description of the step"
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["pending", "in_progress", "completed"],
-                                    "description": "Current status of the step"
-                                }
-                            },
-                            "required": ["step", "status"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["plan"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(UpdatePlanArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 
@@ -167,13 +139,11 @@ mod tests {
                 .unwrap()
                 .contains_key("plan")
         );
-        let plan_schema = params["properties"]["plan"].as_object().unwrap();
-        assert!(
-            plan_schema["items"].as_object().unwrap()["properties"]
-                .as_object()
-                .unwrap()
-                .contains_key("status")
-        );
+        // schemars uses $ref for nested types; PlanItemArg is in $defs
+        let defs = params.get("$defs").unwrap().as_object().unwrap();
+        assert!(defs.contains_key("PlanItemArg"));
+        let plan_item = defs["PlanItemArg"].as_object().unwrap();
+        assert!(plan_item["properties"].as_object().unwrap().contains_key("status"));
     }
 
     #[tokio::test]

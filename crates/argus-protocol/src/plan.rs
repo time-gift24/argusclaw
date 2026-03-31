@@ -3,10 +3,11 @@
 //! Shared types for plan serialization/deserialization between argus-thread and
 //! external consumers (UI reads plan from Thread).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Status of a plan step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     /// Step has not been started.
@@ -18,7 +19,7 @@ pub enum StepStatus {
 }
 
 /// A single item in a plan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanItemArg {
     /// The step description.
@@ -28,7 +29,7 @@ pub struct PlanItemArg {
 }
 
 /// Arguments for the `update_plan` tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatePlanArgs {
     /// Optional explanation for the plan update (logged, not stored).

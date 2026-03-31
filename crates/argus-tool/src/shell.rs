@@ -210,6 +210,20 @@ fn has_command_token(lower: &str, token: &str) -> bool {
     false
 }
 
+/// Arguments for the shell tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ShellArgs {
+    /// The shell command to execute
+    command: String,
+    /// Timeout in seconds (optional, default 120)
+    #[serde(default)]
+    timeout: Option<u64>,
+    /// Working directory for the command (optional)
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
 /// Shell command execution tool with risk level Critical.
 pub struct ShellTool {
     timeout_secs: u64,
@@ -266,24 +280,8 @@ impl NamedTool for ShellTool {
             description:
                 "Execute a shell command. Commands run in a subprocess with captured output."
                     .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute"
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, default 120)"
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Working directory for the command (optional)"
-                    }
-                },
-                "required": ["command"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(ShellArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

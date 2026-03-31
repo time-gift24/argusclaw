@@ -25,6 +25,20 @@ use crate::path_utils::validate_path;
 /// Maximum file size for reading (1MB).
 const MAX_READ_SIZE: u64 = 1024 * 1024;
 
+/// Arguments for the read tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ReadArgs {
+    /// Path to the file to read
+    path: String,
+    /// Line number to start reading from (1-indexed, optional, default: 1)
+    #[serde(default)]
+    offset: Option<u32>,
+    /// Maximum number of lines to read (optional)
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
 /// Read tool implementation — reads file contents with path validation and size limit.
 pub struct ReadTool;
 
@@ -55,24 +69,8 @@ impl NamedTool for ReadTool {
                 "Read a file from the filesystem. Returns file content as text with line numbers. \
                  For large files, specify offset and limit to read a portion."
                     .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read"
-                    },
-                    "offset": {
-                        "type": "number",
-                        "description": "Line number to start reading from (1-indexed, optional, default: 1)"
-                    },
-                    "limit": {
-                        "type": "number",
-                        "description": "Maximum number of lines to read (optional)"
-                    }
-                },
-                "required": ["path"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(ReadArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -73,7 +74,7 @@ impl std::fmt::Display for ThreadId {
 }
 
 /// Agent ID - INTEGER auto-increment from database
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct AgentId(pub i64);
 
 impl AgentId {
