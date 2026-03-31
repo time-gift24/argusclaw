@@ -2,6 +2,7 @@ use std::net::IpAddr;
 
 use argus_protocol::is_blocked_ip;
 use serde::Deserialize;
+use serde_json::Value;
 use url::Url;
 
 use super::error::ChromeToolError;
@@ -14,8 +15,8 @@ pub enum ChromeAction {
     Wait,
     ExtractText,
     ListLinks,
+    NetworkRequests,
     GetDomSummary,
-    Screenshot,
     Click,
     Type,
     GetUrl,
@@ -31,8 +32,8 @@ impl ChromeAction {
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
             Self::ListLinks => "list_links",
+            Self::NetworkRequests => "network_requests",
             Self::GetDomSummary => "get_dom_summary",
-            Self::Screenshot => "screenshot",
             Self::Click => "click",
             Self::Type => "type",
             Self::GetUrl => "get_url",
@@ -53,6 +54,8 @@ pub struct ChromeToolArgs {
     pub selector: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_requests: Option<u32>,
     #[serde(default)]
     pub text: Option<String>,
 }
@@ -81,7 +84,10 @@ impl ChromeToolArgs {
                             action: args.action.as_str().to_string(),
                             field: "url",
                         })?;
-                if args.session_id.is_some() || args.selector.is_some() || args.timeout_ms.is_some()
+                if args.session_id.is_some()
+                    || args.selector.is_some()
+                    || args.timeout_ms.is_some()
+                    || args.max_requests.is_some()
                 {
                     return Err(ChromeToolError::InvalidArguments {
                         reason: format!(
@@ -147,13 +153,13 @@ impl ChromeToolArgs {
                 require_session_id(&args)?;
                 validate_for_list_links(&args)?;
             }
+            ChromeAction::NetworkRequests => {
+                require_session_id(&args)?;
+                validate_for_network_requests(&args)?;
+            }
             ChromeAction::GetDomSummary => {
                 require_session_id(&args)?;
                 validate_for_dom_summary(&args)?;
-            }
-            ChromeAction::Screenshot => {
-                require_session_id(&args)?;
-                validate_for_screenshot(&args)?;
             }
             ChromeAction::Click => {
                 require_session_id(&args)?;
@@ -209,6 +215,16 @@ pub struct CookieSummary {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NetworkRequestSummary {
+    pub method: String,
+    pub url: String,
+    pub status: Option<u16>,
+    pub request_headers: Value,
+    pub response_headers: Value,
+    pub error: Option<String>,
+}
+
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
     value
         .as_deref()
@@ -228,10 +244,10 @@ fn require_session_id(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.selector.is_some() {
+    if args.url.is_some() || args.selector.is_some() || args.max_requests.is_some() {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
-                "fields 'url' and 'selector' are not allowed for action '{}'",
+                "fields 'url', 'selector', and 'max_requests' are not allowed for action '{}'",
                 args.action.as_str()
             ),
         });
@@ -244,6 +260,7 @@ fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
         || args.session_id.is_some()
         || args.selector.is_some()
         || args.timeout_ms.is_some()
+        || args.max_requests.is_some()
         || args.text.is_some()
     {
         return Err(ChromeToolError::InvalidArguments {
@@ -257,58 +274,51 @@ fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_extract_text(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.timeout_ms.is_some() {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "fields 'url' and 'timeout_ms' are not allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
-    Ok(())
+    reject_fields(
+        args,
+        &["url", "text", "timeout_ms", "max_requests"],
+        "fields 'url', 'text', 'timeout_ms', and 'max_requests' are not allowed",
+    )
 }
 
 fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.selector.is_some() || args.timeout_ms.is_some() {
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms", "max_requests"],
+        "only 'session_id' is allowed",
+    )
+}
+
+fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    if let Some(max_requests) = args.max_requests && max_requests == 0 {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(
-                "only 'session_id' is allowed for action '{}'",
+                "field 'max_requests' must be greater than 0 for action '{}'",
                 args.action.as_str()
             ),
         });
     }
-    Ok(())
+
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms"],
+        "only 'session_id' and 'max_requests' are allowed",
+    )
 }
 
 fn validate_for_dom_summary(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.selector.is_some() || args.timeout_ms.is_some() {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "only 'session_id' is allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
-    Ok(())
-}
-
-fn validate_for_screenshot(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.selector.is_some() || args.timeout_ms.is_some() {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "fields 'url', 'selector', and 'timeout_ms' are not allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
-    Ok(())
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms", "max_requests"],
+        "only 'session_id' is allowed",
+    )
 }
 
 fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("selector", &args.selector, args.action.as_str())?;
     reject_fields(
         args,
-        &["url", "text", "timeout_ms"],
+        &["url", "text", "timeout_ms", "max_requests"],
         "only 'session_id' and 'selector' are allowed",
     )
 }
@@ -318,7 +328,7 @@ fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("text", &args.text, args.action.as_str())?;
     reject_fields(
         args,
-        &["url", "timeout_ms"],
+        &["url", "timeout_ms", "max_requests"],
         "only 'session_id', 'selector', and 'text' are allowed",
     )
 }
@@ -326,7 +336,7 @@ fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     reject_fields(
         args,
-        &["url", "selector", "text", "timeout_ms"],
+        &["url", "selector", "text", "timeout_ms", "max_requests"],
         "only 'session_id' is allowed",
     )
 }
@@ -334,7 +344,7 @@ fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 fn validate_for_get_cookies(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     reject_fields(
         args,
-        &["url", "selector", "text", "timeout_ms"],
+        &["url", "selector", "text", "timeout_ms", "max_requests"],
         "only 'session_id' is allowed",
     )
 }
@@ -365,6 +375,7 @@ fn reject_fields(
             "selector" => args.selector.is_some(),
             "text" => args.text.is_some(),
             "timeout_ms" => args.timeout_ms.is_some(),
+            "max_requests" => args.max_requests.is_some(),
             _ => false,
         })
         .copied()

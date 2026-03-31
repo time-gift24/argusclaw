@@ -16,8 +16,8 @@ impl ExplorePolicy {
             ChromeAction::Wait,
             ChromeAction::ExtractText,
             ChromeAction::ListLinks,
+            ChromeAction::NetworkRequests,
             ChromeAction::GetDomSummary,
-            ChromeAction::Screenshot,
         ]);
         Self { allowed }
     }
@@ -30,8 +30,8 @@ impl ExplorePolicy {
             ChromeAction::Wait,
             ChromeAction::ExtractText,
             ChromeAction::ListLinks,
+            ChromeAction::NetworkRequests,
             ChromeAction::GetDomSummary,
-            ChromeAction::Screenshot,
             ChromeAction::Click,
             ChromeAction::Type,
             ChromeAction::GetUrl,
