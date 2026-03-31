@@ -760,6 +760,12 @@ impl Turn {
                 HookAction::Block(reason) => {
                     return Err(TurnError::LlmCallBlocked { reason });
                 }
+                HookAction::ContinueWithMessage(message) => {
+                    tracing::warn!(
+                        message = %message,
+                        "Hook returned ContinueWithMessage on BeforeCallLLM (ignored)"
+                    );
+                }
             }
 
             // Build the request with current messages and tools
@@ -836,8 +842,7 @@ impl Turn {
                         thread_id: Some(self.thread_id.clone()),
                         turn_number: Some(self.turn_number),
                     };
-                    // TurnEnd is observe-only, ignore errors
-                    let _ = self
+                    let turn_end_action = self
                         .fire_hooks(HookEvent::TurnEnd, &HookContext::ToolEvent(Box::new(ctx)))
                         .await;
 
@@ -854,6 +859,55 @@ impl Turn {
                             finish_reason: format!("{:?}", trace_response.finish_reason),
                         };
                         let _ = writer.write_event(&llm_resp_event).await;
+                    }
+
+                    let mut output = output;
+                    let continue_message = match turn_end_action {
+                        Ok(HookAction::ContinueWithMessage(message)) => Some(message),
+                        Ok(HookAction::Continue) => None,
+                        Ok(HookAction::Block(reason)) => {
+                            tracing::warn!(
+                                reason = %reason,
+                                "TurnEnd hook returned Block (ignored)"
+                            );
+                            None
+                        }
+                        Ok(other) => {
+                            tracing::warn!(
+                                action = ?other,
+                                "TurnEnd hook returned unsupported action (ignored)"
+                            );
+                            None
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "TurnEnd hook failed (ignored)"
+                            );
+                            None
+                        }
+                    };
+
+                    if let Some(message) = continue_message {
+                        messages = std::mem::take(&mut output.messages);
+                        messages.push(ChatMessage::user(&message));
+
+                        if let Some(writer) = trace_writer.as_mut() {
+                            let _ = writer
+                                .write_event(&TurnLogEvent::UserInput {
+                                    content: message.clone(),
+                                    role: "user".to_string(),
+                                })
+                                .await;
+                        }
+
+                        tracing::debug!(
+                            thread_id = %self.thread_id,
+                            turn_number = %self.turn_number,
+                            iteration = %iteration,
+                            "TurnEnd hook requested continuation with injected user message"
+                        );
+                        continue;
                     }
 
                     return Ok((output, trace_writer));
@@ -1445,6 +1499,12 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
+    use argus_protocol::{AgentId, AgentType, ProviderId};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
     use tokio::sync::broadcast;
 
     #[test]
@@ -1468,5 +1528,184 @@ mod tests {
         // Note: We can't easily test this without a mock provider
         // This is just a placeholder test to verify channel creation works
         let _ = (stream_tx, thread_event_tx);
+    }
+
+    #[derive(Debug)]
+    struct SequencedProvider {
+        responses: Mutex<Vec<CompletionResponse>>,
+    }
+
+    impl SequencedProvider {
+        fn new(responses: Vec<CompletionResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequencedProvider {
+        fn model_name(&self) -> &str {
+            "sequenced"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Ok(CompletionResponse {
+                    content: Some("done".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                });
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    struct ContinueOnceTurnEndHook {
+        used: Mutex<bool>,
+    }
+
+    impl ContinueOnceTurnEndHook {
+        fn new() -> Self {
+            Self {
+                used: Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HookHandler for ContinueOnceTurnEndHook {
+        async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
+            if ctx.event == HookEvent::TurnEnd {
+                let mut used = self.used.lock().unwrap();
+                if !*used {
+                    *used = true;
+                    return HookAction::ContinueWithMessage("continue".to_string());
+                }
+            }
+            HookAction::Continue
+        }
+    }
+
+    struct AlwaysContinueTurnEndHook;
+
+    #[async_trait]
+    impl HookHandler for AlwaysContinueTurnEndHook {
+        async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
+            if ctx.event == HookEvent::TurnEnd {
+                return HookAction::ContinueWithMessage("continue".to_string());
+            }
+            HookAction::Continue
+        }
+    }
+
+    fn make_agent_record() -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
+            id: AgentId::new(1),
+            display_name: "Test Agent".to_string(),
+            description: "A test agent".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: None,
+            system_prompt: "You are a test agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: None,
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        })
+    }
+
+    fn make_turn(
+        provider: Arc<dyn LlmProvider>,
+        hooks: Vec<Arc<dyn HookHandler>>,
+        max_iterations: u32,
+    ) -> Turn {
+        let (stream_tx, _stream_rx): (broadcast::Sender<TurnStreamEvent>, _) =
+            broadcast::channel(256);
+        let (thread_event_tx, _thread_event_rx): (broadcast::Sender<ThreadEvent>, _) =
+            broadcast::channel(256);
+
+        TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user("start")])
+            .provider(provider)
+            .hooks(hooks)
+            .config(TurnConfig {
+                max_iterations: Some(max_iterations),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .build()
+            .expect("turn should build")
+    }
+
+    #[tokio::test]
+    async fn turn_end_continue_with_message_triggers_next_iteration() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("second".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let turn = make_turn(provider, vec![Arc::new(ContinueOnceTurnEndHook::new())], 5);
+        let output = turn.execute().await.expect("turn should succeed");
+
+        assert!(output.messages.iter().any(|m| m.content == "first"));
+        assert!(output.messages.iter().any(|m| m.content == "continue"));
+        assert!(output.messages.iter().any(|m| m.content == "second"));
+    }
+
+    #[tokio::test]
+    async fn turn_end_always_continue_hits_max_iterations() {
+        let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
+            content: Some("loop".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }]));
+
+        let turn = make_turn(provider, vec![Arc::new(AlwaysContinueTurnEndHook)], 2);
+        let result = turn.execute().await;
+
+        assert!(matches!(result, Err(TurnError::MaxIterationsReached(2))));
     }
 }

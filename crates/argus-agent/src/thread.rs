@@ -19,6 +19,7 @@ use argus_tool::ToolManager;
 use super::compact::{CompactContext, Compactor};
 use super::config::ThreadConfig;
 use super::error::ThreadError;
+use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
@@ -506,11 +507,14 @@ impl Thread {
             self.plan_store.clone(),
         ))));
 
-        let hooks: Vec<Arc<dyn HookHandler>> = self
+        let mut hooks: Vec<Arc<dyn HookHandler>> = self
             .hooks
             .as_ref()
             .map(|registry| registry.all_handlers())
             .unwrap_or_default();
+        hooks.push(Arc::new(PlanContinuationHook::new(Arc::new(
+            self.plan_store.clone(),
+        ))));
 
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);

@@ -4,7 +4,7 @@
 //! - `BeforeCallLLM`: Can modify messages and tools before each LLM call
 //! - `BeforeToolCall`: Can block tool execution
 //! - `AfterToolCall`: Observe tool results
-//! - `TurnEnd`: Observe turn completion
+//! - `TurnEnd`: Observe turn completion and optionally request loop continuation
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -44,6 +44,8 @@ pub enum HookAction {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     },
+    /// Continue the turn loop with an injected user message (TurnEnd only).
+    ContinueWithMessage(String),
 }
 
 /// Context for BeforeCallLLM hook - allows access to messages and tools.
@@ -96,7 +98,8 @@ pub trait HookHandler: Send + Sync {
     /// Handle tool-related events (BeforeToolCall, AfterToolCall, TurnEnd).
     ///
     /// For `BeforeToolCall`: returning `Block(reason)` prevents tool execution.
-    /// For other events: return value is ignored (observe-only).
+    /// For `TurnEnd`: `ContinueWithMessage` can be interpreted by turn executors.
+    /// For other events: return value is observe-only.
     async fn on_tool_event(&self, _ctx: &ToolHookContext) -> HookAction {
         HookAction::Continue
     }
@@ -182,6 +185,12 @@ impl HookRegistry {
                     current_messages = messages;
                     current_tools = tools;
                 }
+                HookAction::ContinueWithMessage(message) => {
+                    tracing::warn!(
+                        message = %message,
+                        "Hook handler returned ContinueWithMessage on BeforeCallLLM (ignored)"
+                    );
+                }
             }
         }
 
@@ -192,6 +201,7 @@ impl HookRegistry {
     ///
     /// For `BeforeToolCall`, the first `Block` stops execution and returns the reason.
     /// For other events, errors are logged but don't propagate.
+    /// `ContinueWithMessage` is logged and ignored in registry path.
     pub async fn fire_tool_event(&self, ctx: &ToolHookContext) -> Result<(), String> {
         let Some(handlers) = self.handlers.get(&ctx.event) else {
             return Ok(());
@@ -210,6 +220,21 @@ impl HookRegistry {
                         error = %reason,
                         "Hook handler returned Block (non-blocking event)"
                     );
+                }
+                HookAction::ContinueWithMessage(message) => {
+                    if matches!(ctx.event, HookEvent::TurnEnd) {
+                        tracing::debug!(
+                            event = ?ctx.event,
+                            message = %message,
+                            "Hook handler returned ContinueWithMessage (registry path is observe-only, ignored)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            event = ?ctx.event,
+                            message = %message,
+                            "Hook handler returned ContinueWithMessage on non-TurnEnd event (ignored)"
+                        );
+                    }
                 }
                 _ => {
                     tracing::warn!(
@@ -428,5 +453,98 @@ mod tests {
         assert!(messages[1].content.contains("Original"));
         assert_eq!(messages[2].role, crate::llm::Role::User);
         assert!(messages[2].content.contains("Additional"));
+    }
+
+    #[tokio::test]
+    async fn continue_with_message_is_ignored_on_before_tool_call() {
+        struct ContinueMessageHandler;
+
+        #[async_trait]
+        impl HookHandler for ContinueMessageHandler {
+            async fn on_tool_event(&self, _ctx: &ToolHookContext) -> HookAction {
+                HookAction::ContinueWithMessage("continue".to_string())
+            }
+        }
+
+        let registry = HookRegistry::new();
+        registry.register(HookEvent::BeforeToolCall, Arc::new(ContinueMessageHandler));
+
+        let ctx = ToolHookContext {
+            event: HookEvent::BeforeToolCall,
+            tool_name: "test_tool".to_string(),
+            tool_call_id: "id".to_string(),
+            tool_input: serde_json::json!({}),
+            tool_result: None,
+            error: None,
+            tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
+        };
+
+        let result = registry.fire_tool_event(&ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn continue_with_message_is_ignored_on_after_tool_call() {
+        struct ContinueMessageHandler;
+
+        #[async_trait]
+        impl HookHandler for ContinueMessageHandler {
+            async fn on_tool_event(&self, _ctx: &ToolHookContext) -> HookAction {
+                HookAction::ContinueWithMessage("continue".to_string())
+            }
+        }
+
+        let registry = HookRegistry::new();
+        registry.register(HookEvent::AfterToolCall, Arc::new(ContinueMessageHandler));
+
+        let ctx = ToolHookContext {
+            event: HookEvent::AfterToolCall,
+            tool_name: "test_tool".to_string(),
+            tool_call_id: "id".to_string(),
+            tool_input: serde_json::json!({}),
+            tool_result: Some(serde_json::json!({"result": "ok"})),
+            error: None,
+            tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
+        };
+
+        let result = registry.fire_tool_event(&ctx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn continue_with_message_is_accepted_on_turn_end_registry_path() {
+        struct ContinueMessageHandler;
+
+        #[async_trait]
+        impl HookHandler for ContinueMessageHandler {
+            async fn on_tool_event(&self, _ctx: &ToolHookContext) -> HookAction {
+                HookAction::ContinueWithMessage("continue".to_string())
+            }
+        }
+
+        let registry = HookRegistry::new();
+        registry.register(HookEvent::TurnEnd, Arc::new(ContinueMessageHandler));
+
+        let ctx = ToolHookContext {
+            event: HookEvent::TurnEnd,
+            tool_name: String::new(),
+            tool_call_id: String::new(),
+            tool_input: serde_json::Value::Null,
+            tool_result: None,
+            error: None,
+            tool_manager: None,
+            thread_event_sender: None,
+            thread_id: None,
+            turn_number: None,
+        };
+
+        let result = registry.fire_tool_event(&ctx).await;
+        assert!(result.is_ok());
     }
 }
