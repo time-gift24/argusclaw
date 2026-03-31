@@ -451,6 +451,7 @@ impl ThreadPool {
         execution_thread_id: ThreadId,
         pipe_tx: broadcast::Sender<ThreadEvent>,
         _control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+        cancellation: TurnCancellation,
     ) -> ThreadJobResult {
         let fallback_job_id = request.job_id.clone();
         let fallback_agent_id = request.agent_id;
@@ -514,6 +515,7 @@ impl ThreadPool {
             &thread,
             request.job_id.clone(),
             request.prompt,
+            cancellation,
         ))
         .catch_unwind()
         .await;
@@ -564,6 +566,7 @@ impl ThreadPool {
         thread: &Arc<RwLock<argus_agent::Thread>>,
         job_id: String,
         prompt: String,
+        cancellation: TurnCancellation,
     ) -> ThreadJobResult {
         #[cfg(test)]
         if prompt == "__panic_thread_pool_execute_turn__" {
@@ -581,7 +584,7 @@ impl ThreadPool {
         let turn = {
             let mut guard = thread.write().await;
             match guard
-                .begin_turn(prompt, None, TurnCancellation::new())
+                .begin_turn(prompt, None, cancellation)
                 .await
             {
                 Ok(turn) => turn,
@@ -1984,6 +1987,7 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::CompactorManager;
+    use argus_agent::TurnCancellation;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
         LlmProviderRepository,
@@ -2928,7 +2932,7 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         let _ = pool
-            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .execute_job(request, execution_thread_id, pipe_tx, control_tx, TurnCancellation::new())
             .await;
         let events = drain_events(&mut pipe_rx);
 
@@ -2967,7 +2971,7 @@ mod tests {
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let result = pool
-            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .execute_job(request, execution_thread_id, pipe_tx, control_tx, TurnCancellation::new())
             .await;
 
         assert!(result.success);
@@ -3001,7 +3005,7 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         let result = pool
-            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .execute_job(request, execution_thread_id, pipe_tx, control_tx, TurnCancellation::new())
             .await;
         let events = drain_events(&mut pipe_rx);
 
@@ -3182,7 +3186,7 @@ mod tests {
             let pipe_tx = pipe_tx.clone();
             let control_tx = control_tx.clone();
             tokio::spawn(async move {
-                pool.execute_job(request_a, thread_a, pipe_tx, control_tx)
+                pool.execute_job(request_a, thread_a, pipe_tx, control_tx, TurnCancellation::new())
                     .await
             })
         };
@@ -3191,7 +3195,7 @@ mod tests {
             let pipe_tx = pipe_tx.clone();
             let control_tx = control_tx.clone();
             tokio::spawn(async move {
-                pool.execute_job(request_b, thread_b, pipe_tx, control_tx)
+                pool.execute_job(request_b, thread_b, pipe_tx, control_tx, TurnCancellation::new())
                     .await
             })
         };

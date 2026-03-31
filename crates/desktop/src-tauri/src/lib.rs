@@ -83,6 +83,7 @@ pub fn run() {
             commands::update_thread_model,
             commands::send_message,
             commands::cancel_turn,
+            commands::stop_job,
             commands::get_thread_snapshot,
             commands::resolve_approval,
             commands::list_sessions,

@@ -486,6 +486,11 @@ pub async fn cancel_turn(
 }
 
 #[tauri::command]
+pub fn stop_job(wing: State<'_, Arc<ArgusWing>>, job_id: String) -> Result<(), String> {
+    wing.stop_job(job_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_thread_snapshot(
     wing: State<'_, Arc<ArgusWing>>,
     session_id: String,

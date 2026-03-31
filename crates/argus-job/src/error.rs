@@ -32,4 +32,8 @@ pub enum JobError {
     /// Turn execution failed.
     #[error("turn execution failed: {0}")]
     TurnResult(String),
+
+    /// Job is not in a running state.
+    #[error("job is not running: {0}")]
+    JobNotRunning(String),
 }

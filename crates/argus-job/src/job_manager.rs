@@ -8,7 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::CompactorManager;
+use argus_agent::{CompactorManager, TurnCancellation};
 #[cfg(test)]
 use argus_agent::TurnOutput;
 #[cfg(test)]
@@ -37,6 +37,8 @@ enum TrackedJobState {
 struct TrackedJob {
     thread_id: ThreadId,
     state: TrackedJobState,
+    /// Cancellation handle for Pending jobs; None once Completed/Consumed.
+    cancellation: Option<TurnCancellation>,
 }
 
 /// Result of looking up a background job for a specific thread.
@@ -156,9 +158,42 @@ impl JobManager {
         self.thread_pool.collect_state()
     }
 
+    /// Stop a running background job by signalling cancellation.
+    ///
+    /// Returns `JobNotFound` if the job was never dispatched,
+    /// or `JobNotRunning` if it already completed.
+    pub fn stop_job(&self, job_id: &str) -> Result<(), JobError> {
+        let mut tracked_jobs = self
+            .tracked_jobs
+            .lock()
+            .expect("job tracking mutex poisoned");
+
+        let tracked_job = tracked_jobs
+            .get_mut(job_id)
+            .ok_or_else(|| JobError::JobNotFound(job_id.to_string()))?;
+
+        match &tracked_job.state {
+            TrackedJobState::Pending => {}
+            TrackedJobState::Completed(_) | TrackedJobState::Consumed(_) => {
+                return Err(JobError::JobNotRunning(job_id.to_string()));
+            }
+        }
+
+        if let Some(cancellation) = tracked_job.cancellation.take() {
+            cancellation.cancel();
+        }
+
+        Ok(())
+    }
+
     /// Record that a job was dispatched for a thread.
     pub fn record_dispatched_job(&self, thread_id: ThreadId, job_id: String) {
-        Self::record_dispatched_job_in_store(&self.tracked_jobs, thread_id, job_id);
+        Self::record_dispatched_job_in_store(
+            &self.tracked_jobs,
+            thread_id,
+            job_id,
+            TurnCancellation::new(),
+        );
     }
 
     /// Record the completed result for a job.
@@ -225,7 +260,15 @@ impl JobManager {
         };
 
         let execution_thread_id = self.thread_pool.enqueue_job(request.clone()).await?;
-        self.record_dispatched_job(originating_thread_id, job_id.clone());
+
+        let cancellation = TurnCancellation::new();
+        let spawn_cancellation = cancellation.clone();
+        Self::record_dispatched_job_in_store(
+            &self.tracked_jobs,
+            originating_thread_id,
+            job_id.clone(),
+            cancellation,
+        );
         let _ = pipe_tx.send(ThreadEvent::ThreadBoundToJob {
             job_id: job_id.clone(),
             thread_id: execution_thread_id,
@@ -254,6 +297,7 @@ impl JobManager {
                     execution_thread_id,
                     pipe_tx_clone.clone(),
                     control_tx_clone.clone(),
+                    spawn_cancellation,
                 )
                 .await;
 
@@ -304,6 +348,7 @@ impl JobManager {
         tracked_jobs: &Arc<StdMutex<HashMap<String, TrackedJob>>>,
         thread_id: ThreadId,
         job_id: String,
+        cancellation: TurnCancellation,
     ) {
         tracked_jobs
             .lock()
@@ -313,6 +358,7 @@ impl JobManager {
                 TrackedJob {
                     thread_id,
                     state: TrackedJobState::Pending,
+                    cancellation: Some(cancellation),
                 },
             );
     }
@@ -330,6 +376,7 @@ impl JobManager {
                 TrackedJob {
                     thread_id,
                     state: TrackedJobState::Completed(result),
+                    cancellation: None,
                 },
             );
     }
@@ -667,4 +714,35 @@ mod tests {
             JobLookup::NotFound
         ));
     }
+
+    #[tokio::test]
+    async fn stop_job_signals_cancellation_for_pending_job() {
+        let manager = test_job_manager();
+        let thread_id = ThreadId::new();
+        let job_id = "job-stop-pending".to_string();
+
+        manager.record_dispatched_job(thread_id, job_id.clone());
+
+        assert!(matches!(
+            manager.get_job_result_status(thread_id, &job_id, false),
+            JobLookup::Pending
+        ));
+
+        manager
+            .stop_job(&job_id)
+            .expect("stop_job should succeed for pending job");
+    }
+
+    #[tokio::test]
+    async fn stop_job_returns_not_found_for_unknown_job() {
+        let manager = test_job_manager();
+
+        let result = manager.stop_job("nonexistent-job");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("job not found"));
+    }
+
 }

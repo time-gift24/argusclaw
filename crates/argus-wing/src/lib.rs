@@ -596,6 +596,15 @@ impl ArgusWing {
             .await
     }
 
+    /// Stop a running background job.
+    pub fn stop_job(&self, job_id: String) -> Result<()> {
+        self.job_manager
+            .stop_job(&job_id)
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })
+    }
+
     /// Get the thread message history, recovering persisted turn summaries when needed.
     pub async fn get_thread_messages(
         &self,
