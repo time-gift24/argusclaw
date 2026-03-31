@@ -183,10 +183,18 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
         let mut runtime_handle =
             ThreadHandle::with_runtime(ThreadRuntime::seeded_from_turn_count(seeded_turn_count));
         let mut active_turn_cancellation: Option<TurnCancellation> = None;
+        let mut shutdown_requested = false;
 
         loop {
             tokio::select! {
                 Some(control_event) = control_rx.recv() => {
+                    if shutdown_requested {
+                        if let ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } = control_event {
+                            let _ = reply_tx.send(None);
+                        }
+                        continue;
+                    }
+
                     let runtime_action = match control_event {
                         ThreadControlEvent::UserMessage { content, msg_override } => {
                             // Production: user messages are queued FIFO while a turn is running.
@@ -209,6 +217,13 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                             let claimed = runtime_handle.claim_queued_job_result(&job_id);
                             let _ = reply_tx.send(claimed);
                             ThreadRuntimeAction::Noop
+                        }
+                        ThreadControlEvent::ShutdownRuntime => {
+                            shutdown_requested = true;
+                            match runtime_handle.state() {
+                                ThreadRuntimeState::Idle => break,
+                                _ => runtime_handle.dispatch(ThreadCommand::CancelActiveTurn),
+                            }
                         }
                     };
 
@@ -235,6 +250,10 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     {
                         let mut guard = mailbox.lock().await;
                         guard.clear_interrupts_for_idle_handoff();
+                    }
+
+                    if shutdown_requested {
+                        break;
                     }
 
                     let runtime_action = runtime_handle.finish_active_turn();

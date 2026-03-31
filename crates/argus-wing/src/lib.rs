@@ -600,7 +600,7 @@ impl ArgusWing {
     pub fn stop_job(&self, job_id: String) -> Result<()> {
         self.job_manager
             .stop_job(&job_id)
-            .map_err(|e| ArgusError::DatabaseError {
+            .map_err(|e| ArgusError::JobError {
                 reason: e.to_string(),
             })
     }
@@ -1842,5 +1842,19 @@ mod tests {
             Some("gpt-4o-mini")
         );
         assert!(persisted_thread.session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_job_surfaces_job_error_instead_of_database_error() {
+        let wing = make_test_wing();
+
+        let error = wing
+            .stop_job("missing-job".to_string())
+            .expect_err("missing job should fail");
+
+        assert!(matches!(
+            error,
+            ArgusError::JobError { reason } if reason.contains("job not found")
+        ));
     }
 }

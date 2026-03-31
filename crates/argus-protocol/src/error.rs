@@ -34,6 +34,9 @@ pub enum ArgusError {
     #[error("Database error: {reason}")]
     DatabaseError { reason: String },
 
+    #[error("Job error: {reason}")]
+    JobError { reason: String },
+
     #[error("LLM error: {reason}")]
     LlmError { reason: String },
 

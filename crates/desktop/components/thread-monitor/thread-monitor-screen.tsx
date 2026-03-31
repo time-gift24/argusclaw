@@ -6,6 +6,7 @@ import { Loader2, RefreshCw } from "lucide-react";
 import { ThreadMonitorSummary } from "@/components/thread-monitor/thread-monitor-summary";
 import { ThreadMonitorTable } from "@/components/thread-monitor/thread-monitor-table";
 import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/components/ui/toast";
 import { useChatStore } from "@/lib/chat-store";
 
 const THREAD_POOL_POLL_INTERVAL_MS = 5_000;
@@ -16,6 +17,9 @@ export function ThreadMonitorScreen() {
   const loading = useChatStore((state) => state.threadPoolSnapshotLoading);
   const error = useChatStore((state) => state.threadPoolError);
   const refresh = useChatStore((state) => state.refreshThreadPoolSnapshot);
+  const stopJob = useChatStore((state) => state.stopJob);
+  const stoppingJobIds = useChatStore((state) => state.stoppingJobIds);
+  const { addToast } = useToast();
   const [kindFilter, setKindFilter] = React.useState<"all" | "chat" | "job">(
     "all",
   );
@@ -40,6 +44,21 @@ export function ThreadMonitorScreen() {
     return true;
   });
 
+  const handleStopJob = React.useCallback(
+    async (jobId: string) => {
+      try {
+        await stopJob(jobId);
+        addToast("success", "已发送停止请求");
+      } catch (error) {
+        addToast(
+          "error",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    },
+    [addToast, stopJob],
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
       <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col gap-4 px-4 pb-6 pt-2">
@@ -49,11 +68,11 @@ export function ThreadMonitorScreen() {
               <div className="flex items-center gap-2">
                 <h2 className="text-xl font-semibold tracking-tight">Thread Monitor</h2>
                 <Badge variant="outline" className="rounded-full">
-                  只读
+                  监控优先
                 </Badge>
               </div>
               <p className="max-w-2xl text-sm text-muted-foreground">
-                监控线程池的总览和统一 runtime 状态。页面只读，线程列表与池级指标都来自后端权威状态查询。
+                监控线程池总览和统一 runtime 状态，并为运行中的 job 提供轻量停止入口。线程列表与池级指标仍以后端权威状态为准。
               </p>
               <div className="flex flex-wrap gap-2 pt-1 text-xs">
                 <Badge variant="outline" className="rounded-full border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">
@@ -139,7 +158,11 @@ export function ThreadMonitorScreen() {
           loading={loading}
         />
 
-        <ThreadMonitorTable threads={filteredThreads} />
+        <ThreadMonitorTable
+          threads={filteredThreads}
+          stoppingJobIds={stoppingJobIds}
+          onStopJob={handleStopJob}
+        />
       </div>
     </div>
   );

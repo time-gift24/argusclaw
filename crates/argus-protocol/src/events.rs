@@ -92,6 +92,11 @@ pub enum ThreadControlEvent {
         /// One-shot reply channel containing the removed queued result, if any.
         reply_tx: oneshot::Sender<Option<ThreadJobResult>>,
     },
+    /// Request the runtime actor to stop and release its owned thread state.
+    ///
+    /// This is an internal control-plane event used by the thread pool when a
+    /// chat runtime is unloaded from memory.
+    ShutdownRuntime,
 }
 
 /// Routed job result metadata shared by the control plane and public event stream.
@@ -284,6 +289,7 @@ impl ThreadMailbox {
             ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } => {
                 let _ = reply_tx.send(None);
             }
+            ThreadControlEvent::ShutdownRuntime => {}
         }
     }
 
