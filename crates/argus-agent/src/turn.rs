@@ -520,6 +520,19 @@ impl Turn {
                 // Cancellation is an expected control-path outcome. Do not emit TurnFailed;
                 // callers will still observe ThreadEvent::Idle.
             }
+            Err(TurnError::MaxIterationsReached { token_usage, .. }) => {
+                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnCompleted {
+                    thread_id: self.thread_id.clone(),
+                    turn_number: self.turn_number,
+                    token_usage: token_usage.clone(),
+                }) {
+                    tracing::warn!(
+                        thread_id = %self.thread_id,
+                        error = %e,
+                        "Failed to send TurnCompleted event for max-iterations partial result"
+                    );
+                }
+            }
             Err(error) => {
                 if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnFailed {
                     thread_id: self.thread_id.clone(),
@@ -946,15 +959,21 @@ impl Turn {
                     // Continue the loop with updated messages
                 }
                 NextAction::LengthExceeded => {
-                    return Err(TurnError::ContextLengthExceeded(
-                        (token_usage.input_tokens + token_usage.output_tokens) as usize,
-                    ));
+                    return Err(TurnError::ContextLengthExceeded {
+                        token_count: (token_usage.input_tokens + token_usage.output_tokens) as usize,
+                        messages,
+                        token_usage,
+                    });
                 }
             }
         }
 
-        // Max iterations reached
-        Err(TurnError::MaxIterationsReached(max_iterations))
+        // Max iterations reached — preserve accumulated messages
+        Err(TurnError::MaxIterationsReached {
+            max_iterations,
+            messages,
+            token_usage,
+        })
     }
 
     /// Calls the LLM in streaming mode, accumulating the response.

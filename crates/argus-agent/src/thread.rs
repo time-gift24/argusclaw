@@ -363,6 +363,37 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
+    /// Run compaction immediately (e.g. after context length exceeded).
+    async fn compact_now(&mut self) {
+        let compactor = self.compactor.clone();
+        let pre_token_count = self.token_count;
+        let pre_message_count = self.messages.len();
+
+        let mut context =
+            CompactContext::new(&self.provider, &mut self.token_count, &mut self.messages)
+                .with_threshold_ratio_override(self.config.compact_threshold_ratio);
+        match compactor.compact(&mut context).await {
+            Ok(()) => {
+                if self.token_count != pre_token_count
+                    || self.messages.len() != pre_message_count
+                {
+                    tracing::info!(
+                        thread_id = %self.id,
+                        new_token_count = self.token_count,
+                        "Compacted after context length exceeded"
+                    );
+                    self.broadcast_to_self(ThreadEvent::Compacted {
+                        thread_id: self.id.to_string(),
+                        new_token_count: self.token_count,
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Compact after context-length-exceeded failed: {}", e);
+            }
+        }
+    }
+
     /// Send a user message into the pipe for processing.
     ///
     /// This is the entry point for external callers (CLI, Tauri).
@@ -462,7 +493,7 @@ impl Thread {
     }
 
     /// Finish a previously started turn and apply its output to thread state.
-    pub fn finish_turn(
+    pub async fn finish_turn(
         &mut self,
         result: Result<TurnOutput, ThreadError>,
     ) -> Result<(), ThreadError> {
@@ -474,6 +505,37 @@ impl Thread {
                 Ok(())
             }
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => Ok(()),
+            Err(ThreadError::TurnFailed(crate::TurnError::MaxIterationsReached {
+                messages,
+                token_usage,
+                ..
+            })) => {
+                tracing::warn!(
+                    thread_id = %self.id,
+                    "Turn hit max iterations — applying partial results"
+                );
+                self.apply_turn_output(TurnOutput {
+                    messages,
+                    token_usage,
+                });
+                Ok(())
+            }
+            Err(ThreadError::TurnFailed(crate::TurnError::ContextLengthExceeded {
+                messages,
+                token_usage,
+                ..
+            })) => {
+                tracing::warn!(
+                    thread_id = %self.id,
+                    "Turn hit context length limit — applying partial results and compacting"
+                );
+                self.apply_turn_output(TurnOutput {
+                    messages,
+                    token_usage,
+                });
+                self.compact_now().await;
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     }

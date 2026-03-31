@@ -225,7 +225,7 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     active_turn_cancellation = None;
                     let finish_result = {
                         let mut guard = thread.write().await;
-                        guard.finish_turn(result)
+                        guard.finish_turn(result).await
                     };
 
                     if let Err(error) = finish_result {

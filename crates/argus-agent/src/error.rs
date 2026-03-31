@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use argus_protocol::llm::LlmError;
+use argus_protocol::llm::{ChatMessage, LlmError};
+use argus_protocol::TokenUsage;
 
 // ---------------------------------------------------------------------------
 // TurnError
@@ -37,13 +38,21 @@ pub enum TurnError {
     #[error("Tool call blocked by hook: {reason}")]
     ToolCallBlocked { reason: String },
 
-    /// Maximum iterations reached.
-    #[error("Maximum iterations ({0}) reached")]
-    MaxIterationsReached(u32),
+    /// Maximum iterations reached — carries partial messages accumulated so far.
+    #[error("Maximum iterations ({max_iterations}) reached")]
+    MaxIterationsReached {
+        max_iterations: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+    },
 
-    /// Context length exceeded.
-    #[error("Context length exceeded: {0} tokens")]
-    ContextLengthExceeded(usize),
+    /// Context length exceeded — carries partial messages; thread should compact before retry.
+    #[error("Context length exceeded: {token_count} tokens")]
+    ContextLengthExceeded {
+        token_count: usize,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+    },
 
     /// Turn timeout exceeded.
     #[error("Turn timeout exceeded")]
@@ -231,14 +240,22 @@ mod tests {
 
     #[test]
     fn test_max_iterations_reached_display() {
-        let err = TurnError::MaxIterationsReached(10);
+        let err = TurnError::MaxIterationsReached {
+            max_iterations: 10,
+            messages: vec![],
+            token_usage: TokenUsage::default(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("10"));
     }
 
     #[test]
     fn test_context_length_exceeded_display() {
-        let err = TurnError::ContextLengthExceeded(4096);
+        let err = TurnError::ContextLengthExceeded {
+            token_count: 4096,
+            messages: vec![],
+            token_usage: TokenUsage::default(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("4096"));
     }

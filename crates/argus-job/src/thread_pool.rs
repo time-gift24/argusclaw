@@ -602,7 +602,7 @@ impl ThreadPool {
             Ok(Ok(output)) => {
                 let finish_result = {
                     let mut guard = thread.write().await;
-                    guard.finish_turn(Ok(output.clone()))
+                    guard.finish_turn(Ok(output.clone())).await
                 };
                 if let Err(error) = finish_result {
                     return Self::failure_result(
@@ -627,7 +627,7 @@ impl ThreadPool {
                 let message = error.to_string();
                 let _ = {
                     let mut guard = thread.write().await;
-                    guard.finish_turn(Err(error.into()))
+                    guard.finish_turn(Err(error.into())).await
                 };
                 Self::failure_result(
                     job_id,
@@ -643,7 +643,7 @@ impl ThreadPool {
                     let mut guard = thread.write().await;
                     guard.finish_turn(Err(argus_agent::ThreadError::TurnBuildFailed(
                         message.clone(),
-                    )))
+                    ))).await
                 };
                 Self::failure_result(
                     job_id,
