@@ -384,3 +384,48 @@ impl KnowledgeToolArgs {
         }
     }
 }
+
+impl TryFrom<KnowledgeToolArgs> for KnowledgeCreatePrArgs {
+    type Error = KnowledgeToolError;
+
+    fn try_from(args: KnowledgeToolArgs) -> Result<Self, Self::Error> {
+        if args.action != KnowledgeAction::CreateKnowledgePr {
+            return Err(KnowledgeToolError::invalid_arguments(format!(
+                "cannot convert action {} into create_knowledge_pr args",
+                args.action
+            )));
+        }
+
+        let target_repo = args
+            .target_repo
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                KnowledgeToolError::invalid_arguments(
+                    "target_repo is required for action create_knowledge_pr",
+                )
+            })?;
+        let pr_title = args.pr_title.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+            KnowledgeToolError::invalid_arguments("pr_title is required for action create_knowledge_pr")
+        })?;
+        let pr_body = args.pr_body.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+            KnowledgeToolError::invalid_arguments("pr_body is required for action create_knowledge_pr")
+        })?;
+
+        if args.files.is_empty() {
+            return Err(KnowledgeToolError::invalid_arguments(
+                "files is required for action create_knowledge_pr",
+            ));
+        }
+
+        Ok(Self {
+            target_repo,
+            base_ref: args.base_ref,
+            branch: args.branch,
+            pr_title,
+            pr_body,
+            draft: args.draft,
+            files: args.files,
+            manifest: args.manifest,
+        })
+    }
+}

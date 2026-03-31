@@ -4,11 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use argus_protocol::ids::ThreadId;
+use argus_protocol::{NamedTool, ToolExecutionContext};
 use argus_tool::knowledge::{
-    GitPrExecutor, GitPrOutcome, KnowledgeCreatePrArgs, KnowledgeManifestFilePatch,
-    KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
-    KnowledgeManifestRepoPatch, KnowledgePrService, RepositoryManifest, merge_manifest,
-    serialize_manifest, validate_repo_relative_path,
+    DefaultKnowledgeRuntime, GitHubBlob, GitHubSnapshot, GitHubTree, GitPrExecutor,
+    GitPrOutcome, KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult,
+    KnowledgeManifestFilePatch, KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch,
+    KnowledgeManifestPatch, KnowledgeManifestRepoPatch, KnowledgePrRuntime,
+    KnowledgePrService, KnowledgeRepoDescriptor, KnowledgeRuntimeBackend, KnowledgeTool,
+    KnowledgeToolError, RepositoryManifest, merge_manifest, serialize_manifest,
+    validate_repo_relative_path,
 };
 
 fn sample_existing_manifest() -> RepositoryManifest {
@@ -281,6 +286,78 @@ impl GitPrExecutor for FakeGitPrExecutor {
     }
 }
 
+fn make_ctx() -> Arc<ToolExecutionContext> {
+    let (pipe_tx, _) = tokio::sync::broadcast::channel(16);
+    let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+    Arc::new(ToolExecutionContext {
+        thread_id: ThreadId::new(),
+        agent_id: None,
+        pipe_tx,
+        control_tx,
+    })
+}
+
+#[derive(Clone, Default)]
+struct NoopKnowledgeBackend;
+
+#[async_trait]
+impl KnowledgeRuntimeBackend for NoopKnowledgeBackend {
+    async fn list_repos(&self) -> Result<Vec<KnowledgeRepoDescriptor>, KnowledgeToolError> {
+        Ok(Vec::new())
+    }
+
+    fn repo_descriptor(&self, _repo_id: &str) -> Option<KnowledgeRepoDescriptor> {
+        None
+    }
+
+    async fn resolve_snapshot(
+        &self,
+        _repo_id: &str,
+        _ref_name: &str,
+    ) -> Result<(String, GitHubSnapshot), KnowledgeToolError> {
+        panic!("read backend should not be used for create_knowledge_pr");
+    }
+}
+
+#[async_trait]
+impl KnowledgeBackend for NoopKnowledgeBackend {
+    async fn read_tree(&self, _snapshot_id: &str) -> Result<GitHubTree, KnowledgeToolError> {
+        panic!("read backend should not be used for create_knowledge_pr");
+    }
+
+    async fn read_manifest(
+        &self,
+        _snapshot_id: &str,
+    ) -> Result<Option<RepositoryManifest>, KnowledgeToolError> {
+        panic!("read backend should not be used for create_knowledge_pr");
+    }
+
+    async fn read_blob(
+        &self,
+        _snapshot_id: &str,
+        _path: &str,
+        _sha: &str,
+    ) -> Result<GitHubBlob, KnowledgeToolError> {
+        panic!("read backend should not be used for create_knowledge_pr");
+    }
+}
+
+#[derive(Clone)]
+struct FakePrRuntime {
+    result: KnowledgeCreatePrResult,
+}
+
+#[async_trait]
+impl KnowledgePrRuntime for FakePrRuntime {
+    async fn create_pr(
+        &self,
+        args: &KnowledgeCreatePrArgs,
+    ) -> Result<KnowledgeCreatePrResult, KnowledgeToolError> {
+        assert_eq!(args.target_repo, "acme/docs");
+        Ok(self.result.clone())
+    }
+}
+
 #[test]
 fn validate_repo_relative_path_rejects_absolute_paths() {
     let err = validate_repo_relative_path("/etc/passwd").unwrap_err();
@@ -442,6 +519,76 @@ fn serialize_manifest_is_stable_and_pretty() {
     }
   ]
 }"#
+    );
+}
+
+#[tokio::test]
+async fn dispatch_create_knowledge_pr_returns_result_payload() {
+    let runtime = DefaultKnowledgeRuntime::new_for_test_with_pr_runtime(
+        NoopKnowledgeBackend,
+        FakePrRuntime {
+            result: KnowledgeCreatePrResult {
+                target_repo: "acme/docs".to_string(),
+                base_ref: "main".to_string(),
+                branch: "codex/knowledge-bootstrap".to_string(),
+                commit_sha: "abc123".to_string(),
+                pr_url: "https://example.com/pr/42".to_string(),
+                manifest_path: ".knowledge/repo.json".to_string(),
+                changed_files: vec![
+                    "docs/knowledge/README.md".to_string(),
+                    ".knowledge/repo.json".to_string(),
+                ],
+                created_files: vec![
+                    "docs/knowledge/README.md".to_string(),
+                    ".knowledge/repo.json".to_string(),
+                ],
+                updated_files: Vec::new(),
+                summary: "Opened draft PR for acme/docs with 2 changed files".to_string(),
+            },
+        },
+    );
+    let tool = KnowledgeTool::new_for_test(runtime);
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "action": "create_knowledge_pr",
+                "target_repo": "acme/docs",
+                "base_ref": "main",
+                "branch": "codex/knowledge-bootstrap",
+                "pr_title": "Bootstrap knowledge docs",
+                "pr_body": "Adds knowledge docs and manifest.",
+                "draft": true,
+                "files": [
+                    {
+                        "path": "docs/knowledge/README.md",
+                        "content": "# Knowledge\n"
+                    }
+                ],
+                "manifest": {
+                    "path": ".knowledge/repo.json",
+                    "files": []
+                }
+            }),
+            make_ctx(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "target_repo": "acme/docs",
+            "base_ref": "main",
+            "branch": "codex/knowledge-bootstrap",
+            "commit_sha": "abc123",
+            "pr_url": "https://example.com/pr/42",
+            "manifest_path": ".knowledge/repo.json",
+            "changed_files": ["docs/knowledge/README.md", ".knowledge/repo.json"],
+            "created_files": ["docs/knowledge/README.md", ".knowledge/repo.json"],
+            "updated_files": [],
+            "summary": "Opened draft PR for acme/docs with 2 changed files"
+        })
     );
 }
 
