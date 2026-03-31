@@ -18,7 +18,10 @@ pub use github::{
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
 pub use markdown::{ParsedSection, parse_markdown_sections};
-pub use pr::{merge_manifest, serialize_manifest, validate_repo_relative_path};
+pub use pr::{
+    CliGitPrExecutor, GitPrExecutor, GitPrOutcome, KnowledgePrService, merge_manifest,
+    serialize_manifest, validate_repo_relative_path,
+};
 pub use models::{
     ContentPage, ExploreTreeEntry, ExploreTreeResult, GitHubBlob, GitHubSnapshot, GitHubTree,
     GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeCreatePrArgs,

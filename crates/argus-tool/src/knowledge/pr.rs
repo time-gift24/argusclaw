@@ -1,11 +1,410 @@
 use std::path::{Component, Path};
 
+use async_trait::async_trait;
+use tempfile::TempDir;
+use tokio::fs;
+use tokio::process::Command;
+
+use super::manifest::DEFAULT_MANIFEST_PATHS;
 use super::error::KnowledgeToolError;
 use super::manifest::{FileOverride, NodeOverride, RepositoryManifest, RepositoryManifestMeta};
 use super::models::{
-    KnowledgeManifestFilePatch, KnowledgeManifestNodePatch, KnowledgeManifestPatch,
-    KnowledgeManifestRepoPatch,
+    KnowledgeCreatePrArgs, KnowledgeCreatePrResult, KnowledgeManifestFilePatch,
+    KnowledgeManifestNodePatch, KnowledgeManifestPatch, KnowledgeManifestRepoPatch,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPrOutcome {
+    pub pr_url: String,
+    pub reused_existing: bool,
+}
+
+#[async_trait]
+pub trait GitPrExecutor: Send + Sync {
+    async fn ensure_auth(&self) -> Result<(), KnowledgeToolError>;
+
+    async fn clone_repo(&self, target_repo: &str, destination: &Path) -> Result<(), KnowledgeToolError>;
+
+    async fn prepare_branch(
+        &self,
+        repo_dir: &Path,
+        base_ref: &str,
+        branch: &str,
+    ) -> Result<(), KnowledgeToolError>;
+
+    async fn commit_and_push(
+        &self,
+        repo_dir: &Path,
+        branch: &str,
+        commit_message: &str,
+    ) -> Result<String, KnowledgeToolError>;
+
+    async fn create_or_reuse_pr(
+        &self,
+        repo_dir: &Path,
+        base_ref: &str,
+        branch: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<GitPrOutcome, KnowledgeToolError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CliGitPrExecutor;
+
+impl CliGitPrExecutor {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    async fn run_command(
+        &self,
+        repo_dir: Option<&Path>,
+        program: &str,
+        args: &[&str],
+    ) -> Result<String, KnowledgeToolError> {
+        let mut command = Command::new(program);
+        command.args(args);
+        if let Some(repo_dir) = repo_dir {
+            command.current_dir(repo_dir);
+        }
+
+        let output = command
+            .output()
+            .await
+            .map_err(|err| KnowledgeToolError::RequestFailed(format!(
+                "failed to run {}: {}",
+                render_command(program, args),
+                err
+            )))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let details = if !stderr.is_empty() { stderr } else { stdout };
+            return Err(KnowledgeToolError::RequestFailed(format!(
+                "{} failed: {}",
+                render_command(program, args),
+                details
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+}
+
+#[async_trait]
+impl GitPrExecutor for CliGitPrExecutor {
+    async fn ensure_auth(&self) -> Result<(), KnowledgeToolError> {
+        self.run_command(None, "gh", &["auth", "status"]).await?;
+        Ok(())
+    }
+
+    async fn clone_repo(
+        &self,
+        target_repo: &str,
+        destination: &Path,
+    ) -> Result<(), KnowledgeToolError> {
+        let destination = destination.to_string_lossy().to_string();
+        self.run_command(None, "gh", &["repo", "clone", target_repo, &destination])
+            .await?;
+        Ok(())
+    }
+
+    async fn prepare_branch(
+        &self,
+        repo_dir: &Path,
+        base_ref: &str,
+        branch: &str,
+    ) -> Result<(), KnowledgeToolError> {
+        self.run_command(Some(repo_dir), "git", &["fetch", "origin", base_ref])
+            .await?;
+        self.run_command(Some(repo_dir), "git", &["checkout", base_ref])
+            .await?;
+        self.run_command(
+            Some(repo_dir),
+            "git",
+            &["pull", "--ff-only", "origin", base_ref],
+        )
+        .await?;
+        self.run_command(Some(repo_dir), "git", &["checkout", "-B", branch])
+            .await?;
+        Ok(())
+    }
+
+    async fn commit_and_push(
+        &self,
+        repo_dir: &Path,
+        branch: &str,
+        commit_message: &str,
+    ) -> Result<String, KnowledgeToolError> {
+        self.run_command(Some(repo_dir), "git", &["add", "--all"]).await?;
+        self.run_command(Some(repo_dir), "git", &["commit", "-m", commit_message])
+            .await?;
+        self.run_command(
+            Some(repo_dir),
+            "git",
+            &["push", "--set-upstream", "origin", branch],
+        )
+        .await?;
+        self.run_command(Some(repo_dir), "git", &["rev-parse", "HEAD"])
+            .await
+    }
+
+    async fn create_or_reuse_pr(
+        &self,
+        repo_dir: &Path,
+        base_ref: &str,
+        branch: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<GitPrOutcome, KnowledgeToolError> {
+        let existing = self
+            .run_command(
+                Some(repo_dir),
+                "gh",
+                &["pr", "view", branch, "--json", "url", "--jq", ".url"],
+            )
+            .await;
+        if let Ok(pr_url) = existing
+            && !pr_url.is_empty()
+        {
+            return Ok(GitPrOutcome {
+                pr_url,
+                reused_existing: true,
+            });
+        }
+
+        let mut args = vec![
+            "pr",
+            "create",
+            "--base",
+            base_ref,
+            "--head",
+            branch,
+            "--title",
+            title,
+            "--body",
+            body,
+        ];
+        if draft {
+            args.push("--draft");
+        }
+
+        let pr_url = self.run_command(Some(repo_dir), "gh", &args).await?;
+        Ok(GitPrOutcome {
+            pr_url,
+            reused_existing: false,
+        })
+    }
+}
+
+pub struct KnowledgePrService<E = CliGitPrExecutor> {
+    executor: E,
+}
+
+impl Default for KnowledgePrService<CliGitPrExecutor> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KnowledgePrService<CliGitPrExecutor> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::new_with_executor(CliGitPrExecutor::new())
+    }
+}
+
+impl<E: GitPrExecutor> KnowledgePrService<E> {
+    #[must_use]
+    pub fn new_with_executor(executor: E) -> Self {
+        Self { executor }
+    }
+
+    pub async fn create_pr(
+        &self,
+        args: &KnowledgeCreatePrArgs,
+    ) -> Result<KnowledgeCreatePrResult, KnowledgeToolError> {
+        self.executor.ensure_auth().await?;
+
+        let checkout = TempDir::new().map_err(|err| {
+            KnowledgeToolError::RequestFailed(format!("failed to create temp checkout: {err}"))
+        })?;
+        self.executor
+            .clone_repo(&args.target_repo, checkout.path())
+            .await?;
+
+        let base_ref = args
+            .base_ref
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+        let branch = args
+            .branch
+            .clone()
+            .unwrap_or_else(|| "codex/knowledge-pr-update".to_string());
+        self.executor
+            .prepare_branch(checkout.path(), &base_ref, &branch)
+            .await?;
+
+        let write_summary = write_requested_files(checkout.path(), args).await?;
+        let commit_sha = self
+            .executor
+            .commit_and_push(checkout.path(), &branch, "docs: update knowledge base")
+            .await?;
+        let pr_outcome = self
+            .executor
+            .create_or_reuse_pr(
+                checkout.path(),
+                &base_ref,
+                &branch,
+                &args.pr_title,
+                &args.pr_body,
+                args.draft.unwrap_or(false),
+            )
+            .await?;
+
+        let action = if pr_outcome.reused_existing {
+            "Updated existing PR"
+        } else if args.draft.unwrap_or(false) {
+            "Opened draft PR"
+        } else {
+            "Opened PR"
+        };
+        let manifest_path = write_summary
+            .manifest_path
+            .unwrap_or_else(|| DEFAULT_MANIFEST_PATHS[0].to_string());
+
+        Ok(KnowledgeCreatePrResult {
+            target_repo: args.target_repo.clone(),
+            base_ref,
+            branch,
+            commit_sha,
+            pr_url: pr_outcome.pr_url,
+            manifest_path,
+            changed_files: write_summary.changed_files.clone(),
+            created_files: write_summary.created_files.clone(),
+            updated_files: write_summary.updated_files.clone(),
+            summary: format!("{action} for {} with {} changed files", args.target_repo, write_summary.changed_files.len()),
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct WriteSummary {
+    changed_files: Vec<String>,
+    created_files: Vec<String>,
+    updated_files: Vec<String>,
+    manifest_path: Option<String>,
+}
+
+async fn write_requested_files(
+    repo_dir: &Path,
+    args: &KnowledgeCreatePrArgs,
+) -> Result<WriteSummary, KnowledgeToolError> {
+    let mut summary = WriteSummary::default();
+
+    for file in &args.files {
+        validate_repo_relative_path(&file.path)?;
+        write_repo_file(repo_dir, &file.path, &file.content, &mut summary).await?;
+    }
+
+    let manifest_path = resolve_manifest_path(repo_dir, args.manifest.as_ref())?;
+    summary.manifest_path = manifest_path.clone();
+    if let (Some(manifest_path), Some(manifest_patch)) = (manifest_path, args.manifest.as_ref()) {
+        let existing = if repo_dir.join(&manifest_path).exists() {
+            Some(read_manifest(repo_dir, &manifest_path).await?)
+        } else {
+            None
+        };
+        let merged = merge_manifest(existing, manifest_patch)?;
+        let serialized = serialize_manifest(&merged)?;
+        write_repo_file(repo_dir, &manifest_path, &serialized, &mut summary).await?;
+    }
+
+    Ok(summary)
+}
+
+fn resolve_manifest_path(
+    repo_dir: &Path,
+    patch: Option<&KnowledgeManifestPatch>,
+) -> Result<Option<String>, KnowledgeToolError> {
+    if let Some(path) = patch.and_then(|patch| patch.path.clone()) {
+        validate_repo_relative_path(&path)?;
+        return Ok(Some(path));
+    }
+
+    for manifest_path in DEFAULT_MANIFEST_PATHS {
+        if repo_dir.join(manifest_path).exists() {
+            return Ok(Some((*manifest_path).to_string()));
+        }
+    }
+
+    if patch.is_some() {
+        return Ok(Some(DEFAULT_MANIFEST_PATHS[0].to_string()));
+    }
+
+    Ok(None)
+}
+
+async fn read_manifest(
+    repo_dir: &Path,
+    manifest_path: &str,
+) -> Result<RepositoryManifest, KnowledgeToolError> {
+    let manifest_text = fs::read_to_string(repo_dir.join(manifest_path))
+        .await
+        .map_err(|err| {
+            KnowledgeToolError::RequestFailed(format!(
+                "failed to read manifest {}: {}",
+                manifest_path, err
+            ))
+        })?;
+    let manifest_json = serde_json::from_str(&manifest_text)
+        .map_err(|err| KnowledgeToolError::manifest_parse(err.to_string()))?;
+    RepositoryManifest::from_json(manifest_json)
+}
+
+async fn write_repo_file(
+    repo_dir: &Path,
+    relative_path: &str,
+    content: &str,
+    summary: &mut WriteSummary,
+) -> Result<(), KnowledgeToolError> {
+    let destination = repo_dir.join(relative_path);
+    let existed = destination.exists();
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).await.map_err(|err| {
+            KnowledgeToolError::RequestFailed(format!(
+                "failed to create parent directories for {}: {}",
+                relative_path, err
+            ))
+        })?;
+    }
+    fs::write(&destination, content).await.map_err(|err| {
+        KnowledgeToolError::RequestFailed(format!("failed to write {}: {}", relative_path, err))
+    })?;
+
+    summary.changed_files.push(relative_path.to_string());
+    if existed {
+        summary.updated_files.push(relative_path.to_string());
+    } else {
+        summary.created_files.push(relative_path.to_string());
+    }
+
+    Ok(())
+}
+
+fn render_command(program: &str, args: &[&str]) -> String {
+    let joined = args.join(" ");
+    if joined.is_empty() {
+        program.to_string()
+    } else {
+        format!("{program} {joined}")
+    }
+}
 
 pub fn validate_repo_relative_path(path: &str) -> Result<(), KnowledgeToolError> {
     let trimmed = path.trim();
