@@ -3,8 +3,8 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
-import { CircleHelp, Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye } from "lucide-react"
-import { agents, providers, tools, type AgentRecord, type LlmProviderSummary, type ToolInfo } from "@/lib/tauri"
+import { CircleHelp, Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen } from "lucide-react"
+import { agents, providers, tools, knowledge, type AgentRecord, type LlmProviderSummary, type ToolInfo, type KnowledgeRepoRecord } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Button } from "@/components/ui/button"
@@ -54,7 +54,10 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [toolList, setToolList] = React.useState<ToolInfo[]>([])
+  const [knowledgeRepoList, setKnowledgeRepoList] = React.useState<KnowledgeRepoRecord[]>([])
+  const [agentWorkspaces, setAgentWorkspaces] = React.useState<string[]>([])
   const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
+  const [savingWorkspaces, setSavingWorkspaces] = React.useState(false)
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -99,6 +102,9 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         const toolsData = await tools.list()
         setToolList(toolsData)
 
+        const knowledgeReposData = await knowledge.list()
+        setKnowledgeRepoList(knowledgeReposData)
+
         const allAgents = await agents.list()
         const candidates = allAgents.filter(
           (a) => !a.parent_agent_id && a.agent_type !== "subagent" && a.id !== agentId
@@ -109,6 +115,12 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         if (agentId !== undefined) {
           const agent = await agents.get(agentId)
           if (agent) setFormData(agent)
+          try {
+            const workspaces = await knowledge.listAgentWorkspaces(agentId)
+            setAgentWorkspaces(workspaces)
+          } catch {
+            // Agent may not have knowledge workspaces yet
+          }
         } else if (parentId !== undefined) {
           setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
         } else {
@@ -128,6 +140,18 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     setSaving(true)
     try {
       const savedId = await agents.upsert(formData)
+      // Save knowledge workspace bindings
+      if (isEditing || savedId) {
+        const targetId = isEditing ? agentId! : savedId
+        setSavingWorkspaces(true)
+        try {
+          await knowledge.setAgentWorkspaces(targetId, agentWorkspaces)
+        } catch (wsError) {
+          console.error("Failed to save knowledge workspaces:", wsError)
+        } finally {
+          setSavingWorkspaces(false)
+        }
+      }
       addToast("success", isEditing ? "配置已保存" : "创建成功")
       router.push(`/settings/agents/edit?id=${savedId}`)
     } catch (error) {
@@ -435,6 +459,60 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
               )}
             </div>
           </div>
+
+          {/* 知识库配置 */}
+          {knowledgeRepoList.length > 0 && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between text-sm font-bold text-foreground px-1">
+                <div className="flex items-center gap-2">
+                  <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                    <BookOpen className="h-4 w-4" />
+                  </div>
+                  知识库配置
+                </div>
+                <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest bg-muted/40 px-2 py-0.5 rounded-full">
+                  已选 {agentWorkspaces.length} / {new Set(knowledgeRepoList.map(r => r.workspace)).size} 工作区
+                </span>
+              </div>
+              <div className="bg-muted/20 p-6 rounded-3xl border border-muted/60 shadow-sm">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {[...new Set(knowledgeRepoList.map(r => r.workspace))].map((ws) => (
+                    <div
+                      key={ws}
+                      onClick={() => {
+                        const isSelected = agentWorkspaces.includes(ws)
+                        setAgentWorkspaces((prev) =>
+                          isSelected
+                            ? prev.filter((w) => w !== ws)
+                            : [...prev, ws],
+                        )
+                      }}
+                      className={cn(
+                        "group flex items-start gap-3 rounded-2xl border p-4 cursor-pointer transition-all",
+                        agentWorkspaces.includes(ws)
+                          ? "border-primary bg-primary/5 shadow-inner"
+                          : "border-muted/60 bg-background hover:border-primary/30",
+                      )}
+                    >
+                      <Checkbox
+                        checked={agentWorkspaces.includes(ws)}
+                        className="mt-0.5 shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="space-y-1 min-w-0">
+                        <Label className="text-xs font-bold cursor-pointer block truncate">
+                          {ws}
+                        </Label>
+                        <p className="text-[10px] text-muted-foreground leading-snug">
+                          {knowledgeRepoList.filter((r) => r.workspace === ws).length} 个仓库
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 第三排：系统提示词 - 占据整宽 */}
           <div className="space-y-4 pb-10">

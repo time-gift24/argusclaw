@@ -53,6 +53,7 @@ use argus_tool::ToolManager;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
+pub use argus_repository::types::KnowledgeRepoRecord;
 pub use resolver::ProviderManagerResolver;
 
 /// Default agent display name for the ArgusWing template.

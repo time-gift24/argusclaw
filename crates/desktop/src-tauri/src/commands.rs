@@ -696,6 +696,100 @@ pub async fn get_provider_context_window(
 }
 
 // ============================================================================
+// Knowledge Repo Commands
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnowledgeRepoRecordPayload {
+    pub id: i64,
+    pub repo: String,
+    pub repo_id: String,
+    pub provider: String,
+    pub owner: String,
+    pub name: String,
+    pub default_branch: String,
+    pub manifest_paths: Vec<String>,
+    pub workspace: String,
+}
+
+impl From<argus_wing::KnowledgeRepoRecord> for KnowledgeRepoRecordPayload {
+    fn from(r: argus_wing::KnowledgeRepoRecord) -> Self {
+        Self {
+            id: r.id,
+            repo: r.repo,
+            repo_id: r.repo_id,
+            provider: r.provider,
+            owner: r.owner,
+            name: r.name,
+            default_branch: r.default_branch,
+            manifest_paths: r.manifest_paths,
+            workspace: r.workspace,
+        }
+    }
+}
+
+impl From<KnowledgeRepoRecordPayload> for argus_wing::KnowledgeRepoRecord {
+    fn from(p: KnowledgeRepoRecordPayload) -> Self {
+        Self {
+            id: p.id,
+            repo: p.repo,
+            repo_id: p.repo_id,
+            provider: p.provider,
+            owner: p.owner,
+            name: p.name,
+            default_branch: p.default_branch,
+            manifest_paths: p.manifest_paths,
+            workspace: p.workspace,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn list_knowledge_repos(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<KnowledgeRepoRecordPayload>, String> {
+    let records = wing.list_knowledge_repos().await.map_err(|e| e.to_string())?;
+    Ok(records.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+pub async fn upsert_knowledge_repo(
+    wing: State<'_, Arc<ArgusWing>>,
+    record: KnowledgeRepoRecordPayload,
+) -> Result<i64, String> {
+    wing.upsert_knowledge_repo(record.into()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_knowledge_repo(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<bool, String> {
+    wing.delete_knowledge_repo(id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_agent_knowledge_workspaces(
+    wing: State<'_, Arc<ArgusWing>>,
+    agent_id: i64,
+) -> Result<Vec<String>, String> {
+    wing.list_agent_knowledge_workspaces(AgentId::new(agent_id))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_agent_knowledge_workspaces(
+    wing: State<'_, Arc<ArgusWing>>,
+    agent_id: i64,
+    workspaces: Vec<String>,
+) -> Result<(), String> {
+    wing.set_agent_knowledge_workspaces(AgentId::new(agent_id), workspaces)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
