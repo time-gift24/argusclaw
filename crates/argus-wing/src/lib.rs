@@ -36,9 +36,9 @@ use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
-    ThreadPoolState,
+    knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider,
+    LlmProviderId, LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel,
+    SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, KnowledgeRepoRepository,
@@ -272,7 +272,12 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
-        self.tool_manager.register(Arc::new(KnowledgeTool::new()));
+
+        let knowledge_provider: Arc<dyn KnowledgeRepoProvider> =
+            Arc::new(ArgusSqlite::new(self.pool.clone()));
+        self.tool_manager.register(Arc::new(
+            KnowledgeTool::new_with_repo_provider(knowledge_provider),
+        ));
 
         Ok(())
     }
