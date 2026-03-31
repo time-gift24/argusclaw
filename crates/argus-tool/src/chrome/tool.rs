@@ -27,7 +27,7 @@ const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
     ChromeAction::GetDomSummary,
-    ChromeAction::Screenshot,
+    ChromeAction::NetworkRequests,
 ];
 
 const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
@@ -37,7 +37,7 @@ const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
     ChromeAction::GetDomSummary,
-    ChromeAction::Screenshot,
+    ChromeAction::NetworkRequests,
     ChromeAction::Click,
     ChromeAction::Type,
     ChromeAction::GetUrl,
@@ -163,6 +163,10 @@ impl ChromeTool {
             "timeout_ms": {
                 "type": "integer",
                 "description": "Optional bounded passive wait in milliseconds for wait"
+            },
+            "max_requests": {
+                "type": "integer",
+                "description": "Maximum number of recent network requests to return"
             }
         });
 
@@ -322,21 +326,6 @@ impl NamedTool for ChromeTool {
                     "summary": summary,
                 }))
             }
-            ChromeAction::Screenshot => {
-                let session_id = required_session_id(&args)?;
-                let saved_path = self
-                    .manager
-                    .screenshot(&session_id, None)
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "screenshot",
-                    "session_id": session_id,
-                    "screenshot_path": saved_path,
-                    "status": "ok",
-                }))
-            }
             ChromeAction::Click => {
                 let session_id = required_session_id(&args)?;
                 let selector = required_field(&args, "selector", args.selector.as_deref())?;
@@ -388,6 +377,19 @@ impl NamedTool for ChromeTool {
                     "action": "get_cookies",
                     "session_id": session_id,
                     "cookies": cookies,
+                }))
+            }
+            ChromeAction::NetworkRequests => {
+                let session_id = required_session_id(&args)?;
+                let requests = self
+                    .manager
+                    .network_requests(&session_id, args.max_requests)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "network_requests",
+                    "session_id": session_id,
+                    "requests": requests,
                 }))
             }
         }

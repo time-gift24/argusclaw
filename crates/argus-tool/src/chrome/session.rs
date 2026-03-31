@@ -1,25 +1,347 @@
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::json;
+use thirtyfour::extensions::cdp::ChromeDevTools;
 use thirtyfour::prelude::{By, WebDriver};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use super::error::ChromeToolError;
-use super::models::{CookieSummary, LinkSummary};
+use super::models::{CookieSummary, LinkSummary, NetworkRequestSummary};
+
+const NETWORK_RECORDER_BOOTSTRAP_SCRIPT: &str = r#"
+(() => {
+    const stateKey = "__argusChromeNetworkRecorder";
+    if (window[stateKey]) {
+        return;
+    }
+
+    const maxEntries = 512;
+    const state = { requests: [] };
+
+    const trimRequests = () => {
+        if (state.requests.length > maxEntries) {
+            state.requests.splice(0, state.requests.length - maxEntries);
+        }
+    };
+
+    const headersToObject = (value) => {
+        const result = {};
+        if (!value) {
+            return result;
+        }
+
+        try {
+            if (typeof Headers !== "undefined" && value instanceof Headers) {
+                value.forEach((headerValue, headerName) => {
+                    result[String(headerName).toLowerCase()] = String(headerValue);
+                });
+                return result;
+            }
+
+            if (Array.isArray(value)) {
+                for (const entry of value) {
+                    if (Array.isArray(entry) && entry.length >= 2) {
+                        result[String(entry[0]).toLowerCase()] = String(entry[1]);
+                    }
+                }
+                return result;
+            }
+
+            if (typeof value.entries === "function") {
+                for (const [headerName, headerValue] of value.entries()) {
+                    result[String(headerName).toLowerCase()] = String(headerValue);
+                }
+                return result;
+            }
+
+            if (typeof value === "object") {
+                for (const [headerName, headerValue] of Object.entries(value)) {
+                    if (headerValue != null) {
+                        result[String(headerName).toLowerCase()] = Array.isArray(headerValue)
+                            ? headerValue.map(String).join(", ")
+                            : String(headerValue);
+                    }
+                }
+            }
+        } catch (_) {
+            return result;
+        }
+
+        return result;
+    };
+
+    const parseRawHeaders = (rawHeaders) => {
+        const result = {};
+        if (!rawHeaders) {
+            return result;
+        }
+
+        for (const line of String(rawHeaders).split(/\r?\n/)) {
+            if (!line) {
+                continue;
+            }
+            const separatorIndex = line.indexOf(":");
+            if (separatorIndex <= 0) {
+                continue;
+            }
+            const headerName = line.slice(0, separatorIndex).trim().toLowerCase();
+            const headerValue = line.slice(separatorIndex + 1).trim();
+            if (headerName) {
+                result[headerName] = headerValue;
+            }
+        }
+        return result;
+    };
+
+    const requestUrl = (input) => {
+        if (typeof input === "string") {
+            return input;
+        }
+        if (input && typeof input.url === "string") {
+            return input.url;
+        }
+        return String(input || "");
+    };
+
+    const requestMethod = (input, init) => {
+        if (init && typeof init.method === "string" && init.method) {
+            return init.method.toUpperCase();
+        }
+        if (input && typeof input.method === "string" && input.method) {
+            return input.method.toUpperCase();
+        }
+        return "GET";
+    };
+
+    const requestHeaders = (input, init) => {
+        if (init && Object.prototype.hasOwnProperty.call(init, "headers")) {
+            return headersToObject(init.headers);
+        }
+        if (input && input.headers) {
+            return headersToObject(input.headers);
+        }
+        return {};
+    };
+
+    const record = (entry) => {
+        state.requests.push(entry);
+        trimRequests();
+    };
+
+    Object.defineProperty(window, stateKey, {
+        value: state,
+        configurable: false,
+        enumerable: false,
+        writable: false,
+    });
+
+    if (typeof window.fetch === "function") {
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async function(input, init) {
+            const entry = {
+                observed_at: performance.now(),
+                method: requestMethod(input, init),
+                url: requestUrl(input),
+                status: null,
+                request_headers: requestHeaders(input, init),
+                response_headers: {},
+                error: null,
+            };
+
+            try {
+                const response = await originalFetch(input, init);
+                entry.observed_at = performance.now();
+                entry.status = Number.isFinite(response.status) ? response.status : null;
+                entry.response_headers = headersToObject(response.headers);
+                record(entry);
+                return response;
+            } catch (error) {
+                entry.observed_at = performance.now();
+                entry.error =
+                    error && typeof error.message === "string" ? error.message : String(error);
+                record(entry);
+                throw error;
+            }
+        };
+    }
+
+    if (typeof XMLHttpRequest !== "undefined") {
+        const originalOpen = XMLHttpRequest.prototype.open;
+        const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+        const originalSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this.__argusRequestMeta = {
+                method: String(method || "GET").toUpperCase(),
+                url: String(url || ""),
+                request_headers: {},
+                observed_at: performance.now(),
+            };
+            return originalOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+            const meta = this.__argusRequestMeta || (this.__argusRequestMeta = {
+                method: "GET",
+                url: "",
+                request_headers: {},
+                observed_at: performance.now(),
+            });
+            meta.request_headers[String(name).toLowerCase()] = String(value);
+            return originalSetRequestHeader.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function() {
+            const xhr = this;
+            const meta = xhr.__argusRequestMeta || {
+                method: "GET",
+                url: "",
+                request_headers: {},
+                observed_at: performance.now(),
+            };
+
+            const finalize = (errorMessage) => {
+                record({
+                    observed_at: performance.now(),
+                    method: meta.method || "GET",
+                    url: meta.url || "",
+                    status: Number.isFinite(xhr.status) && xhr.status > 0 ? xhr.status : null,
+                    request_headers: meta.request_headers || {},
+                    response_headers: parseRawHeaders(
+                        typeof xhr.getAllResponseHeaders === "function"
+                            ? xhr.getAllResponseHeaders()
+                            : ""
+                    ),
+                    error: errorMessage,
+                });
+                xhr.removeEventListener("loadend", onLoadEnd);
+                xhr.removeEventListener("error", onError);
+                xhr.removeEventListener("abort", onAbort);
+                xhr.removeEventListener("timeout", onTimeout);
+            };
+
+            const onLoadEnd = () => finalize(null);
+            const onError = () => finalize("network error");
+            const onAbort = () => finalize("aborted");
+            const onTimeout = () => finalize("timeout");
+
+            xhr.addEventListener("loadend", onLoadEnd);
+            xhr.addEventListener("error", onError);
+            xhr.addEventListener("abort", onAbort);
+            xhr.addEventListener("timeout", onTimeout);
+            return originalSend.apply(xhr, arguments);
+        };
+    }
+})();
+"#;
+
+const NETWORK_REQUEST_SNAPSHOT_SCRIPT: &str = r#"
+return (function () {
+    const state = window.__argusChromeNetworkRecorder;
+    const runtimeRequests =
+        state && Array.isArray(state.requests) ? state.requests.slice() : [];
+    const performanceApi =
+        window.performance && typeof window.performance.getEntriesByType === "function"
+            ? window.performance
+            : null;
+    const navigationEntries = performanceApi
+        ? performanceApi.getEntriesByType("navigation")
+        : [];
+    const navigationRequests = navigationEntries.map((entry) => ({
+        observed_at: Number(entry.startTime || 0),
+        method: "GET",
+        url: String(entry.name || window.location.href || ""),
+        status:
+            typeof entry.responseStatus === "number" && entry.responseStatus > 0
+                ? entry.responseStatus
+                : null,
+        request_headers: {},
+        response_headers: {},
+        error: null,
+    }));
+    const resourceEntries = performanceApi
+        ? performanceApi.getEntriesByType("resource")
+        : [];
+    const resourceRequests = resourceEntries
+        .filter((entry) => {
+            const initiator = String(entry.initiatorType || "");
+            return initiator !== "fetch" && initiator !== "xmlhttprequest";
+        })
+        .map((entry) => ({
+            observed_at: Number(entry.startTime || 0),
+            method: "GET",
+            url: String(entry.name || ""),
+            status:
+                typeof entry.responseStatus === "number" && entry.responseStatus > 0
+                    ? entry.responseStatus
+                    : null,
+            request_headers: {},
+            response_headers: {},
+            error: null,
+        }));
+
+    return [...navigationRequests, ...resourceRequests, ...runtimeRequests]
+        .filter((entry) => typeof entry.url === "string" && entry.url.length > 0)
+        .sort((left, right) => Number(left.observed_at || 0) - Number(right.observed_at || 0))
+        .map((entry) => ({
+            method: String(entry.method || "GET"),
+            url: String(entry.url || ""),
+            status: typeof entry.status === "number" ? entry.status : null,
+            request_headers:
+                entry.request_headers && typeof entry.request_headers === "object"
+                    ? entry.request_headers
+                    : {},
+            response_headers:
+                entry.response_headers && typeof entry.response_headers === "object"
+                    ? entry.response_headers
+                    : {},
+            error: entry.error == null ? null : String(entry.error),
+        }));
+})();
+"#;
+
+pub(crate) async fn install_network_request_recorder(
+    driver: &WebDriver,
+) -> Result<(), ChromeToolError> {
+    let dev_tools = ChromeDevTools::new(driver.handle.clone());
+    dev_tools
+        .execute_cdp_with_params(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": NETWORK_RECORDER_BOOTSTRAP_SCRIPT }),
+        )
+        .await
+        .map_err(|e| ChromeToolError::PageReadFailed {
+            reason: format!("failed to install network request recorder: {e}"),
+        })?;
+    Ok(())
+}
+
+fn keep_recent_requests(
+    mut requests: Vec<NetworkRequestSummary>,
+    max_requests: Option<u32>,
+) -> Vec<NetworkRequestSummary> {
+    match max_requests {
+        Some(limit) => requests.split_off(requests.len().saturating_sub(limit as usize)),
+        None => requests,
+    }
+}
 
 #[async_trait]
 pub trait BrowserSession: Send + Sync {
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
     async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError>;
-    async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
     async fn current_url(&self) -> Result<String, ChromeToolError>;
     async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError>;
+    async fn network_requests(
+        &self,
+        max_requests: Option<u32>,
+    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError>;
 }
 
 #[derive(Clone)]
@@ -27,7 +349,6 @@ pub struct ChromeSession {
     pub session_id: String,
     pub current_url: String,
     pub page_title: String,
-    pub last_screenshot_path: Option<PathBuf>,
     interaction: Arc<dyn BrowserSession>,
 }
 
@@ -37,7 +358,6 @@ impl fmt::Debug for ChromeSession {
             .field("session_id", &self.session_id)
             .field("current_url", &self.current_url)
             .field("page_title", &self.page_title)
-            .field("last_screenshot_path", &self.last_screenshot_path)
             .finish()
     }
 }
@@ -54,7 +374,6 @@ impl ChromeSession {
             session_id,
             current_url,
             page_title,
-            last_screenshot_path: None,
             interaction,
         }
     }
@@ -62,10 +381,6 @@ impl ChromeSession {
     #[must_use]
     pub fn interaction(&self) -> Arc<dyn BrowserSession> {
         Arc::clone(&self.interaction)
-    }
-
-    pub fn set_last_screenshot_path(&mut self, path: Option<PathBuf>) {
-        self.last_screenshot_path = path;
     }
 }
 
@@ -148,16 +463,6 @@ impl BrowserSession for ManagedWebDriverSession {
         Ok(links)
     }
 
-    async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
-        let driver = self.live_driver().await?;
-        driver
-            .screenshot_as_png()
-            .await
-            .map_err(|e| ChromeToolError::ScreenshotFailed {
-                reason: e.to_string(),
-            })
-    }
-
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
         let driver = self.live_driver().await?;
         let element = driver.find(By::Css(selector)).await.map_err(|e| {
@@ -217,6 +522,28 @@ impl BrowserSession for ManagedWebDriverSession {
                 path: c.path,
             })
             .collect())
+    }
+
+    async fn network_requests(
+        &self,
+        max_requests: Option<u32>,
+    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
+        let driver = self.live_driver().await?;
+
+        let entries = driver
+            .execute(NETWORK_REQUEST_SNAPSHOT_SCRIPT.to_string(), vec![])
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: format!("failed to read network requests: {e}"),
+            })?;
+
+        let requests = entries
+            .convert()
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: format!("failed to deserialize network requests: {e}"),
+            })?;
+
+        Ok(keep_recent_requests(requests, max_requests))
     }
 
     async fn shutdown(&self) -> Result<(), ChromeToolError> {
@@ -320,7 +647,54 @@ mod tests {
 
     use tokio::process::Command;
 
-    use super::{ChromeToolError, finalize_shutdown};
+    use crate::chrome::models::NetworkRequestSummary;
+
+    use super::{
+        ChromeToolError, NETWORK_RECORDER_BOOTSTRAP_SCRIPT, NETWORK_REQUEST_SNAPSHOT_SCRIPT,
+        finalize_shutdown, keep_recent_requests,
+    };
+
+    #[test]
+    fn keep_recent_requests_prefers_latest_entries() {
+        let requests = vec![
+            NetworkRequestSummary {
+                method: "GET".to_string(),
+                url: "https://example.com/1".to_string(),
+                status: Some(200),
+                request_headers: serde_json::json!({}),
+                response_headers: serde_json::json!({}),
+                error: None,
+            },
+            NetworkRequestSummary {
+                method: "GET".to_string(),
+                url: "https://example.com/2".to_string(),
+                status: Some(200),
+                request_headers: serde_json::json!({}),
+                response_headers: serde_json::json!({}),
+                error: None,
+            },
+            NetworkRequestSummary {
+                method: "GET".to_string(),
+                url: "https://example.com/3".to_string(),
+                status: Some(200),
+                request_headers: serde_json::json!({}),
+                response_headers: serde_json::json!({}),
+                error: None,
+            },
+        ];
+
+        let recent = keep_recent_requests(requests, Some(2));
+        let urls: Vec<_> = recent.into_iter().map(|request| request.url).collect();
+        assert_eq!(urls, vec!["https://example.com/2", "https://example.com/3"]);
+    }
+
+    #[test]
+    fn network_scripts_cover_navigation_fetch_and_xhr() {
+        assert!(NETWORK_REQUEST_SNAPSHOT_SCRIPT.contains("getEntriesByType(\"navigation\")"));
+        assert!(NETWORK_REQUEST_SNAPSHOT_SCRIPT.contains("getEntriesByType(\"resource\")"));
+        assert!(NETWORK_RECORDER_BOOTSTRAP_SCRIPT.contains("window.fetch"));
+        assert!(NETWORK_RECORDER_BOOTSTRAP_SCRIPT.contains("XMLHttpRequest.prototype.open"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]

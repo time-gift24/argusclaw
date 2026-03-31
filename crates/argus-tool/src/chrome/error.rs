@@ -61,12 +61,6 @@ pub enum ChromeToolError {
     #[error("failed to read page state: {reason}")]
     PageReadFailed { reason: String },
 
-    #[error("screenshot output path '{path}' is not allowed")]
-    OutputPathNotAllowed { path: String },
-
-    #[error("failed to capture screenshot: {reason}")]
-    ScreenshotFailed { reason: String },
-
     #[error("failed to shut down chrome session: {reason}")]
     SessionShutdownFailed { reason: String },
 

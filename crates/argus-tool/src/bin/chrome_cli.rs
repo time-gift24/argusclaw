@@ -71,12 +71,6 @@ enum Command {
         #[arg(long = "session-id")]
         session_id: String,
     },
-    /// Capture a screenshot and save to temporary path
-    Screenshot {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
-    },
     /// Click an element (interactive mode required)
     Click {
         /// Session ID returned by open
@@ -109,6 +103,15 @@ enum Command {
         /// Session ID returned by open
         #[arg(long = "session-id")]
         session_id: String,
+    },
+    /// List network requests that occurred for the current page
+    NetworkRequests {
+        /// Session ID returned by open
+        #[arg(long = "session-id")]
+        session_id: String,
+        /// Optional maximum number of requests to return
+        #[arg(long)]
+        max_requests: Option<u32>,
     },
 }
 
@@ -181,13 +184,6 @@ fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
                 "session_id": session_id,
             }),
         ),
-        Command::Screenshot { session_id } => (
-            "screenshot",
-            json!({
-                "action": "screenshot",
-                "session_id": session_id,
-            }),
-        ),
         Command::Click {
             session_id,
             selector,
@@ -224,6 +220,17 @@ fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
             json!({
                 "action": "get_cookies",
                 "session_id": session_id,
+            }),
+        ),
+        Command::NetworkRequests {
+            session_id,
+            max_requests,
+        } => (
+            "network_requests",
+            json!({
+                "action": "network_requests",
+                "session_id": session_id,
+                "max_requests": max_requests,
             }),
         ),
     }
