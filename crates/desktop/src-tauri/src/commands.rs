@@ -748,7 +748,10 @@ impl From<KnowledgeRepoRecordPayload> for argus_wing::KnowledgeRepoRecord {
 pub async fn list_knowledge_repos(
     wing: State<'_, Arc<ArgusWing>>,
 ) -> Result<Vec<KnowledgeRepoRecordPayload>, String> {
-    let records = wing.list_knowledge_repos().await.map_err(|e| e.to_string())?;
+    let records = wing
+        .list_knowledge_repos()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(records.into_iter().map(Into::into).collect())
 }
 
@@ -757,7 +760,9 @@ pub async fn upsert_knowledge_repo(
     wing: State<'_, Arc<ArgusWing>>,
     record: KnowledgeRepoRecordPayload,
 ) -> Result<i64, String> {
-    wing.upsert_knowledge_repo(record.into()).await.map_err(|e| e.to_string())
+    wing.upsert_knowledge_repo(record.into())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -765,7 +770,9 @@ pub async fn delete_knowledge_repo(
     wing: State<'_, Arc<ArgusWing>>,
     id: i64,
 ) -> Result<bool, String> {
-    wing.delete_knowledge_repo(id).await.map_err(|e| e.to_string())
+    wing.delete_knowledge_repo(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

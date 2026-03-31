@@ -253,10 +253,7 @@ fn build_definition_schema(command: &Command) -> serde_json::Value {
         let mut properties = serde_json::Map::new();
         let mut required = vec!["action"];
 
-        properties.insert(
-            "action".to_string(),
-            action_schema(sub),
-        );
+        properties.insert("action".to_string(), action_schema(sub));
 
         let args_schema = subcommand_args_schema(sub);
         if !args_schema.properties.is_empty() {
@@ -687,14 +684,15 @@ mod tests {
 
     fn variant_allows_action(variant: &serde_json::Value, action: &str) -> bool {
         match &variant["properties"]["action"] {
-            serde_json::Value::Object(map) => map
-                .get("const")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| value == action)
-                || map
-                    .get("enum")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|values| values.iter().any(|value| value == action)),
+            serde_json::Value::Object(map) => {
+                map.get("const")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| value == action)
+                    || map
+                        .get("enum")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|values| values.iter().any(|value| value == action))
+            }
             _ => false,
         }
     }
@@ -779,6 +777,7 @@ mod tests {
         let (control_tx, _) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
+            agent_id: None,
             pipe_tx,
             control_tx,
         })
