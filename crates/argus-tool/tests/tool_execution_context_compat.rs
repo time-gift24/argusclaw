@@ -8,6 +8,7 @@ fn tool_execution_context_supports_legacy_struct_literal_construction() {
 
     let _ctx = ToolExecutionContext {
         thread_id: ThreadId::new(),
+        agent_id: None,
         pipe_tx,
         control_tx,
     };
