@@ -18,7 +18,6 @@ pub struct ChromePaths {
     pub root: PathBuf,
     pub driver: PathBuf,
     pub patched: PathBuf,
-    pub screenshots: PathBuf,
     pub tmp: PathBuf,
 }
 
@@ -28,14 +27,12 @@ impl ChromePaths {
         let root = home.join(".arguswing").join("chrome");
         let driver = root.join("driver");
         let patched = root.join("patched");
-        let screenshots = root.join("screenshots");
         let tmp = root.join("tmp");
 
         Self {
             root,
             driver,
             patched,
-            screenshots,
             tmp,
         }
     }
@@ -44,7 +41,6 @@ impl ChromePaths {
         create_directory(&self.root)?;
         create_directory(&self.driver)?;
         create_directory(&self.patched)?;
-        create_directory(&self.screenshots)?;
         create_directory(&self.tmp)?;
         Ok(())
     }
@@ -642,7 +638,6 @@ mod tests {
         assert!(paths.root.is_dir());
         assert!(paths.driver.is_dir());
         assert!(paths.patched.is_dir());
-        assert!(paths.screenshots.is_dir());
         assert!(paths.tmp.is_dir());
     }
 

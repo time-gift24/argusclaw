@@ -26,8 +26,8 @@ const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Wait,
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
+    ChromeAction::NetworkRequests,
     ChromeAction::GetDomSummary,
-    ChromeAction::Screenshot,
 ];
 
 const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
@@ -36,8 +36,8 @@ const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Wait,
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
+    ChromeAction::NetworkRequests,
     ChromeAction::GetDomSummary,
-    ChromeAction::Screenshot,
     ChromeAction::Click,
     ChromeAction::Type,
     ChromeAction::GetUrl,
@@ -163,6 +163,10 @@ impl ChromeTool {
             "timeout_ms": {
                 "type": "integer",
                 "description": "Optional bounded passive wait in milliseconds for wait"
+            },
+            "max_requests": {
+                "type": "integer",
+                "description": "Optional maximum number of request records for network requests"
             }
         });
 
@@ -322,19 +326,18 @@ impl NamedTool for ChromeTool {
                     "summary": summary,
                 }))
             }
-            ChromeAction::Screenshot => {
+            ChromeAction::NetworkRequests => {
                 let session_id = required_session_id(&args)?;
-                let saved_path = self
+                let requests = self
                     .manager
-                    .screenshot(&session_id, None)
+                    .network_requests(&session_id, args.max_requests)
                     .await
                     .map_err(Self::map_error)?;
 
                 Ok(json!({
-                    "action": "screenshot",
+                    "action": "network_requests",
                     "session_id": session_id,
-                    "screenshot_path": saved_path,
-                    "status": "ok",
+                    "requests": requests,
                 }))
             }
             ChromeAction::Click => {

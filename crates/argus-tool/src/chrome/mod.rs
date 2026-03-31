@@ -26,7 +26,9 @@ mod tests {
     use super::manager::{
         BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
     };
-    use super::models::{ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, PageMetadata};
+    use super::models::{
+        ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, NetworkRequestSummary, PageMetadata,
+    };
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
     use super::session::BrowserSession;
@@ -199,7 +201,7 @@ mod tests {
         assert!(action_values.contains(&"extract_text"));
         assert!(action_values.contains(&"list_links"));
         assert!(action_values.contains(&"get_dom_summary"));
-        assert!(action_values.contains(&"screenshot"));
+        assert!(action_values.contains(&"network_requests"));
         assert!(action_values.contains(&"install"));
         assert!(!action_values.contains(&"click"));
 
@@ -207,8 +209,8 @@ mod tests {
         assert!(def.parameters["properties"].get("selector").is_some());
         assert!(
             def.parameters["properties"]
-                .get("screenshot_path")
-                .is_none()
+                .get("max_requests")
+                .is_some()
         );
         assert!(def.parameters["properties"].get("text").is_none());
     }
@@ -332,27 +334,17 @@ mod tests {
             .expect("get_dom_summary should succeed");
         assert_eq!(summary["summary"], "Visible page text");
 
-        let screenshot = tool
+        let network = tool
             .execute(
                 json!({
-                    "action": "screenshot",
+                    "action": "network_requests",
                     "session_id": session_id
                 }),
                 make_ctx(),
             )
             .await
-            .expect("screenshot should succeed");
-        let screenshot_path = PathBuf::from(
-            screenshot["screenshot_path"]
-                .as_str()
-                .expect("screenshot path should be returned"),
-        );
-        assert!(screenshot_path.is_absolute());
-        assert!(screenshot_path.is_file());
-        assert_eq!(
-            screenshot_path.extension().and_then(|value| value.to_str()),
-            Some("png")
-        );
+            .expect("network_requests should succeed");
+        assert!(network["requests"].is_array());
     }
 
     #[tokio::test]
@@ -605,10 +597,6 @@ mod tests {
     fn chrome_paths_use_arguswing_root() {
         let paths = ChromePaths::from_home(Path::new("/tmp/home"));
         assert_eq!(paths.root, PathBuf::from("/tmp/home/.arguswing/chrome"));
-        assert_eq!(
-            paths.screenshots,
-            PathBuf::from("/tmp/home/.arguswing/chrome/screenshots")
-        );
     }
 
     #[test]
@@ -680,7 +668,7 @@ mod tests {
                     text: "Docs".to_string(),
                 }],
                 text: "Managed text".to_string(),
-                screenshot: b"managed-png".to_vec(),
+                network_requests: Vec::new(),
                 url: url.to_string(),
                 cookies: vec![],
             });
@@ -783,7 +771,7 @@ mod tests {
                     page_title: page_title.into(),
                     links,
                     text: text.into(),
-                    screenshot: b"fake-png".to_vec(),
+                    network_requests: Vec::new(),
                 },
             );
             self
@@ -796,14 +784,14 @@ mod tests {
         page_title: String,
         links: Vec<LinkSummary>,
         text: String,
-        screenshot: Vec<u8>,
+        network_requests: Vec<NetworkRequestSummary>,
     }
 
     #[derive(Debug)]
     struct FakeBrowserSession {
         links: Vec<LinkSummary>,
         text: String,
-        screenshot: Vec<u8>,
+        network_requests: Vec<NetworkRequestSummary>,
         url: String,
         cookies: Vec<CookieSummary>,
     }
@@ -821,8 +809,15 @@ mod tests {
             Ok(self.links.clone())
         }
 
-        async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
-            Ok(self.screenshot.clone())
+        async fn network_requests(
+            &self,
+            max_requests: Option<u32>,
+        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
+            let mut requests = self.network_requests.clone();
+            if let Some(max_requests) = max_requests {
+                requests.truncate(max_requests as usize);
+            }
+            Ok(requests)
         }
 
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
@@ -859,7 +854,7 @@ mod tests {
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
                 links: page.links.clone(),
                 text: page.text.clone(),
-                screenshot: page.screenshot.clone(),
+                network_requests: page.network_requests.clone(),
                 url: page.final_url.clone(),
                 cookies: vec![],
             });

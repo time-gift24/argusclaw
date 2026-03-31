@@ -71,11 +71,14 @@ enum Command {
         #[arg(long = "session-id")]
         session_id: String,
     },
-    /// Capture a screenshot and save to temporary path
-    Screenshot {
+    /// Capture browser resource timing entries
+    NetworkRequests {
         /// Session ID returned by open
         #[arg(long = "session-id")]
         session_id: String,
+        /// Maximum number of records to return
+        #[arg(long)]
+        max_requests: Option<u32>,
     },
     /// Click an element (interactive mode required)
     Click {
@@ -181,11 +184,15 @@ fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
                 "session_id": session_id,
             }),
         ),
-        Command::Screenshot { session_id } => (
-            "screenshot",
+        Command::NetworkRequests {
+            session_id,
+            max_requests,
+        } => (
+            "network_requests",
             json!({
-                "action": "screenshot",
+                "action": "network_requests",
                 "session_id": session_id,
+                "max_requests": max_requests,
             }),
         ),
         Command::Click {

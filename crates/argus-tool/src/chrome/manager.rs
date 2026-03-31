@@ -17,7 +17,9 @@ use super::error::ChromeToolError;
 use super::installer::{
     ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
 };
-use super::models::{CookieSummary, LinkSummary, OpenArgs, OpenedSession, PageMetadata};
+use super::models::{
+    CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, OpenedSession, PageMetadata,
+};
 use super::session::{
     BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
 };
@@ -115,7 +117,6 @@ pub struct ChromeManager {
     session_order: RwLock<VecDeque<String>>,
     session_limit: usize,
     next_session_id: AtomicU64,
-    next_screenshot_id: AtomicU64,
 }
 
 impl ChromeManager {
@@ -144,7 +145,6 @@ impl ChromeManager {
             session_order: RwLock::new(VecDeque::new()),
             session_limit,
             next_session_id: AtomicU64::new(0),
-            next_screenshot_id: AtomicU64::new(0),
         }
     }
 
@@ -336,26 +336,15 @@ impl ChromeManager {
         self.extract_text(session_id, None).await
     }
 
-    pub async fn screenshot(
+    pub async fn network_requests(
         &self,
         session_id: &str,
-        screenshot_name: Option<&str>,
-    ) -> Result<PathBuf, ChromeToolError> {
-        self.paths.ensure_directories()?;
-        let interaction = self.session_interaction(session_id).await?;
-        let screenshot_path = self.managed_screenshot_path(session_id, screenshot_name)?;
-        let png = interaction.screenshot_png().await?;
-        std::fs::write(&screenshot_path, png).map_err(|e| ChromeToolError::FileWriteFailed {
-            path: screenshot_path.clone(),
-            reason: e.to_string(),
-        })?;
-
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| Self::session_not_found(session_id))?;
-        session.set_last_screenshot_path(Some(screenshot_path.clone()));
-        Ok(screenshot_path)
+        max_requests: Option<u32>,
+    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
+        self.session_interaction(session_id)
+            .await?
+            .network_requests(max_requests)
+            .await
     }
 
     pub async fn click(&self, session_id: &str, selector: &str) -> Result<(), ChromeToolError> {
@@ -397,34 +386,6 @@ impl ChromeManager {
     fn next_session_id(&self) -> String {
         let next = self.next_session_id.fetch_add(1, Ordering::Relaxed) + 1;
         format!("session-{next}")
-    }
-
-    fn managed_screenshot_path(
-        &self,
-        session_id: &str,
-        screenshot_name: Option<&str>,
-    ) -> Result<PathBuf, ChromeToolError> {
-        if let Some(name) = screenshot_name {
-            let candidate = Path::new(name);
-            let is_file_name_only =
-                candidate.file_name().and_then(|value| value.to_str()) == Some(name);
-            let is_png = candidate
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.eq_ignore_ascii_case("png"));
-            if !is_file_name_only || !is_png {
-                return Err(ChromeToolError::OutputPathNotAllowed {
-                    path: name.to_string(),
-                });
-            }
-            return Ok(self.paths.screenshots.join(name));
-        }
-
-        let next = self.next_screenshot_id.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(self
-            .paths
-            .screenshots
-            .join(format!("{session_id}-{next}.png")))
     }
 
     async fn session_interaction(
@@ -659,6 +620,25 @@ fn build_chrome_capabilities(
 ) -> Result<ChromeCapabilities, ChromeToolError> {
     let mut capabilities = DesiredCapabilities::chrome();
     capabilities
+        .set_base_capability(
+            "goog:loggingPrefs",
+            serde_json::json!({ "performance": "ALL" }),
+        )
+        .map_err(|e| ChromeToolError::DriverStartFailed {
+            reason: format!("failed to enable chrome performance logging: {e}"),
+        })?;
+    capabilities
+        .add_experimental_option(
+            "perfLoggingPrefs",
+            serde_json::json!({
+                "enableNetwork": true,
+                "enablePage": false,
+            }),
+        )
+        .map_err(|e| ChromeToolError::DriverStartFailed {
+            reason: format!("failed to configure chrome performance logging: {e}"),
+        })?;
+    capabilities
         .set_binary(browser_binary.to_string_lossy().as_ref())
         .map_err(|e| ChromeToolError::DriverStartFailed {
             reason: e.to_string(),
@@ -863,7 +843,9 @@ mod tests {
     use serde_json::json;
 
     use crate::chrome::error::ChromeToolError;
-    use crate::chrome::models::{CookieSummary, LinkSummary, OpenArgs, PageMetadata};
+    use crate::chrome::models::{
+        CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, PageMetadata,
+    };
     use crate::chrome::session::BrowserSession;
 
     use super::{
@@ -877,7 +859,7 @@ mod tests {
         page_title: String,
         links: Vec<LinkSummary>,
         text: String,
-        screenshot: Vec<u8>,
+        network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
     }
 
@@ -909,7 +891,31 @@ mod tests {
                     page_title: page_title.into(),
                     links,
                     text: text.into(),
-                    screenshot: b"fake-png".to_vec(),
+                    network_requests: Vec::new(),
+                    shutdown_label: requested_url,
+                },
+            );
+            self
+        }
+
+        fn with_page_with_network_requests(
+            mut self,
+            requested_url: impl Into<String>,
+            final_url: impl Into<String>,
+            page_title: impl Into<String>,
+            links: Vec<LinkSummary>,
+            text: impl Into<String>,
+            network_requests: Vec<NetworkRequestSummary>,
+        ) -> Self {
+            let requested_url = requested_url.into();
+            self.pages.insert(
+                requested_url.clone(),
+                FakePage {
+                    final_url: final_url.into(),
+                    page_title: page_title.into(),
+                    links,
+                    text: text.into(),
+                    network_requests,
                     shutdown_label: requested_url,
                 },
             );
@@ -921,7 +927,7 @@ mod tests {
     struct FakeBrowserSession {
         links: Vec<LinkSummary>,
         text: String,
-        screenshot: Vec<u8>,
+        network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
         shutdowns: Arc<StdMutex<Vec<String>>>,
         url: String,
@@ -941,8 +947,15 @@ mod tests {
             Ok(self.links.clone())
         }
 
-        async fn screenshot_png(&self) -> Result<Vec<u8>, ChromeToolError> {
-            Ok(self.screenshot.clone())
+        async fn network_requests(
+            &self,
+            max_requests: Option<u32>,
+        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
+            let mut requests = self.network_requests.clone();
+            if let Some(max_requests) = max_requests {
+                requests.truncate(max_requests as usize);
+            }
+            Ok(requests)
         }
 
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
@@ -983,7 +996,7 @@ mod tests {
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
                 links: page.links.clone(),
                 text: page.text.clone(),
-                screenshot: page.screenshot.clone(),
+                network_requests: page.network_requests.clone(),
                 shutdown_label: page.shutdown_label.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
                 url: page.final_url.clone(),
@@ -1157,7 +1170,6 @@ mod tests {
         assert_eq!(session.session_id, opened.session_id);
         assert_eq!(session.current_url, "https://example.com");
         assert_eq!(session.page_title, "Example");
-        assert_eq!(session.last_screenshot_path, None);
     }
 
     #[tokio::test]
@@ -1201,7 +1213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_screenshot_updates_session_state() {
+    async fn manager_network_requests_returns_records_from_session() {
         let manager = ChromeManager::new_for_test(sample_backend());
         let opened = manager
             .open(OpenArgs {
@@ -1210,17 +1222,40 @@ mod tests {
             .await
             .unwrap();
 
-        let returned = manager.screenshot(&opened.session_id, None).await.unwrap();
-        assert!(returned.starts_with(&manager.paths.screenshots));
-        assert!(returned.is_file());
-
-        let session = manager.session(&opened.session_id).await.unwrap();
-        assert_eq!(session.last_screenshot_path, Some(returned));
+        let requests = manager.network_requests(&opened.session_id, None).await.unwrap();
+        assert!(requests.is_empty());
     }
 
     #[tokio::test]
-    async fn screenshot_rejects_arbitrary_output_path() {
-        let manager = ChromeManager::new_for_test(sample_backend());
+    async fn manager_network_requests_respects_max_limit() {
+        let manager = ChromeManager::new_for_test(Arc::new(
+            FakeBrowserBackend::default().with_page_with_network_requests(
+                "https://example.com",
+                "https://example.com",
+                "Example",
+                vec![],
+                "Example text",
+                vec![
+                    NetworkRequestSummary {
+                        method: "GET".to_string(),
+                        url: "https://example.com/a".to_string(),
+                        status: Some(200),
+                        request_headers: json!({}),
+                        response_headers: json!({}),
+                        error: None,
+                    },
+                    NetworkRequestSummary {
+                        method: "GET".to_string(),
+                        url: "https://example.com/b".to_string(),
+                        status: Some(200),
+                        request_headers: json!({}),
+                        response_headers: json!({}),
+                        error: None,
+                    },
+                ],
+            ),
+        ));
+
         let opened = manager
             .open(OpenArgs {
                 url: "https://example.com".into(),
@@ -1228,11 +1263,11 @@ mod tests {
             .await
             .unwrap();
 
-        let err = manager
-            .screenshot(&opened.session_id, Some("../../escape.png"))
+        let requests = manager
+            .network_requests(&opened.session_id, Some(1))
             .await
-            .unwrap_err();
-        assert!(err.to_string().contains("not allowed"));
+            .unwrap();
+        assert_eq!(requests.len(), 1);
     }
 
     #[tokio::test]
@@ -1258,7 +1293,7 @@ mod tests {
         ));
 
         let err = manager
-            .screenshot("missing", Some("missing.png"))
+            .network_requests("missing", None)
             .await
             .unwrap_err();
         assert!(matches!(
