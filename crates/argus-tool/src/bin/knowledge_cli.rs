@@ -158,10 +158,7 @@ fn make_ctx() -> Arc<ToolExecutionContext> {
 
 fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
     match command {
-        Command::ListRepos => (
-            "list_repos",
-            json!({ "action": "list_repos" }),
-        ),
+        Command::ListRepos => ("list_repos", json!({ "action": "list_repos" })),
         Command::ResolveSnapshot { repo_id, r#ref } => (
             "resolve_snapshot",
             json!({

@@ -1,8 +1,8 @@
 //! Knowledge repo provider implementations.
 
-use async_trait::async_trait;
 use argus_protocol::ids::AgentId;
 use argus_protocol::{KnowledgeRepoProvider, KnowledgeRepoRecord};
+use async_trait::async_trait;
 
 use super::error::KnowledgeToolError;
 use super::registry::KnowledgeRepoRegistry;
@@ -26,6 +26,12 @@ impl KnowledgeRepoProvider for FileKnowledgeRepoProvider {
             .map(|(index, repo)| KnowledgeRepoRecord {
                 id: index as i64,
                 repo: format!("{}/{}", repo.owner, repo.name),
+                repo_id: repo.repo_id,
+                provider: repo.provider,
+                owner: repo.owner,
+                name: repo.name,
+                default_branch: repo.default_branch,
+                manifest_paths: repo.manifest_paths,
                 workspace: String::new(),
             })
             .collect())
@@ -44,6 +50,12 @@ impl KnowledgeRepoProvider for FileKnowledgeRepoProvider {
         Ok(KnowledgeRepoRecord {
             id: 0,
             repo: format!("{}/{}", descriptor.owner, descriptor.name),
+            repo_id: descriptor.repo_id,
+            provider: descriptor.provider,
+            owner: descriptor.owner,
+            name: descriptor.name,
+            default_branch: descriptor.default_branch,
+            manifest_paths: descriptor.manifest_paths,
             workspace: String::new(),
         })
     }
@@ -77,7 +89,7 @@ impl KnowledgeRepoProvider for StaticKnowledgeRepoProvider {
     ) -> Result<KnowledgeRepoRecord, Box<dyn std::error::Error + Send + Sync>> {
         self.repos
             .iter()
-            .find(|r| r.repo == repo)
+            .find(|r| r.repo == repo || r.repo_id == repo)
             .cloned()
             .ok_or_else(|| KnowledgeToolError::NotFound(repo.to_string()).into())
     }

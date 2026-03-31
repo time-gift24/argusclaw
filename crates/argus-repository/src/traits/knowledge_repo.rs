@@ -9,12 +9,12 @@ use crate::types::KnowledgeRepoRecord;
 #[async_trait]
 pub trait KnowledgeRepoRepository: Send + Sync {
     /// Insert or update a knowledge repo, returning the row ID.
-    async fn upsert(&self, repo: &str, workspace: &str) -> Result<i64, DbError>;
+    async fn upsert(&self, record: &KnowledgeRepoRecord) -> Result<i64, DbError>;
 
     /// Get a repo by database ID.
     async fn get(&self, id: i64) -> Result<Option<KnowledgeRepoRecord>, DbError>;
 
-    /// Get a repo by its repo string.
+    /// Get a repo by its repo lookup key or repo_id.
     async fn find_by_repo(&self, repo: &str) -> Result<Option<KnowledgeRepoRecord>, DbError>;
 
     /// List all knowledge repos.
@@ -24,7 +24,10 @@ pub trait KnowledgeRepoRepository: Send + Sync {
     async fn delete(&self, id: i64) -> Result<bool, DbError>;
 
     /// List repos visible to a specific agent (via workspace binding).
-    async fn list_repos_for_agent(&self, agent_id: i64) -> Result<Vec<KnowledgeRepoRecord>, DbError>;
+    async fn list_repos_for_agent(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<KnowledgeRepoRecord>, DbError>;
 
     /// Set the workspace bindings for an agent (replaces all existing).
     async fn set_agent_workspaces(
