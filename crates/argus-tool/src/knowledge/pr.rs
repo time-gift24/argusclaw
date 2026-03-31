@@ -206,6 +206,14 @@ pub struct KnowledgePrService<E = CliGitPrExecutor> {
     executor: E,
 }
 
+#[async_trait]
+pub trait KnowledgePrRuntime: Send + Sync {
+    async fn create_pr(
+        &self,
+        args: &KnowledgeCreatePrArgs,
+    ) -> Result<KnowledgeCreatePrResult, KnowledgeToolError>;
+}
+
 impl Default for KnowledgePrService<CliGitPrExecutor> {
     fn default() -> Self {
         Self::new()
@@ -290,6 +298,16 @@ impl<E: GitPrExecutor> KnowledgePrService<E> {
             updated_files: write_summary.updated_files.clone(),
             summary: format!("{action} for {} with {} changed files", args.target_repo, write_summary.changed_files.len()),
         })
+    }
+}
+
+#[async_trait]
+impl<E: GitPrExecutor> KnowledgePrRuntime for KnowledgePrService<E> {
+    async fn create_pr(
+        &self,
+        args: &KnowledgeCreatePrArgs,
+    ) -> Result<KnowledgeCreatePrResult, KnowledgeToolError> {
+        KnowledgePrService::create_pr(self, args).await
     }
 }
 

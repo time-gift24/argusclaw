@@ -11,9 +11,11 @@ use super::error::KnowledgeToolError;
 use super::github::{GitHubKnowledgeBackend, ReqwestGitHubTransport};
 use super::indexer::{KnowledgeBackend, KnowledgeIndexer};
 use super::models::{
-    ContentPage, ExploreTreeEntry, GitHubSnapshot, KnowledgeAction, KnowledgeNode,
-    KnowledgeNodeKind, KnowledgeRepoDescriptor, KnowledgeToolArgs,
+    ContentPage, ExploreTreeEntry, GitHubSnapshot, KnowledgeAction, KnowledgeCreatePrArgs,
+    KnowledgeCreatePrResult, KnowledgeNode, KnowledgeNodeKind, KnowledgeRepoDescriptor,
+    KnowledgeToolArgs,
 };
+use super::pr::{CliGitPrExecutor, KnowledgePrRuntime, KnowledgePrService};
 use super::registry::KnowledgeRepoRegistry;
 
 #[async_trait]
@@ -38,32 +40,53 @@ pub trait KnowledgeRuntimeBackend: KnowledgeBackend {
     ) -> Result<(String, GitHubSnapshot), KnowledgeToolError>;
 }
 
-pub struct DefaultKnowledgeRuntime<B = GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+pub struct DefaultKnowledgeRuntime<
+    B = GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+    P = KnowledgePrService<CliGitPrExecutor>,
+> {
     backend: Arc<B>,
     indexer: KnowledgeIndexer<Arc<B>>,
+    pr_runtime: Arc<P>,
 }
 
-impl DefaultKnowledgeRuntime<GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+impl DefaultKnowledgeRuntime<
+    GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+    KnowledgePrService<CliGitPrExecutor>,
+> {
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_backend(GitHubKnowledgeBackend::new(
-            KnowledgeRepoRegistry::load_default(),
-            ReqwestGitHubTransport::new(),
-        ))
+        Self::new_with_backend_and_pr_runtime(
+            GitHubKnowledgeBackend::new(
+                KnowledgeRepoRegistry::load_default(),
+                ReqwestGitHubTransport::new(),
+            ),
+            KnowledgePrService::new(),
+        )
     }
 }
 
-impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
+impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B, KnowledgePrService<CliGitPrExecutor>> {
     #[must_use]
     pub fn new_for_test(backend: B) -> Self {
-        Self::new_with_backend(backend)
+        Self::new_with_backend_and_pr_runtime(backend, KnowledgePrService::new())
+    }
+}
+
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> DefaultKnowledgeRuntime<B, P> {
+    #[must_use]
+    pub fn new_for_test_with_pr_runtime(backend: B, pr_runtime: P) -> Self {
+        Self::new_with_backend_and_pr_runtime(backend, pr_runtime)
     }
 
     #[must_use]
-    pub fn new_with_backend(backend: B) -> Self {
+    pub fn new_with_backend_and_pr_runtime(backend: B, pr_runtime: P) -> Self {
         let backend = Arc::new(backend);
         let indexer = KnowledgeIndexer::new(backend.clone());
-        Self { backend, indexer }
+        Self {
+            backend,
+            indexer,
+            pr_runtime: Arc::new(pr_runtime),
+        }
     }
 
     async fn resolve_snapshot_id(&self, args: &KnowledgeToolArgs) -> Result<String, ToolError> {
@@ -184,16 +207,38 @@ impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
             }
         })
     }
+
+    fn render_create_pr_result(result: &KnowledgeCreatePrResult) -> Value {
+        json!({
+            "target_repo": result.target_repo,
+            "base_ref": result.base_ref,
+            "branch": result.branch,
+            "commit_sha": result.commit_sha,
+            "pr_url": result.pr_url,
+            "manifest_path": result.manifest_path,
+            "changed_files": result.changed_files,
+            "created_files": result.created_files,
+            "updated_files": result.updated_files,
+            "summary": result.summary,
+        })
+    }
 }
 
-impl Default for DefaultKnowledgeRuntime<GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+impl Default
+    for DefaultKnowledgeRuntime<
+        GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        KnowledgePrService<CliGitPrExecutor>,
+    >
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledgeRuntime<B> {
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> KnowledgeRuntime
+    for DefaultKnowledgeRuntime<B, P>
+{
     async fn dispatch(
         &self,
         args: KnowledgeToolArgs,
@@ -348,10 +393,23 @@ impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledge
                     "results": neighbors.iter().map(Self::render_node).collect::<Vec<_>>(),
                 }))
             }
-            KnowledgeAction::CreateKnowledgePr => Err(ToolError::ExecutionFailed {
-                tool_name: "knowledge".to_string(),
-                reason: "create_knowledge_pr is not implemented yet".to_string(),
-            }),
+            KnowledgeAction::CreateKnowledgePr => {
+                let request =
+                    KnowledgeCreatePrArgs::try_from(args).map_err(|err| ToolError::ExecutionFailed {
+                        tool_name: "knowledge".to_string(),
+                        reason: err.to_string(),
+                    })?;
+                let result = self
+                    .pr_runtime
+                    .create_pr(&request)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed {
+                        tool_name: "knowledge".to_string(),
+                        reason: err.to_string(),
+                    })?;
+
+                Ok(Self::render_create_pr_result(&result))
+            }
         }
     }
 }
