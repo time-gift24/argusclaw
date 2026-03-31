@@ -24,6 +24,23 @@ use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 /// Maximum number of matches to return.
 const MAX_MATCHES: usize = 100;
 
+/// Arguments for the grep tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct GrepArgs {
+    /// The regex pattern to search for
+    pattern: String,
+    /// Directory or file path to search in (default: current directory)
+    #[serde(default)]
+    path: Option<String>,
+    /// Glob pattern to filter files (default: "*")
+    #[serde(default, rename = "glob")]
+    glob_pattern: Option<String>,
+    /// Case insensitive search (default: false)
+    #[serde(default)]
+    ignore_case: Option<bool>,
+}
+
 /// Grep tool implementation - searches file contents with risk level High.
 pub struct GrepTool;
 
@@ -51,28 +68,8 @@ impl NamedTool for GrepTool {
         ToolDefinition {
             name: "grep".to_string(),
             description: "Search for patterns in files using regex".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "The regex pattern to search for"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory or file path to search in (default: current directory)"
-                    },
-                    "glob": {
-                        "type": "string",
-                        "description": "Glob pattern to filter files (default: \"*\")"
-                    },
-                    "ignore_case": {
-                        "type": "boolean",
-                        "description": "Case insensitive search (default: false)"
-                    }
-                },
-                "required": ["pattern"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(GrepArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

@@ -20,6 +20,21 @@ use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
 use crate::path_utils::validate_path;
 
+/// Arguments for the apply_patch tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ApplyPatchArgs {
+    /// Path to the file to edit
+    path: String,
+    /// The exact string to find and replace
+    old_string: String,
+    /// The string to replace it with
+    new_string: String,
+    /// If true, replace all occurrences (default false)
+    #[serde(default)]
+    replace_all: Option<bool>,
+}
+
 /// Apply patch tool — applies search/replace edits to files.
 pub struct ApplyPatchTool;
 
@@ -49,28 +64,8 @@ impl NamedTool for ApplyPatchTool {
             description: "Apply targeted edits to a file using search/replace. Finds the exact \
                  'old_string' and replaces it with 'new_string'. Use for surgical changes."
                 .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to edit"
-                    },
-                    "old_string": {
-                        "type": "string",
-                        "description": "The exact string to find and replace"
-                    },
-                    "new_string": {
-                        "type": "string",
-                        "description": "The string to replace it with"
-                    },
-                    "replace_all": {
-                        "type": "boolean",
-                        "description": "If true, replace all occurrences (default false)"
-                    }
-                },
-                "required": ["path", "old_string", "new_string"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(ApplyPatchArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

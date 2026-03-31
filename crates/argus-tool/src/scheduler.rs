@@ -12,6 +12,7 @@ use argus_protocol::{
     ToolError, ToolExecutionContext,
 };
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
@@ -35,20 +36,31 @@ enum SchedulerInput {
     },
 }
 
-#[derive(Debug, Deserialize)]
+/// Arguments for dispatch_job.
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DispatchJobArgs {
+    /// The prompt/task description for the job
     prompt: String,
+    /// The agent ID to use for this job
     agent_id: AgentId,
+    /// Optional context JSON for the job
     #[serde(default)]
     context: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Arguments for get_job_result.
+#[derive(Debug, Deserialize, JsonSchema)]
 struct GetJobResultArgs {
+    /// The job ID returned by dispatch_job
     job_id: String,
+    /// When true, consume a completed queued result so it will not be auto-injected into a later turn
     #[serde(default)]
     consume: Option<bool>,
 }
+
+/// Empty arguments for list_subagents.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListSubagentsArgs {}
 
 /// Serialized job result payload returned by scheduler lookups.
 #[derive(Debug, Clone, Serialize)]
@@ -214,25 +226,8 @@ fn legacy_dispatch_definition(name: &str) -> ToolDefinition {
     ToolDefinition {
         name: name.to_string(),
         description: "Dispatch a background job to a subagent. The job runs asynchronously; use get_job_result(job_id, consume=true) if you want to proactively check for completion and consume the result before it is replayed as a later queued message.".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "The prompt/task description for the job"
-                },
-                "agent_id": {
-                    "type": "number",
-                    "description": "The agent ID to use for this job"
-                },
-                "context": {
-                    "type": "object",
-                    "description": "Optional context JSON for the job"
-                }
-            },
-            "required": ["prompt", "agent_id"],
-            "additionalProperties": false
-        }),
+        parameters: serde_json::to_value(schemars::schema_for!(DispatchJobArgs))
+            .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
     }
 }
 
@@ -240,11 +235,8 @@ fn legacy_list_subagents_definition() -> ToolDefinition {
     ToolDefinition {
         name: "list_subagents".to_string(),
         description: "List all subagents that belong to this agent. Returns the agent_id, display_name, and description of each subagent.".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
+        parameters: serde_json::to_value(schemars::schema_for!(ListSubagentsArgs))
+            .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
     }
 }
 
@@ -252,21 +244,8 @@ fn legacy_get_job_result_definition() -> ToolDefinition {
     ToolDefinition {
         name: "get_job_result".to_string(),
         description: "Check whether a background job has finished. Use consume=true when you are ready to use the result now and do not want it replayed as a future queued message.".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The job ID returned by dispatch_job"
-                },
-                "consume": {
-                    "type": "boolean",
-                    "description": "When true, consume a completed queued result so it will not be auto-injected into a later turn"
-                }
-            },
-            "required": ["job_id"],
-            "additionalProperties": false
-        }),
+        parameters: serde_json::to_value(schemars::schema_for!(GetJobResultArgs))
+            .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
     }
 }
 

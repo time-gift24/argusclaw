@@ -23,6 +23,21 @@ use crate::path_utils::validate_path;
 /// Maximum directory listing entries.
 const MAX_DIR_ENTRIES: usize = 500;
 
+/// Arguments for the list_dir tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct ListDirArgs {
+    /// Path to the directory to list (defaults to current directory)
+    #[serde(default)]
+    path: Option<String>,
+    /// If true, list contents recursively (default false)
+    #[serde(default)]
+    recursive: Option<bool>,
+    /// Maximum depth for recursive listing (default 3)
+    #[serde(default)]
+    max_depth: Option<usize>,
+}
+
 /// Directories to skip during recursive listing.
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -60,24 +75,8 @@ impl NamedTool for ListDirTool {
         ToolDefinition {
             name: "list_dir".to_string(),
             description: "List contents of a directory on the filesystem.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the directory to list (defaults to current directory)"
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "If true, list contents recursively (default false)"
-                    },
-                    "max_depth": {
-                        "type": "number",
-                        "description": "Maximum depth for recursive listing (default 3)"
-                    }
-                },
-                "required": []
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(ListDirArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

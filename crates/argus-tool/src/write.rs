@@ -24,6 +24,16 @@ use crate::path_utils::validate_path;
 /// Maximum file size for writing (5MB).
 const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
 
+/// Arguments for the write_file tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct WriteFileArgs {
+    /// Path to the file to write
+    path: String,
+    /// Content to write to the file
+    content: String,
+}
+
 /// Write file tool — writes content to files with path validation and size limit.
 pub struct WriteFileTool;
 
@@ -54,20 +64,8 @@ impl NamedTool for WriteFileTool {
                 "Write content to a file on the filesystem. Creates the file if it doesn't \
                  exist, overwrites if it does. Parent directories are created automatically."
                     .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["path", "content"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(WriteFileArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

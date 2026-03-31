@@ -20,6 +20,17 @@ use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 /// Maximum number of results to return.
 const MAX_RESULTS: usize = 1000;
 
+/// Arguments for the glob tool.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
+struct GlobArgs {
+    /// The glob pattern to match files (e.g., "**/*.rs", "src/**/*.ts")
+    pattern: String,
+    /// Directory to search in (default: current directory)
+    #[serde(default)]
+    path: Option<String>,
+}
+
 /// Glob tool implementation - finds files matching patterns with risk level High.
 pub struct GlobTool;
 
@@ -48,20 +59,8 @@ impl NamedTool for GlobTool {
             name: "glob".to_string(),
             description: "Find files matching glob patterns (e.g., \"**/*.rs\", \"src/**/*.ts\")"
                 .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "The glob pattern to match files (e.g., \"**/*.rs\", \"src/**/*.ts\")"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory to search in (default: current directory)"
-                    }
-                },
-                "required": ["pattern"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(GlobArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 
