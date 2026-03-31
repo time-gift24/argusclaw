@@ -457,9 +457,7 @@ impl Thread {
     }
 
     async fn maybe_run_compact_agent(&mut self) -> Result<(), String> {
-        if !self.should_run_compact_agent() {
-            return Ok(());
-        }
+        debug_assert!(self.should_run_compact_agent());
         if self.token_count < self.compact_agent_threshold() {
             return Ok(());
         }

@@ -911,6 +911,7 @@ impl Turn {
                                 .write_event(&TurnLogEvent::UserInput {
                                     content: message.clone(),
                                     role: "user".to_string(),
+                                    metadata: None,
                                 })
                                 .await;
                         }

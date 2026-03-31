@@ -247,6 +247,16 @@ impl SessionManager {
             return Ok(compact_agent_id);
         }
 
+        if let Some(agent) = self
+            .template_manager
+            .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
+            .await?
+        {
+            return Ok(Some(agent.id));
+        }
+
+        self.template_manager.seed_builtin_agents().await?;
+
         match self
             .template_manager
             .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
@@ -256,7 +266,7 @@ impl SessionManager {
             None => {
                 tracing::warn!(
                     compact_agent = DEFAULT_COMPACT_AGENT_DISPLAY_NAME,
-                    "default compact agent is not seeded; threads will continue without it"
+                    "default compact agent is unavailable even after builtin seeding"
                 );
                 Ok(None)
             }
@@ -1921,18 +1931,16 @@ mod tests {
     #[tokio::test]
     async fn create_thread_defaults_compact_agent_to_builtin_template() {
         let manager = test_session_manager().await;
-        manager
-            .template_manager
-            .seed_builtin_agents()
-            .await
-            .expect("builtin agents should seed");
 
         let compact_agent = manager
             .template_manager
             .find_by_display_name("Compact Context")
             .await
-            .expect("compact template lookup should succeed")
-            .expect("compact template should exist");
+            .expect("compact template lookup before thread create should succeed");
+        assert!(
+            compact_agent.is_none(),
+            "test helper intentionally starts without builtin compact agent seeded"
+        );
 
         let session_id = manager
             .create("compact-by-default".to_string())
@@ -1942,6 +1950,13 @@ mod tests {
             .create_thread(session_id, AgentId::new(7), None, None, None)
             .await
             .expect("thread should create");
+
+        let compact_agent = manager
+            .template_manager
+            .find_by_display_name("Compact Context")
+            .await
+            .expect("compact template lookup should succeed after thread create")
+            .expect("compact template should exist");
 
         let thread = manager
             .thread_repo
