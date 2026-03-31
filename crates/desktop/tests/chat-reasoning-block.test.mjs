@@ -8,8 +8,8 @@ const threadSource = readFileSync(
 );
 
 test("reasoning block uses a max height instead of fixed height", () => {
-  assert.match(threadSource, /max-h-\[150px\]/);
-  assert.doesNotMatch(threadSource, /className="[^"]*\sh-\[150px\][^"]*"/);
+  assert.match(threadSource, /max-h-\[200px\]/);
+  assert.doesNotMatch(threadSource, /className="[^"]*\sh-\[200px\][^"]*"/);
 });
 
 test("reasoning block keeps a collapsible header", () => {

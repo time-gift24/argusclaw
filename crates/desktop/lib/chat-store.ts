@@ -8,10 +8,8 @@ import type {
   ThreadEventEnvelope,
   ThreadPoolEventReason,
   ThreadPoolRuntimeKind,
-  ThreadPoolRuntimeRef,
   ThreadPoolRuntimeSummary,
   ThreadPoolSnapshot,
-  ThreadPoolState,
   ThreadSnapshotPayload,
   ThreadRuntimeStatus,
 } from "@/lib/types/chat";
@@ -127,6 +125,7 @@ export interface ChatStore {
   threadPoolSnapshotLoading: boolean;
   threadPoolError: string | null;
   threadPoolThreads: ThreadPoolThreadState[];
+  stoppingJobIds: Record<string, true>;
   _unlisten: UnlistenFn | null;
 
   initialize: () => Promise<void>;
@@ -142,6 +141,7 @@ export interface ChatStore {
   selectModelOverride: (model: string | null) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   cancelTurn: () => Promise<void>;
+  stopJob: (jobId: string) => Promise<void>;
   refreshThreadPoolSnapshot: () => Promise<void>;
   refreshSnapshot: (
     sessionKey: string,
@@ -153,6 +153,16 @@ export interface ChatStore {
 
 let threadEventListenerInitPromise: Promise<UnlistenFn> | null = null;
 let threadPoolSnapshotRequestVersion = 0;
+
+function clearStoppingJobId(
+  stoppingJobIds: Record<string, true>,
+  jobId: string,
+): Record<string, true> {
+  if (!(jobId in stoppingJobIds)) return stoppingJobIds;
+  const nextStoppingJobIds = { ...stoppingJobIds };
+  delete nextStoppingJobIds[jobId];
+  return nextStoppingJobIds;
+}
 
 function mapRuntimeSummaryToThreadState(
   runtime: ThreadPoolRuntimeSummary,
@@ -246,6 +256,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   threadPoolSnapshotLoading: false,
   threadPoolError: null,
   threadPoolThreads: [],
+  stoppingJobIds: {},
   _unlisten: null,
 
   async initialize() {
@@ -679,6 +690,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  async stopJob(jobId: string) {
+    if (!jobId) return;
+    if (get().stoppingJobIds[jobId]) return;
+
+    set((state) => ({
+      errorMessage: null,
+      stoppingJobIds: {
+        ...state.stoppingJobIds,
+        [jobId]: true,
+      },
+    }));
+
+    try {
+      await chat.stopJob(jobId);
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      set((state) => ({
+        errorMessage: errorMessage,
+        stoppingJobIds: clearStoppingJobId(state.stoppingJobIds, jobId),
+      }));
+      throw error;
+    }
+  },
+
   async refreshSnapshot(
     sessionKey: string,
     options?: { preserveError?: boolean },
@@ -1079,7 +1114,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "job_result":
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session) return {};
+          const stoppingJobIds = clearStoppingJobId(
+            state.stoppingJobIds,
+            payload.job_id,
+          );
+          if (!session) {
+            return { stoppingJobIds };
+          }
           const existing = session.jobStatuses[payload.job_id];
           const nextJobStatus = normalizeJobStatusPayload({
             job_id: payload.job_id,
@@ -1101,6 +1142,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
               },
             },
+            stoppingJobIds,
           };
         });
         break;

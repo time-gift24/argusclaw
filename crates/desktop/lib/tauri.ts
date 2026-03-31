@@ -330,6 +330,8 @@ export const chat = {
   cancelTurn: (sessionId: string, threadId: string) =>
     invoke<void>("cancel_turn", { sessionId, threadId }),
 
+  stopJob: (jobId: string) => invoke<void>("stop_job", { jobId }),
+
   getThreadSnapshot: (sessionId: string, threadId: string) =>
     invoke<ThreadSnapshotPayload>("get_thread_snapshot", {
       sessionId,

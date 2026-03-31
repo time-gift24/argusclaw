@@ -28,7 +28,8 @@ use argus_tool::ToolManager;
 use chrono::Utc;
 use futures_util::FutureExt;
 use rust_decimal::Decimal;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc};
+use tokio::task::AbortHandle;
 
 use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
@@ -97,7 +98,10 @@ struct RuntimeEntry {
     summary: ThreadPoolRuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
     thread: Option<Arc<RwLock<argus_agent::Thread>>>,
+    control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
+    forwarder_abort: Option<AbortHandle>,
     slot_permit: Option<OwnedSemaphorePermit>,
+    load_mutex: Arc<AsyncMutex<()>>,
 }
 
 #[derive(Debug, Default)]
@@ -106,6 +110,25 @@ struct ThreadPoolStore {
     job_bindings: HashMap<String, ThreadId>,
     peak_estimated_memory_bytes: u64,
     peak_process_memory_bytes: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeShutdown {
+    thread: Option<Arc<RwLock<argus_agent::Thread>>>,
+    control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
+    forwarder_abort: Option<AbortHandle>,
+}
+
+impl RuntimeShutdown {
+    fn run(self) {
+        if let Some(forwarder_abort) = self.forwarder_abort {
+            forwarder_abort.abort();
+        }
+        if let Some(control_tx) = self.control_tx {
+            let _ = control_tx.send(ThreadControlEvent::ShutdownRuntime);
+        }
+        drop(self.thread);
+    }
 }
 
 #[derive(Clone)]
@@ -232,13 +255,25 @@ impl ThreadPool {
     /// Remove a runtime from the pool registry.
     pub fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let removed = store.runtimes.remove(&thread_id.to_string()).is_some();
+        let removed_entry = store.runtimes.remove(&thread_id.to_string());
+        let removed = removed_entry.is_some();
         if removed {
             store
                 .job_bindings
                 .retain(|_, bound_thread_id| bound_thread_id != thread_id);
             Self::refresh_peaks(&mut store);
         }
+        drop(store);
+
+        if let Some(entry) = removed_entry {
+            RuntimeShutdown {
+                thread: entry.thread,
+                control_tx: entry.control_tx,
+                forwarder_abort: entry.forwarder_abort,
+            }
+            .run();
+        }
+
         removed
     }
 
@@ -396,14 +431,7 @@ impl ThreadPool {
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
-        if let Some(thread) = self
-            .store
-            .lock()
-            .expect("thread-pool mutex poisoned")
-            .runtimes
-            .get(&thread_id.to_string())
-            .and_then(|entry| entry.thread.clone())
-        {
+        if let Some(thread) = self.loaded_runtime(&thread_id) {
             return Ok(thread);
         }
 
@@ -421,6 +449,12 @@ impl ThreadPool {
             None,
             None,
         );
+        let load_mutex = self.runtime_load_mutex(&thread_id)?;
+        let _load_guard = load_mutex.lock().await;
+        if let Some(thread) = self.loaded_runtime(&thread_id) {
+            return Ok(thread);
+        }
+
         self.ensure_runtime_slot(&thread_id).await?;
 
         let thread = match self.build_chat_thread(session_id, thread_id).await {
@@ -451,6 +485,7 @@ impl ThreadPool {
         execution_thread_id: ThreadId,
         pipe_tx: broadcast::Sender<ThreadEvent>,
         _control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
+        cancellation: TurnCancellation,
     ) -> ThreadJobResult {
         let fallback_job_id = request.job_id.clone();
         let fallback_agent_id = request.agent_id;
@@ -514,6 +549,7 @@ impl ThreadPool {
             &thread,
             request.job_id.clone(),
             request.prompt,
+            cancellation,
         ))
         .catch_unwind()
         .await;
@@ -538,13 +574,14 @@ impl ThreadPool {
             self.transition_runtime_to_cooling(&execution_thread_id, Some(cooling_memory))
         {
             if self.admission_waiters.load(Ordering::SeqCst) > 0
-                && let Some((runtime, snapshot)) = Self::evict_runtime_from_shared_store(
+                && let Some((runtime, snapshot, shutdown)) = Self::evict_runtime_from_shared_store(
                     &self.store,
                     self.max_threads,
                     &execution_thread_id,
                     ThreadPoolEventReason::MemoryPressure,
                 )
             {
+                shutdown.run();
                 let _ = pipe_tx.send(ThreadEvent::ThreadPoolEvicted {
                     runtime,
                     reason: ThreadPoolEventReason::MemoryPressure,
@@ -564,6 +601,7 @@ impl ThreadPool {
         thread: &Arc<RwLock<argus_agent::Thread>>,
         job_id: String,
         prompt: String,
+        cancellation: TurnCancellation,
     ) -> ThreadJobResult {
         #[cfg(test)]
         if prompt == "__panic_thread_pool_execute_turn__" {
@@ -580,10 +618,7 @@ impl ThreadPool {
         };
         let turn = {
             let mut guard = thread.write().await;
-            match guard
-                .begin_turn(prompt, None, TurnCancellation::new())
-                .await
-            {
+            match guard.begin_turn(prompt, None, cancellation).await {
                 Ok(turn) => turn,
                 Err(error) => {
                     return Self::failure_result(
@@ -752,17 +787,33 @@ impl ThreadPool {
     ) -> broadcast::Sender<ThreadEvent> {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
         let runtime_key = runtime.thread_id.to_string();
-        let (sender, existing_thread, existing_slot_permit) =
-            if let Some(entry) = store.runtimes.get_mut(&runtime_key) {
-                (
-                    entry.sender.clone(),
-                    entry.thread.clone(),
-                    entry.slot_permit.take(),
-                )
-            } else {
-                let (sender, _rx) = broadcast::channel(256);
-                (sender, None, None)
-            };
+        let (
+            sender,
+            existing_thread,
+            existing_control_tx,
+            existing_forwarder_abort,
+            existing_slot_permit,
+            load_mutex,
+        ) = if let Some(entry) = store.runtimes.get_mut(&runtime_key) {
+            (
+                entry.sender.clone(),
+                entry.thread.clone(),
+                entry.control_tx.clone(),
+                entry.forwarder_abort.take(),
+                entry.slot_permit.take(),
+                Arc::clone(&entry.load_mutex),
+            )
+        } else {
+            let (sender, _rx) = broadcast::channel(256);
+            (
+                sender,
+                None,
+                None,
+                None,
+                None,
+                Arc::new(AsyncMutex::new(())),
+            )
+        };
         store.runtimes.insert(
             runtime_key,
             RuntimeEntry {
@@ -776,11 +827,43 @@ impl ThreadPool {
                 },
                 sender: sender.clone(),
                 thread: thread.or(existing_thread),
+                control_tx: existing_control_tx,
+                forwarder_abort: existing_forwarder_abort,
                 slot_permit: existing_slot_permit,
+                load_mutex,
             },
         );
         Self::refresh_peaks(&mut store);
         sender
+    }
+
+    fn loaded_runtime(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<argus_agent::Thread>>> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .and_then(|entry| entry.thread.clone())
+    }
+
+    fn runtime_load_mutex(&self, thread_id: &ThreadId) -> Result<Arc<AsyncMutex<()>>, JobError> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .map(|entry| Arc::clone(&entry.load_mutex))
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
+            })
+    }
+
+    fn take_runtime_shutdown(entry: &mut RuntimeEntry) -> RuntimeShutdown {
+        RuntimeShutdown {
+            thread: entry.thread.take(),
+            control_tx: entry.control_tx.take(),
+            forwarder_abort: entry.forwarder_abort.take(),
+        }
     }
 
     async fn ensure_runtime_slot(&self, thread_id: &ThreadId) -> Result<(), JobError> {
@@ -872,15 +955,18 @@ impl ThreadPool {
         reason: ThreadPoolEventReason,
     ) {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let mut shutdown = RuntimeShutdown::default();
         if let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) {
             entry.summary.status = ThreadRuntimeStatus::Inactive;
             entry.summary.estimated_memory_bytes = 0;
             entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
             entry.summary.last_reason = Some(reason);
-            entry.thread = None;
+            shutdown = Self::take_runtime_shutdown(entry);
             entry.slot_permit = None;
             Self::refresh_peaks(&mut store);
         }
+        drop(store);
+        shutdown.run();
     }
 
     fn evict_oldest_cooling_runtime(
@@ -907,37 +993,56 @@ impl ThreadPool {
         mut runtime_rx: broadcast::Receiver<ThreadEvent>,
     ) -> Result<(), JobError> {
         let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
-        let sender = {
+        let control_tx = {
+            let guard = thread.read().await;
+            guard.control_tx()
+        };
+        let (sender, replaced_runtime) = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-            let sender = {
+            let (sender, replaced_runtime) = {
                 let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
                     return Err(JobError::ExecutionFailed(format!(
                         "thread {} was removed while loading",
                         thread_id
                     )));
                 };
+                let replaced_runtime = if entry
+                    .thread
+                    .as_ref()
+                    .is_some_and(|existing| !Arc::ptr_eq(existing, &thread))
+                {
+                    Self::take_runtime_shutdown(entry)
+                } else {
+                    RuntimeShutdown::default()
+                };
                 entry.summary.status = ThreadRuntimeStatus::Inactive;
                 entry.summary.estimated_memory_bytes = estimated_memory_bytes;
                 entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
                 entry.summary.last_reason = None;
                 entry.thread = Some(Arc::clone(&thread));
-                entry.sender.clone()
+                entry.control_tx = Some(control_tx.clone());
+                entry.forwarder_abort = None;
+                (entry.sender.clone(), replaced_runtime)
             };
             Self::refresh_peaks(&mut store);
-            sender
+            (sender, replaced_runtime)
         };
+        replaced_runtime.run();
         let store = Arc::clone(&self.store);
         let max_threads = self.max_threads;
         let persistence = self.persistence.clone();
-        let thread_for_metrics = Arc::clone(&thread);
+        let thread_for_metrics = Arc::downgrade(&thread);
         let admission_waiters = Arc::clone(&self.admission_waiters);
 
-        tokio::spawn(async move {
+        let forwarder = tokio::spawn(async move {
             loop {
                 match runtime_rx.recv().await {
                     Ok(event) => {
                         let _ = sender.send(event.clone());
                         if matches!(event, ThreadEvent::Idle { .. }) {
+                            let Some(thread_for_metrics) = thread_for_metrics.upgrade() else {
+                                break;
+                            };
                             let estimated_memory_bytes =
                                 ThreadPool::estimate_thread_memory(&thread_for_metrics).await;
                             ThreadPool::persist_thread_stats_with_persistence(
@@ -952,7 +1057,7 @@ impl ThreadPool {
                                 let mut store = store.lock().expect("thread-pool mutex poisoned");
                                 let Some(entry) = store.runtimes.get_mut(&thread_id.to_string())
                                 else {
-                                    continue;
+                                    break;
                                 };
                                 entry.summary.status = ThreadRuntimeStatus::Cooling;
                                 entry.summary.estimated_memory_bytes = estimated_memory_bytes;
@@ -966,7 +1071,7 @@ impl ThreadPool {
                             };
 
                             if admission_waiters.load(Ordering::SeqCst) > 0 {
-                                if let Some((runtime, snapshot)) =
+                                if let Some((runtime, snapshot, shutdown)) =
                                     ThreadPool::evict_runtime_from_shared_store(
                                         &store,
                                         max_threads,
@@ -974,6 +1079,7 @@ impl ThreadPool {
                                         ThreadPoolEventReason::MemoryPressure,
                                     )
                                 {
+                                    shutdown.run();
                                     let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
                                         runtime,
                                         reason: ThreadPoolEventReason::MemoryPressure,
@@ -993,6 +1099,16 @@ impl ThreadPool {
                 }
             }
         });
+        let forwarder_abort = forwarder.abort_handle();
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
+            forwarder_abort.abort();
+            return Err(JobError::ExecutionFailed(format!(
+                "thread {} was removed while attaching",
+                thread_id
+            )));
+        };
+        entry.forwarder_abort = Some(forwarder_abort);
         Ok(())
     }
 
@@ -1001,14 +1117,13 @@ impl ThreadPool {
         request: &ThreadPoolJobRequest,
         thread_id: ThreadId,
     ) -> Result<Arc<RwLock<argus_agent::Thread>>, JobError> {
-        if let Some(thread) = self
-            .store
-            .lock()
-            .expect("thread-pool mutex poisoned")
-            .runtimes
-            .get(&thread_id.to_string())
-            .and_then(|entry| entry.thread.clone())
-        {
+        if let Some(thread) = self.loaded_runtime(&thread_id) {
+            return Ok(thread);
+        }
+
+        let load_mutex = self.runtime_load_mutex(&thread_id)?;
+        let _load_guard = load_mutex.lock().await;
+        if let Some(thread) = self.loaded_runtime(&thread_id) {
             return Ok(thread);
         }
 
@@ -1062,12 +1177,25 @@ impl ThreadPool {
                 thread_id
             )));
         };
+        let replaced_runtime = if entry
+            .thread
+            .as_ref()
+            .is_some_and(|existing| !Arc::ptr_eq(existing, &thread))
+        {
+            Self::take_runtime_shutdown(entry)
+        } else {
+            RuntimeShutdown::default()
+        };
         entry.summary.status = ThreadRuntimeStatus::Inactive;
         entry.summary.estimated_memory_bytes = estimated_memory_bytes;
         entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
         entry.summary.last_reason = None;
         entry.thread = Some(thread);
+        entry.control_tx = None;
+        entry.forwarder_abort = None;
         Self::refresh_peaks(&mut store);
+        drop(store);
+        replaced_runtime.run();
         Ok(())
     }
 
@@ -1076,12 +1204,13 @@ impl ThreadPool {
         thread_id: &ThreadId,
         reason: ThreadPoolEventReason,
     ) -> Option<ThreadPoolRuntimeRef> {
-        let (runtime, snapshot) = Self::evict_runtime_from_shared_store(
+        let (runtime, snapshot, shutdown) = Self::evict_runtime_from_shared_store(
             &self.store,
             self.max_threads,
             thread_id,
             reason.clone(),
         )?;
+        shutdown.run();
         let sender = self
             .store
             .lock()
@@ -1102,21 +1231,21 @@ impl ThreadPool {
         max_threads: u32,
         thread_id: &ThreadId,
         reason: ThreadPoolEventReason,
-    ) -> Option<(ThreadPoolRuntimeRef, ThreadPoolSnapshot)> {
+    ) -> Option<(ThreadPoolRuntimeRef, ThreadPoolSnapshot, RuntimeShutdown)> {
         let mut store = store.lock().expect("thread-pool mutex poisoned");
         let entry = store.runtimes.get_mut(&thread_id.to_string())?;
         if entry.summary.status != ThreadRuntimeStatus::Cooling {
             return None;
         }
+        let shutdown = ThreadPool::take_runtime_shutdown(entry);
         entry.summary.status = ThreadRuntimeStatus::Evicted;
         entry.summary.last_reason = Some(reason);
         entry.summary.estimated_memory_bytes = 0;
-        entry.thread = None;
         entry.slot_permit = None;
         let runtime = entry.summary.runtime.clone();
         Self::refresh_peaks(&mut store);
         let snapshot = Self::collect_metrics_from_store(max_threads, &store);
-        Some((runtime, snapshot))
+        Some((runtime, snapshot, shutdown))
     }
 
     fn summarize_output(output: &TurnOutput) -> String {
@@ -1758,6 +1887,77 @@ impl ThreadPool {
         tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await
     }
 
+    async fn collect_turn_numbers(
+        turns_dir: &Path,
+        turn_count_hint: Option<u32>,
+    ) -> Result<Vec<u32>, std::io::Error> {
+        if !turns_dir.exists() {
+            if turn_count_hint.is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("turns dir not found: {}", turns_dir.display()),
+                ));
+            }
+            return Ok(Vec::new());
+        }
+
+        let mut turn_numbers = Vec::new();
+        let mut entries = tokio::fs::read_dir(turns_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+                && let Ok(number) = stem.parse::<u32>()
+            {
+                turn_numbers.push(number);
+            }
+        }
+        turn_numbers.sort_unstable();
+        turn_numbers.dedup();
+        if let Some(turn_count) = turn_count_hint {
+            turn_numbers.retain(|number| *number <= turn_count);
+        }
+        Ok(turn_numbers)
+    }
+
+    fn extend_recovered_state(
+        messages: &mut Vec<ChatMessage>,
+        token_count: &mut u32,
+        events: Vec<TurnLogEvent>,
+    ) {
+        for event in events {
+            match event {
+                TurnLogEvent::UserInput { content, .. } => {
+                    if !content.trim().is_empty() {
+                        messages.push(ChatMessage::user(content));
+                    }
+                }
+                TurnLogEvent::LlmResponse {
+                    content,
+                    reasoning_content,
+                    tool_calls,
+                    ..
+                } => {
+                    if tool_calls.is_empty()
+                        && (!content.trim().is_empty()
+                            || !reasoning_content.as_deref().unwrap_or("").trim().is_empty())
+                    {
+                        messages.push(ChatMessage::assistant_with_reasoning(
+                            content,
+                            reasoning_content,
+                        ));
+                    }
+                }
+                TurnLogEvent::TurnEnd { token_usage, .. } => {
+                    *token_count = token_usage.total_tokens;
+                }
+                _ => {}
+            }
+        }
+    }
+
     async fn recover_thread_state_from_trace(
         trace_dir: &Path,
         session_id: &SessionId,
@@ -1768,66 +1968,35 @@ impl ThreadPool {
             .join(session_id.to_string())
             .join(thread_id.to_string())
             .join("turns");
-        let mut turn_numbers = Vec::new();
-        if let Some(turn_count) = turn_count_hint {
-            turn_numbers.extend(1..=turn_count);
-        } else if turns_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&turns_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                    && let Ok(number) = stem.parse::<u32>()
-                {
-                    turn_numbers.push(number);
-                }
-            }
-            turn_numbers.sort_unstable();
-        }
+        let turn_numbers = Self::collect_turn_numbers(&turns_dir, turn_count_hint).await?;
 
         let mut messages = Vec::new();
         let mut token_count = 0;
+        let mut max_turn_number = 0;
         for turn_number in &turn_numbers {
             let path = turns_dir.join(format!("{turn_number}.jsonl"));
-            let events = read_jsonl_events(&path)
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            for event in events {
-                match event {
-                    TurnLogEvent::UserInput { content, .. } => {
-                        if !content.trim().is_empty() {
-                            messages.push(ChatMessage::user(content));
-                        }
-                    }
-                    TurnLogEvent::LlmResponse {
-                        content,
-                        reasoning_content,
-                        tool_calls,
-                        ..
-                    } => {
-                        if tool_calls.is_empty()
-                            && (!content.trim().is_empty()
-                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty())
-                        {
-                            messages.push(ChatMessage::assistant_with_reasoning(
-                                content,
-                                reasoning_content,
-                            ));
-                        }
-                    }
-                    TurnLogEvent::TurnEnd { token_usage, .. } => {
-                        token_count = token_usage.total_tokens;
-                    }
-                    _ => {}
+            let events = match read_jsonl_events(&path).await {
+                Ok(events) if !events.is_empty() => events,
+                Ok(_) => {
+                    tracing::warn!(path = %path.display(), "Skipping empty turn trace during recovery");
+                    continue;
                 }
-            }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "Skipping unreadable turn trace during recovery"
+                    );
+                    continue;
+                }
+            };
+            max_turn_number = max_turn_number.max(*turn_number);
+            Self::extend_recovered_state(&mut messages, &mut token_count, events);
         }
 
         Ok(RecoveredThreadState {
             messages,
-            turn_count: turn_numbers.len() as u32,
+            turn_count: max_turn_number,
             token_count,
         })
     }
@@ -1838,66 +2007,35 @@ impl ThreadPool {
         turn_count_hint: Option<u32>,
     ) -> Result<RecoveredThreadState, std::io::Error> {
         let turns_dir = trace_dir.join(thread_id.to_string()).join("turns");
-        let mut turn_numbers = Vec::new();
-        if let Some(turn_count) = turn_count_hint {
-            turn_numbers.extend(1..=turn_count);
-        } else if turns_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&turns_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                    && let Ok(number) = stem.parse::<u32>()
-                {
-                    turn_numbers.push(number);
-                }
-            }
-            turn_numbers.sort_unstable();
-        }
+        let turn_numbers = Self::collect_turn_numbers(&turns_dir, turn_count_hint).await?;
 
         let mut messages = Vec::new();
         let mut token_count = 0;
+        let mut max_turn_number = 0;
         for turn_number in &turn_numbers {
             let path = turns_dir.join(format!("{turn_number}.jsonl"));
-            let events = read_jsonl_events(&path)
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            for event in events {
-                match event {
-                    TurnLogEvent::UserInput { content, .. } => {
-                        if !content.trim().is_empty() {
-                            messages.push(ChatMessage::user(content));
-                        }
-                    }
-                    TurnLogEvent::LlmResponse {
-                        content,
-                        reasoning_content,
-                        tool_calls,
-                        ..
-                    } => {
-                        if tool_calls.is_empty()
-                            && (!content.trim().is_empty()
-                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty())
-                        {
-                            messages.push(ChatMessage::assistant_with_reasoning(
-                                content,
-                                reasoning_content,
-                            ));
-                        }
-                    }
-                    TurnLogEvent::TurnEnd { token_usage, .. } => {
-                        token_count = token_usage.total_tokens;
-                    }
-                    _ => {}
+            let events = match read_jsonl_events(&path).await {
+                Ok(events) if !events.is_empty() => events,
+                Ok(_) => {
+                    tracing::warn!(path = %path.display(), "Skipping empty turn trace during recovery");
+                    continue;
                 }
-            }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "Skipping unreadable turn trace during recovery"
+                    );
+                    continue;
+                }
+            };
+            max_turn_number = max_turn_number.max(*turn_number);
+            Self::extend_recovered_state(&mut messages, &mut token_count, events);
         }
 
         Ok(RecoveredThreadState {
             messages,
-            turn_count: turn_numbers.len() as u32,
+            turn_count: max_turn_number,
             token_count,
         })
     }
@@ -1979,11 +2117,13 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
 mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use argus_agent::CompactorManager;
+    use argus_agent::{CompactorManager, TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
         LlmProviderRepository,
@@ -1992,6 +2132,7 @@ mod tests {
         AgentId, AgentRecord, AgentType, LlmProvider, LlmProviderKind, LlmProviderRecord,
         ProviderId, ProviderResolver, ProviderSecretStatus, SecretString, SessionId,
         ThinkingConfig, ThreadEvent, ThreadId, ThreadPoolEventReason, ThreadRuntimeStatus,
+        TokenUsage,
     };
     use argus_repository::traits::{
         AgentRepository, JobRepository, SessionRepository, ThreadRepository,
@@ -2007,6 +2148,7 @@ mod tests {
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
     use tokio::sync::{RwLock, Semaphore, broadcast, mpsc};
+    use tokio::task::yield_now;
     use tokio::time::{sleep, timeout};
 
     use super::{ThreadPool, ThreadPoolPersistence};
@@ -2040,6 +2182,51 @@ mod tests {
     impl FixedProviderResolver {
         fn new(provider: Arc<dyn LlmProvider>) -> Self {
             Self { provider }
+        }
+    }
+
+    struct CountingDelayedProviderResolver {
+        provider: Arc<dyn LlmProvider>,
+        delay: Duration,
+        resolve_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingDelayedProviderResolver {
+        fn new(
+            provider: Arc<dyn LlmProvider>,
+            delay: Duration,
+            resolve_calls: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                provider,
+                delay,
+                resolve_calls,
+            }
+        }
+
+        async fn resolve_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            sleep(self.delay).await;
+            Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    #[async_trait]
+    impl ProviderResolver for CountingDelayedProviderResolver {
+        async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            self.resolve_provider().await
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            self.resolve_provider().await
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            self.resolve_provider().await
         }
     }
 
@@ -2193,9 +2380,9 @@ mod tests {
         (thread_pool, sqlite)
     }
 
-    async fn test_runtime_pool_with_limit(
+    async fn test_runtime_pool_with_resolver(
         max_threads: u32,
-        provider: Arc<dyn LlmProvider>,
+        provider_resolver: Arc<dyn ProviderResolver>,
     ) -> (ThreadPool, Arc<ArgusSqlite>, LlmProviderId) {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
@@ -2237,7 +2424,7 @@ mod tests {
 
         let mut thread_pool = ThreadPool::with_persistence(
             template_manager,
-            Arc::new(FixedProviderResolver::new(provider)),
+            provider_resolver,
             Arc::new(ToolManager::new()),
             Arc::new(CompactorManager::with_defaults()),
             trace_dir,
@@ -2251,6 +2438,14 @@ mod tests {
         thread_pool.resident_slots = Arc::new(Semaphore::new(max_threads as usize));
 
         (thread_pool, sqlite, provider_id)
+    }
+
+    async fn test_runtime_pool_with_limit(
+        max_threads: u32,
+        provider: Arc<dyn LlmProvider>,
+    ) -> (ThreadPool, Arc<ArgusSqlite>, LlmProviderId) {
+        test_runtime_pool_with_resolver(max_threads, Arc::new(FixedProviderResolver::new(provider)))
+            .await
     }
 
     async fn seed_chat_thread(
@@ -2291,6 +2486,65 @@ mod tests {
         pool.register_chat_thread(session_id, thread_id);
 
         (session_id, thread_id)
+    }
+
+    fn unique_trace_dir(prefix: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("{prefix}-{}", ThreadId::new()));
+        std::fs::create_dir_all(&path).expect("trace dir should exist");
+        path
+    }
+
+    async fn write_trace_turn(
+        base_dir: &Path,
+        turn_number: u32,
+        user_content: &str,
+        assistant_content: &str,
+        total_tokens: u32,
+    ) {
+        let mut writer = TraceWriter::new(
+            base_dir,
+            turn_number,
+            &TraceConfig::new(true, base_dir.to_path_buf()),
+        )
+        .await
+        .expect("trace writer should open");
+        writer
+            .write_event(&TurnLogEvent::UserInput {
+                content: user_content.to_string(),
+                role: "user".to_string(),
+            })
+            .await
+            .expect("user input should persist");
+        writer
+            .write_event(&TurnLogEvent::LlmResponse {
+                content: assistant_content.to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                finish_reason: "stop".to_string(),
+            })
+            .await
+            .expect("assistant response should persist");
+        writer
+            .finish_success(&TokenUsage {
+                input_tokens: total_tokens / 2,
+                output_tokens: total_tokens.saturating_sub(total_tokens / 2),
+                total_tokens,
+            })
+            .await
+            .expect("turn should finalize");
+    }
+
+    async fn wait_for_thread_drop<T>(weak: &std::sync::Weak<T>) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if weak.upgrade().is_none() {
+                    break;
+                }
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("thread should be dropped");
     }
 
     fn sample_provider_record(is_default: bool) -> LlmProviderRecord {
@@ -2928,7 +3182,13 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         let _ = pool
-            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .execute_job(
+                request,
+                execution_thread_id,
+                pipe_tx,
+                control_tx,
+                TurnCancellation::new(),
+            )
             .await;
         let events = drain_events(&mut pipe_rx);
 
@@ -2967,7 +3227,13 @@ mod tests {
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let result = pool
-            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .execute_job(
+                request,
+                execution_thread_id,
+                pipe_tx,
+                control_tx,
+                TurnCancellation::new(),
+            )
             .await;
 
         assert!(result.success);
@@ -3001,7 +3267,13 @@ mod tests {
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         let result = pool
-            .execute_job(request, execution_thread_id, pipe_tx, control_tx)
+            .execute_job(
+                request,
+                execution_thread_id,
+                pipe_tx,
+                control_tx,
+                TurnCancellation::new(),
+            )
             .await;
         let events = drain_events(&mut pipe_rx);
 
@@ -3182,8 +3454,14 @@ mod tests {
             let pipe_tx = pipe_tx.clone();
             let control_tx = control_tx.clone();
             tokio::spawn(async move {
-                pool.execute_job(request_a, thread_a, pipe_tx, control_tx)
-                    .await
+                pool.execute_job(
+                    request_a,
+                    thread_a,
+                    pipe_tx,
+                    control_tx,
+                    TurnCancellation::new(),
+                )
+                .await
             })
         };
         let second = {
@@ -3191,8 +3469,14 @@ mod tests {
             let pipe_tx = pipe_tx.clone();
             let control_tx = control_tx.clone();
             tokio::spawn(async move {
-                pool.execute_job(request_b, thread_b, pipe_tx, control_tx)
-                    .await
+                pool.execute_job(
+                    request_b,
+                    thread_b,
+                    pipe_tx,
+                    control_tx,
+                    TurnCancellation::new(),
+                )
+                .await
             })
         };
 
@@ -3264,6 +3548,204 @@ mod tests {
             result.is_err(),
             "removed runtime should fail to attach cleanly"
         );
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_unloads_chat_runtime_and_allows_reload() {
+        let provider = Arc::new(CapturingProvider::new(
+            "reload after remove",
+            Duration::from_millis(25),
+            16,
+        ));
+        let (pool, sqlite, provider_id) = test_runtime_pool_with_limit(2, provider).await;
+        let (session_id, thread_id) =
+            seed_chat_thread(&pool, &sqlite, provider_id, "remove-runtime-reload").await;
+        let thread = pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should load");
+        let weak = Arc::downgrade(&thread);
+        drop(thread);
+
+        assert!(pool.remove_runtime(&thread_id));
+        wait_for_thread_drop(&weak).await;
+
+        let mut rx = pool.register_chat_thread(session_id, thread_id);
+        pool.send_chat_message(session_id, thread_id, "reload".to_string())
+            .await
+            .expect("reloaded chat runtime should accept messages");
+        let _ = wait_for_thread_event(&mut rx, |event| {
+            matches!(
+                event,
+                ThreadEvent::ThreadPoolCooling { runtime }
+                    if runtime.thread_id == thread_id
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn evict_chat_if_idle_unloads_chat_runtime() {
+        let provider = Arc::new(CapturingProvider::new(
+            "evict after cooling",
+            Duration::from_millis(25),
+            16,
+        ));
+        let (pool, sqlite, provider_id) = test_runtime_pool_with_limit(2, provider).await;
+        let (session_id, thread_id) =
+            seed_chat_thread(&pool, &sqlite, provider_id, "evict-chat-runtime").await;
+        let mut rx = pool.register_chat_thread(session_id, thread_id);
+        let thread = pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should load");
+        let weak = Arc::downgrade(&thread);
+        drop(thread);
+
+        pool.send_chat_message(session_id, thread_id, "cool then evict".to_string())
+            .await
+            .expect("chat message should enqueue");
+        let _ = wait_for_thread_event(&mut rx, |event| {
+            matches!(
+                event,
+                ThreadEvent::ThreadPoolCooling { runtime }
+                    if runtime.thread_id == thread_id
+            )
+        })
+        .await;
+
+        pool.evict_chat_if_idle(&thread_id)
+            .expect("cooling chat runtime should evict");
+        wait_for_thread_drop(&weak).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_chat_runtime_is_single_flight() {
+        let provider = Arc::new(CapturingProvider::new(
+            "single-flight chat reply",
+            Duration::from_millis(5),
+            12,
+        ));
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let (pool, sqlite, provider_id) = test_runtime_pool_with_resolver(
+            2,
+            Arc::new(CountingDelayedProviderResolver::new(
+                provider,
+                Duration::from_millis(75),
+                Arc::clone(&resolve_calls),
+            )),
+        )
+        .await;
+        let (session_id, thread_id) =
+            seed_chat_thread(&pool, &sqlite, provider_id, "single-flight-chat").await;
+
+        let (first, second) = tokio::join!(
+            pool.ensure_chat_runtime(session_id, thread_id),
+            pool.ensure_chat_runtime(session_id, thread_id)
+        );
+        let first = first.expect("first chat load should succeed");
+        let second = second.expect("second chat load should succeed");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_job_runtime_is_single_flight() {
+        let provider = Arc::new(CapturingProvider::new(
+            "single-flight job reply",
+            Duration::from_millis(5),
+            12,
+        ));
+        let resolve_calls = Arc::new(AtomicUsize::new(0));
+        let (pool, _sqlite, _provider_id) = test_runtime_pool_with_resolver(
+            2,
+            Arc::new(CountingDelayedProviderResolver::new(
+                provider,
+                Duration::from_millis(75),
+                Arc::clone(&resolve_calls),
+            )),
+        )
+        .await;
+        let request = super::test_request("job-single-flight");
+        let execution_thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("enqueue should succeed");
+        let request_a = request.clone();
+        let request_b = request;
+
+        let (first, second) = tokio::join!(
+            pool.ensure_job_runtime(&request_a, execution_thread_id),
+            pool.ensure_job_runtime(&request_b, execution_thread_id)
+        );
+        let first = first.expect("first job load should succeed");
+        let second = second.expect("second job load should succeed");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(resolve_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recover_thread_state_from_sparse_turn_files_uses_highest_turn_number() {
+        let trace_dir = unique_trace_dir("argus-thread-pool-chat-recovery");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let base_dir = trace_dir
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+
+        write_trace_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        write_trace_turn(&base_dir, 3, "third prompt", "third reply", 33).await;
+
+        let recovered = ThreadPool::recover_thread_state_from_trace(
+            &trace_dir,
+            &session_id,
+            &thread_id,
+            Some(3),
+        )
+        .await
+        .expect("sparse traces should recover");
+
+        assert_eq!(recovered.turn_count, 3);
+        assert!(
+            recovered
+                .messages
+                .iter()
+                .any(|message| message.content == "first reply")
+        );
+        assert!(
+            recovered
+                .messages
+                .iter()
+                .any(|message| message.content == "third reply")
+        );
+        assert_eq!(recovered.token_count, 33);
+    }
+
+    #[tokio::test]
+    async fn recover_job_thread_state_skips_invalid_turn_files() {
+        let trace_dir = unique_trace_dir("argus-thread-pool-job-recovery");
+        let thread_id = ThreadId::new();
+        let base_dir = trace_dir.join(thread_id.to_string());
+
+        write_trace_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        std::fs::write(base_dir.join("turns").join("2.jsonl"), "{invalid-json")
+            .expect("invalid turn file should persist");
+
+        let recovered =
+            ThreadPool::recover_job_thread_state_from_trace(&trace_dir, &thread_id, Some(2))
+                .await
+                .expect("invalid turn files should be skipped");
+
+        assert_eq!(recovered.turn_count, 1);
+        assert!(
+            recovered
+                .messages
+                .iter()
+                .any(|message| message.content == "first reply")
+        );
+        assert_eq!(recovered.token_count, 11);
     }
 
     #[tokio::test]

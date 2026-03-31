@@ -19,7 +19,9 @@ import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { useChatStore } from "@/lib/chat-store";
 import type { ChatStore } from "@/lib/chat-store";
 import { providers } from "@/lib/tauri";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
 import {
   ActionBarMorePrimitive,
@@ -289,17 +291,64 @@ const PendingAssistantArtifacts: FC = () => {
 const JobStatusArtifacts: FC = () => {
   const session = useActiveChatSession();
   const jobStatuses = Object.values(session?.jobStatuses ?? {});
+  const stoppingJobIds = useChatStore((state) => state.stoppingJobIds);
+  const threadPoolThreads = useChatStore((state) => state.threadPoolThreads);
+  const stopJob = useChatStore((state) => state.stopJob);
+  const { addToast } = useToast();
 
   if (jobStatuses.length === 0) return null;
 
+  const runtimeStatusByJobId = new Map(
+    threadPoolThreads
+      .filter((thread) => thread.kind === "job" && thread.jobId)
+      .map((thread) => [thread.jobId!, thread.status]),
+  );
+
   const sorted = [...jobStatuses].sort((left, right) => {
-    if (left.status === right.status) return left.job_id.localeCompare(right.job_id);
-    if (left.status === "running") return -1;
-    if (right.status === "running") return 1;
-    if (left.status === "failed") return -1;
-    if (right.status === "failed") return 1;
-    return 0;
+    const leftRuntimeStatus = runtimeStatusByJobId.get(left.job_id);
+    const rightRuntimeStatus = runtimeStatusByJobId.get(right.job_id);
+    const leftStatus = stoppingJobIds[left.job_id]
+      ? "stopping"
+      : leftRuntimeStatus === "queued"
+        ? "queued"
+        : left.status;
+    const rightStatus = stoppingJobIds[right.job_id]
+      ? "stopping"
+      : rightRuntimeStatus === "queued"
+        ? "queued"
+        : right.status;
+
+    const priority = (status: "stopping" | "queued" | typeof left.status) => {
+      switch (status) {
+        case "stopping":
+          return 0;
+        case "running":
+          return 1;
+        case "queued":
+          return 2;
+        case "failed":
+          return 3;
+        case "completed":
+          return 4;
+      }
+    };
+
+    const priorityDiff = priority(leftStatus) - priority(rightStatus);
+    if (priorityDiff !== 0) return priorityDiff;
+    return left.job_id.localeCompare(right.job_id);
   });
+
+  const handleStopJob = async (jobId: string) => {
+    try {
+      await stopJob(jobId);
+      addToast("success", "已发送停止请求");
+    } catch (error) {
+      addToast(
+        "error",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
 
   return (
     <div className="mx-auto w-full max-w-(--thread-max-width) px-4 pb-2">
@@ -312,7 +361,10 @@ const JobStatusArtifacts: FC = () => {
             后台任务 {sorted.length} 个
           </span>
           <div className="ml-auto flex items-center gap-2">
-            {sorted.some((job) => job.status === "running") && (
+            {sorted.some((job) => {
+              const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
+              return stoppingJobIds[job.job_id] || runtimeStatus === "queued" || job.status === "running";
+            }) && (
               <Loader2 className="size-3 animate-spin text-primary" />
             )}
             <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/jobs:rotate-180" />
@@ -321,47 +373,130 @@ const JobStatusArtifacts: FC = () => {
 
         <div className="mt-3 flex flex-col gap-2">
           {sorted.map((job) => {
-            const isRunning = job.status === "running";
-            const isFailed = job.status === "failed";
+            const isStopping = !!stoppingJobIds[job.job_id];
+            const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
+            const uiStatus =
+              isStopping
+                ? "stopping"
+                : runtimeStatus === "queued"
+                  ? "queued"
+                  : job.status;
+            const isRunning = uiStatus === "running";
+            const isQueued = uiStatus === "queued";
+            const isFailed = uiStatus === "failed";
+            const isCompleted = uiStatus === "completed";
+            const isActionable = (job.status === "running" || isQueued) && !isStopping;
+
+            const statusLabel =
+              uiStatus === "stopping"
+                ? "正在停止"
+                : uiStatus === "queued"
+                  ? "排队中"
+                : uiStatus === "running"
+                  ? "运行中"
+                  : uiStatus === "failed"
+                    ? "失败"
+                    : "已完成";
+
+            const statusBadgeClass =
+              uiStatus === "stopping"
+                ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                : uiStatus === "queued"
+                  ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+                : uiStatus === "running"
+                  ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                  : uiStatus === "failed"
+                    ? "border-destructive/30 bg-destructive/10 text-destructive"
+                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
 
             return (
               <div
                 key={job.job_id}
-                className="rounded-xl border border-muted/40 bg-background/80 px-3 py-3 text-sm shadow-sm"
+                className="rounded-2xl border border-muted/50 bg-background/85 px-4 py-4 text-sm shadow-sm transition-colors"
               >
-                <div className="flex items-start gap-2">
-                  <div className="mt-0.5">
-                    {isRunning ? (
-                      <Loader2 className="size-4 animate-spin text-primary" />
-                    ) : isFailed ? (
-                      <CircleAlert className="size-4 text-destructive" />
-                    ) : (
-                      <CheckIcon className="size-4 text-emerald-600" />
-                    )}
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <div
+                      className={cn(
+                        "mt-0.5 rounded-xl p-2",
+                        isStopping && "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+                        isQueued && "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
+                        isRunning && "bg-primary/10 text-primary",
+                        isFailed && "bg-destructive/10 text-destructive",
+                        isCompleted && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                      )}
+                    >
+                      {isStopping || isRunning || isQueued ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : isFailed ? (
+                        <CircleAlert className="size-4" />
+                      ) : (
+                        <CheckIcon className="size-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="truncate font-semibold text-foreground">
+                          {job.agent_display_name ?? `Agent ${job.agent_id}`}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "rounded-full px-2.5 py-0.5 text-[10px] uppercase tracking-[0.18em]",
+                            statusBadgeClass,
+                          )}
+                        >
+                          {statusLabel}
+                        </Badge>
+                      </div>
+                      <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                        <span className="line-clamp-2 break-words">
+                          {job.agent_description || "后台子 agent 任务"}
+                        </span>
+                      </div>
+                      {job.prompt && (
+                        <div className="mt-2 rounded-xl border border-muted/40 bg-muted/20 px-3 py-2 text-xs leading-relaxed text-foreground/80">
+                          {job.prompt}
+                        </div>
+                      )}
+                      {job.message && (
+                        <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-muted/40 bg-muted/35 px-3 py-2 text-xs leading-relaxed text-foreground/80">
+                          {job.message}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate font-semibold text-foreground">
-                        {job.agent_display_name ?? `Agent ${job.agent_id}`}
-                      </span>
-                      <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
-                        {job.status}
-                      </span>
-                    </div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      <span className="line-clamp-2 break-words">
-                        {job.agent_description || "后台子 agent 任务"}
-                      </span>
-                    </div>
-                    {job.prompt && (
-                      <div className="mt-2 line-clamp-2 break-words text-xs text-foreground/80">
-                        {job.prompt}
-                      </div>
-                    )}
-                    {job.message && (
-                      <div className="mt-2 line-clamp-6 whitespace-pre-wrap break-words rounded-lg bg-muted/40 px-2 py-1.5 text-xs text-foreground/80">
-                        {job.message}
-                      </div>
+                  <div className="flex shrink-0 items-center sm:justify-end">
+                    {isActionable || isStopping ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className={cn(
+                          "h-11 min-w-28 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40",
+                          isStopping
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+                            : "border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10",
+                        )}
+                        disabled={isStopping}
+                        aria-label={isStopping ? "正在停止任务" : "停止任务"}
+                        onClick={() => void handleStopJob(job.job_id)}
+                      >
+                        {isStopping ? (
+                          <>
+                            <Loader2 className="mr-2 size-4 animate-spin" />
+                            正在停止
+                          </>
+                        ) : (
+                          <>
+                            <StopCircle className="mr-2 size-4" />
+                            停止任务
+                          </>
+                        )}
+                      </Button>
+                    ) : isFailed ? (
+                      <div className="text-xs text-muted-foreground">任务已结束</div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">—</div>
                     )}
                   </div>
                 </div>

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thirtyfour::RequestData;
 use thirtyfour::common::command::FormatRequestData;
 use thirtyfour::prelude::{By, WebDriver};
@@ -67,7 +67,6 @@ impl ChromeSession {
     pub fn interaction(&self) -> Arc<dyn BrowserSession> {
         Arc::clone(&self.interaction)
     }
-
 }
 
 pub struct ManagedWebDriverSession {
@@ -368,16 +367,11 @@ impl BrowserSession for ManagedWebDriverSession {
             })
             .await
             .map_err(|e| ChromeToolError::PageReadFailed {
-                reason: format!(
-                    "failed to collect chrome performance logs: {}",
-                    e.to_string()
-                ),
+                reason: format!("failed to collect chrome performance logs: {e}"),
             })?
             .value()
             .map_err(|e| ChromeToolError::PageReadFailed {
-                reason: format!(
-                    "failed to parse chrome performance logs: {e}"
-                ),
+                reason: format!("failed to parse chrome performance logs: {e}"),
             })?;
 
         let mut tracker = self.network_requests.lock().await;
