@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::{read_jsonl_events, TurnLogEvent};
+use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEvent};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
@@ -11,8 +11,9 @@ use argus_protocol::{
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::{
-    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
-    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool, ToolManager,
+    DispatchJobTool, GetJobResultTool, ListSubagentsTool, SchedulerBackend,
+    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
+    SchedulerSubagent, SchedulerTool, ToolManager,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -176,10 +177,11 @@ impl SchedulerBackend for SessionSchedulerBackend {
         Ok(job_id)
     }
 
-    async fn list_subagents(
-        &self,
-        agent_id: AgentId,
-    ) -> std::result::Result<Vec<SchedulerSubagent>, ToolError> {
+    async fn list_subagents(&self) -> std::result::Result<Vec<SchedulerSubagent>, ToolError> {
+        let agent_id = current_agent_id().ok_or_else(|| ToolError::ExecutionFailed {
+            tool_name: "list_subagents".to_string(),
+            reason: "current agent_id not available".to_string(),
+        })?;
         let records = self
             .template_manager
             .list_subagents(agent_id)
@@ -253,7 +255,14 @@ impl SessionManager {
             template_manager.clone(),
             job_manager.clone(),
         ));
-        tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend)));
+        tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
+        tool_manager.register(Arc::new(DispatchJobTool::new(scheduler_backend.clone())));
+        tool_manager.register(Arc::new(DispatchJobTool::with_name(
+            "dispath_job",
+            scheduler_backend.clone(),
+        )));
+        tool_manager.register(Arc::new(GetJobResultTool::new(scheduler_backend.clone())));
+        tool_manager.register(Arc::new(ListSubagentsTool::new(scheduler_backend)));
 
         Self {
             session_repo,
@@ -1326,6 +1335,73 @@ mod tests {
         )
     }
 
+    async fn test_session_manager_with_tool_manager() -> (SessionManager, Arc<ToolManager>) {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        let provider_id =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(7),
+                display_name: "Session Test Agent".to_string(),
+                description: "Used to verify session loading".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(provider_id.into_inner())),
+                model_id: Some("capturing".to_string()),
+                system_prompt: "You are a test session agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
+
+        let provider = Arc::new(CapturingProvider::new("hello", Duration::from_millis(5)));
+        let provider_resolver =
+            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
+        let tool_manager = Arc::new(ToolManager::new());
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            template_manager.clone(),
+            Arc::clone(&provider_resolver),
+            tool_manager.clone(),
+            Arc::new(CompactorManager::with_defaults()),
+            trace_dir.clone(),
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+        ));
+
+        (
+            SessionManager::new(
+                sqlite.clone() as Arc<dyn SessionRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
+                template_manager,
+                provider_resolver,
+                tool_manager.clone(),
+                trace_dir,
+                job_manager.thread_pool(),
+                job_manager,
+            ),
+            tool_manager,
+        )
+    }
+
     fn test_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
             id: AgentId::new(1),
@@ -1708,5 +1784,17 @@ mod tests {
             session.get_thread(&thread_id).is_some(),
             "loaded session should expose persisted live threads"
         );
+    }
+
+    #[tokio::test]
+    async fn session_manager_registers_scheduler_and_legacy_scheduler_tool_names() {
+        let (_manager, tool_manager) = test_session_manager_with_tool_manager().await;
+        let tool_ids = tool_manager.list_ids();
+
+        assert!(tool_ids.iter().any(|id| id == "scheduler"));
+        assert!(tool_ids.iter().any(|id| id == "dispatch_job"));
+        assert!(tool_ids.iter().any(|id| id == "dispath_job"));
+        assert!(tool_ids.iter().any(|id| id == "get_job_result"));
+        assert!(tool_ids.iter().any(|id| id == "list_subagents"));
     }
 }

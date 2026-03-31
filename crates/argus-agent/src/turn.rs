@@ -1292,7 +1292,6 @@ impl Turn {
                     );
                     let ctx = Arc::new(ToolExecutionContext {
                         thread_id: self.originating_thread_id,
-                        agent_id: Some(self.agent_record.id),
                         pipe_tx: self.thread_event_tx.clone(),
                         control_tx: self.control_tx.clone(),
                     });

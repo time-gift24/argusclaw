@@ -33,8 +33,9 @@ pub use list::ListDirTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadTool;
 pub use scheduler::{
-    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
-    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool,
+    DispatchJobTool, GetJobResultTool, ListSubagentsTool, SchedulerBackend,
+    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
+    SchedulerSubagent, SchedulerTool,
 };
 pub use shell::ShellTool;
 pub use write::WriteFileTool;
@@ -295,7 +296,6 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
-            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -339,7 +339,6 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
-            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -356,7 +355,6 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
-            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
@@ -380,7 +378,6 @@ mod tests {
         let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Arc::new(ToolExecutionContext {
             thread_id: argus_protocol::ids::ThreadId::new(),
-            agent_id: None,
             pipe_tx: tx,
             control_tx,
         });
