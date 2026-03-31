@@ -54,7 +54,10 @@ impl Session {
     }
 
     pub fn get_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
-        let thread = self.threads.get(thread_id).and_then(|r| r.value().upgrade());
+        let thread = self
+            .threads
+            .get(thread_id)
+            .and_then(|r| r.value().upgrade());
         if thread.is_none() {
             self.threads.remove(thread_id);
         }

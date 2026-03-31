@@ -22,10 +22,7 @@ use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::dispatch_tool::DispatchJobTool;
 use crate::error::JobError;
-use crate::get_job_result_tool::GetJobResultTool;
-use crate::list_subagents_tool::ListSubagentsTool;
 use crate::thread_pool::{ThreadPool, ThreadPoolPersistence};
 use crate::types::ThreadPoolJobRequest;
 
@@ -57,7 +54,6 @@ pub enum JobLookup {
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
-    template_manager: Arc<TemplateManager>,
     thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<HashMap<String, TrackedJob>>>,
 }
@@ -100,7 +96,7 @@ impl JobManager {
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
         let thread_pool = Arc::new(ThreadPool::with_persistence(
-            template_manager.clone(),
+            template_manager,
             provider_resolver,
             tool_manager,
             compactor_manager,
@@ -109,7 +105,6 @@ impl JobManager {
         ));
 
         Self {
-            template_manager,
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(HashMap::new())),
         }
@@ -138,21 +133,6 @@ impl JobManager {
                 provider_repository,
             )),
         )
-    }
-
-    /// Create a DispatchJobTool for this manager.
-    pub fn create_dispatch_tool(self: Arc<Self>) -> DispatchJobTool {
-        DispatchJobTool::new(self)
-    }
-
-    /// Create a ListSubagentsTool for this manager.
-    pub fn create_list_subagents_tool(self: Arc<Self>) -> ListSubagentsTool {
-        ListSubagentsTool::new(Arc::clone(&self.template_manager))
-    }
-
-    /// Create a GetJobResultTool for this manager.
-    pub fn create_get_job_result_tool(self: Arc<Self>) -> GetJobResultTool {
-        GetJobResultTool::new(self)
     }
 
     /// Get the currently bound execution thread for a job, if any.

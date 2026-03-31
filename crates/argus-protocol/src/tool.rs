@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::ids::ThreadId;
+use crate::ids::{AgentId, ThreadId};
 use crate::llm::ToolDefinition;
 use crate::risk_level::RiskLevel;
 use crate::{ThreadControlEvent, ThreadEvent};
@@ -18,6 +18,8 @@ use crate::{ThreadControlEvent, ThreadEvent};
 pub struct ToolExecutionContext {
     /// The thread ID in which the tool is executing.
     pub thread_id: ThreadId,
+    /// The current agent ID for this turn, when available.
+    pub agent_id: Option<AgentId>,
     /// The pipe sender for this thread. Tools can send ThreadEvent variants
     /// into this pipe. Failures are logged as warnings and do not block execution.
     pub pipe_tx: broadcast::Sender<ThreadEvent>,

@@ -47,7 +47,7 @@ pub struct SessionManager {
 - 惰性加载：会话按需从数据库加载到内存
 - 多层存储：内存 + SQLite 持久化
 - Thread 聚合管理
-- 自动注册 dispatch_job / get_job_result / list_subagents 工具
+- 自动注册 scheduler 工具（统一封装 dispatch_job / get_job_result / list_subagents）
 
 ### 3. ProviderResolver Trait
 
