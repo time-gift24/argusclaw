@@ -6,8 +6,10 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
+use crate::approval_state::ApprovalState;
 use crate::turn::TurnCancellation;
 use crate::{TurnBuilder, TurnOutput};
+use argus_protocol::approval::ApprovalManager;
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -108,6 +110,14 @@ pub struct Thread {
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
+
+    /// Per-thread approval state tracking which tools have been approved.
+    #[builder(default)]
+    approval_state: Arc<Mutex<ApprovalState>>,
+
+    /// Approval manager for requesting and resolving approvals.
+    #[builder(default, setter(strip_option))]
+    approval_manager: Option<Arc<dyn ApprovalManager>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -177,6 +187,10 @@ impl ThreadBuilder {
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
             turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
+            approval_state: self
+                .approval_state
+                .unwrap_or_else(|| Arc::new(Mutex::new(ApprovalState::new()))),
+            approval_manager: self.approval_manager.flatten(),
         })
     }
 }
@@ -310,6 +324,21 @@ impl Thread {
             trace_config.model = Some(model_name);
         }
         self.updated_at = Utc::now();
+    }
+
+    /// Check if a tool has been approved for this session.
+    pub async fn is_tool_approved(&self, tool_name: &str) -> bool {
+        self.approval_state.lock().await.is_approved(tool_name)
+    }
+
+    /// Approve a specific tool for the rest of this session.
+    pub async fn approve_tool(&self, tool_name: &str) {
+        self.approval_state.lock().await.approve_tool(tool_name);
+    }
+
+    /// Approve all tools for the rest of this session.
+    pub async fn approve_all_tools(&self) {
+        self.approval_state.lock().await.approve_all();
     }
 
     /// Get mutable access to messages (for Compactor).
@@ -530,7 +559,12 @@ impl Thread {
             .stream_tx(stream_tx)
             .thread_event_tx(self.pipe_tx.clone())
             .control_tx(self.control_tx.clone())
-            .mailbox(Arc::clone(&self.mailbox));
+            .mailbox(Arc::clone(&self.mailbox))
+            .approval_state(Arc::clone(&self.approval_state));
+
+        if let Some(ref approval_mgr) = self.approval_manager {
+            turn_builder = turn_builder.approval_manager(approval_mgr.clone());
+        }
 
         if let Some(ref tc) = self.config.turn_config.trace_config {
             turn_builder = turn_builder.trace_config(tc.clone());

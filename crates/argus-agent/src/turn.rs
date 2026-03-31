@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
+use argus_protocol::approval::{ApprovalDecision, ApprovalManager, ApprovalRequest};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, LlmStreamEvent,
     ToolCall, ToolDefinition,
@@ -327,6 +328,14 @@ pub struct Turn {
     #[builder(default, setter(strip_option))]
     #[allow(dead_code)]
     trace_writer: Option<TraceWriter>,
+
+    /// Per-thread approval state (shared with Thread via Arc<Mutex>).
+    #[builder(default)]
+    approval_state: Arc<Mutex<crate::approval_state::ApprovalState>>,
+
+    /// Approval manager for requesting and resolving approvals.
+    #[builder(default, setter(strip_option))]
+    approval_manager: Option<Arc<dyn ApprovalManager>>,
 }
 
 impl TurnBuilder {
@@ -1183,6 +1192,131 @@ impl Turn {
 
         // Find the tool in self.tools
         let tool = self.tools.iter().find(|t| t.name() == tool_name).cloned();
+
+        // --- Inline approval check (replaces ApprovalHook) ---
+        if let Some(ref tool_instance) = tool {
+            let requires_approval = tool_instance.requires_approval()
+                || self
+                    .approval_manager
+                    .as_ref()
+                    .is_some_and(|mgr| mgr.requires_approval(tool_name.as_str()));
+            if requires_approval {
+                let already_approved = self.approval_state.lock().await.is_approved(tool_name.as_str());
+                if !already_approved {
+                    if let Some(ref approval_mgr) = self.approval_manager {
+                        let risk_level = tool_instance.risk_level();
+                        let timeout_secs = approval_mgr.approval_timeout_secs();
+                        let request = ApprovalRequest::new(
+                            self.agent_record.id.to_string(),
+                            tool_name.clone(),
+                            format!("Execute: {}", tool_name),
+                            timeout_secs,
+                            risk_level,
+                        );
+                        let request_id = request.id;
+
+                        // Emit WaitingForApproval
+                        let _ = self.thread_event_tx.send(ThreadEvent::WaitingForApproval {
+                            thread_id: self.thread_id.clone(),
+                            turn_number: self.turn_number,
+                            request: request.clone(),
+                        });
+
+                        let approval_started = std::time::Instant::now();
+                        let decision = approval_mgr.request_approval(request).await;
+
+                        // Emit ApprovalResolved
+                        let response = argus_protocol::approval::ApprovalResponse {
+                            request_id,
+                            decision,
+                            decided_at: chrono::Utc::now(),
+                            decided_by: None,
+                        };
+                        let _ = self.thread_event_tx.send(ThreadEvent::ApprovalResolved {
+                            thread_id: self.thread_id.clone(),
+                            turn_number: self.turn_number,
+                            response,
+                        });
+
+                        match decision {
+                            ApprovalDecision::ApprovedSession => {
+                                self.approval_state.lock().await.approve_all();
+                            }
+                            ApprovalDecision::Approved => {
+                                self.approval_state.lock().await.approve_tool(&tool_name);
+                            }
+                            ApprovalDecision::Denied | ApprovalDecision::TimedOut => {
+                                let reason = match decision {
+                                    ApprovalDecision::Denied => "User denied".to_string(),
+                                    ApprovalDecision::TimedOut => "Approval timed out".to_string(),
+                                    _ => unreachable!(),
+                                };
+                                tracing::warn!(
+                                    thread_id = %self.thread_id,
+                                    turn_number = %self.turn_number,
+                                    tool_name = %tool_name,
+                                    reason = %reason,
+                                    "Tool call blocked by approval"
+                                );
+
+                                let duration_ms = approval_started.elapsed().as_millis() as u64;
+                                let content = format!("Tool call blocked: {}", reason);
+
+                                // Write blocked to trace
+                                {
+                                    let mut guard = trace_writer.lock().await;
+                                    if let Some(writer) = guard.as_mut() {
+                                        let _ = writer
+                                            .write_event(&TurnLogEvent::ToolResult {
+                                                id: tool_call_id.clone(),
+                                                name: tool_name.clone(),
+                                                result: content.clone(),
+                                                duration_ms,
+                                                error: Some(reason.clone()),
+                                            })
+                                            .await;
+                                    }
+                                }
+
+                                // Fire AfterToolCall hook with error for observability parity.
+                                let after_ctx = ToolHookContext {
+                                    event: HookEvent::AfterToolCall,
+                                    tool_name: tool_name.clone(),
+                                    tool_call_id: tool_call_id.clone(),
+                                    tool_input: tool_input.clone(),
+                                    tool_result: None,
+                                    error: Some(reason.clone()),
+                                    tool_manager: None,
+                                    thread_event_sender: Some(self.thread_event_tx.clone()),
+                                    thread_id: Some(self.thread_id.clone()),
+                                    turn_number: Some(self.turn_number),
+                                };
+                                let _ = self
+                                    .fire_hooks(
+                                        HookEvent::AfterToolCall,
+                                        &HookContext::ToolEvent(Box::new(after_ctx)),
+                                    )
+                                    .await;
+
+                                return ToolExecutionResult {
+                                    tool_call_id,
+                                    name: tool_name,
+                                    content,
+                                    duration_ms,
+                                };
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            turn_number = %self.turn_number,
+                            tool_name = %tool_name,
+                            "Tool requires approval but no approval manager is configured; allowing execution"
+                        );
+                    }
+                }
+            }
+        }
 
         // Fire BeforeToolCall hook
         let ctx = ToolHookContext {

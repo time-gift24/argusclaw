@@ -519,6 +519,7 @@ pub fn resolve_approval(
     let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
     let decision = match decision.as_str() {
         "approved" => ApprovalDecision::Approved,
+        "approved_session" => ApprovalDecision::ApprovedSession,
         "denied" => ApprovalDecision::Denied,
         _ => return Err(format!("Invalid approval decision: {}", decision)),
     };

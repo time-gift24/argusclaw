@@ -185,6 +185,13 @@ pub trait ApprovalManager: Send + Sync {
     /// Check if a tool requires approval based on current policy.
     fn requires_approval(&self, tool_name: &str) -> bool;
 
+    /// Approval timeout (seconds) used when creating approval requests.
+    ///
+    /// Default is 60s for backward compatibility.
+    fn approval_timeout_secs(&self) -> u64 {
+        60
+    }
+
     /// Submit an approval request. Returns a future that resolves when approved/denied/timed out.
     async fn request_approval(&self, req: ApprovalRequest) -> ApprovalDecision;
 

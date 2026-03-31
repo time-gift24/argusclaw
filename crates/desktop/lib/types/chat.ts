@@ -185,4 +185,8 @@ export interface ThreadEventEnvelope {
   payload: ThreadEventPayload;
 }
 
-export type ApprovalDecision = "approved" | "denied" | "timed_out";
+export type ApprovalDecision =
+  | "approved"
+  | "approved_session"
+  | "denied"
+  | "timed_out";
