@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -78,22 +79,25 @@ impl ChromeSession {
 pub(crate) struct ChromeDriverProcess {
     child: Mutex<Option<Child>>,
     port: u16,
+    driver_binary: PathBuf,
 }
 
 impl fmt::Debug for ChromeDriverProcess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChromeDriverProcess")
             .field("port", &self.port)
+            .field("driver_binary", &self.driver_binary)
             .finish_non_exhaustive()
     }
 }
 
 impl ChromeDriverProcess {
     #[must_use]
-    pub(crate) fn new(child: Child, port: u16) -> Self {
+    pub(crate) fn new(child: Child, port: u16, driver_binary: PathBuf) -> Self {
         Self {
             child: Mutex::new(Some(child)),
             port,
+            driver_binary,
         }
     }
 
@@ -103,13 +107,29 @@ impl ChromeDriverProcess {
 
     pub(crate) async fn is_alive(&self) -> bool {
         let mut guard = self.child.lock().await;
-        match guard.as_mut() {
+        let is_alive = match guard.as_mut() {
             None => false,
             Some(child) => child
                 .try_wait()
                 .map(|status| status.is_none())
                 .unwrap_or(false),
+        };
+        if !is_alive {
+            guard.take();
         }
+        is_alive
+    }
+
+    pub(crate) fn matches_driver_binary(&self, driver_binary: &Path) -> bool {
+        self.driver_binary == driver_binary
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), ChromeToolError> {
+        let mut child = self.child.lock().await.take();
+        if let Some(child) = child.as_mut() {
+            shutdown_child_process(child).await?;
+        }
+        Ok(())
     }
 }
 
@@ -518,7 +538,12 @@ impl BrowserSession for ManagedWebDriverSession {
 
     async fn shutdown(&self) -> Result<(), ChromeToolError> {
         if let Some(driver) = self.driver.lock().await.take() {
-            let _ = driver.quit().await;
+            driver
+                .quit()
+                .await
+                .map_err(|e| ChromeToolError::SessionShutdownFailed {
+                    reason: e.to_string(),
+                })?;
         }
         Ok(())
     }
@@ -550,10 +575,76 @@ pub(crate) async fn shutdown_child_process(child: &mut Child) -> Result<(), Chro
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use thirtyfour::prelude::{DesiredCapabilities, WebDriver};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::{
-        ChromeToolError, NetworkRequestTracker, WebDriverLogEntry, apply_performance_log_entries,
+        BrowserSession, ChromeToolError, ManagedWebDriverSession, NetworkRequestTracker,
+        WebDriverLogEntry, apply_performance_log_entries,
     };
+
+    async fn read_http_request(
+        stream: &mut tokio::net::TcpStream,
+    ) -> std::io::Result<(String, Vec<u8>)> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none()
+                && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                header_end = Some(index + 4);
+                let headers = String::from_utf8_lossy(&buffer[..index + 4]);
+                for line in headers.lines() {
+                    if let Some(value) = line.strip_prefix("Content-Length:") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+
+            if let Some(end) = header_end
+                && buffer.len() >= end + content_length
+            {
+                let request_line = String::from_utf8_lossy(&buffer[..end])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                return Ok((request_line, buffer));
+            }
+        }
+
+        let request_line = String::from_utf8_lossy(&buffer)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        Ok((request_line, buffer))
+    }
+
+    async fn write_json_response(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        body: serde_json::Value,
+    ) -> std::io::Result<()> {
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await
+    }
 
     #[test]
     fn performance_log_parser_collects_real_network_event_fields() {
@@ -657,5 +748,69 @@ mod tests {
         assert_eq!(requests[1].url, "https://cdn.example.com/app.js");
         assert_eq!(requests[1].status, None);
         assert_eq!(requests[1].error.as_deref(), Some("net::ERR_ABORTED"));
+    }
+
+    #[tokio::test]
+    async fn managed_webdriver_session_shutdown_propagates_quit_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_request in [
+                "POST /session HTTP/1.1",
+                "POST /session/test-session/timeouts HTTP/1.1",
+                "DELETE /session/test-session HTTP/1.1",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (request_line, _) = read_http_request(&mut stream).await.unwrap();
+                assert_eq!(request_line, expected_request);
+
+                let response = if expected_request.starts_with("DELETE ") {
+                    (
+                        "500 Internal Server Error",
+                        json!({
+                            "value": {
+                                "error": "unknown error",
+                                "message": "quit failed",
+                                "stacktrace": ""
+                            }
+                        }),
+                    )
+                } else if expected_request.starts_with("POST /session ") {
+                    (
+                        "200 OK",
+                        json!({
+                            "value": {
+                                "sessionId": "test-session",
+                                "capabilities": {
+                                    "browserName": "chrome"
+                                }
+                            }
+                        }),
+                    )
+                } else {
+                    ("200 OK", json!({ "value": null }))
+                };
+
+                write_json_response(&mut stream, response.0, response.1)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let driver = WebDriver::new(
+            format!("http://{server_addr}"),
+            DesiredCapabilities::chrome(),
+        )
+        .await
+        .unwrap();
+        let session = ManagedWebDriverSession::new(driver);
+
+        let error = session.shutdown().await.unwrap_err();
+        assert!(matches!(
+            error,
+            ChromeToolError::SessionShutdownFailed { .. }
+        ));
+
+        server.await.unwrap();
     }
 }
