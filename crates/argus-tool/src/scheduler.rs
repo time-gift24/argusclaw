@@ -132,7 +132,7 @@ fn scheduler_dispatch_variant() -> serde_json::Value {
                 "description": "Task prompt for dispatch_job"
             },
             "agent_id": {
-                "type": "number",
+                "type": "integer",
                 "description": "Subagent ID for dispatch_job"
             },
             "context": {
@@ -465,6 +465,37 @@ mod tests {
         assert_eq!(call.prompt, "summarize logs");
         assert_eq!(call.agent_id, AgentId::new(7));
         assert_eq!(call.context, Some(serde_json::json!({"env": "staging"})));
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_accepts_numeric_string_agent_id() {
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-43".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::Pending,
+        });
+        let tool = SchedulerTool::new(backend.clone());
+
+        let response = tool
+            .execute(
+                serde_json::json!({
+                    "action": "dispatch_job",
+                    "prompt": "summarize logs",
+                    "agent_id": "7",
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("dispatch_job should accept numeric string agent ids");
+
+        assert_eq!(response["job_id"], serde_json::json!("job-43"));
+        let calls = backend
+            .dispatch_calls
+            .lock()
+            .expect("dispatch_calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].agent_id, AgentId::new(7));
     }
 
     #[tokio::test]
