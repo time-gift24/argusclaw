@@ -15,7 +15,7 @@ use super::models::{
     KnowledgeCreatePrResult, KnowledgeNode, KnowledgeNodeKind, KnowledgeRepoDescriptor,
     KnowledgeToolArgs,
 };
-use super::pr::{CliGitPrExecutor, KnowledgePrRuntime, KnowledgePrService};
+use super::pr::{GitHubPrExecutor, KnowledgePrRuntime, KnowledgePrService};
 use super::registry::KnowledgeRepoRegistry;
 
 #[async_trait]
@@ -42,17 +42,19 @@ pub trait KnowledgeRuntimeBackend: KnowledgeBackend {
 
 pub struct DefaultKnowledgeRuntime<
     B = GitHubKnowledgeBackend<ReqwestGitHubTransport>,
-    P = KnowledgePrService<CliGitPrExecutor>,
+    P = KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
 > {
     backend: Arc<B>,
     indexer: KnowledgeIndexer<Arc<B>>,
     pr_runtime: Arc<P>,
 }
 
-impl DefaultKnowledgeRuntime<
-    GitHubKnowledgeBackend<ReqwestGitHubTransport>,
-    KnowledgePrService<CliGitPrExecutor>,
-> {
+impl
+    DefaultKnowledgeRuntime<
+        GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+    >
+{
     #[must_use]
     pub fn new() -> Self {
         Self::new_with_backend_and_pr_runtime(
@@ -65,14 +67,18 @@ impl DefaultKnowledgeRuntime<
     }
 }
 
-impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B, KnowledgePrService<CliGitPrExecutor>> {
+impl<B: KnowledgeRuntimeBackend + 'static>
+    DefaultKnowledgeRuntime<B, KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>>
+{
     #[must_use]
     pub fn new_for_test(backend: B) -> Self {
         Self::new_with_backend_and_pr_runtime(backend, KnowledgePrService::new())
     }
 }
 
-impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> DefaultKnowledgeRuntime<B, P> {
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static>
+    DefaultKnowledgeRuntime<B, P>
+{
     #[must_use]
     pub fn new_for_test_with_pr_runtime(backend: B, pr_runtime: P) -> Self {
         Self::new_with_backend_and_pr_runtime(backend, pr_runtime)
@@ -227,7 +233,7 @@ impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> Defa
 impl Default
     for DefaultKnowledgeRuntime<
         GitHubKnowledgeBackend<ReqwestGitHubTransport>,
-        KnowledgePrService<CliGitPrExecutor>,
+        KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
     >
 {
     fn default() -> Self {
@@ -394,19 +400,18 @@ impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> Know
                 }))
             }
             KnowledgeAction::CreateKnowledgePr => {
-                let request =
-                    KnowledgeCreatePrArgs::try_from(args).map_err(|err| ToolError::ExecutionFailed {
+                let request = KnowledgeCreatePrArgs::try_from(args).map_err(|err| {
+                    ToolError::ExecutionFailed {
                         tool_name: "knowledge".to_string(),
                         reason: err.to_string(),
-                    })?;
-                let result = self
-                    .pr_runtime
-                    .create_pr(&request)
-                    .await
-                    .map_err(|err| ToolError::ExecutionFailed {
+                    }
+                })?;
+                let result = self.pr_runtime.create_pr(&request).await.map_err(|err| {
+                    ToolError::ExecutionFailed {
                         tool_name: "knowledge".to_string(),
                         reason: err.to_string(),
-                    })?;
+                    }
+                })?;
 
                 Ok(Self::render_create_pr_result(&result))
             }
