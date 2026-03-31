@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::ids::ThreadId;
@@ -21,6 +22,10 @@ struct Cli {
     /// Pretty-print JSON output
     #[arg(long, global = true, default_value_t = false)]
     pretty: bool,
+
+    /// Keep interactive session open for the specified milliseconds after `open`
+    #[arg(long, global = true, default_value_t = 0)]
+    hold_ms: u64,
 
     #[command(subcommand)]
     command: Command,
@@ -110,7 +115,7 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let result = run(cli.command, cli.interactive).await;
+    let result = run(cli.command, cli.interactive, cli.hold_ms).await;
 
     let output = if cli.pretty {
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| {
@@ -135,7 +140,7 @@ fn make_ctx() -> Arc<ToolExecutionContext> {
     })
 }
 
-fn payload_for_command(command: Command) -> (&'static str, serde_json::Value) {
+fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
     match command {
         Command::Install => ("install", json!({ "action": "install" })),
         Command::Open { url } => ("open", json!({ "action": "open", "url": url })),
@@ -223,7 +228,7 @@ fn payload_for_command(command: Command) -> (&'static str, serde_json::Value) {
     }
 }
 
-async fn run(command: Command, interactive: bool) -> serde_json::Value {
+async fn run(command: Command, interactive: bool, hold_ms: u64) -> serde_json::Value {
     let tool = if interactive {
         ChromeTool::new_interactive()
     } else {
@@ -233,9 +238,16 @@ async fn run(command: Command, interactive: bool) -> serde_json::Value {
     let manager = ToolManager::new();
     manager.register(Arc::new(tool));
 
-    let (action, request) = payload_for_command(command);
+    let (action, request) = payload_for_command(&command);
+    let result = manager.execute("chrome", request, make_ctx()).await;
 
-    match manager.execute("chrome", request, make_ctx()).await {
+    if hold_ms > 0 {
+        if matches!(command, Command::Open { .. }) && interactive {
+            tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+        }
+    }
+
+    match result {
         Ok(result) => json!({
             "ok": true,
             "result": result,
