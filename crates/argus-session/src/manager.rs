@@ -11,9 +11,8 @@ use argus_protocol::{
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::{
-    DispatchJobTool, GetJobResultTool, ListSubagentsTool, SchedulerBackend,
-    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
-    SchedulerSubagent, SchedulerTool, ToolManager,
+    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
+    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool, ToolManager,
 };
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -256,13 +255,6 @@ impl SessionManager {
             job_manager.clone(),
         ));
         tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
-        tool_manager.register(Arc::new(DispatchJobTool::new(scheduler_backend.clone())));
-        tool_manager.register(Arc::new(DispatchJobTool::with_name(
-            "dispath_job",
-            scheduler_backend.clone(),
-        )));
-        tool_manager.register(Arc::new(GetJobResultTool::new(scheduler_backend.clone())));
-        tool_manager.register(Arc::new(ListSubagentsTool::new(scheduler_backend)));
 
         Self {
             session_repo,
@@ -1787,14 +1779,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_manager_registers_scheduler_and_legacy_scheduler_tool_names() {
+    async fn session_manager_registers_unified_scheduler_tool() {
         let (_manager, tool_manager) = test_session_manager_with_tool_manager().await;
         let tool_ids = tool_manager.list_ids();
 
         assert!(tool_ids.iter().any(|id| id == "scheduler"));
-        assert!(tool_ids.iter().any(|id| id == "dispatch_job"));
-        assert!(tool_ids.iter().any(|id| id == "dispath_job"));
-        assert!(tool_ids.iter().any(|id| id == "get_job_result"));
-        assert!(tool_ids.iter().any(|id| id == "list_subagents"));
+        assert!(!tool_ids.iter().any(|id| id == "dispatch_job"));
+        assert!(!tool_ids.iter().any(|id| id == "dispath_job"));
+        assert!(!tool_ids.iter().any(|id| id == "get_job_result"));
+        assert!(!tool_ids.iter().any(|id| id == "list_subagents"));
     }
 }

@@ -12,7 +12,6 @@ use argus_protocol::{
     ToolError, ToolExecutionContext,
 };
 use async_trait::async_trait;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
@@ -35,32 +34,6 @@ enum SchedulerInput {
         consume: Option<bool>,
     },
 }
-
-/// Arguments for dispatch_job.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct DispatchJobArgs {
-    /// The prompt/task description for the job
-    prompt: String,
-    /// The agent ID to use for this job
-    agent_id: AgentId,
-    /// Optional context JSON for the job
-    #[serde(default)]
-    context: Option<serde_json::Value>,
-}
-
-/// Arguments for get_job_result.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct GetJobResultArgs {
-    /// The job ID returned by dispatch_job
-    job_id: String,
-    /// When true, consume a completed queued result so it will not be auto-injected into a later turn
-    #[serde(default)]
-    consume: Option<bool>,
-}
-
-/// Empty arguments for list_subagents.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ListSubagentsArgs {}
 
 /// Serialized job result payload returned by scheduler lookups.
 #[derive(Debug, Clone, Serialize)]
@@ -222,140 +195,6 @@ fn scheduler_definition() -> ToolDefinition {
     }
 }
 
-fn legacy_dispatch_definition(name: &str) -> ToolDefinition {
-    ToolDefinition {
-        name: name.to_string(),
-        description: "Dispatch a background job to a subagent. The job runs asynchronously; use get_job_result(job_id, consume=true) if you want to proactively check for completion and consume the result before it is replayed as a later queued message.".to_string(),
-        parameters: serde_json::to_value(schemars::schema_for!(DispatchJobArgs))
-            .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
-    }
-}
-
-fn legacy_list_subagents_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "list_subagents".to_string(),
-        description: "List all subagents that belong to this agent. Returns the agent_id, display_name, and description of each subagent.".to_string(),
-        parameters: serde_json::to_value(schemars::schema_for!(ListSubagentsArgs))
-            .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
-    }
-}
-
-fn legacy_get_job_result_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "get_job_result".to_string(),
-        description: "Check whether a background job has finished. Use consume=true when you are ready to use the result now and do not want it replayed as a future queued message.".to_string(),
-        parameters: serde_json::to_value(schemars::schema_for!(GetJobResultArgs))
-            .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
-    }
-}
-
-async fn execute_dispatch_job(
-    backend: &Arc<dyn SchedulerBackend>,
-    input: serde_json::Value,
-    ctx: Arc<ToolExecutionContext>,
-    tool_name: &str,
-) -> Result<serde_json::Value, ToolError> {
-    let args: DispatchJobArgs = parse_input(input, tool_name)?;
-
-    dispatch_job_request(backend, ctx, args.prompt, args.agent_id, args.context).await
-}
-
-async fn dispatch_job_request(
-    backend: &Arc<dyn SchedulerBackend>,
-    ctx: Arc<ToolExecutionContext>,
-    prompt: String,
-    agent_id: AgentId,
-    context: Option<serde_json::Value>,
-) -> Result<serde_json::Value, ToolError> {
-    let job_id = backend
-        .dispatch_job(SchedulerDispatchRequest {
-            thread_id: ctx.thread_id,
-            prompt,
-            agent_id,
-            context,
-            pipe_tx: ctx.pipe_tx.clone(),
-            control_tx: ctx.control_tx.clone(),
-        })
-        .await?;
-
-    Ok(serde_json::json!({
-        "job_id": job_id,
-        "status": "dispatched"
-    }))
-}
-
-async fn execute_list_subagents(
-    backend: &Arc<dyn SchedulerBackend>,
-    tool_name: &str,
-) -> Result<serde_json::Value, ToolError> {
-    let subagents = backend.list_subagents().await?;
-    serialize_value(subagents, tool_name, "subagents")
-}
-
-async fn execute_get_job_result(
-    backend: &Arc<dyn SchedulerBackend>,
-    input: serde_json::Value,
-    ctx: Arc<ToolExecutionContext>,
-    tool_name: &str,
-) -> Result<serde_json::Value, ToolError> {
-    let args: GetJobResultArgs = parse_input(input, tool_name)?;
-
-    get_job_result_request(
-        backend,
-        ctx,
-        args.job_id,
-        args.consume.unwrap_or(false),
-        tool_name,
-    )
-    .await
-}
-
-async fn get_job_result_request(
-    backend: &Arc<dyn SchedulerBackend>,
-    ctx: Arc<ToolExecutionContext>,
-    job_id: String,
-    consume: bool,
-    tool_name: &str,
-) -> Result<serde_json::Value, ToolError> {
-    let lookup = backend
-        .get_job_result(SchedulerLookupRequest {
-            thread_id: ctx.thread_id,
-            job_id: job_id.clone(),
-            consume,
-            control_tx: ctx.control_tx.clone(),
-        })
-        .await?;
-
-    format_lookup_response(tool_name, &job_id, lookup)
-}
-
-fn format_lookup_response(
-    tool_name: &str,
-    job_id: &str,
-    lookup: SchedulerJobLookup,
-) -> Result<serde_json::Value, ToolError> {
-    match lookup {
-        SchedulerJobLookup::NotFound => Ok(serde_json::json!({
-            "job_id": job_id,
-            "status": "not_found",
-        })),
-        SchedulerJobLookup::Pending => Ok(serde_json::json!({
-            "job_id": job_id,
-            "status": "pending",
-        })),
-        SchedulerJobLookup::Completed(result) => Ok(serde_json::json!({
-            "job_id": job_id,
-            "status": "completed",
-            "result": serialize_value(result, tool_name, "job result")?,
-        })),
-        SchedulerJobLookup::Consumed(result) => Ok(serde_json::json!({
-            "job_id": job_id,
-            "status": "consumed",
-            "result": serialize_value(result, tool_name, "job result")?,
-        })),
-    }
-}
-
 /// Tool for scheduling and querying background subagent work.
 pub struct SchedulerTool {
     backend: Arc<dyn SchedulerBackend>,
@@ -400,152 +239,61 @@ impl NamedTool for SchedulerTool {
                 prompt,
                 agent_id,
                 context,
-            } => dispatch_job_request(&self.backend, ctx, prompt, agent_id, context).await,
+            } => {
+                let job_id = self
+                    .backend
+                    .dispatch_job(SchedulerDispatchRequest {
+                        thread_id: ctx.thread_id,
+                        prompt,
+                        agent_id,
+                        context,
+                        pipe_tx: ctx.pipe_tx.clone(),
+                        control_tx: ctx.control_tx.clone(),
+                    })
+                    .await?;
+
+                Ok(serde_json::json!({
+                    "job_id": job_id,
+                    "status": "dispatched"
+                }))
+            }
             SchedulerInput::ListSubagents => {
-                execute_list_subagents(&self.backend, self.name()).await
+                let subagents = self.backend.list_subagents().await?;
+                serialize_value(subagents, self.name(), "subagents")
             }
             SchedulerInput::GetJobResult { job_id, consume } => {
-                get_job_result_request(
-                    &self.backend,
-                    ctx,
-                    job_id,
-                    consume.unwrap_or(false),
-                    self.name(),
-                )
-                .await
+                let lookup = self
+                    .backend
+                    .get_job_result(SchedulerLookupRequest {
+                        thread_id: ctx.thread_id,
+                        job_id: job_id.clone(),
+                        consume: consume.unwrap_or(false),
+                        control_tx: ctx.control_tx.clone(),
+                    })
+                    .await?;
+
+                match lookup {
+                    SchedulerJobLookup::NotFound => Ok(serde_json::json!({
+                        "job_id": job_id,
+                        "status": "not_found",
+                    })),
+                    SchedulerJobLookup::Pending => Ok(serde_json::json!({
+                        "job_id": job_id,
+                        "status": "pending",
+                    })),
+                    SchedulerJobLookup::Completed(result) => Ok(serde_json::json!({
+                        "job_id": job_id,
+                        "status": "completed",
+                        "result": serialize_value(result, self.name(), "job result")?,
+                    })),
+                    SchedulerJobLookup::Consumed(result) => Ok(serde_json::json!({
+                        "job_id": job_id,
+                        "status": "consumed",
+                        "result": serialize_value(result, self.name(), "job result")?,
+                    })),
+                }
             }
         }
-    }
-}
-
-/// Compatibility wrapper for the legacy `dispatch_job` tool name.
-pub struct DispatchJobTool {
-    backend: Arc<dyn SchedulerBackend>,
-    name: &'static str,
-}
-
-impl std::fmt::Debug for DispatchJobTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DispatchJobTool")
-            .field("name", &self.name)
-            .finish()
-    }
-}
-
-impl DispatchJobTool {
-    #[must_use]
-    pub fn new(backend: Arc<dyn SchedulerBackend>) -> Self {
-        Self::with_name("dispatch_job", backend)
-    }
-
-    #[must_use]
-    pub fn with_name(name: &'static str, backend: Arc<dyn SchedulerBackend>) -> Self {
-        Self { backend, name }
-    }
-}
-
-#[async_trait]
-impl NamedTool for DispatchJobTool {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        legacy_dispatch_definition(self.name)
-    }
-
-    fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Medium
-    }
-
-    async fn execute(
-        &self,
-        input: serde_json::Value,
-        ctx: Arc<ToolExecutionContext>,
-    ) -> Result<serde_json::Value, ToolError> {
-        execute_dispatch_job(&self.backend, input, ctx, self.name()).await
-    }
-}
-
-/// Compatibility wrapper for the legacy `list_subagents` tool name.
-pub struct ListSubagentsTool {
-    backend: Arc<dyn SchedulerBackend>,
-}
-
-impl std::fmt::Debug for ListSubagentsTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ListSubagentsTool").finish()
-    }
-}
-
-impl ListSubagentsTool {
-    #[must_use]
-    pub fn new(backend: Arc<dyn SchedulerBackend>) -> Self {
-        Self { backend }
-    }
-}
-
-#[async_trait]
-impl NamedTool for ListSubagentsTool {
-    fn name(&self) -> &str {
-        "list_subagents"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        legacy_list_subagents_definition()
-    }
-
-    fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Low
-    }
-
-    async fn execute(
-        &self,
-        _input: serde_json::Value,
-        _ctx: Arc<ToolExecutionContext>,
-    ) -> Result<serde_json::Value, ToolError> {
-        execute_list_subagents(&self.backend, self.name()).await
-    }
-}
-
-/// Compatibility wrapper for the legacy `get_job_result` tool name.
-pub struct GetJobResultTool {
-    backend: Arc<dyn SchedulerBackend>,
-}
-
-impl std::fmt::Debug for GetJobResultTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GetJobResultTool").finish()
-    }
-}
-
-impl GetJobResultTool {
-    #[must_use]
-    pub fn new(backend: Arc<dyn SchedulerBackend>) -> Self {
-        Self { backend }
-    }
-}
-
-#[async_trait]
-impl NamedTool for GetJobResultTool {
-    fn name(&self) -> &str {
-        "get_job_result"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        legacy_get_job_result_definition()
-    }
-
-    fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Low
-    }
-
-    async fn execute(
-        &self,
-        input: serde_json::Value,
-        ctx: Arc<ToolExecutionContext>,
-    ) -> Result<serde_json::Value, ToolError> {
-        execute_get_job_result(&self.backend, input, ctx, self.name()).await
     }
 }
 
@@ -767,41 +515,6 @@ mod tests {
         assert_eq!(response["job_id"], serde_json::json!("job-42"));
         assert_eq!(response["status"], serde_json::json!("completed"));
         assert_eq!(response["result"]["message"], serde_json::json!("finished"));
-    }
-
-    #[tokio::test]
-    async fn legacy_dispatch_job_tool_accepts_original_argument_shape() {
-        let backend = Arc::new(MockSchedulerBackend {
-            dispatch_job_id: "job-77".to_string(),
-            dispatch_calls: Mutex::new(Vec::new()),
-            list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
-        });
-        let tool = DispatchJobTool::with_name("dispath_job", backend.clone());
-        let ctx = make_ctx();
-        let thread_id = ctx.thread_id;
-
-        let response = tool
-            .execute(
-                serde_json::json!({
-                    "prompt": "review docs",
-                    "agent_id": 11
-                }),
-                ctx,
-            )
-            .await
-            .expect("legacy dispatch tool should succeed");
-
-        assert_eq!(tool.name(), "dispath_job");
-        assert_eq!(response["job_id"], serde_json::json!("job-77"));
-
-        let calls = backend
-            .dispatch_calls
-            .lock()
-            .expect("dispatch_calls mutex poisoned");
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].thread_id, thread_id);
-        assert_eq!(calls[0].agent_id, AgentId::new(11));
     }
 
     #[test]
