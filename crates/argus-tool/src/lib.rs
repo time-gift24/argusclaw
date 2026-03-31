@@ -21,6 +21,7 @@ pub mod list;
 pub mod patch;
 pub mod path_utils;
 pub mod read;
+pub mod scheduler;
 pub mod shell;
 pub mod write;
 
@@ -31,6 +32,11 @@ pub use http::HttpTool;
 pub use list::ListDirTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadTool;
+pub use scheduler::{
+    DispatchJobTool, GetJobResultTool, ListSubagentsTool, SchedulerBackend,
+    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
+    SchedulerSubagent, SchedulerTool,
+};
 pub use shell::ShellTool;
 pub use write::WriteFileTool;
 

@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::{
-    CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig,
-    TurnCancellation, TurnConfig, TurnLogEvent, TurnOutput, read_jsonl_events,
+    CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
+    TurnConfig, TurnLogEvent, TurnOutput, read_jsonl_events,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
@@ -21,8 +21,7 @@ use argus_protocol::{
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
-    AgentId as RepoAgentId, JobRecord, JobResult, JobType, ThreadRecord, WorkflowId,
-    WorkflowStatus,
+    AgentId as RepoAgentId, JobRecord, JobResult, JobType, ThreadRecord, WorkflowId, WorkflowStatus,
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
@@ -466,7 +465,8 @@ impl ThreadPool {
                     String::new(),
                     error.to_string(),
                 );
-                self.persist_job_completion(&request.job_id, &result, None).await;
+                self.persist_job_completion(&request.job_id, &result, None)
+                    .await;
                 return result;
             }
         };
@@ -527,7 +527,8 @@ impl ThreadPool {
                 Self::panic_message(payload),
             ),
         };
-        self.persist_thread_stats(&execution_thread_id, &thread).await;
+        self.persist_thread_stats(&execution_thread_id, &thread)
+            .await;
         self.persist_job_completion(&request.job_id, &result, Some(started_at.as_str()))
             .await;
 
@@ -752,7 +753,11 @@ impl ThreadPool {
         let runtime_key = runtime.thread_id.to_string();
         let (sender, existing_thread, existing_slot_permit) =
             if let Some(entry) = store.runtimes.get_mut(&runtime_key) {
-                (entry.sender.clone(), entry.thread.clone(), entry.slot_permit.take())
+                (
+                    entry.sender.clone(),
+                    entry.thread.clone(),
+                    entry.slot_permit.take(),
+                )
             } else {
                 let (sender, _rx) = broadcast::channel(256);
                 (sender, None, None)
@@ -904,10 +909,7 @@ impl ThreadPool {
         let sender = {
             let mut store = self.store.lock().expect("thread-pool mutex poisoned");
             let sender = {
-                let Some(entry) = store
-                    .runtimes
-                    .get_mut(&thread_id.to_string())
-                else {
+                let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
                     return Err(JobError::ExecutionFailed(format!(
                         "thread {} was removed while loading",
                         thread_id
@@ -1033,8 +1035,14 @@ impl ThreadPool {
                 return Err(error);
             }
         };
-        if let Err(error) = self.attach_job_runtime(thread_id, Arc::clone(&thread)).await {
-            self.reset_runtime_after_load_failure(&thread_id, ThreadPoolEventReason::ExecutionFailed);
+        if let Err(error) = self
+            .attach_job_runtime(thread_id, Arc::clone(&thread))
+            .await
+        {
+            self.reset_runtime_after_load_failure(
+                &thread_id,
+                ThreadPoolEventReason::ExecutionFailed,
+            );
             return Err(error);
         }
         Ok(thread)
@@ -1435,7 +1443,11 @@ impl ThreadPool {
         history_bytes + plan_bytes + u64::from(guard.token_count())
     }
 
-    async fn persist_thread_stats(&self, thread_id: &ThreadId, thread: &Arc<RwLock<argus_agent::Thread>>) {
+    async fn persist_thread_stats(
+        &self,
+        thread_id: &ThreadId,
+        thread: &Arc<RwLock<argus_agent::Thread>>,
+    ) {
         Self::persist_thread_stats_with_persistence(
             self.persistence.as_ref(),
             thread_id,
@@ -1486,7 +1498,9 @@ impl ThreadPool {
             .job_repository
             .update_status(&WorkflowId::new(job_id), status, started_at, finished_at)
             .await
-            .map_err(|err| JobError::ExecutionFailed(format!("failed to persist job status: {err}")))
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to persist job status: {err}"))
+            })
     }
 
     async fn persist_job_completion(
@@ -3247,7 +3261,10 @@ mod tests {
             .attach_chat_runtime(thread_id, session_id, thread, runtime_rx)
             .await;
 
-        assert!(result.is_err(), "removed runtime should fail to attach cleanly");
+        assert!(
+            result.is_err(),
+            "removed runtime should fail to attach cleanly"
+        );
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ src/
 ├── grep.rs          # GrepTool：内容搜索
 ├── http.rs          # HttpTool：HTTP 请求
 ├── read.rs          # ReadTool：文件读取
+├── scheduler.rs     # SchedulerTool：子智能体任务调度
 └── shell.rs         # ShellTool：Shell 执行
 ```
 
@@ -54,6 +55,7 @@ pub struct ToolManager {
 | `grep` | Medium | 文件内容搜索 |
 | `http` | Medium | HTTP 请求 |
 | `read` | Low | 文件读取 |
+| `scheduler` | Medium | 子智能体任务调度（dispatch/list/result） |
 | `shell` | Critical | Shell 命令执行 |
 
 ## 公共 API

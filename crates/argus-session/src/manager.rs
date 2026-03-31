@@ -1,20 +1,25 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::{read_jsonl_events, TurnLogEvent};
-use argus_job::{JobManager, ThreadPool};
+use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEvent};
+use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
-    ThreadEvent, ThreadId,
+    ThreadEvent, ThreadId, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
-use argus_tool::ToolManager;
+use argus_tool::{
+    DispatchJobTool, GetJobResultTool, ListSubagentsTool, SchedulerBackend,
+    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
+    SchedulerSubagent, SchedulerTool, ToolManager,
+};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
@@ -69,6 +74,154 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
     }
 }
 
+#[derive(Clone)]
+struct SessionSchedulerBackend {
+    template_manager: Arc<TemplateManager>,
+    job_manager: Arc<JobManager>,
+}
+
+impl std::fmt::Debug for SessionSchedulerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionSchedulerBackend").finish()
+    }
+}
+
+impl SessionSchedulerBackend {
+    fn new(template_manager: Arc<TemplateManager>, job_manager: Arc<JobManager>) -> Self {
+        Self {
+            template_manager,
+            job_manager,
+        }
+    }
+
+    fn map_job_lookup(lookup: JobLookup) -> SchedulerJobLookup {
+        match lookup {
+            JobLookup::NotFound => SchedulerJobLookup::NotFound,
+            JobLookup::Pending => SchedulerJobLookup::Pending,
+            JobLookup::Completed(result) => SchedulerJobLookup::Completed(SchedulerJobResult {
+                success: result.success,
+                message: result.message,
+                token_usage: result.token_usage,
+                agent_id: result.agent_id,
+                agent_display_name: result.agent_display_name,
+                agent_description: result.agent_description,
+            }),
+            JobLookup::Consumed(result) => SchedulerJobLookup::Consumed(SchedulerJobResult {
+                success: result.success,
+                message: result.message,
+                token_usage: result.token_usage,
+                agent_id: result.agent_id,
+                agent_display_name: result.agent_display_name,
+                agent_description: result.agent_description,
+            }),
+        }
+    }
+
+    async fn claim_queued_runtime_result(
+        &self,
+        control_tx: &tokio::sync::mpsc::UnboundedSender<ThreadControlEvent>,
+        job_id: &str,
+    ) -> std::result::Result<(), ToolError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if let Err(error) = control_tx.send(ThreadControlEvent::ClaimQueuedJobResult {
+            job_id: job_id.to_string(),
+            reply_tx,
+        }) {
+            tracing::warn!(job_id, "failed to enqueue queued-job claim: {error}");
+            return Ok(());
+        }
+
+        if let Err(error) = reply_rx.await {
+            tracing::warn!(job_id, "queued-job claim reply dropped: {error}");
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SchedulerBackend for SessionSchedulerBackend {
+    async fn dispatch_job(
+        &self,
+        request: SchedulerDispatchRequest,
+    ) -> std::result::Result<String, ToolError> {
+        let job_id = Uuid::new_v4().to_string();
+
+        let dispatch_event = ThreadEvent::JobDispatched {
+            thread_id: request.thread_id,
+            job_id: job_id.clone(),
+            agent_id: request.agent_id,
+            prompt: request.prompt.clone(),
+            context: request.context.clone(),
+        };
+        if let Err(error) = request.pipe_tx.send(dispatch_event) {
+            tracing::warn!("failed to send JobDispatched event: {error}");
+        }
+
+        self.job_manager
+            .dispatch_job(
+                request.thread_id,
+                job_id.clone(),
+                request.agent_id,
+                request.prompt,
+                request.context,
+                request.pipe_tx,
+                request.control_tx,
+            )
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool_name: "scheduler".to_string(),
+                reason: error.to_string(),
+            })?;
+
+        Ok(job_id)
+    }
+
+    async fn list_subagents(&self) -> std::result::Result<Vec<SchedulerSubagent>, ToolError> {
+        let agent_id = current_agent_id().ok_or_else(|| ToolError::ExecutionFailed {
+            tool_name: "list_subagents".to_string(),
+            reason: "current agent_id not available".to_string(),
+        })?;
+        let records = self
+            .template_manager
+            .list_subagents(agent_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                tool_name: "scheduler".to_string(),
+                reason: error.to_string(),
+            })?;
+
+        Ok(records
+            .into_iter()
+            .map(|record| SchedulerSubagent {
+                agent_id: record.id,
+                display_name: record.display_name,
+                description: record.description,
+            })
+            .collect())
+    }
+
+    async fn get_job_result(
+        &self,
+        request: SchedulerLookupRequest,
+    ) -> std::result::Result<SchedulerJobLookup, ToolError> {
+        let lookup =
+            self.job_manager
+                .get_job_result_status(request.thread_id, &request.job_id, false);
+
+        if request.consume && matches!(lookup, JobLookup::Completed(_)) {
+            self.claim_queued_runtime_result(&request.control_tx, &request.job_id)
+                .await?;
+            let consumed_lookup =
+                self.job_manager
+                    .get_job_result_status(request.thread_id, &request.job_id, true);
+            return Ok(Self::map_job_lookup(consumed_lookup));
+        }
+
+        Ok(Self::map_job_lookup(lookup))
+    }
+}
+
 /// Manages sessions and their threads.
 #[derive(Clone)]
 pub struct SessionManager {
@@ -98,17 +251,18 @@ impl SessionManager {
         thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
     ) -> Self {
-        // Register the dispatch_job tool
-        let dispatch_tool = job_manager.clone().create_dispatch_tool();
-        tool_manager.register(Arc::new(dispatch_tool));
-
-        // Register the list_subagents tool for querying subagents
-        let list_subagents_tool = job_manager.clone().create_list_subagents_tool();
-        tool_manager.register(Arc::new(list_subagents_tool));
-
-        // Register the get_job_result tool for proactive job polling
-        let get_job_result_tool = job_manager.clone().create_get_job_result_tool();
-        tool_manager.register(Arc::new(get_job_result_tool));
+        let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
+            template_manager.clone(),
+            job_manager.clone(),
+        ));
+        tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
+        tool_manager.register(Arc::new(DispatchJobTool::new(scheduler_backend.clone())));
+        tool_manager.register(Arc::new(DispatchJobTool::with_name(
+            "dispath_job",
+            scheduler_backend.clone(),
+        )));
+        tool_manager.register(Arc::new(GetJobResultTool::new(scheduler_backend.clone())));
+        tool_manager.register(Arc::new(ListSubagentsTool::new(scheduler_backend)));
 
         Self {
             session_repo,
@@ -191,7 +345,8 @@ impl SessionManager {
 
         self.sessions.insert(session_id, session.clone());
         for thread_record in thread_records {
-            self.thread_pool.register_chat_thread(session_id, thread_record.id);
+            self.thread_pool
+                .register_chat_thread(session_id, thread_record.id);
             match self
                 .thread_pool
                 .ensure_chat_runtime(session_id, thread_record.id)
@@ -626,11 +781,7 @@ impl SessionManager {
     }
 
     /// Send a cancel/interrupt signal to a specific thread's active turn.
-    pub async fn cancel_thread(
-        &self,
-        session_id: SessionId,
-        thread_id: &ThreadId,
-    ) -> Result<()> {
+    pub async fn cancel_thread(&self, session_id: SessionId, thread_id: &ThreadId) -> Result<()> {
         let session = self
             .sessions
             .get(&session_id)
@@ -641,11 +792,12 @@ impl SessionManager {
             .or_else(|| self.thread_pool.loaded_chat_thread(thread_id))
             .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
 
-        let result = thread.read().await.send_control_event(
-            ThreadControlEvent::UserInterrupt {
+        let result = thread
+            .read()
+            .await
+            .send_control_event(ThreadControlEvent::UserInterrupt {
                 content: "stop".to_string(),
-            },
-        );
+            });
         result.map_err(|e| ArgusError::LlmError {
             reason: e.to_string(),
         })
@@ -988,13 +1140,13 @@ mod tests {
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, ProviderId,
-        ProviderResolver, ProviderSecretStatus, Role, SecretString, SessionId,
-        ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThinkingConfig,
+        ProviderResolver, ProviderSecretStatus, Role, SecretString, SessionId, ThinkingConfig,
+        ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
     };
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
-    use argus_repository::{ArgusSqlite, migrate};
+    use argus_repository::{migrate, ArgusSqlite};
     use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
@@ -1002,7 +1154,9 @@ mod tests {
     use sqlx::SqlitePool;
     use tokio::time::{sleep, timeout};
 
-    use super::{recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager};
+    use super::{
+        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
+    };
 
     #[derive(Debug)]
     struct CapturingProvider {
@@ -1085,7 +1239,9 @@ mod tests {
             Ok(Arc::clone(&self.provider))
         }
 
-        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+        async fn default_provider(
+            &self,
+        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
             Ok(Arc::clone(&self.provider))
         }
 
@@ -1121,12 +1277,10 @@ mod tests {
             .expect("sqlite memory pool should connect");
         migrate(&pool).await.expect("migration should succeed");
         let sqlite = Arc::new(ArgusSqlite::new(pool));
-        let provider_id = LlmProviderRepository::upsert_provider(
-            sqlite.as_ref(),
-            &sample_provider_record(true),
-        )
-        .await
-        .expect("provider upsert should succeed");
+        let provider_id =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
 
         let template_manager = Arc::new(TemplateManager::new(
             sqlite.clone() as Arc<dyn AgentRepository>,
@@ -1178,6 +1332,73 @@ mod tests {
             trace_dir,
             job_manager.thread_pool(),
             job_manager,
+        )
+    }
+
+    async fn test_session_manager_with_tool_manager() -> (SessionManager, Arc<ToolManager>) {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        let provider_id =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(7),
+                display_name: "Session Test Agent".to_string(),
+                description: "Used to verify session loading".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(provider_id.into_inner())),
+                model_id: Some("capturing".to_string()),
+                system_prompt: "You are a test session agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
+
+        let provider = Arc::new(CapturingProvider::new("hello", Duration::from_millis(5)));
+        let provider_resolver =
+            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
+        let tool_manager = Arc::new(ToolManager::new());
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            template_manager.clone(),
+            Arc::clone(&provider_resolver),
+            tool_manager.clone(),
+            Arc::new(CompactorManager::with_defaults()),
+            trace_dir.clone(),
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+        ));
+
+        (
+            SessionManager::new(
+                sqlite.clone() as Arc<dyn SessionRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
+                template_manager,
+                provider_resolver,
+                tool_manager.clone(),
+                trace_dir,
+                job_manager.thread_pool(),
+                job_manager,
+            ),
+            tool_manager,
         )
     }
 
@@ -1557,14 +1778,23 @@ mod tests {
             .unload(session_id)
             .await
             .expect("session should unload");
-        let session = manager
-            .load(session_id)
-            .await
-            .expect("session should load");
+        let session = manager.load(session_id).await.expect("session should load");
 
         assert!(
             session.get_thread(&thread_id).is_some(),
             "loaded session should expose persisted live threads"
         );
+    }
+
+    #[tokio::test]
+    async fn session_manager_registers_scheduler_and_legacy_scheduler_tool_names() {
+        let (_manager, tool_manager) = test_session_manager_with_tool_manager().await;
+        let tool_ids = tool_manager.list_ids();
+
+        assert!(tool_ids.iter().any(|id| id == "scheduler"));
+        assert!(tool_ids.iter().any(|id| id == "dispatch_job"));
+        assert!(tool_ids.iter().any(|id| id == "dispath_job"));
+        assert!(tool_ids.iter().any(|id| id == "get_job_result"));
+        assert!(tool_ids.iter().any(|id| id == "list_subagents"));
     }
 }
