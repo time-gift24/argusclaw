@@ -1,7 +1,14 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+
 use argus_tool::knowledge::{
-    KnowledgeManifestFilePatch, KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch,
-    KnowledgeManifestPatch, KnowledgeManifestRepoPatch, RepositoryManifest,
-    merge_manifest, serialize_manifest, validate_repo_relative_path,
+    GitPrExecutor, GitPrOutcome, KnowledgeCreatePrArgs, KnowledgeManifestFilePatch,
+    KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
+    KnowledgeManifestRepoPatch, KnowledgePrService, RepositoryManifest, merge_manifest,
+    serialize_manifest, validate_repo_relative_path,
 };
 
 fn sample_existing_manifest() -> RepositoryManifest {
@@ -113,6 +120,164 @@ fn sample_patch() -> KnowledgeManifestPatch {
                 relations: None,
             },
         ]),
+    }
+}
+
+fn sample_create_pr_args() -> KnowledgeCreatePrArgs {
+    KnowledgeCreatePrArgs {
+        target_repo: "acme/docs".to_string(),
+        base_ref: Some("main".to_string()),
+        branch: Some("codex/knowledge-bootstrap".to_string()),
+        pr_title: "Bootstrap knowledge docs".to_string(),
+        pr_body: "Adds knowledge docs and manifest.".to_string(),
+        draft: Some(true),
+        files: vec![argus_tool::knowledge::KnowledgeFileWrite {
+            path: "docs/knowledge/README.md".to_string(),
+            content: "# Knowledge\n".to_string(),
+        }],
+        manifest: Some(sample_patch()),
+    }
+}
+
+#[derive(Debug, Default)]
+struct FakeExecutorState {
+    calls: Vec<String>,
+    seed_files: HashMap<String, String>,
+    captured_files: HashMap<String, String>,
+    auth_error: Option<String>,
+    pr_error: Option<String>,
+    existing_pr_url: Option<String>,
+    created_pr_url: Option<String>,
+    commit_sha: String,
+}
+
+#[derive(Clone, Default)]
+struct FakeGitPrExecutor {
+    state: Arc<Mutex<FakeExecutorState>>,
+}
+
+impl FakeGitPrExecutor {
+    fn with_state(state: FakeExecutorState) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    fn capture_repo(repo_dir: &Path) -> HashMap<String, String> {
+        fn walk(root: &Path, current: &Path, files: &mut HashMap<String, String>) {
+            let entries = std::fs::read_dir(current).expect("directory should read");
+            for entry in entries {
+                let entry = entry.expect("entry should exist");
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(root, &path, files);
+                    continue;
+                }
+
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("path should be inside repo")
+                    .to_string_lossy()
+                    .to_string();
+                let content = std::fs::read_to_string(&path).expect("file should read");
+                files.insert(relative, content);
+            }
+        }
+
+        let mut files = HashMap::new();
+        walk(repo_dir, repo_dir, &mut files);
+        files
+    }
+}
+
+#[async_trait]
+impl GitPrExecutor for FakeGitPrExecutor {
+    async fn ensure_auth(&self) -> Result<(), argus_tool::knowledge::KnowledgeToolError> {
+        let mut state = self.state.lock().expect("state should lock");
+        state.calls.push("ensure_auth".to_string());
+        if let Some(error) = &state.auth_error {
+            return Err(argus_tool::knowledge::KnowledgeToolError::RequestFailed(
+                error.clone(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn clone_repo(
+        &self,
+        _target_repo: &str,
+        destination: &Path,
+    ) -> Result<(), argus_tool::knowledge::KnowledgeToolError> {
+        let mut state = self.state.lock().expect("state should lock");
+        state.calls.push("clone_repo".to_string());
+        std::fs::create_dir_all(destination).expect("destination should exist");
+        for (path, content) in state.seed_files.clone() {
+            let full_path = destination.join(&path);
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).expect("parent should exist");
+            }
+            std::fs::write(full_path, content).expect("seed file should write");
+        }
+        Ok(())
+    }
+
+    async fn prepare_branch(
+        &self,
+        _repo_dir: &Path,
+        base_ref: &str,
+        branch: &str,
+    ) -> Result<(), argus_tool::knowledge::KnowledgeToolError> {
+        let mut state = self.state.lock().expect("state should lock");
+        state
+            .calls
+            .push(format!("prepare_branch:{base_ref}:{branch}"));
+        Ok(())
+    }
+
+    async fn commit_and_push(
+        &self,
+        repo_dir: &Path,
+        branch: &str,
+        _commit_message: &str,
+    ) -> Result<String, argus_tool::knowledge::KnowledgeToolError> {
+        let mut state = self.state.lock().expect("state should lock");
+        state.calls.push(format!("commit_and_push:{branch}"));
+        state.captured_files = Self::capture_repo(repo_dir);
+        Ok(state.commit_sha.clone())
+    }
+
+    async fn create_or_reuse_pr(
+        &self,
+        _repo_dir: &Path,
+        base_ref: &str,
+        branch: &str,
+        _title: &str,
+        _body: &str,
+        draft: bool,
+    ) -> Result<GitPrOutcome, argus_tool::knowledge::KnowledgeToolError> {
+        let mut state = self.state.lock().expect("state should lock");
+        state
+            .calls
+            .push(format!("create_or_reuse_pr:{base_ref}:{branch}:{draft}"));
+        if let Some(error) = &state.pr_error {
+            return Err(argus_tool::knowledge::KnowledgeToolError::RequestFailed(
+                error.clone(),
+            ));
+        }
+        if let Some(pr_url) = &state.existing_pr_url {
+            return Ok(GitPrOutcome {
+                pr_url: pr_url.clone(),
+                reused_existing: true,
+            });
+        }
+
+        Ok(GitPrOutcome {
+            pr_url: state
+                .created_pr_url
+                .clone()
+                .unwrap_or_else(|| "https://example.com/pr/1".to_string()),
+            reused_existing: false,
+        })
     }
 }
 
@@ -278,4 +443,123 @@ fn serialize_manifest_is_stable_and_pretty() {
   ]
 }"#
     );
+}
+
+#[tokio::test]
+async fn executor_successful_flow_writes_files_and_opens_pr() {
+    let executor = FakeGitPrExecutor::with_state(FakeExecutorState {
+        seed_files: HashMap::from([(
+            "knowledge.json".to_string(),
+            serde_json::json!({
+                "version": 1,
+                "repo": {
+                    "title": "Existing docs",
+                    "default_branch": "main",
+                    "include": ["docs"],
+                    "exclude": [],
+                    "entrypoints": ["README.md"]
+                },
+                "files": [],
+                "nodes": []
+            })
+            .to_string(),
+        )]),
+        created_pr_url: Some("https://example.com/pr/42".to_string()),
+        commit_sha: "abc123".to_string(),
+        ..FakeExecutorState::default()
+    });
+    let state = executor.state.clone();
+    let service = KnowledgePrService::new_with_executor(executor);
+
+    let result = service.create_pr(&sample_create_pr_args()).await.unwrap();
+
+    assert_eq!(result.commit_sha, "abc123");
+    assert_eq!(result.pr_url, "https://example.com/pr/42");
+    assert_eq!(result.manifest_path, ".knowledge/repo.json");
+    assert!(result
+        .changed_files
+        .contains(&"docs/knowledge/README.md".to_string()));
+    assert!(result
+        .changed_files
+        .contains(&".knowledge/repo.json".to_string()));
+
+    let state = state.lock().expect("state should lock");
+    assert_eq!(
+        state.calls,
+        vec![
+            "ensure_auth",
+            "clone_repo",
+            "prepare_branch:main:codex/knowledge-bootstrap",
+            "commit_and_push:codex/knowledge-bootstrap",
+            "create_or_reuse_pr:main:codex/knowledge-bootstrap:true",
+        ]
+    );
+    assert_eq!(
+        state.captured_files.get("docs/knowledge/README.md"),
+        Some(&"# Knowledge\n".to_string())
+    );
+    assert!(
+        state
+            .captured_files
+            .get(".knowledge/repo.json")
+            .expect("manifest should be written")
+            .contains("\"title\": \"Docs\"")
+    );
+}
+
+#[tokio::test]
+async fn executor_auth_failure_stops_before_clone() {
+    let executor = FakeGitPrExecutor::with_state(FakeExecutorState {
+        auth_error: Some("gh auth status failed".to_string()),
+        ..FakeExecutorState::default()
+    });
+    let state = executor.state.clone();
+    let service = KnowledgePrService::new_with_executor(executor);
+
+    let err = service.create_pr(&sample_create_pr_args()).await.unwrap_err();
+
+    assert!(err.to_string().contains("gh auth status failed"));
+    let state = state.lock().expect("state should lock");
+    assert_eq!(state.calls, vec!["ensure_auth"]);
+}
+
+#[tokio::test]
+async fn executor_pr_creation_failure_happens_after_push() {
+    let executor = FakeGitPrExecutor::with_state(FakeExecutorState {
+        pr_error: Some("gh pr create failed".to_string()),
+        commit_sha: "abc123".to_string(),
+        ..FakeExecutorState::default()
+    });
+    let state = executor.state.clone();
+    let service = KnowledgePrService::new_with_executor(executor);
+
+    let err = service.create_pr(&sample_create_pr_args()).await.unwrap_err();
+
+    assert!(err.to_string().contains("gh pr create failed"));
+    let state = state.lock().expect("state should lock");
+    assert_eq!(
+        state.calls,
+        vec![
+            "ensure_auth",
+            "clone_repo",
+            "prepare_branch:main:codex/knowledge-bootstrap",
+            "commit_and_push:codex/knowledge-bootstrap",
+            "create_or_reuse_pr:main:codex/knowledge-bootstrap:true",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn executor_reuses_existing_pr() {
+    let executor = FakeGitPrExecutor::with_state(FakeExecutorState {
+        existing_pr_url: Some("https://example.com/pr/existing".to_string()),
+        commit_sha: "def456".to_string(),
+        ..FakeExecutorState::default()
+    });
+    let service = KnowledgePrService::new_with_executor(executor);
+
+    let result = service.create_pr(&sample_create_pr_args()).await.unwrap();
+
+    assert_eq!(result.pr_url, "https://example.com/pr/existing");
+    assert!(result.summary.contains("Updated existing PR"));
 }
