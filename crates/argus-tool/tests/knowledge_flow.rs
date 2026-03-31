@@ -149,26 +149,31 @@ impl FixedKnowledgeBackend {
                     GitHubTreeEntry {
                         path: "README.md".to_string(),
                         sha: "blob-readme".to_string(),
+                        mode: None,
                         kind: GitHubTreeEntryKind::Blob,
                     },
                     GitHubTreeEntry {
                         path: "docs".to_string(),
                         sha: "tree-docs".to_string(),
+                        mode: None,
                         kind: GitHubTreeEntryKind::Tree,
                     },
                     GitHubTreeEntry {
                         path: "docs/auth.md".to_string(),
                         sha: "blob-auth".to_string(),
+                        mode: None,
                         kind: GitHubTreeEntryKind::Blob,
                     },
                     GitHubTreeEntry {
                         path: "docs/login.md".to_string(),
                         sha: "blob-login".to_string(),
+                        mode: None,
                         kind: GitHubTreeEntryKind::Blob,
                     },
                     GitHubTreeEntry {
                         path: "knowledge.json".to_string(),
                         sha: "blob-manifest".to_string(),
+                        mode: None,
                         kind: GitHubTreeEntryKind::Blob,
                     },
                 ],

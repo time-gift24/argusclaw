@@ -217,6 +217,7 @@ pub struct GitHubTree {
 pub struct GitHubTreeEntry {
     pub path: String,
     pub sha: String,
+    pub mode: Option<String>,
     pub kind: GitHubTreeEntryKind,
 }
 
@@ -306,6 +307,15 @@ fn default_branch() -> String {
     "main".to_string()
 }
 
+fn is_valid_target_repo(value: &str) -> bool {
+    let trimmed = value.trim();
+    let mut parts = trimmed.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(owner), Some(repo), None) if !owner.trim().is_empty() && !repo.trim().is_empty()
+    )
+}
+
 impl KnowledgeToolArgs {
     pub fn parse(value: Value) -> Result<Self, KnowledgeToolError> {
         let args: Self = serde_json::from_value(value)
@@ -334,6 +344,12 @@ impl KnowledgeToolArgs {
                 if target_repo.is_none() {
                     return Err(KnowledgeToolError::InvalidArguments(
                         "target_repo is required for action create_knowledge_pr".to_string(),
+                    ));
+                }
+                if !is_valid_target_repo(target_repo.unwrap_or_default()) {
+                    return Err(KnowledgeToolError::InvalidArguments(
+                        "target_repo must be in owner/name format for action create_knowledge_pr"
+                            .to_string(),
                     ));
                 }
 
@@ -404,12 +420,27 @@ impl TryFrom<KnowledgeToolArgs> for KnowledgeCreatePrArgs {
                     "target_repo is required for action create_knowledge_pr",
                 )
             })?;
-        let pr_title = args.pr_title.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
-            KnowledgeToolError::invalid_arguments("pr_title is required for action create_knowledge_pr")
-        })?;
-        let pr_body = args.pr_body.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
-            KnowledgeToolError::invalid_arguments("pr_body is required for action create_knowledge_pr")
-        })?;
+        if !is_valid_target_repo(&target_repo) {
+            return Err(KnowledgeToolError::invalid_arguments(
+                "target_repo must be in owner/name format for action create_knowledge_pr",
+            ));
+        }
+        let pr_title = args
+            .pr_title
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                KnowledgeToolError::invalid_arguments(
+                    "pr_title is required for action create_knowledge_pr",
+                )
+            })?;
+        let pr_body = args
+            .pr_body
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                KnowledgeToolError::invalid_arguments(
+                    "pr_body is required for action create_knowledge_pr",
+                )
+            })?;
 
         if args.files.is_empty() {
             return Err(KnowledgeToolError::invalid_arguments(

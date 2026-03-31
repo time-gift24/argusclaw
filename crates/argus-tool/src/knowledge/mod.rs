@@ -4,8 +4,8 @@ mod github;
 mod indexer;
 mod manifest;
 mod markdown;
-mod pr;
 mod models;
+mod pr;
 mod provider;
 mod registry;
 mod tool;
@@ -13,15 +13,12 @@ mod tool;
 pub use cache::SnapshotCache;
 pub use error::KnowledgeToolError;
 pub use github::{
-    GitHubKnowledgeBackend, GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport,
+    GitHubApiMethod, GitHubCommit, GitHubKnowledgeBackend, GitHubKnowledgeClient,
+    GitHubPullRequest, GitHubTransport, GitHubTreeWrite, ReqwestGitHubTransport,
 };
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
 pub use markdown::{ParsedSection, parse_markdown_sections};
-pub use pr::{
-    CliGitPrExecutor, GitPrExecutor, GitPrOutcome, KnowledgePrRuntime, KnowledgePrService,
-    merge_manifest, serialize_manifest, validate_repo_relative_path,
-};
 pub use models::{
     ContentPage, ExploreTreeEntry, ExploreTreeResult, GitHubBlob, GitHubSnapshot, GitHubTree,
     GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeCreatePrArgs,
@@ -30,6 +27,11 @@ pub use models::{
     KnowledgeManifestRepoPatch, KnowledgeNode, KnowledgeNodeKind, KnowledgeRelation,
     KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
+pub use pr::{
+    GitHubPrExecutor, GitPrExecutor, GitPrOutcome, KnowledgePrRemoteEntry, KnowledgePrRuntime,
+    KnowledgePrService, KnowledgePrWorkspace, KnowledgePrWorkspaceFile, merge_manifest,
+    serialize_manifest, validate_repo_relative_path,
+};
 pub use provider::{FileKnowledgeRepoProvider, StaticKnowledgeRepoProvider};
 pub use registry::KnowledgeRepoRegistry;
 pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeRuntimeBackend, KnowledgeTool};
@@ -37,10 +39,10 @@ pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeRuntimeBacken
 #[cfg(test)]
 mod tests {
     use super::{
-        GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree, GitHubTreeEntry,
-        GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer, KnowledgeRepoRegistry,
-        KnowledgeRuntime, KnowledgeTool, KnowledgeToolArgs, RepositoryManifest,
-        parse_markdown_sections,
+        GitHubApiMethod, GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree,
+        GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer,
+        KnowledgeRepoRegistry, KnowledgeRuntime, KnowledgeTool, KnowledgeToolArgs,
+        RepositoryManifest, parse_markdown_sections,
     };
     use argus_protocol::NamedTool;
     use argus_protocol::ids::ThreadId;
@@ -69,7 +71,12 @@ mod tests {
 
     #[async_trait]
     impl GitHubTransport for FakeGitHubTransport {
-        async fn get_json(&self, _url: &str) -> Result<Value, super::KnowledgeToolError> {
+        async fn request_json(
+            &self,
+            _method: GitHubApiMethod,
+            _url: &str,
+            _body: Option<Value>,
+        ) -> Result<Value, super::KnowledgeToolError> {
             self.responses
                 .lock()
                 .unwrap()
@@ -296,6 +303,7 @@ mod tests {
     async fn knowledge_github_read_tree_maps_entries() {
         let client = GitHubKnowledgeClient::new_for_test(FakeGitHubTransport::with_json(vec![
             serde_json::json!({
+                "sha": "abc123",
                 "tree": { "sha": "tree-1" }
             }),
             serde_json::json!({
@@ -314,6 +322,7 @@ mod tests {
     async fn knowledge_github_read_tree_resolves_commit_to_tree_sha() {
         let client = GitHubKnowledgeClient::new_for_test(FakeGitHubTransport::with_json(vec![
             serde_json::json!({
+                "sha": "abc123",
                 "tree": { "sha": "tree-1" }
             }),
             serde_json::json!({
@@ -411,11 +420,13 @@ mod tests {
                         GitHubTreeEntry {
                             path: "docs/auth.md".to_string(),
                             sha: "blob-auth".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                         GitHubTreeEntry {
                             path: "docs/login.md".to_string(),
                             sha: "blob-login".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                     ],
@@ -472,26 +483,31 @@ mod tests {
                         GitHubTreeEntry {
                             path: "README.md".to_string(),
                             sha: "blob-readme".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                         GitHubTreeEntry {
                             path: "docs".to_string(),
                             sha: "tree-docs".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Tree,
                         },
                         GitHubTreeEntry {
                             path: "docs/auth.md".to_string(),
                             sha: "blob-auth".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                         GitHubTreeEntry {
                             path: "docs/guides".to_string(),
                             sha: "tree-guides".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Tree,
                         },
                         GitHubTreeEntry {
                             path: "docs/guides/setup.md".to_string(),
                             sha: "blob-setup".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                     ],

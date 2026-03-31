@@ -1,20 +1,20 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use tempfile::tempdir;
 
 use argus_protocol::ids::ThreadId;
 use argus_protocol::{NamedTool, ToolExecutionContext};
 use argus_tool::knowledge::{
-    CliGitPrExecutor, DefaultKnowledgeRuntime, GitHubBlob, GitHubSnapshot, GitHubTree,
-    GitPrExecutor, GitPrOutcome, KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult,
-    KnowledgeManifestFilePatch, KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch,
-    KnowledgeManifestPatch, KnowledgeManifestRepoPatch, KnowledgePrRuntime, KnowledgePrService,
-    KnowledgeRepoDescriptor, KnowledgeRuntimeBackend, KnowledgeTool, KnowledgeToolError,
-    RepositoryManifest, merge_manifest, serialize_manifest, validate_repo_relative_path,
+    DefaultKnowledgeRuntime, GitHubApiMethod, GitHubBlob, GitHubPrExecutor, GitHubSnapshot,
+    GitHubTransport, GitHubTree, GitHubTreeEntryKind, GitPrExecutor, GitPrOutcome,
+    KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult, KnowledgeManifestFilePatch,
+    KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
+    KnowledgeManifestRepoPatch, KnowledgePrRemoteEntry, KnowledgePrRuntime, KnowledgePrService,
+    KnowledgePrWorkspace, KnowledgePrWorkspaceFile, KnowledgeRepoDescriptor,
+    KnowledgeRuntimeBackend, KnowledgeTool, KnowledgeToolError, RepositoryManifest, merge_manifest,
+    serialize_manifest, validate_repo_relative_path,
 };
 
 fn sample_existing_manifest() -> RepositoryManifest {
@@ -145,78 +145,50 @@ fn sample_create_pr_args() -> KnowledgeCreatePrArgs {
     }
 }
 
-fn run_git(cwd: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {} failed\nstdout:\n{}\nstderr:\n{}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedGitHubRequest {
+    method: GitHubApiMethod,
+    url: String,
+    body: Option<serde_json::Value>,
 }
 
-fn git_output(cwd: &Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {} failed\nstdout:\n{}\nstderr:\n{}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+#[derive(Clone, Default)]
+struct RecordingGitHubTransport {
+    requests: Arc<Mutex<Vec<RecordedGitHubRequest>>>,
+    responses: Arc<Mutex<VecDeque<Result<serde_json::Value, KnowledgeToolError>>>>,
 }
 
-fn git_git_dir_output(git_dir: &Path, args: &[&str]) -> String {
-    let git_dir = git_dir.to_string_lossy().to_string();
-    let output = std::process::Command::new("git")
-        .args(["--git-dir", &git_dir])
-        .args(args)
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git --git-dir={} {} failed\nstdout:\n{}\nstderr:\n{}",
-        git_dir,
-        args.join(" "),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+impl RecordingGitHubTransport {
+    fn with_responses(responses: Vec<Result<serde_json::Value, KnowledgeToolError>>) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
+        }
+    }
 }
 
-fn configure_git_identity(repo_dir: &Path) {
-    run_git(repo_dir, &["config", "user.email", "test@example.com"]);
-    run_git(repo_dir, &["config", "user.name", "Codex Test"]);
-}
-
-fn init_origin_with_main() -> tempfile::TempDir {
-    let temp = tempdir().expect("tempdir should create");
-    let origin = temp.path().join("origin.git");
-    let origin_str = origin.to_string_lossy().to_string();
-    run_git(temp.path(), &["init", "--bare", &origin_str]);
-    let _ = git_git_dir_output(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-
-    let seed = temp.path().join("seed");
-    let seed_str = seed.to_string_lossy().to_string();
-    run_git(temp.path(), &["clone", &origin_str, &seed_str]);
-    configure_git_identity(&seed);
-    std::fs::write(seed.join("README.md"), "base\n").expect("seed file should write");
-    run_git(&seed, &["add", "README.md"]);
-    run_git(&seed, &["commit", "-m", "base"]);
-    run_git(&seed, &["branch", "-M", "main"]);
-    run_git(&seed, &["push", "origin", "main"]);
-
-    temp
+#[async_trait]
+impl GitHubTransport for RecordingGitHubTransport {
+    async fn request_json(
+        &self,
+        method: GitHubApiMethod,
+        url: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, KnowledgeToolError> {
+        self.requests
+            .lock()
+            .expect("requests should lock")
+            .push(RecordedGitHubRequest {
+                method,
+                url: url.to_string(),
+                body,
+            });
+        self.responses
+            .lock()
+            .expect("responses should lock")
+            .pop_front()
+            .expect("response should exist")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -243,30 +215,46 @@ impl FakeGitPrExecutor {
         }
     }
 
-    fn capture_repo(repo_dir: &Path) -> HashMap<String, String> {
-        fn walk(root: &Path, current: &Path, files: &mut HashMap<String, String>) {
-            let entries = std::fs::read_dir(current).expect("directory should read");
-            for entry in entries {
-                let entry = entry.expect("entry should exist");
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(root, &path, files);
-                    continue;
-                }
+    fn workspace_from_seed_files(
+        target_repo: &str,
+        base_ref: &str,
+        branch: &str,
+        seed_files: HashMap<String, String>,
+    ) -> KnowledgePrWorkspace {
+        let files = seed_files
+            .into_iter()
+            .map(|(path, content)| {
+                (
+                    path,
+                    KnowledgePrWorkspaceFile {
+                        original_content: Some(content.clone()),
+                        current_content: content,
+                        original_mode: Some("100644".to_string()),
+                    },
+                )
+            })
+            .collect();
 
-                let relative = path
-                    .strip_prefix(root)
-                    .expect("path should be inside repo")
-                    .to_string_lossy()
-                    .to_string();
-                let content = std::fs::read_to_string(&path).expect("file should read");
-                files.insert(relative, content);
-            }
+        KnowledgePrWorkspace {
+            target_repo: target_repo.to_string(),
+            owner: "acme".to_string(),
+            repo: "docs".to_string(),
+            base_ref: base_ref.to_string(),
+            branch: branch.to_string(),
+            branch_exists: false,
+            head_commit_sha: "base-sha".to_string(),
+            head_tree_sha: "tree-sha".to_string(),
+            files,
+            remote_entries: HashMap::new(),
         }
+    }
 
-        let mut files = HashMap::new();
-        walk(repo_dir, repo_dir, &mut files);
-        files
+    fn capture_workspace(workspace: &KnowledgePrWorkspace) -> HashMap<String, String> {
+        workspace
+            .files
+            .iter()
+            .map(|(path, file)| (path.clone(), file.current_content.clone()))
+            .collect()
     }
 }
 
@@ -283,62 +271,53 @@ impl GitPrExecutor for FakeGitPrExecutor {
         Ok(())
     }
 
-    async fn clone_repo(
+    async fn prepare_workspace(
         &self,
-        _target_repo: &str,
-        destination: &Path,
-    ) -> Result<(), argus_tool::knowledge::KnowledgeToolError> {
+        args: &KnowledgeCreatePrArgs,
+    ) -> Result<KnowledgePrWorkspace, argus_tool::knowledge::KnowledgeToolError> {
         let mut state = self.state.lock().expect("state should lock");
-        state.calls.push("clone_repo".to_string());
-        std::fs::create_dir_all(destination).expect("destination should exist");
-        for (path, content) in state.seed_files.clone() {
-            let full_path = destination.join(&path);
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).expect("parent should exist");
-            }
-            std::fs::write(full_path, content).expect("seed file should write");
-        }
-        Ok(())
-    }
-
-    async fn prepare_branch(
-        &self,
-        _repo_dir: &Path,
-        base_ref: &str,
-        branch: &str,
-    ) -> Result<(), argus_tool::knowledge::KnowledgeToolError> {
-        let mut state = self.state.lock().expect("state should lock");
-        state
-            .calls
-            .push(format!("prepare_branch:{base_ref}:{branch}"));
-        Ok(())
+        state.calls.push(format!(
+            "prepare_workspace:{}:{}",
+            args.base_ref.as_deref().unwrap_or("main"),
+            args.branch
+                .as_deref()
+                .unwrap_or("codex/knowledge-pr-update")
+        ));
+        Ok(Self::workspace_from_seed_files(
+            &args.target_repo,
+            args.base_ref.as_deref().unwrap_or("main"),
+            args.branch
+                .as_deref()
+                .unwrap_or("codex/knowledge-pr-update"),
+            state.seed_files.clone(),
+        ))
     }
 
     async fn commit_and_push(
         &self,
-        repo_dir: &Path,
-        branch: &str,
+        workspace: &mut KnowledgePrWorkspace,
         _commit_message: &str,
     ) -> Result<String, argus_tool::knowledge::KnowledgeToolError> {
         let mut state = self.state.lock().expect("state should lock");
-        state.calls.push(format!("commit_and_push:{branch}"));
-        state.captured_files = Self::capture_repo(repo_dir);
+        state
+            .calls
+            .push(format!("commit_and_push:{}", workspace.branch));
+        state.captured_files = Self::capture_workspace(workspace);
         Ok(state.commit_sha.clone())
     }
 
     async fn create_or_reuse_pr(
         &self,
-        _repo_dir: &Path,
-        base_ref: &str,
-        branch: &str,
+        workspace: &KnowledgePrWorkspace,
         _title: &str,
         _body: &str,
         draft: bool,
     ) -> Result<GitPrOutcome, argus_tool::knowledge::KnowledgeToolError> {
         let mut state = self.state.lock().expect("state should lock");
-        state
-            .calls
-            .push(format!("create_or_reuse_pr:{base_ref}:{branch}:{draft}"));
+        state.calls.push(format!(
+            "create_or_reuse_pr:{}:{}:{draft}",
+            workspace.base_ref, workspace.branch
+        ));
         if let Some(error) = &state.pr_error {
             return Err(argus_tool::knowledge::KnowledgeToolError::RequestFailed(
                 error.clone(),
@@ -435,7 +414,6 @@ impl KnowledgePrRuntime for FakePrRuntime {
 
 #[derive(Clone)]
 struct SymlinkSeedExecutor {
-    outside_dir: Arc<std::path::PathBuf>,
     commit_called: Arc<AtomicBool>,
 }
 
@@ -445,31 +423,37 @@ impl GitPrExecutor for SymlinkSeedExecutor {
         Ok(())
     }
 
-    async fn clone_repo(
+    async fn prepare_workspace(
         &self,
-        _target_repo: &str,
-        destination: &Path,
-    ) -> Result<(), KnowledgeToolError> {
-        std::fs::create_dir_all(destination).expect("destination should exist");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(self.outside_dir.as_path(), destination.join("docs"))
-            .expect("symlink should create");
-        Ok(())
-    }
-
-    async fn prepare_branch(
-        &self,
-        _repo_dir: &Path,
-        _base_ref: &str,
-        _branch: &str,
-    ) -> Result<(), KnowledgeToolError> {
-        Ok(())
+        args: &KnowledgeCreatePrArgs,
+    ) -> Result<KnowledgePrWorkspace, KnowledgeToolError> {
+        Ok(KnowledgePrWorkspace {
+            target_repo: args.target_repo.clone(),
+            owner: "acme".to_string(),
+            repo: "docs".to_string(),
+            base_ref: args.base_ref.clone().unwrap_or_else(|| "main".to_string()),
+            branch: args
+                .branch
+                .clone()
+                .unwrap_or_else(|| "codex/knowledge-pr-update".to_string()),
+            branch_exists: false,
+            head_commit_sha: "base-sha".to_string(),
+            head_tree_sha: "tree-sha".to_string(),
+            files: Default::default(),
+            remote_entries: HashMap::from([(
+                "docs".to_string(),
+                KnowledgePrRemoteEntry {
+                    sha: "blob-symlink".to_string(),
+                    mode: Some("120000".to_string()),
+                    kind: GitHubTreeEntryKind::Blob,
+                },
+            )]),
+        })
     }
 
     async fn commit_and_push(
         &self,
-        _repo_dir: &Path,
-        _branch: &str,
+        _workspace: &mut KnowledgePrWorkspace,
         _commit_message: &str,
     ) -> Result<String, KnowledgeToolError> {
         self.commit_called.store(true, Ordering::SeqCst);
@@ -478,9 +462,7 @@ impl GitPrExecutor for SymlinkSeedExecutor {
 
     async fn create_or_reuse_pr(
         &self,
-        _repo_dir: &Path,
-        _base_ref: &str,
-        _branch: &str,
+        _workspace: &KnowledgePrWorkspace,
         _title: &str,
         _body: &str,
         _draft: bool,
@@ -777,13 +759,8 @@ async fn dispatch_create_knowledge_pr_returns_result_payload() {
 #[cfg(unix)]
 #[tokio::test]
 async fn executor_rejects_writes_through_symlinked_parents() {
-    let temp = tempdir().expect("tempdir should create");
-    let outside_dir = temp.path().join("outside");
-    std::fs::create_dir_all(&outside_dir).expect("outside dir should exist");
-
     let commit_called = Arc::new(AtomicBool::new(false));
     let service = KnowledgePrService::new_with_executor(SymlinkSeedExecutor {
-        outside_dir: Arc::new(outside_dir.clone()),
         commit_called: commit_called.clone(),
     });
 
@@ -805,7 +782,6 @@ async fn executor_rejects_writes_through_symlinked_parents() {
         .unwrap_err();
 
     assert!(err.to_string().contains("symlink"));
-    assert!(!outside_dir.join("escape.md").exists());
     assert!(!commit_called.load(Ordering::SeqCst));
 }
 
@@ -856,8 +832,7 @@ async fn executor_successful_flow_writes_files_and_opens_pr() {
         state.calls,
         vec![
             "ensure_auth",
-            "clone_repo",
-            "prepare_branch:main:codex/knowledge-bootstrap",
+            "prepare_workspace:main:codex/knowledge-bootstrap",
             "commit_and_push:codex/knowledge-bootstrap",
             "create_or_reuse_pr:main:codex/knowledge-bootstrap:true",
         ]
@@ -915,8 +890,7 @@ async fn executor_pr_creation_failure_happens_after_push() {
         state.calls,
         vec![
             "ensure_auth",
-            "clone_repo",
-            "prepare_branch:main:codex/knowledge-bootstrap",
+            "prepare_workspace:main:codex/knowledge-bootstrap",
             "commit_and_push:codex/knowledge-bootstrap",
             "create_or_reuse_pr:main:codex/knowledge-bootstrap:true",
         ]
@@ -939,87 +913,136 @@ async fn executor_reuses_existing_pr() {
 }
 
 #[tokio::test]
-async fn cli_executor_reuses_existing_remote_branch_history() {
-    let temp = init_origin_with_main();
-    let origin = temp.path().join("origin.git");
-    let origin_str = origin.to_string_lossy().to_string();
-    let executor = CliGitPrExecutor::new();
-    let branch = "codex/knowledge-pr-update";
+async fn github_executor_uses_http_api_to_create_branch_commit_and_pr() {
+    let transport = RecordingGitHubTransport::with_responses(vec![
+        Ok(serde_json::json!({"object": {"sha": "base-sha"}})),
+        Err(KnowledgeToolError::NotFound("branch missing".to_string())),
+        Ok(serde_json::json!({"sha": "base-sha", "tree": {"sha": "base-tree-sha"}})),
+        Ok(serde_json::json!({"tree": []})),
+        Ok(serde_json::json!({"sha": "manifest-blob-sha"})),
+        Ok(serde_json::json!({"sha": "doc-blob-sha"})),
+        Ok(serde_json::json!({"sha": "new-tree-sha"})),
+        Ok(serde_json::json!({"sha": "new-commit-sha"})),
+        Ok(serde_json::json!({"ref": "refs/heads/codex/knowledge-bootstrap"})),
+        Ok(serde_json::json!([])),
+        Ok(serde_json::json!({"html_url": "https://example.com/pr/42"})),
+    ]);
+    let requests = transport.requests.clone();
+    let service =
+        KnowledgePrService::new_with_executor(GitHubPrExecutor::new_for_test(transport, "token"));
 
-    let first = temp.path().join("first");
-    let first_str = first.to_string_lossy().to_string();
-    run_git(temp.path(), &["clone", &origin_str, &first_str]);
-    configure_git_identity(&first);
-    executor
-        .prepare_branch(&first, "main", branch)
-        .await
-        .unwrap();
-    std::fs::write(first.join("docs.txt"), "first\n").expect("file should write");
-    let first_sha = executor
-        .commit_and_push(&first, branch, "first change")
-        .await
-        .unwrap();
+    let result = service.create_pr(&sample_create_pr_args()).await.unwrap();
 
-    let second = temp.path().join("second");
-    let second_str = second.to_string_lossy().to_string();
-    run_git(temp.path(), &["clone", &origin_str, &second_str]);
-    configure_git_identity(&second);
-    executor
-        .prepare_branch(&second, "main", branch)
-        .await
-        .unwrap();
-    std::fs::write(second.join("docs.txt"), "second\n").expect("file should write");
-    let second_sha = executor
-        .commit_and_push(&second, branch, "second change")
-        .await
-        .unwrap();
+    assert_eq!(result.commit_sha, "new-commit-sha");
+    assert_eq!(result.pr_url, "https://example.com/pr/42");
 
-    run_git(
-        &second,
-        &["merge-base", "--is-ancestor", &first_sha, &second_sha],
+    let requests = requests.lock().expect("requests should lock");
+    assert_eq!(requests[0].method, GitHubApiMethod::Get);
+    assert!(
+        requests[0]
+            .url
+            .ends_with("/repos/acme/docs/git/ref/heads/main")
     );
-    let remote_head = git_git_dir_output(&origin, &["rev-parse", &format!("refs/heads/{branch}")]);
-    assert_eq!(remote_head, second_sha);
-    let remote_content = git_output(&second, &["show", &format!("origin/{branch}:docs.txt")]);
-    assert_eq!(remote_content, "second");
+    assert_eq!(requests[1].method, GitHubApiMethod::Get);
+    assert!(
+        requests[1]
+            .url
+            .ends_with("/repos/acme/docs/git/ref/heads/codex/knowledge-bootstrap")
+    );
+    assert_eq!(requests[4].method, GitHubApiMethod::Post);
+    assert!(requests[4].url.ends_with("/repos/acme/docs/git/blobs"));
+    assert_eq!(
+        requests[6].body,
+        Some(serde_json::json!({
+            "base_tree": "base-tree-sha",
+            "tree": [
+                {
+                    "path": ".knowledge/repo.json",
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": "manifest-blob-sha"
+                },
+                {
+                    "path": "docs/knowledge/README.md",
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": "doc-blob-sha"
+                }
+            ]
+        }))
+    );
+    assert_eq!(
+        requests[10].body,
+        Some(serde_json::json!({
+            "title": "Bootstrap knowledge docs",
+            "body": "Adds knowledge docs and manifest.",
+            "base": "main",
+            "head": "codex/knowledge-bootstrap",
+            "draft": true
+        }))
+    );
 }
 
 #[tokio::test]
-async fn cli_executor_commit_and_push_is_noop_when_branch_is_already_up_to_date() {
-    let temp = init_origin_with_main();
-    let origin = temp.path().join("origin.git");
-    let origin_str = origin.to_string_lossy().to_string();
-    let executor = CliGitPrExecutor::new();
-    let branch = "codex/knowledge-pr-update";
+async fn github_executor_reuses_existing_pr_and_updates_branch_ref() {
+    let transport = RecordingGitHubTransport::with_responses(vec![
+        Ok(serde_json::json!({"object": {"sha": "base-sha"}})),
+        Ok(serde_json::json!({"object": {"sha": "branch-sha"}})),
+        Ok(serde_json::json!({"sha": "branch-sha", "tree": {"sha": "branch-tree-sha"}})),
+        Ok(serde_json::json!({
+            "tree": [
+                {
+                    "path": "docs/knowledge/README.md",
+                    "sha": "existing-doc-sha",
+                    "mode": "100644",
+                    "type": "blob"
+                }
+            ]
+        })),
+        Ok(
+            serde_json::json!({"sha": "existing-doc-sha", "content": "IyBPbGQK", "encoding": "base64"}),
+        ),
+        Ok(serde_json::json!({"sha": "manifest-blob-sha"})),
+        Ok(serde_json::json!({"sha": "doc-blob-sha"})),
+        Ok(serde_json::json!({"sha": "new-tree-sha"})),
+        Ok(serde_json::json!({"sha": "new-commit-sha"})),
+        Ok(serde_json::json!({"ref": "refs/heads/codex/knowledge-bootstrap"})),
+        Ok(serde_json::json!([
+            {"html_url": "https://example.com/pr/existing"}
+        ])),
+    ]);
+    let requests = transport.requests.clone();
+    let service =
+        KnowledgePrService::new_with_executor(GitHubPrExecutor::new_for_test(transport, "token"));
 
-    let first = temp.path().join("first");
-    let first_str = first.to_string_lossy().to_string();
-    run_git(temp.path(), &["clone", &origin_str, &first_str]);
-    configure_git_identity(&first);
-    executor
-        .prepare_branch(&first, "main", branch)
-        .await
-        .unwrap();
-    std::fs::write(first.join("docs.txt"), "first\n").expect("file should write");
-    let first_sha = executor
-        .commit_and_push(&first, branch, "first change")
-        .await
-        .unwrap();
+    let result = service.create_pr(&sample_create_pr_args()).await.unwrap();
 
-    let second = temp.path().join("second");
-    let second_str = second.to_string_lossy().to_string();
-    run_git(temp.path(), &["clone", &origin_str, &second_str]);
-    configure_git_identity(&second);
-    executor
-        .prepare_branch(&second, "main", branch)
-        .await
-        .unwrap();
-    let second_sha = executor
-        .commit_and_push(&second, branch, "no-op change")
-        .await
-        .unwrap();
+    assert_eq!(result.pr_url, "https://example.com/pr/existing");
+    assert!(result.summary.contains("Updated existing PR"));
 
-    assert_eq!(second_sha, first_sha);
-    let remote_head = git_git_dir_output(&origin, &["rev-parse", &format!("refs/heads/{branch}")]);
-    assert_eq!(remote_head, first_sha);
+    let requests = requests.lock().expect("requests should lock");
+    assert!(requests.iter().any(|request| {
+        request.method == GitHubApiMethod::Patch
+            && request
+                .url
+                .ends_with("/repos/acme/docs/git/refs/heads/codex/knowledge-bootstrap")
+    }));
+    assert!(!requests.iter().any(|request| {
+        request.method == GitHubApiMethod::Post && request.url.ends_with("/repos/acme/docs/pulls")
+    }));
+}
+
+#[tokio::test]
+async fn github_executor_requires_github_token_for_create_pr() {
+    let service = KnowledgePrService::new_with_executor(GitHubPrExecutor::new_for_test(
+        RecordingGitHubTransport::default(),
+        "",
+    ));
+
+    let err = service
+        .create_pr(&sample_create_pr_args())
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("GITHUB_TOKEN"));
 }
