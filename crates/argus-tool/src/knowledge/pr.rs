@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 
+use super::cli::{CliRunner, RealCliRunner};
 use super::error::KnowledgeToolError;
-use super::github::{
-    GitHubKnowledgeClient, GitHubTransport, GitHubTreeWrite, ReqwestGitHubTransport,
-};
 use super::manifest::DEFAULT_MANIFEST_PATHS;
 use super::manifest::{FileOverride, NodeOverride, RepositoryManifest, RepositoryManifestMeta};
 use super::models::{
@@ -47,6 +45,7 @@ pub struct KnowledgePrWorkspace {
     pub head_tree_sha: String,
     pub files: BTreeMap<String, KnowledgePrWorkspaceFile>,
     pub remote_entries: HashMap<String, KnowledgePrRemoteEntry>,
+    pub work_dir: Option<PathBuf>,
 }
 
 #[async_trait]
@@ -73,55 +72,62 @@ pub trait GitPrExecutor: Send + Sync {
     ) -> Result<GitPrOutcome, KnowledgeToolError>;
 }
 
-pub struct GitHubPrExecutor<T: GitHubTransport = ReqwestGitHubTransport> {
-    client: GitHubKnowledgeClient<T>,
-    auth_token: Option<String>,
+// ---------------------------------------------------------------------------
+// CliPrExecutor — uses `git` and `gh` CLI commands
+// ---------------------------------------------------------------------------
+
+pub struct CliPrExecutor<R: CliRunner = RealCliRunner> {
+    runner: R,
+    temp_dir: tokio::sync::Mutex<Option<tempfile::TempDir>>,
 }
 
-impl Default for GitHubPrExecutor<ReqwestGitHubTransport> {
+impl Default for CliPrExecutor<RealCliRunner> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl GitHubPrExecutor<ReqwestGitHubTransport> {
+impl CliPrExecutor<RealCliRunner> {
     #[must_use]
     pub fn new() -> Self {
-        let transport = ReqwestGitHubTransport::new();
-        let auth_token = transport.auth_token().map(ToOwned::to_owned);
-        Self::new_with_transport(transport, auth_token)
+        Self::new_with_runner(RealCliRunner)
     }
 }
 
-impl<T: GitHubTransport> GitHubPrExecutor<T> {
+impl<R: CliRunner> CliPrExecutor<R> {
     #[must_use]
-    pub fn new_with_transport(transport: T, auth_token: Option<String>) -> Self {
+    pub fn new_with_runner(runner: R) -> Self {
         Self {
-            client: GitHubKnowledgeClient::new(transport),
-            auth_token,
+            runner,
+            temp_dir: tokio::sync::Mutex::new(None),
         }
-    }
-
-    #[must_use]
-    pub fn new_for_test(transport: T, auth_token: impl Into<String>) -> Self {
-        let auth_token = auth_token.into();
-        Self::new_with_transport(
-            transport,
-            (!auth_token.trim().is_empty()).then_some(auth_token),
-        )
     }
 }
 
 #[async_trait]
-impl<T: GitHubTransport> GitPrExecutor for GitHubPrExecutor<T> {
+impl<R: CliRunner + 'static> GitPrExecutor for CliPrExecutor<R> {
     async fn ensure_auth(&self) -> Result<(), KnowledgeToolError> {
-        if self.auth_token.is_some() {
-            Ok(())
-        } else {
-            Err(KnowledgeToolError::RequestFailed(
-                "GITHUB_TOKEN is required for action create_knowledge_pr".to_string(),
-            ))
-        }
+        let tmp = tempfile::TempDir::new()
+            .map_err(|e| KnowledgeToolError::RequestFailed(e.to_string()))?;
+        let tmp_path = tmp.path().to_path_buf();
+
+        self.runner
+            .run("gh", &["auth", "status"], &tmp_path)
+            .await
+            .map_err(|_| {
+                KnowledgeToolError::RequestFailed(
+                    "gh auth status failed: run `gh auth login` first".to_string(),
+                )
+            })?;
+
+        self.runner
+            .run("git", &["--version"], &tmp_path)
+            .await
+            .map_err(|_| {
+                KnowledgeToolError::RequestFailed("git is not installed or not on PATH".to_string())
+            })?;
+
+        Ok(())
     }
 
     async fn prepare_workspace(
@@ -135,55 +141,116 @@ impl<T: GitHubTransport> GitPrExecutor for GitHubPrExecutor<T> {
             .clone()
             .unwrap_or_else(|| "codex/knowledge-pr-update".to_string());
 
-        let base_snapshot = self
-            .client
-            .resolve_snapshot(&owner, &repo, &base_ref)
+        let tmp = tempfile::TempDir::new()
+            .map_err(|e| KnowledgeToolError::RequestFailed(e.to_string()))?;
+        let tmp_path = tmp.path().to_path_buf();
+        let clone_url = format!("https://github.com/{owner}/{repo}");
+
+        self.runner
+            .run(
+                "git",
+                &[
+                    "clone",
+                    "--single-branch",
+                    "--branch",
+                    &base_ref,
+                    "--depth=1",
+                    &clone_url,
+                    tmp_path.to_str().unwrap_or("."),
+                ],
+                Path::new("."),
+            )
             .await?;
-        let (branch_exists, head_snapshot) =
-            match self.client.resolve_snapshot(&owner, &repo, &branch).await {
-                Ok(snapshot) => (true, snapshot),
-                Err(KnowledgeToolError::NotFound(_)) => (false, base_snapshot.clone()),
-                Err(err) => return Err(err),
-            };
-        let head_commit = self
-            .client
-            .read_commit(&owner, &repo, &head_snapshot.rev)
+
+        let branch_exists = match self
+            .runner
+            .run(
+                "git",
+                &["ls-remote", "--heads", &clone_url, &branch],
+                Path::new("."),
+            )
+            .await
+        {
+            Ok(output) => !output.stdout.trim().is_empty(),
+            Err(_) => false,
+        };
+
+        if branch_exists {
+            self.runner
+                .run("git", &["fetch", "origin", &format!("{branch}:{branch}")], &tmp_path)
+                .await?;
+            self.runner
+                .run("git", &["checkout", &branch], &tmp_path)
+                .await?;
+        }
+
+        let ls_tree_output = self
+            .runner
+            .run("git", &["ls-tree", "-r", "HEAD"], &tmp_path)
             .await?;
-        let tree = self
-            .client
-            .read_tree_from_sha(&owner, &repo, &head_snapshot.rev, &head_commit.tree_sha)
-            .await?;
-        let remote_entries = tree
-            .entries
-            .into_iter()
-            .map(|entry| {
-                (
-                    entry.path.clone(),
+        let mut remote_entries = HashMap::new();
+        for line in ls_tree_output.stdout.lines() {
+            let parts: Vec<&str> = line.splitn(4, &['\t', ' '][..]).collect();
+            if parts.len() >= 4 {
+                let mode = parts[0].to_string();
+                let kind_str = parts[1];
+                let sha = parts[2].to_string();
+                let path = parts[3].to_string();
+                let kind = if kind_str == "tree" {
+                    GitHubTreeEntryKind::Tree
+                } else {
+                    GitHubTreeEntryKind::Blob
+                };
+                remote_entries.insert(
+                    path,
                     KnowledgePrRemoteEntry {
-                        sha: entry.sha,
-                        mode: entry.mode,
-                        kind: entry.kind,
+                        sha,
+                        mode: Some(mode),
+                        kind,
                     },
-                )
-            })
-            .collect::<HashMap<_, _>>();
+                );
+            }
+        }
+
+        let head_commit_sha = self
+            .runner
+            .run("git", &["rev-parse", "HEAD"], &tmp_path)
+            .await?
+            .stdout
+            .trim()
+            .to_string();
+        let head_tree_sha = self
+            .runner
+            .run("git", &["rev-parse", "HEAD^{tree}"], &tmp_path)
+            .await?
+            .stdout
+            .trim()
+            .to_string();
 
         let mut files = BTreeMap::new();
         for path in relevant_workspace_paths(args)? {
             if let Some(entry) = remote_entries.get(&path)
                 && entry.kind == GitHubTreeEntryKind::Blob
             {
-                let blob = self.client.read_blob(&owner, &repo, &entry.sha).await?;
+                let content = self
+                    .runner
+                    .run("git", &["show", &format!("HEAD:{path}")], &tmp_path)
+                    .await
+                    .map(|out| out.stdout)
+                    .unwrap_or_default();
                 files.insert(
                     path,
                     KnowledgePrWorkspaceFile {
-                        original_content: Some(blob.text.clone()),
-                        current_content: blob.text,
+                        original_content: Some(content.clone()),
+                        current_content: content,
                         original_mode: entry.mode.clone(),
                     },
                 );
             }
         }
+
+        let mut guard = self.temp_dir.lock().await;
+        *guard = Some(tmp);
 
         Ok(KnowledgePrWorkspace {
             target_repo: args.target_repo.clone(),
@@ -192,10 +259,11 @@ impl<T: GitHubTransport> GitPrExecutor for GitHubPrExecutor<T> {
             base_ref,
             branch,
             branch_exists,
-            head_commit_sha: head_commit.sha,
-            head_tree_sha: head_commit.tree_sha,
+            head_commit_sha,
+            head_tree_sha,
             files,
             remote_entries,
+            work_dir: Some(tmp_path),
         })
     }
 
@@ -204,79 +272,77 @@ impl<T: GitHubTransport> GitPrExecutor for GitHubPrExecutor<T> {
         workspace: &mut KnowledgePrWorkspace,
         commit_message: &str,
     ) -> Result<String, KnowledgeToolError> {
-        let mut tree_entries = Vec::new();
+        let work_dir = workspace
+            .work_dir
+            .as_ref()
+            .ok_or_else(|| {
+                KnowledgeToolError::RequestFailed("workspace has no work_dir".to_string())
+            })?;
 
-        for (path, file) in &workspace.files {
-            if file.original_content.as_deref() == Some(file.current_content.as_str()) {
-                continue;
-            }
+        let has_changes = workspace
+            .files
+            .iter()
+            .any(|(_, f)| f.original_content.as_deref() != Some(f.current_content.as_str()));
 
-            let blob_sha = self
-                .client
-                .create_blob(&workspace.owner, &workspace.repo, &file.current_content)
-                .await?;
-            tree_entries.push(GitHubTreeWrite {
-                path: path.clone(),
-                mode: normalized_blob_mode(file.original_mode.as_deref()),
-                sha: blob_sha,
-            });
-        }
-
-        if tree_entries.is_empty() {
-            if !workspace.branch_exists {
-                self.client
-                    .create_ref(
-                        &workspace.owner,
-                        &workspace.repo,
-                        &workspace.branch,
-                        &workspace.head_commit_sha,
-                    )
-                    .await?;
-                workspace.branch_exists = true;
-            }
-            return Ok(workspace.head_commit_sha.clone());
-        }
-
-        let tree_sha = self
-            .client
-            .create_tree(
-                &workspace.owner,
-                &workspace.repo,
-                &workspace.head_tree_sha,
-                &tree_entries,
-            )
-            .await?;
-        let commit_sha = self
-            .client
-            .create_commit(
-                &workspace.owner,
-                &workspace.repo,
-                commit_message,
-                &tree_sha,
-                &[workspace.head_commit_sha.clone()],
-            )
-            .await?;
-
-        if workspace.branch_exists {
-            self.client
-                .update_ref(
-                    &workspace.owner,
-                    &workspace.repo,
-                    &workspace.branch,
-                    &commit_sha,
-                )
-                .await?;
-        } else {
-            self.client
-                .create_ref(
-                    &workspace.owner,
-                    &workspace.repo,
-                    &workspace.branch,
-                    &commit_sha,
-                )
+        if !workspace.branch_exists {
+            self.runner
+                .run("git", &["checkout", "-b", &workspace.branch], work_dir)
                 .await?;
             workspace.branch_exists = true;
         }
+
+        if has_changes {
+            for (path, file) in &workspace.files {
+                if file.original_content.as_deref() == Some(file.current_content.as_str()) {
+                    continue;
+                }
+                let full_path = work_dir.join(path);
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| KnowledgeToolError::RequestFailed(e.to_string()))?;
+                }
+                std::fs::write(&full_path, &file.current_content)
+                    .map_err(|e| KnowledgeToolError::RequestFailed(e.to_string()))?;
+            }
+
+            self.runner
+                .run("git", &["add", "-A"], work_dir)
+                .await?;
+            self.runner
+                .run(
+                    "git",
+                    &[
+                        "-c",
+                        "user.name=argus[bot]",
+                        "-c",
+                        "user.email=argus[bot]@users.noreply.github.com",
+                        "commit",
+                        "-m",
+                        commit_message,
+                    ],
+                    work_dir,
+                )
+                .await?;
+        }
+
+        self.runner
+            .run("git", &["push", "origin", &workspace.branch], work_dir)
+            .await?;
+
+        let commit_sha = self
+            .runner
+            .run("git", &["rev-parse", "HEAD"], work_dir)
+            .await?
+            .stdout
+            .trim()
+            .to_string();
+        let tree_sha = self
+            .runner
+            .run("git", &["rev-parse", "HEAD^{tree}"], work_dir)
+            .await?
+            .stdout
+            .trim()
+            .to_string();
 
         workspace.head_commit_sha = commit_sha.clone();
         workspace.head_tree_sha = tree_sha;
@@ -297,34 +363,72 @@ impl<T: GitHubTransport> GitPrExecutor for GitHubPrExecutor<T> {
         body: &str,
         draft: bool,
     ) -> Result<GitPrOutcome, KnowledgeToolError> {
-        let existing = self
-            .client
-            .list_pull_requests_for_head(
-                &workspace.owner,
-                &workspace.repo,
-                &workspace.owner,
-                &workspace.branch,
+        let repo_flag = format!("{}/{}", workspace.owner, workspace.repo);
+        let list_output = self
+            .runner
+            .run(
+                "gh",
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    &repo_flag,
+                    "--head",
+                    &workspace.branch,
+                    "--state",
+                    "open",
+                    "--json",
+                    "url",
+                    "--limit",
+                    "1",
+                ],
+                Path::new("."),
             )
             .await?;
-        if let Some(existing_pr) = existing.first() {
+
+        let urls: Vec<serde_json::Value> = serde_json::from_str(list_output.stdout.trim())
+            .unwrap_or_default();
+        if let Some(url_val) = urls.first().and_then(|v| v.get("url"))
+            && let Some(pr_url) = url_val.as_str()
+        {
             return Ok(GitPrOutcome {
-                pr_url: existing_pr.html_url.clone(),
+                pr_url: pr_url.to_string(),
                 reused_existing: true,
             });
         }
 
-        let pr_url = self
-            .client
-            .create_pull_request(
-                &workspace.owner,
-                &workspace.repo,
-                &workspace.base_ref,
-                &workspace.branch,
-                title,
-                body,
-                draft,
-            )
+        let mut pr_args = vec![
+            "pr".to_string(),
+            "create".to_string(),
+            "--repo".to_string(),
+            repo_flag.clone(),
+            "--base".to_string(),
+            workspace.base_ref.clone(),
+            "--head".to_string(),
+            workspace.branch.clone(),
+            "--title".to_string(),
+            title.to_string(),
+            "--body".to_string(),
+            body.to_string(),
+        ];
+        if draft {
+            pr_args.push("--draft".to_string());
+        }
+
+        let args_strs: Vec<&str> = pr_args.iter().map(String::as_str).collect();
+        let create_output = self
+            .runner
+            .run("gh", &args_strs, Path::new("."))
             .await?;
+
+        let pr_url = create_output
+            .stdout
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_string();
+
         Ok(GitPrOutcome {
             pr_url,
             reused_existing: false,
@@ -332,7 +436,7 @@ impl<T: GitHubTransport> GitPrExecutor for GitHubPrExecutor<T> {
     }
 }
 
-pub struct KnowledgePrService<E = GitHubPrExecutor<ReqwestGitHubTransport>> {
+pub struct KnowledgePrService<E = CliPrExecutor<RealCliRunner>> {
     executor: E,
 }
 
@@ -344,16 +448,16 @@ pub trait KnowledgePrRuntime: Send + Sync {
     ) -> Result<KnowledgeCreatePrResult, KnowledgeToolError>;
 }
 
-impl Default for KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>> {
+impl Default for KnowledgePrService<CliPrExecutor<RealCliRunner>> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>> {
+impl KnowledgePrService<CliPrExecutor<RealCliRunner>> {
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_executor(GitHubPrExecutor::new())
+        Self::new_with_executor(CliPrExecutor::new())
     }
 }
 
@@ -592,13 +696,6 @@ fn validate_workspace_path(
     }
 
     Ok(())
-}
-
-fn normalized_blob_mode(mode: Option<&str>) -> String {
-    match mode {
-        Some("100755") => "100755".to_string(),
-        _ => "100644".to_string(),
-    }
 }
 
 fn parse_target_repo(target_repo: &str) -> Result<(String, String), KnowledgeToolError> {

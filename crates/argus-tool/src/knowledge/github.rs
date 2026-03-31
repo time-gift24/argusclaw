@@ -3,7 +3,6 @@ use base64::Engine;
 use dashmap::DashMap;
 use serde::Deserialize;
 use serde_json::Value;
-use url::Url;
 
 use super::error::KnowledgeToolError;
 use super::manifest::{DEFAULT_MANIFEST_PATHS, RepositoryManifest};
@@ -15,7 +14,6 @@ use super::{KnowledgeBackend, KnowledgeRepoDescriptor};
 pub enum GitHubApiMethod {
     Get,
     Post,
-    Patch,
 }
 
 #[async_trait]
@@ -33,11 +31,6 @@ pub trait GitHubTransport: Send + Sync {
 
     async fn post_json(&self, url: &str, body: Value) -> Result<Value, KnowledgeToolError> {
         self.request_json(GitHubApiMethod::Post, url, Some(body))
-            .await
-    }
-
-    async fn patch_json(&self, url: &str, body: Value) -> Result<Value, KnowledgeToolError> {
-        self.request_json(GitHubApiMethod::Patch, url, Some(body))
             .await
     }
 }
@@ -92,7 +85,6 @@ impl GitHubTransport for ReqwestGitHubTransport {
         let mut request = match method {
             GitHubApiMethod::Get => self.client.get(url),
             GitHubApiMethod::Post => self.client.post(url),
-            GitHubApiMethod::Patch => self.client.patch(url),
         }
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .header(reqwest::header::USER_AGENT, "argus-tool/knowledge");
@@ -274,201 +266,12 @@ impl<T: GitHubTransport> GitHubKnowledgeClient<T> {
             text,
         })
     }
-
-    pub async fn create_blob(
-        &self,
-        owner: &str,
-        repo: &str,
-        content: &str,
-    ) -> Result<String, KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/blobs");
-        let value = self
-            .transport
-            .post_json(
-                &url,
-                serde_json::json!({
-                    "content": content,
-                    "encoding": "utf-8"
-                }),
-            )
-            .await?;
-        check_api_error(&value)?;
-
-        let response: GitHubShaResponse = serde_json::from_value(value)
-            .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))?;
-        Ok(response.sha)
-    }
-
-    pub async fn create_tree(
-        &self,
-        owner: &str,
-        repo: &str,
-        base_tree: &str,
-        entries: &[GitHubTreeWrite],
-    ) -> Result<String, KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/trees");
-        let value = self
-            .transport
-            .post_json(
-                &url,
-                serde_json::json!({
-                    "base_tree": base_tree,
-                    "tree": entries.iter().map(|entry| serde_json::json!({
-                        "path": entry.path,
-                        "mode": entry.mode,
-                        "type": "blob",
-                        "sha": entry.sha
-                    })).collect::<Vec<_>>()
-                }),
-            )
-            .await?;
-        check_api_error(&value)?;
-
-        let response: GitHubShaResponse = serde_json::from_value(value)
-            .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))?;
-        Ok(response.sha)
-    }
-
-    pub async fn create_commit(
-        &self,
-        owner: &str,
-        repo: &str,
-        message: &str,
-        tree_sha: &str,
-        parents: &[String],
-    ) -> Result<String, KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/commits");
-        let value = self
-            .transport
-            .post_json(
-                &url,
-                serde_json::json!({
-                    "message": message,
-                    "tree": tree_sha,
-                    "parents": parents
-                }),
-            )
-            .await?;
-        check_api_error(&value)?;
-
-        let response: GitHubShaResponse = serde_json::from_value(value)
-            .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))?;
-        Ok(response.sha)
-    }
-
-    pub async fn create_ref(
-        &self,
-        owner: &str,
-        repo: &str,
-        branch: &str,
-        sha: &str,
-    ) -> Result<(), KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/refs");
-        let value = self
-            .transport
-            .post_json(
-                &url,
-                serde_json::json!({
-                    "ref": format!("refs/heads/{branch}"),
-                    "sha": sha
-                }),
-            )
-            .await?;
-        check_api_error(&value)?;
-        Ok(())
-    }
-
-    pub async fn update_ref(
-        &self,
-        owner: &str,
-        repo: &str,
-        branch: &str,
-        sha: &str,
-    ) -> Result<(), KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch}");
-        let value = self
-            .transport
-            .patch_json(
-                &url,
-                serde_json::json!({
-                    "sha": sha,
-                    "force": false
-                }),
-            )
-            .await?;
-        check_api_error(&value)?;
-        Ok(())
-    }
-
-    pub async fn list_pull_requests_for_head(
-        &self,
-        owner: &str,
-        repo: &str,
-        head_owner: &str,
-        branch: &str,
-    ) -> Result<Vec<GitHubPullRequest>, KnowledgeToolError> {
-        let mut url = Url::parse(&format!(
-            "https://api.github.com/repos/{owner}/{repo}/pulls"
-        ))
-        .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))?;
-        url.query_pairs_mut()
-            .append_pair("state", "open")
-            .append_pair("head", &format!("{head_owner}:{branch}"));
-
-        let value = self.transport.get_json(url.as_str()).await?;
-        check_api_error(&value)?;
-        serde_json::from_value(value)
-            .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))
-    }
-
-    pub async fn create_pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        base_ref: &str,
-        branch: &str,
-        title: &str,
-        body: &str,
-        draft: bool,
-    ) -> Result<String, KnowledgeToolError> {
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls");
-        let value = self
-            .transport
-            .post_json(
-                &url,
-                serde_json::json!({
-                    "title": title,
-                    "body": body,
-                    "base": base_ref,
-                    "head": branch,
-                    "draft": draft
-                }),
-            )
-            .await?;
-        check_api_error(&value)?;
-
-        let response: GitHubPullRequest = serde_json::from_value(value)
-            .map_err(|err| KnowledgeToolError::unexpected_response(err.to_string()))?;
-        Ok(response.html_url)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubCommit {
     pub sha: String,
     pub tree_sha: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitHubTreeWrite {
-    pub path: String,
-    pub mode: String,
-    pub sha: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct GitHubPullRequest {
-    pub html_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -687,9 +490,4 @@ struct GitHubBlobResponse {
     sha: String,
     content: String,
     encoding: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubShaResponse {
-    sha: String,
 }

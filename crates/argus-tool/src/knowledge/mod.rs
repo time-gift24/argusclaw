@@ -1,4 +1,5 @@
 mod cache;
+mod cli;
 mod error;
 mod github;
 mod indexer;
@@ -11,10 +12,11 @@ mod registry;
 mod tool;
 
 pub use cache::SnapshotCache;
+pub use cli::{CliOutput, CliRunner, RealCliRunner};
 pub use error::KnowledgeToolError;
 pub use github::{
     GitHubApiMethod, GitHubCommit, GitHubKnowledgeBackend, GitHubKnowledgeClient,
-    GitHubPullRequest, GitHubTransport, GitHubTreeWrite, ReqwestGitHubTransport,
+    GitHubTransport, ReqwestGitHubTransport,
 };
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
@@ -28,7 +30,7 @@ pub use models::{
     KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
 pub use pr::{
-    GitHubPrExecutor, GitPrExecutor, GitPrOutcome, KnowledgePrRemoteEntry, KnowledgePrRuntime,
+    CliPrExecutor, GitPrExecutor, GitPrOutcome, KnowledgePrRemoteEntry, KnowledgePrRuntime,
     KnowledgePrService, KnowledgePrWorkspace, KnowledgePrWorkspaceFile, merge_manifest,
     serialize_manifest, validate_repo_relative_path,
 };

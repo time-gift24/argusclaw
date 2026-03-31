@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use argus_protocol::ids::ThreadId;
 use argus_protocol::{NamedTool, ToolExecutionContext};
 use argus_tool::knowledge::{
-    DefaultKnowledgeRuntime, GitHubApiMethod, GitHubBlob, GitHubPrExecutor, GitHubSnapshot,
-    GitHubTransport, GitHubTree, GitHubTreeEntryKind, GitPrExecutor, GitPrOutcome,
+    DefaultKnowledgeRuntime, GitHubBlob, GitHubSnapshot, GitHubTree, GitHubTreeEntryKind,
+    GitPrExecutor, GitPrOutcome,
     KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult, KnowledgeManifestFilePatch,
     KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
     KnowledgeManifestRepoPatch, KnowledgePrRemoteEntry, KnowledgePrRuntime, KnowledgePrService,
@@ -145,52 +145,6 @@ fn sample_create_pr_args() -> KnowledgeCreatePrArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RecordedGitHubRequest {
-    method: GitHubApiMethod,
-    url: String,
-    body: Option<serde_json::Value>,
-}
-
-#[derive(Clone, Default)]
-struct RecordingGitHubTransport {
-    requests: Arc<Mutex<Vec<RecordedGitHubRequest>>>,
-    responses: Arc<Mutex<VecDeque<Result<serde_json::Value, KnowledgeToolError>>>>,
-}
-
-impl RecordingGitHubTransport {
-    fn with_responses(responses: Vec<Result<serde_json::Value, KnowledgeToolError>>) -> Self {
-        Self {
-            requests: Arc::new(Mutex::new(Vec::new())),
-            responses: Arc::new(Mutex::new(VecDeque::from(responses))),
-        }
-    }
-}
-
-#[async_trait]
-impl GitHubTransport for RecordingGitHubTransport {
-    async fn request_json(
-        &self,
-        method: GitHubApiMethod,
-        url: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value, KnowledgeToolError> {
-        self.requests
-            .lock()
-            .expect("requests should lock")
-            .push(RecordedGitHubRequest {
-                method,
-                url: url.to_string(),
-                body,
-            });
-        self.responses
-            .lock()
-            .expect("responses should lock")
-            .pop_front()
-            .expect("response should exist")
-    }
-}
-
 #[derive(Debug, Default)]
 struct FakeExecutorState {
     calls: Vec<String>,
@@ -246,6 +200,7 @@ impl FakeGitPrExecutor {
             head_tree_sha: "tree-sha".to_string(),
             files,
             remote_entries: HashMap::new(),
+            work_dir: None,
         }
     }
 
@@ -448,6 +403,7 @@ impl GitPrExecutor for SymlinkSeedExecutor {
                     kind: GitHubTreeEntryKind::Blob,
                 },
             )]),
+            work_dir: None,
         })
     }
 
@@ -912,137 +868,3 @@ async fn executor_reuses_existing_pr() {
     assert!(result.summary.contains("Updated existing PR"));
 }
 
-#[tokio::test]
-async fn github_executor_uses_http_api_to_create_branch_commit_and_pr() {
-    let transport = RecordingGitHubTransport::with_responses(vec![
-        Ok(serde_json::json!({"object": {"sha": "base-sha"}})),
-        Err(KnowledgeToolError::NotFound("branch missing".to_string())),
-        Ok(serde_json::json!({"sha": "base-sha", "tree": {"sha": "base-tree-sha"}})),
-        Ok(serde_json::json!({"tree": []})),
-        Ok(serde_json::json!({"sha": "manifest-blob-sha"})),
-        Ok(serde_json::json!({"sha": "doc-blob-sha"})),
-        Ok(serde_json::json!({"sha": "new-tree-sha"})),
-        Ok(serde_json::json!({"sha": "new-commit-sha"})),
-        Ok(serde_json::json!({"ref": "refs/heads/codex/knowledge-bootstrap"})),
-        Ok(serde_json::json!([])),
-        Ok(serde_json::json!({"html_url": "https://example.com/pr/42"})),
-    ]);
-    let requests = transport.requests.clone();
-    let service =
-        KnowledgePrService::new_with_executor(GitHubPrExecutor::new_for_test(transport, "token"));
-
-    let result = service.create_pr(&sample_create_pr_args()).await.unwrap();
-
-    assert_eq!(result.commit_sha, "new-commit-sha");
-    assert_eq!(result.pr_url, "https://example.com/pr/42");
-
-    let requests = requests.lock().expect("requests should lock");
-    assert_eq!(requests[0].method, GitHubApiMethod::Get);
-    assert!(
-        requests[0]
-            .url
-            .ends_with("/repos/acme/docs/git/ref/heads/main")
-    );
-    assert_eq!(requests[1].method, GitHubApiMethod::Get);
-    assert!(
-        requests[1]
-            .url
-            .ends_with("/repos/acme/docs/git/ref/heads/codex/knowledge-bootstrap")
-    );
-    assert_eq!(requests[4].method, GitHubApiMethod::Post);
-    assert!(requests[4].url.ends_with("/repos/acme/docs/git/blobs"));
-    assert_eq!(
-        requests[6].body,
-        Some(serde_json::json!({
-            "base_tree": "base-tree-sha",
-            "tree": [
-                {
-                    "path": ".knowledge/repo.json",
-                    "mode": "100644",
-                    "type": "blob",
-                    "sha": "manifest-blob-sha"
-                },
-                {
-                    "path": "docs/knowledge/README.md",
-                    "mode": "100644",
-                    "type": "blob",
-                    "sha": "doc-blob-sha"
-                }
-            ]
-        }))
-    );
-    assert_eq!(
-        requests[10].body,
-        Some(serde_json::json!({
-            "title": "Bootstrap knowledge docs",
-            "body": "Adds knowledge docs and manifest.",
-            "base": "main",
-            "head": "codex/knowledge-bootstrap",
-            "draft": true
-        }))
-    );
-}
-
-#[tokio::test]
-async fn github_executor_reuses_existing_pr_and_updates_branch_ref() {
-    let transport = RecordingGitHubTransport::with_responses(vec![
-        Ok(serde_json::json!({"object": {"sha": "base-sha"}})),
-        Ok(serde_json::json!({"object": {"sha": "branch-sha"}})),
-        Ok(serde_json::json!({"sha": "branch-sha", "tree": {"sha": "branch-tree-sha"}})),
-        Ok(serde_json::json!({
-            "tree": [
-                {
-                    "path": "docs/knowledge/README.md",
-                    "sha": "existing-doc-sha",
-                    "mode": "100644",
-                    "type": "blob"
-                }
-            ]
-        })),
-        Ok(
-            serde_json::json!({"sha": "existing-doc-sha", "content": "IyBPbGQK", "encoding": "base64"}),
-        ),
-        Ok(serde_json::json!({"sha": "manifest-blob-sha"})),
-        Ok(serde_json::json!({"sha": "doc-blob-sha"})),
-        Ok(serde_json::json!({"sha": "new-tree-sha"})),
-        Ok(serde_json::json!({"sha": "new-commit-sha"})),
-        Ok(serde_json::json!({"ref": "refs/heads/codex/knowledge-bootstrap"})),
-        Ok(serde_json::json!([
-            {"html_url": "https://example.com/pr/existing"}
-        ])),
-    ]);
-    let requests = transport.requests.clone();
-    let service =
-        KnowledgePrService::new_with_executor(GitHubPrExecutor::new_for_test(transport, "token"));
-
-    let result = service.create_pr(&sample_create_pr_args()).await.unwrap();
-
-    assert_eq!(result.pr_url, "https://example.com/pr/existing");
-    assert!(result.summary.contains("Updated existing PR"));
-
-    let requests = requests.lock().expect("requests should lock");
-    assert!(requests.iter().any(|request| {
-        request.method == GitHubApiMethod::Patch
-            && request
-                .url
-                .ends_with("/repos/acme/docs/git/refs/heads/codex/knowledge-bootstrap")
-    }));
-    assert!(!requests.iter().any(|request| {
-        request.method == GitHubApiMethod::Post && request.url.ends_with("/repos/acme/docs/pulls")
-    }));
-}
-
-#[tokio::test]
-async fn github_executor_requires_github_token_for_create_pr() {
-    let service = KnowledgePrService::new_with_executor(GitHubPrExecutor::new_for_test(
-        RecordingGitHubTransport::default(),
-        "",
-    ));
-
-    let err = service
-        .create_pr(&sample_create_pr_args())
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("GITHUB_TOKEN"));
-}

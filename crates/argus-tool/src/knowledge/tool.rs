@@ -15,7 +15,8 @@ use super::models::{
     KnowledgeCreatePrResult, KnowledgeNode, KnowledgeNodeKind, KnowledgeRepoDescriptor,
     KnowledgeToolArgs,
 };
-use super::pr::{GitHubPrExecutor, KnowledgePrRuntime, KnowledgePrService};
+use super::pr::{CliPrExecutor, KnowledgePrRuntime, KnowledgePrService};
+use super::cli::RealCliRunner;
 use super::registry::KnowledgeRepoRegistry;
 
 #[async_trait]
@@ -42,7 +43,7 @@ pub trait KnowledgeRuntimeBackend: KnowledgeBackend {
 
 pub struct DefaultKnowledgeRuntime<
     B = GitHubKnowledgeBackend<ReqwestGitHubTransport>,
-    P = KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+    P = KnowledgePrService<CliPrExecutor<RealCliRunner>>,
 > {
     backend: Arc<B>,
     indexer: KnowledgeIndexer<Arc<B>>,
@@ -52,7 +53,7 @@ pub struct DefaultKnowledgeRuntime<
 impl
     DefaultKnowledgeRuntime<
         GitHubKnowledgeBackend<ReqwestGitHubTransport>,
-        KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+        KnowledgePrService<CliPrExecutor<RealCliRunner>>,
     >
 {
     #[must_use]
@@ -68,7 +69,7 @@ impl
 }
 
 impl<B: KnowledgeRuntimeBackend + 'static>
-    DefaultKnowledgeRuntime<B, KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>>
+    DefaultKnowledgeRuntime<B, KnowledgePrService<CliPrExecutor<RealCliRunner>>>
 {
     #[must_use]
     pub fn new_for_test(backend: B) -> Self {
@@ -233,7 +234,7 @@ impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static>
 impl Default
     for DefaultKnowledgeRuntime<
         GitHubKnowledgeBackend<ReqwestGitHubTransport>,
-        KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+        KnowledgePrService<CliPrExecutor<RealCliRunner>>,
     >
 {
     fn default() -> Self {
