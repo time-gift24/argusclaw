@@ -21,7 +21,8 @@ use super::models::{
     CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, OpenedSession, PageMetadata,
 };
 use super::session::{
-    BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
+    BrowserSession, ChromeDriverProcess, ChromeSession, ManagedWebDriverSession,
+    shutdown_child_process,
 };
 
 pub struct BackendOpenResult {
@@ -150,7 +151,7 @@ impl ChromeManager {
 
     #[must_use]
     pub fn new_production(paths: ChromePaths) -> Self {
-        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
+        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost::default());
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
         let managed_support = Some(ManagedChromeSupport {
@@ -172,7 +173,7 @@ impl ChromeManager {
 
     #[must_use]
     pub fn new_interactive_production(paths: ChromePaths) -> Self {
-        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
+        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost::default());
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
         let managed_support = Some(ManagedChromeSupport {
@@ -373,6 +374,29 @@ impl ChromeManager {
             .await
     }
 
+    pub async fn navigate(
+        &self,
+        session_id: &str,
+        url: &str,
+    ) -> Result<OpenedSession, ChromeToolError> {
+        let metadata = self
+            .session_interaction(session_id)
+            .await?
+            .navigate(url)
+            .await?;
+
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.update_metadata(metadata.clone());
+        }
+
+        Ok(OpenedSession {
+            session_id: session_id.to_string(),
+            final_url: metadata.final_url,
+            page_title: metadata.page_title,
+        })
+    }
+
     pub async fn get_cookies(
         &self,
         session_id: &str,
@@ -460,8 +484,18 @@ impl Drop for ChromeManager {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct SystemChromeHost;
+#[derive(Debug)]
+pub struct SystemChromeHost {
+    driver_process: RwLock<Option<Arc<ChromeDriverProcess>>>,
+}
+
+impl Default for SystemChromeHost {
+    fn default() -> Self {
+        Self {
+            driver_process: RwLock::new(None),
+        }
+    }
+}
 
 #[async_trait]
 impl ChromeHost for SystemChromeHost {
@@ -483,8 +517,68 @@ impl ChromeHost for SystemChromeHost {
         driver_binary: &Path,
         session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError> {
+        let process = self.ensure_driver_process(driver_binary).await?;
+        let server_url = process.server_url();
+
+        let capabilities =
+            build_chrome_capabilities(browser_binary, browser_version, session_mode)?;
+
+        let driver = match WebDriver::new(&server_url, capabilities).await {
+            Ok(driver) => driver,
+            Err(err) => {
+                return Err(ChromeToolError::DriverStartFailed {
+                    reason: err.to_string(),
+                });
+            }
+        };
+
+        if let Err(err) = driver.goto(url).await {
+            let _ = driver.clone().quit().await;
+            return Err(ChromeToolError::NavigationFailed {
+                url: url.to_string(),
+                reason: err.to_string(),
+            });
+        }
+        let final_url = driver
+            .current_url()
+            .await
+            .map(|u| u.to_string())
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+        let page_title = driver
+            .title()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+
+        let session: Arc<dyn BrowserSession> = Arc::new(ManagedWebDriverSession::new(driver));
+        Ok(BackendOpenResult {
+            metadata: PageMetadata {
+                final_url,
+                page_title,
+            },
+            session,
+        })
+    }
+}
+
+impl SystemChromeHost {
+    async fn ensure_driver_process(
+        &self,
+        driver_binary: &Path,
+    ) -> Result<Arc<ChromeDriverProcess>, ChromeToolError> {
+        {
+            let guard = self.driver_process.read().await;
+            if let Some(process) = guard.as_ref()
+                && process.is_alive().await
+            {
+                return Ok(Arc::clone(process));
+            }
+        }
+
         let port = reserve_free_port()?;
-        let server_url = format!("http://127.0.0.1:{port}");
         let mut child = Command::new(driver_binary)
             .arg(format!("--port={port}"))
             .stdout(Stdio::null())
@@ -499,57 +593,9 @@ impl ChromeHost for SystemChromeHost {
             return Err(err);
         }
 
-        let capabilities =
-            build_chrome_capabilities(browser_binary, browser_version, session_mode)?;
-
-        let driver = match WebDriver::new(&server_url, capabilities).await {
-            Ok(driver) => driver,
-            Err(err) => {
-                let _ = shutdown_child_process(&mut child).await;
-                return Err(ChromeToolError::DriverStartFailed {
-                    reason: err.to_string(),
-                });
-            }
-        };
-
-        if let Err(err) = driver.goto(url).await {
-            let _ = driver.clone().quit().await;
-            let _ = shutdown_child_process(&mut child).await;
-            return Err(ChromeToolError::NavigationFailed {
-                url: url.to_string(),
-                reason: err.to_string(),
-            });
-        }
-        let final_url = match driver.current_url().await {
-            Ok(value) => value.to_string(),
-            Err(err) => {
-                let _ = driver.clone().quit().await;
-                let _ = shutdown_child_process(&mut child).await;
-                return Err(ChromeToolError::PageReadFailed {
-                    reason: err.to_string(),
-                });
-            }
-        };
-        let page_title = match driver.title().await {
-            Ok(value) => value,
-            Err(err) => {
-                let _ = driver.clone().quit().await;
-                let _ = shutdown_child_process(&mut child).await;
-                return Err(ChromeToolError::PageReadFailed {
-                    reason: err.to_string(),
-                });
-            }
-        };
-
-        let session: Arc<dyn BrowserSession> =
-            Arc::new(ManagedWebDriverSession::new(driver, child));
-        Ok(BackendOpenResult {
-            metadata: PageMetadata {
-                final_url,
-                page_title,
-            },
-            session,
-        })
+        let process = Arc::new(ChromeDriverProcess::new(child, port));
+        *self.driver_process.write().await = Some(Arc::clone(&process));
+        Ok(process)
     }
 }
 
@@ -980,6 +1026,13 @@ mod tests {
 
         async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
             Ok(self.cookies.clone())
+        }
+
+        async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+            Ok(PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Navigated to {url}"),
+            })
         }
     }
 

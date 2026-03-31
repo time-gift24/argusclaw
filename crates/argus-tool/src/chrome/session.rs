@@ -12,7 +12,7 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use super::error::ChromeToolError;
-use super::models::{CookieSummary, LinkSummary, NetworkRequestSummary};
+use super::models::{CookieSummary, LinkSummary, NetworkRequestSummary, PageMetadata};
 
 #[async_trait]
 pub trait BrowserSession: Send + Sync {
@@ -27,6 +27,7 @@ pub trait BrowserSession: Send + Sync {
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
     async fn current_url(&self) -> Result<String, ChromeToolError>;
     async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError>;
+    async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError>;
 }
 
 #[derive(Clone)]
@@ -67,11 +68,53 @@ impl ChromeSession {
     pub fn interaction(&self) -> Arc<dyn BrowserSession> {
         Arc::clone(&self.interaction)
     }
+
+    pub fn update_metadata(&mut self, metadata: PageMetadata) {
+        self.current_url = metadata.final_url;
+        self.page_title = metadata.page_title;
+    }
+}
+
+pub(crate) struct ChromeDriverProcess {
+    child: Mutex<Option<Child>>,
+    port: u16,
+}
+
+impl fmt::Debug for ChromeDriverProcess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChromeDriverProcess")
+            .field("port", &self.port)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChromeDriverProcess {
+    #[must_use]
+    pub(crate) fn new(child: Child, port: u16) -> Self {
+        Self {
+            child: Mutex::new(Some(child)),
+            port,
+        }
+    }
+
+    pub(crate) fn server_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub(crate) async fn is_alive(&self) -> bool {
+        let mut guard = self.child.lock().await;
+        match guard.as_mut() {
+            None => false,
+            Some(child) => child
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false),
+        }
+    }
 }
 
 pub struct ManagedWebDriverSession {
     driver: Mutex<Option<WebDriver>>,
-    driver_process: Mutex<Option<Child>>,
     network_requests: Mutex<NetworkRequestTracker>,
 }
 
@@ -84,10 +127,9 @@ impl fmt::Debug for ManagedWebDriverSession {
 
 impl ManagedWebDriverSession {
     #[must_use]
-    pub fn new(driver: WebDriver, driver_process: Child) -> Self {
+    pub fn new(driver: WebDriver) -> Self {
         Self {
             driver: Mutex::new(Some(driver)),
-            driver_process: Mutex::new(Some(driver_process)),
             network_requests: Mutex::new(NetworkRequestTracker::default()),
         }
     }
@@ -446,35 +488,39 @@ impl BrowserSession for ManagedWebDriverSession {
             .collect())
     }
 
-    async fn shutdown(&self) -> Result<(), ChromeToolError> {
-        let driver_error = if let Some(driver) = self.driver.lock().await.take() {
-            driver
-                .quit()
-                .await
-                .err()
-                .map(|e| ChromeToolError::SessionShutdownFailed {
-                    reason: e.to_string(),
-                })
-        } else {
-            None
-        };
-
-        let mut child_guard = self.driver_process.lock().await;
-        let (result, child_closed) = finalize_shutdown(driver_error, child_guard.as_mut()).await;
-        if child_closed {
-            child_guard.take();
-        }
-        result
+    async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+        let driver = self.live_driver().await?;
+        driver
+            .goto(url)
+            .await
+            .map_err(|e| ChromeToolError::NavigationFailed {
+                url: url.to_string(),
+                reason: e.to_string(),
+            })?;
+        let final_url = driver
+            .current_url()
+            .await
+            .map(|u| u.to_string())
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+        let page_title = driver
+            .title()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+        Ok(PageMetadata {
+            final_url,
+            page_title,
+        })
     }
-}
 
-impl Drop for ManagedWebDriverSession {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = self.driver_process.try_lock()
-            && let Some(child) = guard.as_mut()
-        {
-            let _ = child.start_kill();
+    async fn shutdown(&self) -> Result<(), ChromeToolError> {
+        if let Some(driver) = self.driver.lock().await.take() {
+            let _ = driver.quit().await;
         }
+        Ok(())
     }
 }
 
@@ -501,56 +547,12 @@ pub(crate) async fn shutdown_child_process(child: &mut Child) -> Result<(), Chro
     }
 }
 
-async fn finalize_shutdown(
-    driver_error: Option<ChromeToolError>,
-    child: Option<&mut Child>,
-) -> (Result<(), ChromeToolError>, bool) {
-    let child_error = match child {
-        Some(child) => shutdown_child_process(child).await.err(),
-        None => None,
-    };
-    let child_closed = child_error.is_none();
-
-    (
-        merge_shutdown_errors(driver_error, child_error),
-        child_closed,
-    )
-}
-
-fn merge_shutdown_errors(
-    driver_error: Option<ChromeToolError>,
-    child_error: Option<ChromeToolError>,
-) -> Result<(), ChromeToolError> {
-    match (driver_error, child_error) {
-        (None, None) => Ok(()),
-        (Some(error), None) | (None, Some(error)) => Err(error),
-        (Some(driver_error), Some(child_error)) => Err(ChromeToolError::SessionShutdownFailed {
-            reason: format!(
-                "{}; child cleanup also failed: {}",
-                shutdown_error_reason(driver_error),
-                shutdown_error_reason(child_error)
-            ),
-        }),
-    }
-}
-
-fn shutdown_error_reason(error: ChromeToolError) -> String {
-    match error {
-        ChromeToolError::SessionShutdownFailed { reason } => reason,
-        other => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::process::Stdio;
-
     use serde_json::json;
-    use tokio::process::Command;
 
     use super::{
         ChromeToolError, NetworkRequestTracker, WebDriverLogEntry, apply_performance_log_entries,
-        finalize_shutdown,
     };
 
     #[test]
@@ -655,30 +657,5 @@ mod tests {
         assert_eq!(requests[1].url, "https://cdn.example.com/app.js");
         assert_eq!(requests[1].status, None);
         assert_eq!(requests[1].error.as_deref(), Some("net::ERR_ABORTED"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn finalize_shutdown_still_cleans_child_after_driver_quit_error() {
-        let mut child = Command::new("sleep")
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-
-        let (result, child_closed) = finalize_shutdown(
-            Some(ChromeToolError::SessionShutdownFailed {
-                reason: "driver quit failed".to_string(),
-            }),
-            Some(&mut child),
-        )
-        .await;
-
-        assert!(child_closed);
-        assert!(
-            matches!(result, Err(ChromeToolError::SessionShutdownFailed { reason }) if reason == "driver quit failed")
-        );
-        assert!(child.try_wait().unwrap().is_some());
     }
 }

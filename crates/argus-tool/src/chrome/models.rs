@@ -12,6 +12,7 @@ use super::error::ChromeToolError;
 pub enum ChromeAction {
     Install,
     Open,
+    Navigate,
     Wait,
     ExtractText,
     ListLinks,
@@ -29,6 +30,7 @@ impl ChromeAction {
         match self {
             Self::Install => "install",
             Self::Open => "open",
+            Self::Navigate => "navigate",
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
             Self::ListLinks => "list_links",
@@ -77,69 +79,10 @@ impl ChromeToolArgs {
                 validate_for_install(&args)?;
             }
             ChromeAction::Open => {
-                let url =
-                    args.url
-                        .as_deref()
-                        .ok_or_else(|| ChromeToolError::MissingRequiredField {
-                            action: args.action.as_str().to_string(),
-                            field: "url",
-                        })?;
-                if args.session_id.is_some()
-                    || args.selector.is_some()
-                    || args.timeout_ms.is_some()
-                    || args.max_requests.is_some()
-                {
-                    return Err(ChromeToolError::InvalidArguments {
-                        reason: format!(
-                            "only 'url' is allowed for action '{}'",
-                            args.action.as_str()
-                        ),
-                    });
-                }
-                let parsed = Url::parse(url).map_err(|e| ChromeToolError::InvalidArguments {
-                    reason: format!(
-                        "field 'url' is invalid for action '{}': {e}",
-                        args.action.as_str()
-                    ),
-                })?;
-                if !matches!(parsed.scheme(), "http" | "https") {
-                    return Err(ChromeToolError::InvalidArguments {
-                        reason: format!(
-                            "field 'url' is invalid for action '{}': scheme '{}' is not allowed",
-                            args.action.as_str(),
-                            parsed.scheme()
-                        ),
-                    });
-                }
-                let host = parsed
-                    .host_str()
-                    .ok_or_else(|| ChromeToolError::InvalidArguments {
-                        reason: format!(
-                            "field 'url' is invalid for action '{}': host is missing",
-                            args.action.as_str()
-                        ),
-                    })?;
-                if host.eq_ignore_ascii_case("localhost") {
-                    return Err(ChromeToolError::InvalidArguments {
-                        reason: format!(
-                            "field 'url' is invalid for action '{}': host '{}' is not allowed",
-                            args.action.as_str(),
-                            host
-                        ),
-                    });
-                }
-                if let Ok(ip) = host.parse::<IpAddr>()
-                    && (ip.is_unspecified() || is_blocked_ip(ip))
-                {
-                    return Err(ChromeToolError::InvalidArguments {
-                        reason: format!(
-                            "field 'url' is invalid for action '{}': host '{}' is not allowed",
-                            args.action.as_str(),
-                            host
-                        ),
-                    });
-                }
-                args.url = Some(url.to_string());
+                validate_for_open(&mut args)?;
+            }
+            ChromeAction::Navigate => {
+                validate_for_navigate(&mut args)?;
             }
             ChromeAction::Wait => {
                 require_session_id(&args)?;
@@ -253,6 +196,89 @@ fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
         });
     }
     Ok(())
+}
+
+fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| ChromeToolError::MissingRequiredField {
+            action: args.action.as_str().to_string(),
+            field: "url",
+        })?;
+    if args.session_id.is_some()
+        || args.selector.is_some()
+        || args.timeout_ms.is_some()
+        || args.max_requests.is_some()
+    {
+        return Err(ChromeToolError::InvalidArguments {
+            reason: format!(
+                "only 'url' is allowed for action '{}'",
+                args.action.as_str()
+            ),
+        });
+    }
+    let url = validate_url_for_action(args.action.as_str(), url)?;
+    args.url = Some(url);
+    Ok(())
+}
+
+fn validate_for_navigate(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_session_id(args)?;
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| ChromeToolError::MissingRequiredField {
+            action: args.action.as_str().to_string(),
+            field: "url",
+        })?;
+    if args.selector.is_some() || args.timeout_ms.is_some() || args.max_requests.is_some() {
+        return Err(ChromeToolError::InvalidArguments {
+            reason: format!(
+                "only 'session_id' and 'url' are allowed for action '{}'",
+                args.action.as_str()
+            ),
+        });
+    }
+    let url = validate_url_for_action(args.action.as_str(), url)?;
+    args.url = Some(url);
+    Ok(())
+}
+
+fn validate_url_for_action(action: &str, url: &str) -> Result<String, ChromeToolError> {
+    let parsed = Url::parse(url).map_err(|e| ChromeToolError::InvalidArguments {
+        reason: format!("field 'url' is invalid for action '{action}': {e}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ChromeToolError::InvalidArguments {
+            reason: format!(
+                "field 'url' is invalid for action '{action}': scheme '{}' is not allowed",
+                parsed.scheme()
+            ),
+        });
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ChromeToolError::InvalidArguments {
+            reason: format!("field 'url' is invalid for action '{action}': host is missing"),
+        })?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(ChromeToolError::InvalidArguments {
+            reason: format!(
+                "field 'url' is invalid for action '{action}': host '{host}' is not allowed"
+            ),
+        });
+    }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && (ip.is_unspecified() || is_blocked_ip(ip))
+    {
+        return Err(ChromeToolError::InvalidArguments {
+            reason: format!(
+                "field 'url' is invalid for action '{action}': host '{host}' is not allowed"
+            ),
+        });
+    }
+    Ok(url.to_string())
 }
 
 fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
