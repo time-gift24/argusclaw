@@ -1,0 +1,22 @@
+[package]
+name = "argus-web"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Web server frontend for ArgusWing"
+
+[dependencies]
+argus-wing = { path = "../argus-wing" }
+argus-protocol = { path = "../argus-protocol" }
+axum = { version = "0.8" }
+tower-http = { workspace = true }
+tokio = { workspace = true, features = ["signal", "net"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
