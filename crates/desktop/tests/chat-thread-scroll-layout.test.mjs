@@ -10,6 +10,10 @@ const layoutSource = readFileSync(
   new URL("../app/layout.tsx", import.meta.url),
   "utf8",
 );
+const dashboardShellSource = readFileSync(
+  new URL("../components/shadcn-studio/blocks/dashboard-shell-05/index.tsx", import.meta.url),
+  "utf8",
+);
 const globalsSource = readFileSync(
   new URL("../app/globals.css", import.meta.url),
   "utf8",
@@ -27,13 +31,17 @@ test("thread keeps the scroll-to-bottom control inside the assistant-ui viewport
   assert.ok(scrollButton < viewportClose, "scroll button should stay inside the viewport context");
   assert.match(threadSource, /aui-thread-root [^\"]*relative[^\"]*min-h-0/);
   assert.match(threadSource, /aui-thread-viewport [^\"]*min-h-0[^\"]*overflow-y-auto/);
-  assert.match(threadSource, /sticky bottom-24 z-40 mx-auto/);
+  assert.match(threadSource, /pointer-events-none sticky bottom-4 z-40 mx-auto/);
   assert.doesNotMatch(threadSource, /absolute bottom-24 left-1\/2 z-40/);
 });
 
 test("desktop layout constrains the chat surface to the Tauri window", () => {
   assert.match(layoutSource, /className=\"h-full antialiased font-sans\"/);
   assert.match(layoutSource, /<body className=\"flex h-dvh min-h-dvh flex-col overflow-hidden\">/);
-  assert.match(layoutSource, /<main className=\"flex min-h-0 flex-1 flex-col overflow-y-auto\">/);
+  assert.match(layoutSource, /<DashboardShell navigationItems=\{navigationItems\}>/);
+  assert.match(
+    dashboardShellSource,
+    /<main className="flex-1 relative flex flex-col min-h-0 overflow-hidden">/,
+  );
   assert.match(globalsSource, /html,\s*body\s*\{\s*height:\s*100%;/);
 });

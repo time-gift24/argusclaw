@@ -21,10 +21,9 @@ test("agent editor preview uses assistant-ui markdown parts directly", () => {
     /<MessagePrimitive\.Parts\s+components=\{\{\s*Text:\s*MarkdownText\s*\}\}\s*\/>/,
   );
   assert.match(agentEditorSource, /<MessageProvider\s+message=\{previewMessage\}\s+index=\{0\}\s+isLast>/);
-  assert.match(agentEditorSource, /text-foreground leading-relaxed/);
-  assert.match(agentEditorSource, /\[\&_\.aui-md-h3\]:text-sm/);
+  assert.match(agentEditorSource, /<TabsContent value="preview"/);
+  assert.match(agentEditorSource, /<div className="prose prose-sm dark:prose-invert max-w-none">/);
   assert.doesNotMatch(agentEditorSource, /from\s+"react-markdown"/);
-  assert.doesNotMatch(agentEditorSource, /\bprose\b/);
 });
 
 test("agent editor no longer uses the raw markdown preview helper", () => {

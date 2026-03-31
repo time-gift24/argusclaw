@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const editAgentPageSource = readFileSync(
-  new URL("../app/settings/agents/[id]/page.tsx", import.meta.url),
+  new URL("../app/settings/agents/edit/page.tsx", import.meta.url),
   "utf8",
 );
 
-test("dynamic agent settings page awaits Next 16 route params", () => {
-  assert.match(editAgentPageSource, /async function EditAgentPage/);
-  assert.match(editAgentPageSource, /params:\s*Promise<\{\s*id:\s*string\s*\}>/);
-  assert.match(editAgentPageSource, /const\s*\{\s*id\s*\}\s*=\s*await params/);
+test("static agent settings edit page reads the agent id from search params", () => {
+  assert.match(editAgentPageSource, /function EditAgentContent\(\)/);
+  assert.match(editAgentPageSource, /const searchParams = useSearchParams\(\)/);
+  assert.match(editAgentPageSource, /const id = searchParams\.get\("id"\)/);
+  assert.match(editAgentPageSource, /return id \? parseInt\(id, 10\) : undefined/);
+  assert.match(editAgentPageSource, /<AgentEditor agentId=\{agentId\} \/>/);
 });

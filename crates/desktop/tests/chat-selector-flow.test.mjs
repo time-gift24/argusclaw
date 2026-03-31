@@ -73,9 +73,15 @@ test("agent selector confirms before creating a new session for another agent", 
     /if \(activeSession && activeSession\.templateId !== templateId\)/,
   );
   assert.match(agentSelectorSource, /setPendingTemplateId\(templateId\)/);
+  assert.match(agentSelectorSource, /setConfirmOpen\(true\)/);
   assert.match(agentSelectorSource, /需要新建会话才能生效/);
+  assert.match(agentSelectorSource, /切换智能体需要新建会话/);
+  assert.match(agentSelectorSource, /继续当前会话/);
+  assert.match(agentSelectorSource, /新建会话/);
+  assert.match(agentSelectorSource, /useChatStore\.getState\(\)\.selectTemplate\(pendingTemplateId\)/);
   assert.match(agentSelectorSource, /void activateSession\(pendingTemplateId\)/);
-  assert.match(agentSelectorSource, /void selectTemplate\(activeSession\.templateId\)/);
+  assert.match(agentSelectorSource, /setPendingTemplateId\(null\)/);
+  assert.match(agentSelectorSource, /setConfirmOpen\(false\)/);
 });
 
 test("agent selector declares callback hooks before any empty-template early return", () => {
