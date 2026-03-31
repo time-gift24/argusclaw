@@ -115,6 +115,24 @@ impl ThreadEventEnvelope {
                 turn_number: None,
                 payload: ThreadEventPayload::Compacted { new_token_count },
             }),
+            ThreadEvent::CompactionStarted { thread_id } => Some(Self {
+                session_id,
+                thread_id,
+                turn_number: None,
+                payload: ThreadEventPayload::CompactionStarted,
+            }),
+            ThreadEvent::CompactionFinished { thread_id } => Some(Self {
+                session_id,
+                thread_id,
+                turn_number: None,
+                payload: ThreadEventPayload::CompactionFinished,
+            }),
+            ThreadEvent::CompactionFailed { thread_id, error } => Some(Self {
+                session_id,
+                thread_id,
+                turn_number: None,
+                payload: ThreadEventPayload::CompactionFailed { error },
+            }),
             ThreadEvent::WaitingForApproval {
                 thread_id,
                 turn_number,
@@ -269,6 +287,11 @@ pub enum ThreadEventPayload {
     Idle,
     Compacted {
         new_token_count: u32,
+    },
+    CompactionStarted,
+    CompactionFinished,
+    CompactionFailed {
+        error: String,
     },
     WaitingForApproval {
         request: serde_json::Value,

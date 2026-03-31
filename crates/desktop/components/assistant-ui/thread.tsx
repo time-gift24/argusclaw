@@ -20,6 +20,7 @@ import { useChatStore } from "@/lib/chat-store";
 import type { ChatStore } from "@/lib/chat-store";
 import { providers } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
+import type { ChatMessagePayload } from "@/lib/types/chat";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
@@ -63,6 +64,7 @@ import { useEffect, useRef } from "react";
 const ComposerAction: FC = () => {
   const session = useActiveChatSession();
   const isRunning = useAuiState(s => s.thread.isRunning);
+  const isCompacting = session?.status === "compacting";
   const aui = useAui();
 
   // Fetch context window
@@ -124,7 +126,7 @@ const ComposerAction: FC = () => {
           </Button>
         ) : (
           <ComposerPrimitive.Send asChild>
-            <TooltipIconButton tooltip="发送消息" side="top" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full shadow-lg shadow-primary/20 transition-all active:scale-95" aria-label="Send message">
+            <TooltipIconButton tooltip={isCompacting ? "上下文压缩中" : "发送消息"} side="top" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full shadow-lg shadow-primary/20 transition-all active:scale-95" aria-label="Send message" disabled={isCompacting}>
               <ArrowUpIcon className="aui-composer-send-icon size-4" />
             </TooltipIconButton>
           </ComposerPrimitive.Send>
@@ -135,6 +137,9 @@ const ComposerAction: FC = () => {
 };
 
 const Composer: FC = () => {
+  const session = useActiveChatSession();
+  const isCompacting = session?.status === "compacting";
+
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
       <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-[24px] border border-muted/60 bg-background/80 backdrop-blur-2xl px-1 pt-2 shadow-[0_8px_32px_0_rgba(0,0,0,0.15)] shadow-primary/10 transition-all duration-300 has-[textarea:focus-visible]:border-primary/40 has-[textarea:focus-visible]:ring-4 has-[textarea:focus-visible]:ring-primary/5 data-[dragging=true]:border-primary data-[dragging=true]:border-dashed data-[dragging=true]:bg-primary/5">
@@ -144,11 +149,79 @@ const Composer: FC = () => {
           className="aui-composer-input mb-1 max-h-48 min-h-14 w-full resize-none bg-transparent px-5 pt-3 pb-4 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/50 focus-visible:ring-0 custom-scrollbar"
           rows={1}
           autoFocus
+          disabled={isCompacting}
           aria-label="Message input"
         />
         <ComposerAction />
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
+  );
+};
+
+const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
+  !!message.metadata?.synthetic &&
+  !!message.metadata?.collapsed_by_default &&
+  [
+    "compaction_prompt",
+    "compaction_summary",
+    "compaction_replay",
+  ].includes(message.metadata.mode ?? "");
+
+const CompactionGroups: FC = () => {
+  const session = useActiveChatSession();
+  if (!session) return null;
+
+  const groups: ChatMessagePayload[][] = [];
+  let currentGroup: ChatMessagePayload[] = [];
+
+  for (const message of session.messages) {
+    if (isFoldedCompactionMessage(message)) {
+      currentGroup.push(message);
+      continue;
+    }
+
+    if (currentGroup.length > 0) {
+      groups.push(currentGroup);
+      currentGroup = [];
+    }
+  }
+
+  if (currentGroup.length > 0) {
+    groups.push(currentGroup);
+  }
+
+  if (groups.length === 0) return null;
+
+  return (
+    <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-col gap-3 px-4 py-2">
+      {groups.map((compactionGroup, index) => (
+        <details
+          key={`compaction-group-${index}`}
+          className="rounded-2xl border border-muted/40 bg-muted/20 px-4 py-3 text-sm"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-muted-foreground [&::-webkit-details-marker]:hidden">
+            <Sparkles className="size-4 text-primary/70" />
+            <span className="font-medium">已压缩上下文</span>
+            <ChevronDown className="ml-auto size-4 opacity-60" />
+          </summary>
+          <div className="mt-3 space-y-3 text-sm">
+            {compactionGroup.map((message, messageIndex) => (
+              <div
+                key={`compaction-item-${index}-${messageIndex}`}
+                className="rounded-xl border border-muted/40 bg-background/70 px-3 py-2"
+              >
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {message.role}
+                </div>
+                <div className="whitespace-pre-wrap leading-relaxed text-foreground/90">
+                  {message.content}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
+      ))}
+    </div>
   );
 };
 
@@ -722,6 +795,8 @@ const BranchPicker: FC<BranchPickerPrimitive.Root.Props> = ({
 };
 
 export const Thread: FC = () => {
+  const session = useActiveChatSession();
+
   return (
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container relative flex h-full min-h-0 w-full flex-1 flex-col bg-background overflow-hidden"
@@ -734,6 +809,8 @@ export const Thread: FC = () => {
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
+
+        {session && <CompactionGroups />}
 
         <ThreadPrimitive.Messages
           components={{

@@ -292,6 +292,23 @@ pub struct ChatMessagePayload {
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
     pub tool_calls: Option<Vec<argus_protocol::ToolCall>>,
+    pub metadata: Option<ChatMessageMetadataPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageMetadataModePayload {
+    CompactionPrompt,
+    CompactionSummary,
+    CompactionReplay,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessageMetadataPayload {
+    pub summary: bool,
+    pub mode: Option<ChatMessageMetadataModePayload>,
+    pub synthetic: bool,
+    pub collapsed_by_default: bool,
 }
 
 impl From<&ChatMessage> for ChatMessagePayload {
@@ -303,6 +320,25 @@ impl From<&ChatMessage> for ChatMessagePayload {
             tool_call_id: message.tool_call_id.clone(),
             name: message.name.clone(),
             tool_calls: message.tool_calls.clone(),
+            metadata: message
+                .metadata
+                .as_ref()
+                .map(|metadata| ChatMessageMetadataPayload {
+                    summary: metadata.summary,
+                    mode: metadata.mode.map(|mode| match mode {
+                        argus_protocol::llm::ChatMessageMetadataMode::CompactionPrompt => {
+                            ChatMessageMetadataModePayload::CompactionPrompt
+                        }
+                        argus_protocol::llm::ChatMessageMetadataMode::CompactionSummary => {
+                            ChatMessageMetadataModePayload::CompactionSummary
+                        }
+                        argus_protocol::llm::ChatMessageMetadataMode::CompactionReplay => {
+                            ChatMessageMetadataModePayload::CompactionReplay
+                        }
+                    }),
+                    synthetic: metadata.synthetic,
+                    collapsed_by_default: metadata.collapsed_by_default,
+                }),
         }
     }
 }
@@ -326,6 +362,7 @@ pub async fn create_chat_session(
     template_id: String,
     provider_preference_id: Option<String>,
     model: Option<String>,
+    compact_agent_id: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
     let template_id_i64: i64 = template_id
         .parse()
@@ -339,6 +376,14 @@ pub async fn create_chat_session(
                 .map_err(|e| format!("Invalid provider id: {}", e))
         })
         .transpose()?;
+    let compact_agent_id = compact_agent_id
+        .as_ref()
+        .map(|id| {
+            id.parse::<i64>()
+                .map(AgentId::new)
+                .map_err(|e| format!("Invalid compact agent id: {}", e))
+        })
+        .transpose()?;
 
     // Create a new session for this chat
     let session_id = wing.create_session("").await.map_err(|e| e.to_string())?;
@@ -350,6 +395,7 @@ pub async fn create_chat_session(
             AgentId::new(template_id_i64),
             provider_id,
             model.as_deref(),
+            compact_agent_id,
         )
         .await
         .map_err(|e| e.to_string())?;

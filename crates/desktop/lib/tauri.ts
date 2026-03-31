@@ -232,6 +232,16 @@ export interface ThreadSnapshotPayload {
     tool_call_id?: string | null;
     name?: string | null;
     tool_calls?: Array<{ id: string; name: string; arguments: unknown }> | null;
+    metadata?: {
+      summary: boolean;
+      mode?:
+        | "compaction_prompt"
+        | "compaction_summary"
+        | "compaction_replay"
+        | null;
+      synthetic: boolean;
+      collapsed_by_default: boolean;
+    } | null;
   }>;
   turn_count: number;
   token_count: number;
@@ -298,11 +308,13 @@ export const chat = {
     templateId: number,
     providerPreferenceId: number | null,
     model: string | null,
+    compactAgentId: number | null = null,
   ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
       templateId: templateId.toString(),
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
       model,
+      compactAgentId: compactAgentId?.toString() ?? null,
     }),
 
   activateExistingThread: (sessionId: string, threadId: string) =>

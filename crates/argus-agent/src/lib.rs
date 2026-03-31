@@ -62,6 +62,7 @@ pub mod plan_tool;
 mod runtime;
 pub mod thread;
 pub mod thread_handle;
+mod tokenizer;
 
 pub mod tool_context;
 pub mod trace;
@@ -85,12 +86,18 @@ pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)
 pub use command::ThreadRuntimeSnapshot;
-pub use compact::{CompactContext, Compactor, CompactorManager, KeepRecentCompactor};
+#[allow(deprecated)]
+pub use compact::{
+    CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
+};
 pub use config::ThreadConfig;
-pub use error::{CompactError, ThreadError};
+#[allow(deprecated)]
+pub use error::{CompactError, ThreadError, TokenizationError};
 pub use plan_store::FilePlanStore;
 pub use thread::{Thread, ThreadBuilder};
 pub use thread_handle::ThreadHandle;
+#[allow(deprecated)]
+pub use tokenizer::estimate_tokens;
 pub use types::{ThreadInfo, ThreadState};
 
 // Re-export hook types from argus-protocol for convenience

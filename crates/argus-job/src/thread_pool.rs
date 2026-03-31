@@ -175,6 +175,91 @@ impl std::fmt::Debug for ThreadPool {
 }
 
 impl ThreadPool {
+    async fn resolve_compact_agent_binding(
+        &self,
+        compact_agent_id: Option<AgentId>,
+    ) -> Result<
+        Option<(
+            Arc<argus_protocol::AgentRecord>,
+            Arc<dyn argus_protocol::LlmProvider>,
+        )>,
+        JobError,
+    > {
+        let Some(compact_agent_id) = compact_agent_id else {
+            return Ok(None);
+        };
+
+        let compact_agent_record = self
+            .template_manager
+            .get(compact_agent_id)
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!(
+                    "failed to load compact agent {}: {err}",
+                    compact_agent_id.inner()
+                ))
+            })?
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!(
+                    "compact agent {} not found",
+                    compact_agent_id.inner()
+                ))
+            })?;
+
+        let requested_model = compact_agent_record
+            .model_id
+            .clone()
+            .unwrap_or_else(|| format!("provider-{}", compact_agent_id.inner()));
+        let provider = if let Some(provider_id) = compact_agent_record.provider_id {
+            match compact_agent_record.model_id.as_deref() {
+                Some(model) => match self
+                    .provider_resolver
+                    .resolve_with_model(provider_id, model)
+                    .await
+                {
+                    Ok(provider) => Ok(provider),
+                    Err(_) => self.provider_resolver.resolve(provider_id).await,
+                },
+                None => self.provider_resolver.resolve(provider_id).await,
+            }
+        } else if let Some(model) = compact_agent_record.model_id.as_deref() {
+            if let Some(persistence) = &self.persistence {
+                match persistence
+                    .provider_repository
+                    .get_default_provider_id()
+                    .await
+                {
+                    Ok(Some(default_provider_id)) => match self
+                        .provider_resolver
+                        .resolve_with_model(
+                            ProviderId::new(default_provider_id.into_inner()),
+                            model,
+                        )
+                        .await
+                    {
+                        Ok(provider) => Ok(provider),
+                        Err(_) => self.provider_resolver.default_provider().await,
+                    },
+                    Ok(None) | Err(_) => self.provider_resolver.default_provider().await,
+                }
+            } else {
+                self.provider_resolver.default_provider().await
+            }
+        } else {
+            self.provider_resolver.default_provider().await
+        };
+
+        let provider = match provider {
+            Ok(provider) => provider,
+            Err(error) => Arc::new(UnavailableChatProvider::new(
+                requested_model,
+                format!("failed to resolve compact agent provider: {error}"),
+            )) as Arc<dyn argus_protocol::LlmProvider>,
+        };
+
+        Ok(Some((Arc::new(compact_agent_record), provider)))
+    }
+
     /// Create a new thread pool with a default runtime cap.
     pub fn new(
         template_manager: Arc<TemplateManager>,
@@ -1374,15 +1459,15 @@ impl ThreadPool {
         turn_config.on_turn_complete = Some(Self::build_on_turn_complete(
             self.chat_runtime_config.trace_dir.clone(),
         ));
+        let compact_agent_binding = self
+            .resolve_compact_agent_binding(thread_record.compact_agent_id)
+            .await?;
         let config = ThreadConfigBuilder::default()
+            .compact_agent_id(thread_record.compact_agent_id)
             .turn_config(turn_config)
             .build()
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        let plan_store = FilePlanStore::new(
-            self.chat_runtime_config.trace_dir.clone(),
-            &thread_id.inner().to_string(),
-        );
-        let thread = ThreadBuilder::new()
+        let mut thread_builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(session_id)
             .agent_record(Arc::new(agent_record))
@@ -1394,7 +1479,17 @@ impl ThreadPool {
                     .compactor_manager
                     .default_compactor()
                     .clone(),
-            )
+            );
+        if let Some((compact_agent_record, compact_agent_provider)) = compact_agent_binding {
+            thread_builder = thread_builder
+                .compact_agent_record(compact_agent_record)
+                .compact_agent_provider(compact_agent_provider);
+        }
+        let plan_store = FilePlanStore::new(
+            self.chat_runtime_config.trace_dir.clone(),
+            &thread_id.inner().to_string(),
+        );
+        let thread = thread_builder
             .plan_store(plan_store)
             .config(config)
             .build()
@@ -1758,6 +1853,7 @@ impl ThreadPool {
             turn_count: 0,
             session_id: None,
             template_id: Some(RepoAgentId::new(request.agent_id.inner())),
+            compact_agent_id: None,
             model_override: model_override.clone(),
             created_at: now.to_string(),
             updated_at: now.to_string(),
@@ -2476,6 +2572,7 @@ mod tests {
                 turn_count: 0,
                 session_id: Some(session_id),
                 template_id: Some(RepoAgentId::new(7)),
+                compact_agent_id: None,
                 model_override: Some("capturing".to_string()),
                 created_at: "2026-03-30T00:00:00Z".to_string(),
                 updated_at: "2026-03-30T00:00:00Z".to_string(),
@@ -2674,6 +2771,7 @@ mod tests {
                         turn_count: 0,
                         session_id: None,
                         template_id: Some(RepoAgentId::new(7)),
+                        compact_agent_id: None,
                         model_override: Some("gpt-4o-mini".to_string()),
                         created_at: "2026-03-29T00:00:00Z".to_string(),
                         updated_at: "2026-03-29T00:00:00Z".to_string(),

@@ -25,6 +25,7 @@ async fn test_trace_writer_success() {
         reasoning_content: None,
         tool_calls: vec![],
         finish_reason: "stop".to_string(),
+        metadata: None,
     };
     writer.write_event(&resp_event).await.unwrap();
 
@@ -64,6 +65,7 @@ async fn test_trace_writer_failure() {
         reasoning_content: None,
         tool_calls: vec![],
         finish_reason: "error".to_string(),
+        metadata: None,
     };
     writer.write_event(&resp_event).await.unwrap();
 
@@ -107,6 +109,7 @@ async fn test_trace_writer_with_tool_execution() {
         reasoning_content: None,
         tool_calls: vec![],
         finish_reason: "stop".to_string(),
+        metadata: None,
     };
     writer.write_event(&resp_event).await.unwrap();
 

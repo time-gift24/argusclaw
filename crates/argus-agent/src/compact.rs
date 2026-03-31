@@ -3,6 +3,7 @@
 //! This module provides:
 //! - `Compactor`: Async trait for implementing different compaction strategies.
 //! - `KeepRecentCompactor`: Keeps the most recent messages up to a count.
+//! - `KeepTokensCompactor`: Legacy compatibility strategy based on approximate token estimates.
 //! - `CompactorManager`: Shared manager that handles compaction using a strategy.
 
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use async_trait::async_trait;
 
 use super::error::CompactError;
+use crate::tokenizer::{count_text_tokens, count_total_tokens};
 
 /// Context for compaction operations.
 ///
@@ -58,6 +60,12 @@ impl<'a> CompactContext<'a> {
         self.threshold_ratio_override
     }
 
+    /// Recalculate token count from the current messages using the compatibility tokenizer.
+    pub fn recalculate_token_count(&mut self) -> Result<(), CompactError> {
+        *self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
+        Ok(())
+    }
+
     /// Set the token count.
     pub fn set_token_count(&mut self, count: u32) {
         *self.token_count = count;
@@ -79,6 +87,11 @@ pub trait Compactor: Send + Sync {
 
     /// Name of the compactor strategy.
     fn name(&self) -> &'static str;
+
+    /// Number of recent non-system messages that should remain outside any synthetic summary.
+    fn preserved_tail_count(&self) -> Option<usize> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +186,98 @@ impl Compactor for KeepRecentCompactor {
     fn name(&self) -> &'static str {
         "keep_recent"
     }
+
+    fn preserved_tail_count(&self) -> Option<usize> {
+        Some(self.keep_count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KeepTokensCompactor
+// ---------------------------------------------------------------------------
+
+/// Legacy token-budget compactor kept for public API compatibility.
+#[allow(deprecated)]
+#[deprecated(note = "Prefer KeepRecentCompactor or LLM-driven compaction.")]
+pub struct KeepTokensCompactor {
+    /// Threshold ratio to trigger compaction (0.0 - 1.0).
+    threshold_ratio: f32,
+    /// Target ratio of context window to keep after compaction (0.0 - 1.0).
+    target_ratio: f32,
+}
+
+#[allow(deprecated)]
+impl KeepTokensCompactor {
+    /// Create a new KeepTokensCompactor.
+    #[must_use]
+    pub fn new(threshold_ratio: f32, target_ratio: f32) -> Self {
+        Self {
+            threshold_ratio: threshold_ratio.clamp(0.1, 0.95),
+            target_ratio: target_ratio.clamp(0.1, 0.9),
+        }
+    }
+
+    /// Create with default settings (80% threshold, keep 50% of context).
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(0.8, 0.5)
+    }
+}
+
+#[async_trait]
+#[allow(deprecated)]
+impl Compactor for KeepTokensCompactor {
+    async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError> {
+        let context_window = context.provider.context_window();
+        let threshold_ratio = context
+            .threshold_ratio_override()
+            .unwrap_or(self.threshold_ratio);
+        let threshold = (context_window as f32 * threshold_ratio) as u32;
+
+        if *context.token_count < threshold {
+            return Ok(());
+        }
+
+        let target_tokens = (context_window as f32 * self.target_ratio) as u32;
+        let messages = &mut *context.messages;
+
+        let system_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .cloned()
+            .collect();
+
+        let mut kept: Vec<ChatMessage> = Vec::new();
+        let mut current_tokens = 0u32;
+
+        for msg in messages.iter().rev() {
+            if msg.role == Role::System {
+                continue;
+            }
+            let msg_tokens = count_text_tokens(&msg.content)?;
+            if current_tokens + msg_tokens > target_tokens {
+                break;
+            }
+            kept.push(msg.clone());
+            current_tokens += msg_tokens;
+        }
+
+        kept.reverse();
+        *messages = [system_msgs, kept].concat();
+        context.recalculate_token_count()?;
+
+        tracing::debug!(
+            compactor = self.name(),
+            new_token_count = *context.token_count,
+            "Compatibility compaction completed"
+        );
+
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "keep_tokens"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +346,7 @@ impl std::fmt::Debug for CompactorManager {
 mod tests {
     use std::sync::Arc;
 
+    #[allow(deprecated)]
     use argus_protocol::LlmProvider;
     use argus_protocol::llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
@@ -288,6 +394,25 @@ mod tests {
     fn compactor_manager_defaults() {
         let manager = CompactorManager::with_defaults();
         assert_eq!(manager.default_compactor().name(), "keep_recent");
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn keep_tokens_compactor_new_clamps_values() {
+        let compactor = KeepTokensCompactor::new(2.0, 2.0);
+        assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
+        assert!((compactor.target_ratio - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn compactor_manager_register_and_get() {
+        let mut manager = CompactorManager::with_defaults();
+        manager.register("tokens", Arc::new(KeepTokensCompactor::with_defaults()));
+
+        assert!(manager.get("tokens").is_some());
+        assert_eq!(manager.get("tokens").unwrap().name(), "keep_tokens");
+        assert!(manager.get("nonexistent").is_none());
     }
 
     #[tokio::test]

@@ -82,11 +82,43 @@ pub enum TurnLogError {
 }
 
 // ---------------------------------------------------------------------------
-// ThreadError & CompactError
+// TokenizationError, ThreadError & CompactError
 // ---------------------------------------------------------------------------
+
+/// Legacy tokenization errors kept for public API compatibility.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[deprecated(
+    note = "Token counts are now approximate between turns and authoritative after LLM responses."
+)]
+pub enum TokenizationError {
+    /// Required tokenizer asset was not found on disk.
+    #[error("Tokenizer asset not found: {path}")]
+    AssetMissing { path: PathBuf },
+
+    /// Tokenizer asset path could not be represented as UTF-8.
+    #[error("Tokenizer asset path is not valid UTF-8: {path:?}")]
+    InvalidAssetPath { path: PathBuf },
+
+    /// Tokenizer construction failed.
+    #[error("Failed to build tokenizer from {vocab_path} and {merges_path}: {reason}")]
+    BuildFailed {
+        vocab_path: PathBuf,
+        merges_path: PathBuf,
+        reason: String,
+    },
+
+    /// Tokenizer encoding failed.
+    #[error("Failed to encode text with tokenizer: {reason}")]
+    EncodeFailed { reason: String },
+
+    /// Token count exceeded the supported `u32` range.
+    #[error("Token count exceeds supported range: {count}")]
+    CountOverflow { count: usize },
+}
 
 /// Compact operation error.
 #[derive(Debug, Error)]
+#[allow(deprecated)]
 pub enum CompactError {
     /// Compact failed with a reason.
     #[error("Compact failed: {reason}")]
@@ -95,6 +127,10 @@ pub enum CompactError {
         reason: String,
     },
 
+    /// Tokenization failed while recalculating context size.
+    #[error("Tokenization failed: {0}")]
+    TokenizationFailed(#[from] TokenizationError),
+
     /// Summarize strategy not implemented.
     #[error("Summarize strategy not implemented")]
     SummarizeNotImplemented,
@@ -102,6 +138,7 @@ pub enum CompactError {
 
 /// Errors that can occur during Thread operations.
 #[derive(Debug, Error)]
+#[allow(deprecated)]
 pub enum ThreadError {
     /// Turn execution failed.
     #[error("Turn execution failed: {0}")]
@@ -114,6 +151,10 @@ pub enum ThreadError {
     /// Compact operation failed.
     #[error("Compact failed: {0}")]
     CompactFailed(#[from] CompactError),
+
+    /// Tokenization failed while updating thread state.
+    #[error("Tokenization failed: {0}")]
+    TokenizationFailed(#[from] TokenizationError),
 
     /// Provider not configured.
     #[error("LLM provider not configured")]
@@ -141,6 +182,7 @@ pub enum ThreadError {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -229,6 +271,22 @@ mod tests {
     }
 
     #[test]
+    fn tokenization_error_display_asset_missing() {
+        let err = TokenizationError::AssetMissing {
+            path: PathBuf::from("/tmp/missing.json"),
+        };
+        assert!(err.to_string().contains("missing.json"));
+    }
+
+    #[test]
+    fn compact_error_display_tokenization_failed() {
+        let err = CompactError::TokenizationFailed(TokenizationError::EncodeFailed {
+            reason: "bad token".to_string(),
+        });
+        assert!(err.to_string().contains("bad token"));
+    }
+
+    #[test]
     fn thread_error_display_compact_failed() {
         let err = ThreadError::CompactFailed(CompactError::Failed {
             reason: "test reason".to_string(),
@@ -243,9 +301,16 @@ mod tests {
     }
 
     #[test]
+    fn thread_error_display_tokenization_failed() {
+        let err = ThreadError::TokenizationFailed(TokenizationError::EncodeFailed {
+            reason: "boom".to_string(),
+        });
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
     fn thread_error_display_channel_closed() {
         let err = ThreadError::ChannelClosed;
         assert!(err.to_string().contains("channel"));
     }
-
 }

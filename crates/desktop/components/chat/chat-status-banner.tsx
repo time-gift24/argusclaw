@@ -6,9 +6,18 @@ import { useChatStore } from "@/lib/chat-store";
 const DEFAULT_PROVIDER_ERROR = "No default provider configured";
 
 export function ChatStatusBanner() {
-  const sessionError = useActiveChatSession()?.error;
+  const session = useActiveChatSession();
+  const sessionError = session?.error;
   const storeError = useChatStore((state) => state.errorMessage);
   const message = sessionError ?? storeError;
+
+  if (session?.status === "compacting") {
+    return (
+      <div className="rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-700">
+        上下文压缩中，发送区暂时不可用。
+      </div>
+    );
+  }
 
   if (!message) return null;
 

@@ -327,6 +327,10 @@ pub struct Turn {
     #[builder(default, setter(strip_option))]
     #[allow(dead_code)]
     trace_writer: Option<TraceWriter>,
+
+    /// Synthetic history messages that should be logged once before the visible turn starts.
+    #[builder(default)]
+    trace_prelude_messages: Vec<ChatMessage>,
 }
 
 impl TurnBuilder {
@@ -428,10 +432,18 @@ impl Turn {
                     })
                     .await;
             }
+            if !self.trace_prelude_messages.is_empty() {
+                let _ = writer
+                    .write_event(&TurnLogEvent::HistoryPrelude {
+                        messages: self.trace_prelude_messages.clone(),
+                    })
+                    .await;
+            }
             for msg in self.messages.iter() {
                 if let ChatMessage {
                     role: argus_protocol::llm::Role::User,
                     content,
+                    metadata,
                     ..
                 } = msg
                 {
@@ -439,6 +451,7 @@ impl Turn {
                         .write_event(&TurnLogEvent::UserInput {
                             content: content.clone(),
                             role: "user".to_string(),
+                            metadata: metadata.clone(),
                         })
                         .await;
                 }
@@ -857,6 +870,7 @@ impl Turn {
                                 .filter_map(|tc| serde_json::to_value(tc).ok())
                                 .collect(),
                             finish_reason: format!("{:?}", trace_response.finish_reason),
+                            metadata: None,
                         };
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
@@ -949,6 +963,7 @@ impl Turn {
                                 .filter_map(|tc| serde_json::to_value(tc).ok())
                                 .collect(),
                             finish_reason: format!("{:?}", trace_response.finish_reason),
+                            metadata: None,
                         };
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
