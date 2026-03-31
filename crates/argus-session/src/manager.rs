@@ -234,8 +234,6 @@ pub struct SessionManager {
     provider_resolver: Arc<dyn ProviderResolver>,
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
-    #[allow(dead_code)]
-    job_manager: Arc<JobManager>,
 }
 
 impl SessionManager {
@@ -301,7 +299,6 @@ impl SessionManager {
             provider_resolver,
             trace_dir,
             thread_pool,
-            job_manager,
         }
     }
 
