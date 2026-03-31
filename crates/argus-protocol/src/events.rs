@@ -515,6 +515,23 @@ pub enum ThreadEvent {
         /// New token count after compaction.
         new_token_count: u32,
     },
+    /// Hidden compact-agent flow started.
+    CompactionStarted {
+        /// Thread ID.
+        thread_id: String,
+    },
+    /// Hidden compact-agent flow finished successfully.
+    CompactionFinished {
+        /// Thread ID.
+        thread_id: String,
+    },
+    /// Hidden compact-agent flow failed but the visible turn may continue.
+    CompactionFailed {
+        /// Thread ID.
+        thread_id: String,
+        /// Error summary.
+        error: String,
+    },
     /// Waiting for approval - tool execution paused for human confirmation.
     WaitingForApproval {
         /// Thread ID.

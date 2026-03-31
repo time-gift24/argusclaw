@@ -498,7 +498,7 @@ impl ArgusWing {
 
         // Create thread
         let thread_id = self
-            .create_thread(session_id, template.id, None, None)
+            .create_thread(session_id, template.id, None, None, None)
             .await?;
 
         Ok((session_id, thread_id))
@@ -525,9 +525,16 @@ impl ArgusWing {
         template_id: AgentId,
         provider_id: Option<ProviderId>,
         model_override: Option<&str>,
+        compact_agent_id: Option<AgentId>,
     ) -> Result<ThreadId> {
         self.session_manager
-            .create_thread(session_id, template_id, provider_id, model_override)
+            .create_thread(
+                session_id,
+                template_id,
+                provider_id,
+                model_override,
+                compact_agent_id,
+            )
             .await
     }
 
@@ -1054,6 +1061,7 @@ mod tests {
             template_id,
             Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
             None,
+            None,
         )
         .await
         .expect("thread should create");
@@ -1180,7 +1188,7 @@ mod tests {
             .await
             .expect("session should create");
 
-        wing.create_thread(session_id, template_id, None, None)
+        wing.create_thread(session_id, template_id, None, None, None)
             .await
             .expect("thread should create using the default provider fallback");
     }
@@ -1246,7 +1254,7 @@ mod tests {
             .expect("session should create");
 
         let thread_id = wing
-            .create_thread(session_id, template_id, None, None)
+            .create_thread(session_id, template_id, None, None, None)
             .await
             .expect("thread should create");
 
@@ -1296,7 +1304,7 @@ mod tests {
             .await
             .expect("session should create");
         let thread_id = wing
-            .create_thread(session_id, template_id, None, None)
+            .create_thread(session_id, template_id, None, None, None)
             .await
             .expect("thread should create");
 
@@ -1350,11 +1358,11 @@ mod tests {
             .await
             .expect("session should create");
         let first_thread_id = wing
-            .create_thread(session_id, template_id, None, None)
+            .create_thread(session_id, template_id, None, None, None)
             .await
             .expect("first thread should create");
         let second_thread_id = wing
-            .create_thread(session_id, template_id, None, None)
+            .create_thread(session_id, template_id, None, None, None)
             .await
             .expect("second thread should create");
 
@@ -1444,7 +1452,7 @@ mod tests {
             .expect("session should create");
 
         let thread_id = wing
-            .create_thread(session_id, template_id, None, None)
+            .create_thread(session_id, template_id, None, None, None)
             .await
             .expect("thread should create");
 
@@ -1558,7 +1566,7 @@ mod tests {
             .await
             .expect("foreign session should create");
         let thread_id = wing
-            .create_thread(owning_session_id, template_id, None, None)
+            .create_thread(owning_session_id, template_id, None, None, None)
             .await
             .expect("thread should create");
 
@@ -1625,7 +1633,7 @@ mod tests {
             .await
             .expect("foreign session should create");
         let thread_id = wing
-            .create_thread(owning_session_id, template_id, None, None)
+            .create_thread(owning_session_id, template_id, None, None, None)
             .await
             .expect("thread should create");
 

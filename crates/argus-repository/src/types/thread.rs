@@ -64,6 +64,8 @@ pub struct ThreadRecord {
     pub session_id: Option<SessionId>,
     /// Template (agent) this thread uses.
     pub template_id: Option<AgentId>,
+    /// Optional compact agent bound specifically to this thread.
+    pub compact_agent_id: Option<AgentId>,
     /// Per-thread model override.
     pub model_override: Option<String>,
     /// Creation timestamp.

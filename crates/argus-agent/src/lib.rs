@@ -63,6 +63,7 @@ mod runtime;
 pub mod thread;
 pub mod thread_handle;
 mod tokenizer;
+
 pub mod tool_context;
 pub mod trace;
 pub mod turn;
@@ -85,14 +86,17 @@ pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)
 pub use command::ThreadRuntimeSnapshot;
+#[allow(deprecated)]
 pub use compact::{
     CompactContext, Compactor, CompactorManager, KeepRecentCompactor, KeepTokensCompactor,
 };
 pub use config::ThreadConfig;
+#[allow(deprecated)]
 pub use error::{CompactError, ThreadError, TokenizationError};
 pub use plan_store::FilePlanStore;
 pub use thread::{Thread, ThreadBuilder};
 pub use thread_handle::ThreadHandle;
+#[allow(deprecated)]
 pub use tokenizer::estimate_tokens;
 pub use types::{ThreadInfo, ThreadState};
 

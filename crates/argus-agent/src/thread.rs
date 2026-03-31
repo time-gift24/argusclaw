@@ -8,7 +8,9 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::turn::TurnCancellation;
 use crate::{TurnBuilder, TurnOutput};
-use argus_protocol::llm::{ChatMessage, LlmProvider};
+use argus_protocol::llm::{
+    ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider,
+};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadControlEvent,
@@ -23,8 +25,6 @@ use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
 use super::types::{ThreadInfo, ThreadState};
-use crate::tokenizer::count_total_tokens;
-
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
@@ -66,6 +66,14 @@ pub struct Thread {
     /// Tool manager.
     #[builder(default = "Arc::new(ToolManager::new())")]
     tool_manager: Arc<ToolManager>,
+
+    /// Optional hidden compact agent binding used for pre-turn summarization.
+    #[builder(default, setter(strip_option))]
+    compact_agent_record: Option<Arc<AgentRecord>>,
+
+    /// Provider used to execute hidden compact-agent turns.
+    #[builder(default, setter(strip_option))]
+    compact_agent_provider: Option<Arc<dyn LlmProvider>>,
 
     /// Compactor for managing context size.
     compactor: Arc<dyn Compactor>,
@@ -109,6 +117,10 @@ pub struct Thread {
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
+
+    /// Synthetic history messages that should be traced once with the next visible turn.
+    #[builder(default)]
+    pending_trace_prelude_messages: Vec<ChatMessage>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -121,6 +133,7 @@ impl std::fmt::Debug for Thread {
             .field("messages", &self.messages.len())
             .field("token_count", &self.token_count)
             .field("turn_count", &self.turn_count)
+            .field("compact_agent_id", &self.config.compact_agent_id)
             .field("plan_items", &self.plan_store.store().read().unwrap().len())
             .field("config", &self.config)
             .finish()
@@ -167,6 +180,8 @@ impl ThreadBuilder {
             tool_manager: self
                 .tool_manager
                 .unwrap_or_else(|| Arc::new(ToolManager::new())),
+            compact_agent_record: self.compact_agent_record.flatten(),
+            compact_agent_provider: self.compact_agent_provider.flatten(),
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
             hooks: self.hooks.flatten(),
             config: self.config.unwrap_or_default(),
@@ -178,6 +193,7 @@ impl ThreadBuilder {
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
             turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
+            pending_trace_prelude_messages: self.pending_trace_prelude_messages.unwrap_or_default(),
         })
     }
 }
@@ -350,18 +366,181 @@ impl Thread {
         self.updated_at = updated_at;
     }
 
-    /// Recalculate token count from messages.
-    pub fn recalculate_token_count(&mut self) -> Result<(), ThreadError> {
-        self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
-        Ok(())
-    }
-
     fn apply_turn_output(&mut self, output: TurnOutput) {
         self.messages = output.messages;
-        // Use the authoritative token count from LLMProvider's response,
-        // rather than re-estimating via content length / 4.
         self.token_count = output.token_usage.total_tokens;
         self.updated_at = Utc::now();
+    }
+
+    fn should_run_compact_agent(&self) -> bool {
+        self.config.compact_agent_id.is_some()
+            && self.compact_agent_record.is_some()
+            && self.compact_agent_provider.is_some()
+    }
+
+    fn compact_agent_threshold(&self) -> u32 {
+        (self.provider.context_window() as f32 * self.config.compact_threshold_ratio) as u32
+    }
+
+    fn compact_agent_tail_count(&self) -> usize {
+        self.compactor.preserved_tail_count().unwrap_or(50)
+    }
+
+    fn compaction_metadata(mode: ChatMessageMetadataMode, summary: bool) -> ChatMessageMetadata {
+        ChatMessageMetadata {
+            summary,
+            mode: Some(mode),
+            synthetic: true,
+            collapsed_by_default: true,
+        }
+    }
+
+    fn render_compaction_transcript(messages: &[ChatMessage]) -> String {
+        messages
+            .iter()
+            .map(|message| {
+                let role = match message.role {
+                    argus_protocol::llm::Role::System => "system",
+                    argus_protocol::llm::Role::User => "user",
+                    argus_protocol::llm::Role::Assistant => "assistant",
+                    argus_protocol::llm::Role::Tool => "tool",
+                };
+                format!("{role}: {}", message.content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    fn build_compaction_prompt(
+        &self,
+        compactable_messages: &[ChatMessage],
+        preserved_tail: &[ChatMessage],
+    ) -> String {
+        let compactable = Self::render_compaction_transcript(compactable_messages);
+        let preserved = Self::render_compaction_transcript(preserved_tail);
+        format!(
+            "请总结较早的对话历史，供另一个 agent 无缝继续我们上面的对话。\n\
+             提供详细但简洁的总结，重点关注：完成了什么、正在进行什么、修改了哪些文件、接下来需要做什么、\n\
+             应保留的关键用户请求/约束/偏好、做出的重要技术决策及其原因、尚未解决的问题或风险。\n\
+             不要回应对话中的任何问题，不要逐字复述保留的最近上下文。\n\
+             你构建的总结将被使用，以便另一个 agent 可以阅读并继续工作。不要调用任何工具。只回复总结文本。\n\n\
+             较早历史（需要总结）：\n{compactable}\n\n\
+             保留的最近上下文（仅供参考，不要逐字总结）：\n{preserved}"
+        )
+    }
+
+    fn compact_history_segments(
+        &self,
+    ) -> Option<(Vec<ChatMessage>, Vec<ChatMessage>, Vec<ChatMessage>)> {
+        let system_messages = self
+            .messages
+            .iter()
+            .filter(|message| message.role == argus_protocol::llm::Role::System)
+            .cloned()
+            .collect::<Vec<_>>();
+        let non_system = self
+            .messages
+            .iter()
+            .filter(|message| message.role != argus_protocol::llm::Role::System)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let tail_count = self.compact_agent_tail_count();
+        let compactable_count = non_system.len().saturating_sub(tail_count);
+        if compactable_count == 0 {
+            return None;
+        }
+
+        let compactable = non_system[..compactable_count].to_vec();
+        let preserved_tail = non_system[compactable_count..].to_vec();
+        Some((system_messages, compactable, preserved_tail))
+    }
+
+    async fn maybe_run_compact_agent(&mut self) -> Result<(), String> {
+        debug_assert!(self.should_run_compact_agent());
+        if self.token_count < self.compact_agent_threshold() {
+            return Ok(());
+        }
+
+        let Some((system_messages, compactable_messages, preserved_tail)) =
+            self.compact_history_segments()
+        else {
+            return Ok(());
+        };
+
+        let prompt = self.build_compaction_prompt(&compactable_messages, &preserved_tail);
+        self.broadcast_to_self(ThreadEvent::CompactionStarted {
+            thread_id: self.id.to_string(),
+        });
+
+        let compact_agent_record = self
+            .compact_agent_record
+            .as_ref()
+            .expect("compact agent record checked above");
+        let compact_agent_provider = self
+            .compact_agent_provider
+            .as_ref()
+            .expect("compact agent provider checked above");
+
+        let mut request_messages = Vec::new();
+        if !compact_agent_record.system_prompt.trim().is_empty() {
+            request_messages.push(ChatMessage::system(
+                compact_agent_record.system_prompt.clone(),
+            ));
+        }
+        request_messages.push(ChatMessage::user(prompt.clone()));
+
+        let mut request = CompletionRequest::new(request_messages);
+        if let Some(model) = compact_agent_record.model_id.as_deref() {
+            request = request.with_model(model);
+        }
+        if let Some(max_tokens) = compact_agent_record.max_tokens {
+            request.max_tokens = Some(max_tokens);
+        }
+        if let Some(temperature) = compact_agent_record.temperature {
+            request.temperature = Some(temperature);
+        }
+        if let Some(thinking) = compact_agent_record.thinking_config.clone() {
+            request.thinking = Some(thinking);
+        }
+
+        let response = compact_agent_provider
+            .complete(request)
+            .await
+            .map_err(|error| error.to_string())?;
+        let summary = response.content.unwrap_or_default();
+
+        let synthetic_prompt = ChatMessage::user(prompt).with_metadata(Self::compaction_metadata(
+            ChatMessageMetadataMode::CompactionPrompt,
+            false,
+        ));
+        let synthetic_summary = ChatMessage::assistant(summary).with_metadata(
+            Self::compaction_metadata(ChatMessageMetadataMode::CompactionSummary, true),
+        );
+        let synthetic_replay = ChatMessage::user(
+            "Continue the conversation using the summary above and the preserved recent tail below.",
+        )
+        .with_metadata(Self::compaction_metadata(
+            ChatMessageMetadataMode::CompactionReplay,
+            false,
+        ));
+        let trace_prelude_messages = vec![
+            synthetic_prompt.clone(),
+            synthetic_summary.clone(),
+            synthetic_replay.clone(),
+        ];
+
+        self.messages = system_messages;
+        self.messages.push(synthetic_prompt);
+        self.messages.push(synthetic_summary);
+        self.messages.push(synthetic_replay);
+        self.messages.extend(preserved_tail);
+        self.pending_trace_prelude_messages = trace_prelude_messages;
+
+        self.broadcast_to_self(ThreadEvent::CompactionFinished {
+            thread_id: self.id.to_string(),
+        });
+        Ok(())
     }
 
     /// Send a user message into the pipe for processing.
@@ -405,30 +584,39 @@ impl Thread {
     ) -> Result<crate::Turn, ThreadError> {
         self.set_turn_running(true);
 
-        // Compactor decides internally whether to compact
-        // Clone the Arc first to avoid borrow conflicts
-        let compactor = self.compactor.clone();
-        let pre_token_count = self.token_count;
-        let pre_message_count = self.messages.len();
-
-        // Create CompactContext for compaction. This remains a pre-turn behavior.
-        let compact_result = {
-            let mut context =
-                CompactContext::new(&self.provider, &mut self.token_count, &mut self.messages)
-                    .with_threshold_ratio_override(self.config.compact_threshold_ratio);
-            compactor.compact(&mut context).await
-        };
-        match compact_result {
-            Ok(()) => {
-                if self.token_count != pre_token_count || self.messages.len() != pre_message_count {
-                    self.broadcast_to_self(ThreadEvent::Compacted {
-                        thread_id: self.id.to_string(),
-                        new_token_count: self.token_count,
-                    });
-                }
+        if self.should_run_compact_agent() {
+            if let Err(error) = self.maybe_run_compact_agent().await {
+                tracing::warn!("Compact agent failed: {}", error);
+                self.broadcast_to_self(ThreadEvent::CompactionFailed {
+                    thread_id: self.id.to_string(),
+                    error,
+                });
             }
-            Err(e) => {
-                tracing::warn!("Compact failed: {}", e);
+        } else {
+            let compactor = self.compactor.clone();
+            let pre_token_count = self.token_count;
+            let pre_message_count = self.messages.len();
+
+            let compact_result = {
+                let mut context =
+                    CompactContext::new(&self.provider, &mut self.token_count, &mut self.messages)
+                        .with_threshold_ratio_override(self.config.compact_threshold_ratio);
+                compactor.compact(&mut context).await
+            };
+            match compact_result {
+                Ok(()) => {
+                    if self.token_count != pre_token_count
+                        || self.messages.len() != pre_message_count
+                    {
+                        self.broadcast_to_self(ThreadEvent::Compacted {
+                            thread_id: self.id.to_string(),
+                            new_token_count: self.token_count,
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Compact failed: {}", e);
+                }
             }
         }
 
@@ -452,7 +640,6 @@ impl Thread {
         };
 
         self.messages.push(ChatMessage::user(user_input));
-        self.recalculate_token_count()?;
         match self.build_turn(effective_record, cancellation) {
             Ok(turn) => Ok(turn),
             Err(error) => {
@@ -515,6 +702,7 @@ impl Thread {
         hooks.push(Arc::new(PlanContinuationHook::new(Arc::new(
             self.plan_store.clone(),
         ))));
+        let trace_prelude_messages = std::mem::take(&mut self.pending_trace_prelude_messages);
 
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
@@ -534,7 +722,8 @@ impl Thread {
             .stream_tx(stream_tx)
             .thread_event_tx(self.pipe_tx.clone())
             .control_tx(self.control_tx.clone())
-            .mailbox(Arc::clone(&self.mailbox));
+            .mailbox(Arc::clone(&self.mailbox))
+            .trace_prelude_messages(trace_prelude_messages);
 
         if let Some(ref tc) = self.config.turn_config.trace_config {
             turn_builder = turn_builder.trace_config(tc.clone());
@@ -552,6 +741,7 @@ impl Thread {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -563,7 +753,6 @@ mod tests {
     use crate::error::CompactError;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
-    use crate::tokenizer::count_total_tokens;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
     use async_trait::async_trait;
@@ -636,6 +825,113 @@ mod tests {
         fn name(&self) -> &'static str {
             "failing"
         }
+    }
+
+    struct SummaryProvider {
+        summary: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SummaryProvider {
+        fn model_name(&self) -> &str {
+            "summary-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: Some(self.summary.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 8,
+                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct RecordingSummaryProvider {
+        summary: String,
+        captured_requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingSummaryProvider {
+        fn model_name(&self) -> &str {
+            "recording-summary-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.captured_requests.lock().unwrap().push(request);
+            Ok(CompletionResponse {
+                content: Some(self.summary.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 8,
+                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct FailingSummaryProvider;
+
+    #[async_trait]
+    impl LlmProvider for FailingSummaryProvider {
+        fn model_name(&self) -> &str {
+            "failing-summary-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "failing-summary-provider".to_string(),
+                reason: "summary failed".to_string(),
+            })
+        }
+    }
+
+    fn compact_agent_record() -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
+            id: AgentId::new(99),
+            display_name: "Compact Context".to_string(),
+            description: "Summarizes stale history".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(2)),
+            model_id: Some("compact-model".to_string()),
+            system_prompt:
+                "你是一个有用的AI助手，负责总结对话历史，供后续 agent 无缝继续工作。只输出总结文本。"
+                    .to_string(),
+            tool_names: vec![],
+            max_tokens: Some(256),
+            temperature: Some(0.1),
+            thinking_config: None,
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        })
     }
 
     fn test_agent_record() -> Arc<AgentRecord> {
@@ -755,8 +1051,12 @@ mod tests {
     }
 
     fn token_count_for_messages(messages: &[ChatMessage]) -> u32 {
-        count_total_tokens(messages.iter().map(|message| message.content.as_str()))
-            .expect("tokenization should succeed")
+        messages
+            .iter()
+            .map(|message| {
+                crate::estimate_tokens(&message.content).expect("tokenization should succeed")
+            })
+            .sum()
     }
 
     async fn wait_for_idle_events(
@@ -824,13 +1124,6 @@ mod tests {
             .agent_record(test_agent_record())
             .build();
         assert!(matches!(result, Err(ThreadError::SessionIdNotSet)));
-    }
-
-    #[test]
-    fn estimate_tokens_reasonable() {
-        assert_eq!(crate::estimate_tokens("test").unwrap(), 1);
-        assert_eq!(crate::estimate_tokens("test test").unwrap(), 2);
-        assert_eq!(crate::estimate_tokens("").unwrap(), 0);
     }
 
     #[test]
@@ -1153,8 +1446,7 @@ mod tests {
             ChatMessage::user(repeated.clone()),
             ChatMessage::user(repeated.clone()),
         ];
-        let expected_compacted_token_count =
-            crate::estimate_tokens(&repeated).expect("tokenization should succeed");
+        let expected_compacted_token_count = token_count_for_messages(&persisted_messages[..1]);
         thread.hydrate_from_persisted_state(
             persisted_messages.clone(),
             token_count_for_messages(&persisted_messages),
@@ -1253,5 +1545,287 @@ mod tests {
             no_event.is_err(),
             "failed compaction should not emit compacted event",
         );
+    }
+
+    #[tokio::test]
+    async fn begin_turn_preserves_authoritative_token_count_until_visible_turn_completes() {
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 4_096,
+            }))
+            .compactor(Arc::new(KeepRecentCompactor::with_defaults()))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
+        let next_message = "next message".to_string();
+        let authoritative_token_count = token_count_for_messages(&persisted_messages);
+        thread.hydrate_from_persisted_state(
+            persisted_messages.clone(),
+            authoritative_token_count,
+            0,
+            Utc::now(),
+        );
+
+        let _turn = thread
+            .begin_turn(next_message, None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+
+        assert_eq!(thread.token_count(), authoritative_token_count);
+    }
+
+    #[tokio::test]
+    async fn finish_turn_cancelled_preserves_last_authoritative_token_count() {
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 4_096,
+            }))
+            .compactor(Arc::new(KeepRecentCompactor::with_defaults()))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
+        let next_message = "cancel me".to_string();
+        let authoritative_token_count = token_count_for_messages(&persisted_messages);
+        thread.hydrate_from_persisted_state(
+            persisted_messages.clone(),
+            authoritative_token_count,
+            0,
+            Utc::now(),
+        );
+
+        let _turn = thread
+            .begin_turn(next_message, None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        thread
+            .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
+            .expect("cancelled turn should be ignored");
+
+        assert_eq!(thread.token_count(), authoritative_token_count);
+    }
+
+    #[tokio::test]
+    async fn begin_turn_uses_compact_agent_without_changing_authoritative_token_count() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
+        let config = ThreadConfigBuilder::default()
+            .compact_threshold_ratio(0.2)
+            .compact_agent_id(Some(AgentId::new(99)))
+            .build()
+            .expect("thread config should build");
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider { context_window: 40 }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .compact_agent_record(compact_agent_record())
+            .compact_agent_provider(Arc::new(SummaryProvider {
+                summary: "历史摘要".to_string(),
+            }))
+            .session_id(SessionId::new())
+            .config(config)
+            .build()
+            .expect("thread should build");
+        let repeated = repeated_test_message();
+        let persisted_messages = vec![
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::assistant("earlier assistant"),
+            ChatMessage::user("most recent tail"),
+        ];
+        let authoritative_token_count = token_count_for_messages(&persisted_messages);
+        thread.hydrate_from_persisted_state(
+            persisted_messages,
+            authoritative_token_count,
+            0,
+            Utc::now(),
+        );
+
+        let mut rx = thread.subscribe();
+        let _turn = thread
+            .begin_turn(
+                "real user message".to_string(),
+                None,
+                TurnCancellation::new(),
+            )
+            .await
+            .expect("turn should build after compaction");
+
+        assert_eq!(
+            thread.turn_count(),
+            1,
+            "hidden compaction must not count as a user turn"
+        );
+        assert_eq!(
+            thread.token_count(),
+            authoritative_token_count,
+            "authoritative token count should stay frozen until the visible turn completes",
+        );
+        assert_eq!(
+            thread
+                .history()
+                .iter()
+                .filter(|message| message.content == "real user message")
+                .count(),
+            1,
+            "the live user input must appear exactly once",
+        );
+
+        let messages = thread.history();
+        assert_eq!(messages[0].role, argus_protocol::llm::Role::User);
+        assert_eq!(
+            messages[0].metadata.as_ref().and_then(|m| m.mode),
+            Some(argus_protocol::llm::ChatMessageMetadataMode::CompactionPrompt)
+        );
+        assert_eq!(messages[1].role, argus_protocol::llm::Role::Assistant);
+        assert_eq!(messages[1].content, "历史摘要");
+        assert_eq!(
+            messages[1].metadata.as_ref().and_then(|m| m.mode),
+            Some(argus_protocol::llm::ChatMessageMetadataMode::CompactionSummary)
+        );
+        assert_eq!(messages[2].role, argus_protocol::llm::Role::User);
+        assert_eq!(
+            messages[2].metadata.as_ref().and_then(|m| m.mode),
+            Some(argus_protocol::llm::ChatMessageMetadataMode::CompactionReplay)
+        );
+        assert_eq!(messages[3].content, "most recent tail");
+        assert_eq!(messages[4].content, "real user message");
+
+        let first_event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("compaction started event should arrive")
+            .expect("event should be readable");
+        assert!(matches!(first_event, ThreadEvent::CompactionStarted { .. }));
+
+        let second_event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("compaction finished event should arrive")
+            .expect("event should be readable");
+        assert!(matches!(
+            second_event,
+            ThreadEvent::CompactionFinished { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn begin_turn_compact_agent_failure_preserves_history_and_continues_visible_turn() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
+        let config = ThreadConfigBuilder::default()
+            .compact_threshold_ratio(0.2)
+            .compact_agent_id(Some(AgentId::new(99)))
+            .build()
+            .expect("thread config should build");
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider { context_window: 40 }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .compact_agent_record(compact_agent_record())
+            .compact_agent_provider(Arc::new(FailingSummaryProvider))
+            .session_id(SessionId::new())
+            .config(config)
+            .build()
+            .expect("thread should build");
+        let persisted_messages = vec![
+            ChatMessage::user(repeated_test_message()),
+            ChatMessage::assistant("assistant tail"),
+        ];
+        let authoritative_token_count = token_count_for_messages(&persisted_messages);
+        thread.hydrate_from_persisted_state(
+            persisted_messages.clone(),
+            authoritative_token_count,
+            0,
+            Utc::now(),
+        );
+
+        let mut rx = thread.subscribe();
+        let _turn = thread
+            .begin_turn("follow-up".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("visible turn should still build");
+
+        assert_eq!(thread.turn_count(), 1);
+        assert_eq!(thread.token_count(), authoritative_token_count);
+        assert_eq!(thread.history().len(), persisted_messages.len() + 1);
+        assert_eq!(thread.history()[0].content, persisted_messages[0].content);
+        assert_eq!(thread.history()[1].content, persisted_messages[1].content);
+        assert_eq!(thread.history()[2].content, "follow-up");
+        assert!(
+            thread
+                .history()
+                .iter()
+                .all(|message| message.metadata.is_none()),
+            "failed compaction must not leave synthetic messages behind",
+        );
+
+        let first_event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("compaction started event should arrive")
+            .expect("event should be readable");
+        assert!(matches!(first_event, ThreadEvent::CompactionStarted { .. }));
+
+        let second_event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("compaction failed event should arrive")
+            .expect("event should be readable");
+        assert!(matches!(second_event, ThreadEvent::CompactionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn compact_agent_runtime_prompt_includes_handoff_details() {
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
+        let config = ThreadConfigBuilder::default()
+            .compact_threshold_ratio(0.2)
+            .compact_agent_id(Some(AgentId::new(99)))
+            .build()
+            .expect("thread config should build");
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider { context_window: 40 }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .compact_agent_record(compact_agent_record())
+            .compact_agent_provider(Arc::new(RecordingSummaryProvider {
+                summary: "历史摘要".to_string(),
+                captured_requests: Arc::clone(&captured_requests),
+            }))
+            .session_id(SessionId::new())
+            .config(config)
+            .build()
+            .expect("thread should build");
+        let persisted_messages = vec![
+            ChatMessage::user("完成了 provider 绑定"),
+            ChatMessage::assistant("修改了 thread.rs 和 manager.rs"),
+            ChatMessage::user("接下来补默认 compact agent"),
+            ChatMessage::assistant("记住用户偏好：自动绑定 builtin compact agent"),
+        ];
+        let authoritative_token_count = token_count_for_messages(&persisted_messages);
+        thread.hydrate_from_persisted_state(
+            persisted_messages,
+            authoritative_token_count,
+            0,
+            Utc::now(),
+        );
+
+        let _turn = thread
+            .begin_turn("follow-up".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("visible turn should still build");
+
+        let captured = captured_requests.lock().unwrap();
+        let request = captured
+            .last()
+            .expect("compact agent request should be captured");
+        let prompt = request
+            .messages
+            .last()
+            .expect("request should contain runtime prompt")
+            .content
+            .clone();
+
+        assert!(prompt.contains("修改了哪些文件"));
+        assert!(prompt.contains("接下来需要做什么"));
+        assert!(prompt.contains("另一个 agent 可以阅读并继续工作"));
+        assert!(prompt.contains("不要调用任何工具"));
     }
 }

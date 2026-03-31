@@ -170,6 +170,32 @@ pub struct ImageUrl {
     pub detail: Option<String>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Synthetic metadata modes used by history compaction messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageMetadataMode {
+    CompactionPrompt,
+    CompactionSummary,
+    CompactionReplay,
+}
+
+/// Optional metadata stored alongside a chat message.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChatMessageMetadata {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub summary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ChatMessageMetadataMode>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub synthetic: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapsed_by_default: bool,
+}
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -193,6 +219,9 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Optional rendering/provenance metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<ChatMessageMetadata>,
 }
 
 impl ChatMessage {
@@ -206,6 +235,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            metadata: None,
         }
     }
 
@@ -219,6 +249,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            metadata: None,
         }
     }
 
@@ -234,6 +265,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            metadata: None,
         }
     }
 
@@ -255,6 +287,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            metadata: None,
         }
     }
 
@@ -284,6 +317,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            metadata: None,
         }
     }
 
@@ -301,7 +335,14 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            metadata: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ChatMessageMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 }
 
@@ -840,5 +881,28 @@ mod tests {
         assert_eq!(messages[2].role, Role::Tool); // call_1 is valid
         assert_eq!(messages[3].role, Role::User); // call_2 orphaned
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
+    }
+
+    #[test]
+    fn test_chat_message_metadata_round_trips_for_compaction_messages() {
+        let message = ChatMessage::assistant("压缩摘要").with_metadata(ChatMessageMetadata {
+            summary: true,
+            mode: Some(ChatMessageMetadataMode::CompactionSummary),
+            synthetic: true,
+            collapsed_by_default: true,
+        });
+
+        let value = serde_json::to_value(&message).expect("message should serialize");
+        let restored: ChatMessage =
+            serde_json::from_value(value).expect("message should deserialize");
+
+        let metadata = restored.metadata.expect("metadata should round-trip");
+        assert!(metadata.summary);
+        assert_eq!(
+            metadata.mode,
+            Some(ChatMessageMetadataMode::CompactionSummary)
+        );
+        assert!(metadata.synthetic);
+        assert!(metadata.collapsed_by_default);
     }
 }

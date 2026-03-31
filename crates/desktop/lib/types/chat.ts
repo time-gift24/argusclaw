@@ -21,6 +21,17 @@ export interface ApprovalResponsePayload {
   decided_by?: string | null;
 }
 
+export interface ChatMessageMetadataPayload {
+  summary: boolean;
+  mode?:
+    | "compaction_prompt"
+    | "compaction_summary"
+    | "compaction_replay"
+    | null;
+  synthetic: boolean;
+  collapsed_by_default: boolean;
+}
+
 export interface ChatMessagePayload {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -28,6 +39,7 @@ export interface ChatMessagePayload {
   tool_call_id?: string | null;
   name?: string | null;
   tool_calls?: ToolCallPayload[] | null;
+  metadata?: ChatMessageMetadataPayload | null;
 }
 
 export interface ThreadSnapshotPayload {
@@ -144,6 +156,9 @@ export type ThreadEventPayload =
   | { type: "turn_failed"; error: string }
   | { type: "idle" }
   | { type: "compacted"; new_token_count: number }
+  | { type: "compaction_started" }
+  | { type: "compaction_finished" }
+  | { type: "compaction_failed"; error: string }
   | { type: "thread_bound_to_job"; job_id: string }
   | { type: "thread_pool_queued"; runtime: ThreadPoolRuntimeRef }
   | { type: "thread_pool_started"; runtime: ThreadPoolRuntimeRef }

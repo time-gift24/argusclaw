@@ -1,6 +1,6 @@
 //! Turn log events - incremental JSONL event types.
 
-use argus_protocol::llm::ChatMessage;
+use argus_protocol::llm::{ChatMessage, ChatMessageMetadata};
 use argus_protocol::token_usage::TokenUsage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,9 +14,13 @@ pub enum TurnLogEvent {
         system_prompt: String,
         model: String,
     },
+    HistoryPrelude {
+        messages: Vec<ChatMessage>,
+    },
     UserInput {
         content: String,
         role: String,
+        metadata: Option<ChatMessageMetadata>,
     },
     #[serde(rename = "llm_req")]
     LlmRequest {
@@ -48,6 +52,7 @@ pub enum TurnLogEvent {
         reasoning_content: Option<String>,
         tool_calls: Vec<Value>,
         finish_reason: String,
+        metadata: Option<ChatMessageMetadata>,
     },
     TurnEnd {
         token_usage: TokenUsage,
@@ -64,6 +69,7 @@ impl TurnLogEvent {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             TurnLogEvent::TurnStart { .. } => "turn_start",
+            TurnLogEvent::HistoryPrelude { .. } => "history_prelude",
             TurnLogEvent::UserInput { .. } => "user_input",
             TurnLogEvent::LlmRequest { .. } => "llm_req",
             TurnLogEvent::LlmDelta { .. } => "llm_delta",

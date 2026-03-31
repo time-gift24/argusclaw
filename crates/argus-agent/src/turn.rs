@@ -103,7 +103,6 @@ enum NextAction {
     /// Continue with tool execution.
     ContinueWithTools {
         tool_calls: Vec<ToolCall>,
-        #[allow(dead_code)]
         content: Option<String>,
     },
     /// Context length exceeded.
@@ -115,8 +114,6 @@ struct ToolExecutionResult {
     tool_call_id: String,
     name: String,
     content: String,
-    #[allow(dead_code)]
-    duration_ms: u64,
 }
 
 /// Accumulates streaming events into a complete response.
@@ -323,10 +320,9 @@ pub struct Turn {
     #[builder(default, setter(strip_option))]
     trace_config: Option<TraceConfig>,
 
-    /// Trace writer (created at execute start if enabled).
-    #[builder(default, setter(strip_option))]
-    #[allow(dead_code)]
-    trace_writer: Option<TraceWriter>,
+    /// Synthetic history messages that should be logged once before the visible turn starts.
+    #[builder(default)]
+    trace_prelude_messages: Vec<ChatMessage>,
 }
 
 impl TurnBuilder {
@@ -392,7 +388,6 @@ impl Turn {
         ));
 
         // Create trace writer if configured
-        #[allow(unused_variables)]
         let mut trace_writer = match self.trace_config.as_ref() {
             Some(config) if config.enabled => {
                 let mut base_dir = config.trace_dir.clone();
@@ -428,10 +423,18 @@ impl Turn {
                     })
                     .await;
             }
+            if !self.trace_prelude_messages.is_empty() {
+                let _ = writer
+                    .write_event(&TurnLogEvent::HistoryPrelude {
+                        messages: self.trace_prelude_messages.clone(),
+                    })
+                    .await;
+            }
             for msg in self.messages.iter() {
                 if let ChatMessage {
                     role: argus_protocol::llm::Role::User,
                     content,
+                    metadata,
                     ..
                 } = msg
                 {
@@ -439,6 +442,7 @@ impl Turn {
                         .write_event(&TurnLogEvent::UserInput {
                             content: content.clone(),
                             role: "user".to_string(),
+                            metadata: metadata.clone(),
                         })
                         .await;
                 }
@@ -636,7 +640,6 @@ impl Turn {
     /// Internal method: trigger hooks and return the action.
     ///
     /// Directly iterates over `self.hooks` (no HookRegistry needed).
-    #[allow(dead_code)]
     async fn fire_hooks(
         &self,
         event: HookEvent,
@@ -679,7 +682,6 @@ impl Turn {
     /// Internal method: execute the main LLM -> Tool -> LLM loop.
     ///
     /// This is where the core execution logic lives.
-    #[allow(dead_code)]
     async fn execute_loop(
         &mut self,
         trace_writer: Option<TraceWriter>,
@@ -857,6 +859,7 @@ impl Turn {
                                 .filter_map(|tc| serde_json::to_value(tc).ok())
                                 .collect(),
                             finish_reason: format!("{:?}", trace_response.finish_reason),
+                            metadata: None,
                         };
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
@@ -897,6 +900,7 @@ impl Turn {
                                 .write_event(&TurnLogEvent::UserInput {
                                     content: message.clone(),
                                     role: "user".to_string(),
+                                    metadata: None,
                                 })
                                 .await;
                         }
@@ -949,6 +953,7 @@ impl Turn {
                                 .filter_map(|tc| serde_json::to_value(tc).ok())
                                 .collect(),
                             finish_reason: format!("{:?}", trace_response.finish_reason),
+                            metadata: None,
                         };
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
@@ -1304,7 +1309,6 @@ impl Turn {
                 tool_call_id,
                 name: tool_name,
                 content,
-                duration_ms,
             };
         }
 
@@ -1491,7 +1495,6 @@ impl Turn {
             tool_call_id,
             name: tool_name,
             content,
-            duration_ms,
         }
     }
 }

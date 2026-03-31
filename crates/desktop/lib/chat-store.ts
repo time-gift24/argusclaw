@@ -86,7 +86,7 @@ export interface ChatSessionState {
   threadId: string;
   effectiveProviderId: number | null;
   effectiveModel: string | null;
-  status: "idle" | "running" | "error";
+  status: "idle" | "running" | "compacting" | "error";
   messages: ThreadSnapshotPayload["messages"];
   pendingAssistant: {
     content: string;
@@ -1166,6 +1166,42 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
               tokenCount: payload.new_token_count,
+            },
+          },
+        }));
+        break;
+
+      case "compaction_started":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              status: "compacting",
+            },
+          },
+        }));
+        break;
+
+      case "compaction_finished":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              status: "running",
+            },
+          },
+        }));
+        break;
+
+      case "compaction_failed":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              status: "running",
             },
           },
         }));

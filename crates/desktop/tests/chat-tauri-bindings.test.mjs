@@ -15,8 +15,8 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
   assert.match(tauriSource, /plan_item_count:\s*number/);
   assert.match(
     tauriSource,
-    /createChatSession:\s*\(\s*templateId: number,\s*providerPreferenceId: number \| null,\s*model: string \| null,\s*\)\s*=>\s*invoke<ChatSessionPayload>\("create_chat_session"/,
-  );
+    /createChatSession:\s*\(\s*templateId: number,\s*providerPreferenceId: number \| null,\s*model: string \| null,\s*compactAgentId: number \| null = null,\s*\)\s*=>\s*invoke<ChatSessionPayload>\("create_chat_session"/,
+    );
   assert.match(
     tauriSource,
     /getThreadSnapshot:\s*\(sessionId: string, threadId: string\)\s*=>\s*invoke<ThreadSnapshotPayload>\("get_thread_snapshot"/,
@@ -48,4 +48,6 @@ test("tauri chat session creation keeps unnamed sessions blank for id fallback r
   assert.doesNotMatch(commandSource, /create_session\(&format!\("Chat-/);
   assert.match(commandSource, /get_thread_pool_snapshot/);
   assert.match(commandSource, /get_thread_pool_state/);
+  assert.match(commandSource, /compact_agent_id: Option<String>/);
+  assert.match(tauriSource, /compactAgentId:\s*compactAgentId\?\.toString\(\) \?\? null/);
 });

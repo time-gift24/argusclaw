@@ -85,8 +85,11 @@ pub enum TurnLogError {
 // TokenizationError, ThreadError & CompactError
 // ---------------------------------------------------------------------------
 
-/// Errors that can occur while building or using the shared tokenizer.
+/// Legacy tokenization errors kept for public API compatibility.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[deprecated(
+    note = "Token counts are now approximate between turns and authoritative after LLM responses."
+)]
 pub enum TokenizationError {
     /// Required tokenizer asset was not found on disk.
     #[error("Tokenizer asset not found: {path}")]
@@ -115,6 +118,7 @@ pub enum TokenizationError {
 
 /// Compact operation error.
 #[derive(Debug, Error)]
+#[allow(deprecated)]
 pub enum CompactError {
     /// Compact failed with a reason.
     #[error("Compact failed: {reason}")]
@@ -134,6 +138,7 @@ pub enum CompactError {
 
 /// Errors that can occur during Thread operations.
 #[derive(Debug, Error)]
+#[allow(deprecated)]
 pub enum ThreadError {
     /// Turn execution failed.
     #[error("Turn execution failed: {0}")]
@@ -147,7 +152,7 @@ pub enum ThreadError {
     #[error("Compact failed: {0}")]
     CompactFailed(#[from] CompactError),
 
-    /// Tokenization failed while recalculating thread state.
+    /// Tokenization failed while updating thread state.
     #[error("Tokenization failed: {0}")]
     TokenizationFailed(#[from] TokenizationError),
 
@@ -177,6 +182,7 @@ pub enum ThreadError {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -295,16 +301,16 @@ mod tests {
     }
 
     #[test]
-    fn thread_error_display_channel_closed() {
-        let err = ThreadError::ChannelClosed;
-        assert!(err.to_string().contains("channel"));
-    }
-
-    #[test]
     fn thread_error_display_tokenization_failed() {
         let err = ThreadError::TokenizationFailed(TokenizationError::EncodeFailed {
             reason: "boom".to_string(),
         });
         assert!(err.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn thread_error_display_channel_closed() {
+        let err = ThreadError::ChannelClosed;
+        assert!(err.to_string().contains("channel"));
     }
 }

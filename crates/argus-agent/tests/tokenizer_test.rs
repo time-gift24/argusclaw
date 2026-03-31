@@ -1,4 +1,6 @@
-use argus_agent::estimate_tokens;
+#![allow(deprecated)]
+
+use argus_agent::{Compactor, KeepTokensCompactor, TokenizationError, estimate_tokens};
 
 #[test]
 fn estimate_tokens_returns_zero_for_empty_input() {
@@ -18,4 +20,20 @@ fn estimate_tokens_matches_expected_counts_for_basic_samples() {
             "unexpected token count for {input:?}"
         );
     }
+}
+
+#[test]
+fn keep_tokens_compactor_is_still_constructible_for_compatibility() {
+    let compactor = KeepTokensCompactor::new(0.8, 0.5);
+
+    assert_eq!(compactor.name(), "keep_tokens");
+}
+
+#[test]
+fn tokenization_error_keeps_legacy_variants() {
+    let err = TokenizationError::AssetMissing {
+        path: "/tmp/missing.json".into(),
+    };
+
+    assert!(err.to_string().contains("missing.json"));
 }

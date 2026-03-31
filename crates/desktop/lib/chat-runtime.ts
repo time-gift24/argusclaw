@@ -108,6 +108,15 @@ const parseMessageContent = (content: string): unknown => {
   }
 };
 
+const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
+  !!message.metadata?.synthetic &&
+  !!message.metadata?.collapsed_by_default &&
+  [
+    "compaction_prompt",
+    "compaction_summary",
+    "compaction_replay",
+  ].includes(message.metadata.mode ?? "");
+
 function convertSnapshotMessage(msg: ChatMessagePayload, index: number): AssistantUiMessage | null {
   const createdAt = new Date(index);
 
@@ -143,7 +152,12 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
       role: "assistant",
       content,
       createdAt,
-      metadata: createEmptyAssistantMetadata(),
+      metadata: {
+        ...createEmptyAssistantMetadata(),
+        custom: {
+          messageMetadata: msg.metadata ?? null,
+        },
+      },
     };
   }
 
@@ -154,7 +168,7 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
       content: msg.content,
       createdAt,
       attachments: [],
-      metadata: { custom: {} },
+      metadata: { custom: { messageMetadata: msg.metadata ?? null } },
     };
   }
 
@@ -163,7 +177,7 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
     role: "system",
     content: msg.content,
     createdAt,
-    metadata: { custom: {} },
+    metadata: { custom: { messageMetadata: msg.metadata ?? null } },
   };
 }
 
@@ -179,13 +193,30 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
     }
   >();
 
-  session.messages.forEach((msg: ChatMessagePayload, index: number) => {
+  for (let index = 0; index < session.messages.length; index += 1) {
+    const msg = session.messages[index];
+
+    if (isFoldedCompactionMessage(msg)) {
+      let groupEnd = index + 1;
+      while (
+        groupEnd < session.messages.length &&
+        isFoldedCompactionMessage(session.messages[groupEnd]!)
+      ) {
+        groupEnd += 1;
+      }
+      const compactionGroup = session.messages.slice(index, groupEnd);
+      if (compactionGroup.length > 0) {
+        index = groupEnd - 1;
+        continue;
+      }
+    }
+
     if (msg.role === "tool" && msg.tool_call_id) {
       const location = toolCallLocations.get(msg.tool_call_id);
-      if (!location) return;
+      if (!location) continue;
 
       const targetMessage = messages[location.messageIndex];
-      if (!targetMessage || !Array.isArray(targetMessage.content)) return;
+      if (!targetMessage || !Array.isArray(targetMessage.content)) continue;
 
       const nextContent = targetMessage.content.map((part, partIndex) => {
         if (partIndex !== location.partIndex || part.type !== "tool-call") return part;
@@ -201,21 +232,21 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
         ...targetMessage,
         content: nextContent,
       };
-      return;
+      continue;
     }
 
     const converted = convertSnapshotMessage(msg, index);
-    if (!converted) return;
+    if (!converted) continue;
 
     const messageIndex = messages.push(converted) - 1;
-    if (converted.role !== "assistant" || !Array.isArray(converted.content)) return;
+    if (converted.role !== "assistant" || !Array.isArray(converted.content)) continue;
 
     converted.content.forEach((part, partIndex) => {
       if (part.type === "tool-call") {
         toolCallLocations.set(part.toolCallId, { messageIndex, partIndex });
       }
     });
-  });
+  }
 
   if (session.pendingAssistant) {
     const pendingContent: AssistantUiMessagePart[] = [];

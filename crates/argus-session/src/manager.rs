@@ -23,6 +23,8 @@ use uuid::Uuid;
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
+const DEFAULT_COMPACT_AGENT_DISPLAY_NAME: &str = "Compact Context";
+
 #[derive(Debug)]
 struct RecoveredThreadState {
     messages: Vec<ChatMessage>,
@@ -232,11 +234,43 @@ pub struct SessionManager {
     provider_resolver: Arc<dyn ProviderResolver>,
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
-    #[allow(dead_code)]
-    job_manager: Arc<JobManager>,
 }
 
 impl SessionManager {
+    async fn resolve_thread_compact_agent_id(
+        &self,
+        compact_agent_id: Option<AgentId>,
+    ) -> Result<Option<AgentId>> {
+        if compact_agent_id.is_some() {
+            return Ok(compact_agent_id);
+        }
+
+        if let Some(agent) = self
+            .template_manager
+            .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
+            .await?
+        {
+            return Ok(Some(agent.id));
+        }
+
+        self.template_manager.seed_builtin_agents().await?;
+
+        match self
+            .template_manager
+            .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
+            .await?
+        {
+            Some(agent) => Ok(Some(agent.id)),
+            None => {
+                tracing::warn!(
+                    compact_agent = DEFAULT_COMPACT_AGENT_DISPLAY_NAME,
+                    "default compact agent is unavailable even after builtin seeding"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Create a new SessionManager.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -265,7 +299,6 @@ impl SessionManager {
             provider_resolver,
             trace_dir,
             thread_pool,
-            job_manager,
         }
     }
 
@@ -496,6 +529,7 @@ impl SessionManager {
         template_id: AgentId,
         explicit_provider_id: Option<ProviderId>,
         model_override: Option<&str>,
+        compact_agent_id: Option<AgentId>,
     ) -> Result<ThreadId> {
         let session = self.load(session_id).await?;
 
@@ -568,6 +602,9 @@ impl SessionManager {
         };
 
         let effective_model = provider.model_name().to_string();
+        let compact_agent_id = self
+            .resolve_thread_compact_agent_id(compact_agent_id)
+            .await?;
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
@@ -582,6 +619,7 @@ impl SessionManager {
             turn_count: 0,
             session_id: Some(session_id),
             template_id: Some(template_id),
+            compact_agent_id,
             model_override: Some(effective_model.clone()),
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -987,25 +1025,41 @@ async fn recover_thread_state_from_trace(
 
         for event in events {
             match event {
-                TurnLogEvent::UserInput { content, .. } => {
+                TurnLogEvent::HistoryPrelude {
+                    messages: mut prelude_messages,
+                } => {
+                    messages.append(&mut prelude_messages);
+                }
+                TurnLogEvent::UserInput {
+                    content, metadata, ..
+                } => {
                     if !content.trim().is_empty() {
-                        messages.push(ChatMessage::user(content));
+                        let message = if let Some(metadata) = metadata {
+                            ChatMessage::user(content).with_metadata(metadata)
+                        } else {
+                            ChatMessage::user(content)
+                        };
+                        messages.push(message);
                     }
                 }
                 TurnLogEvent::LlmResponse {
                     content,
                     reasoning_content,
                     tool_calls,
+                    metadata,
                     ..
                 } => {
                     if tool_calls.is_empty() {
                         if !content.trim().is_empty()
                             || !reasoning_content.as_deref().unwrap_or("").trim().is_empty()
                         {
-                            messages.push(ChatMessage::assistant_with_reasoning(
-                                content,
-                                reasoning_content,
-                            ));
+                            let message =
+                                ChatMessage::assistant_with_reasoning(content, reasoning_content);
+                            messages.push(if let Some(metadata) = metadata {
+                                message.with_metadata(metadata)
+                            } else {
+                                message
+                            });
                         }
                     } else {
                         let parsed_tool_calls = tool_calls
@@ -1019,7 +1073,7 @@ async fn recover_thread_state_from_trace(
                             })
                             .collect::<Result<Vec<_>>>()?;
 
-                        messages.push(ChatMessage::assistant_with_tool_calls_and_reasoning(
+                        let message = ChatMessage::assistant_with_tool_calls_and_reasoning(
                             if content.trim().is_empty() {
                                 None
                             } else {
@@ -1027,7 +1081,12 @@ async fn recover_thread_state_from_trace(
                             },
                             parsed_tool_calls,
                             reasoning_content,
-                        ));
+                        );
+                        messages.push(if let Some(metadata) = metadata {
+                            message.with_metadata(metadata)
+                        } else {
+                            message
+                        });
                     }
                 }
                 TurnLogEvent::ToolResult {
@@ -1129,7 +1188,9 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::{CompactorManager, KeepRecentCompactor, ThreadBuilder};
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, FinishReason, LlmError};
+    use argus_protocol::llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
+    };
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, ProviderId,
         ProviderResolver, ProviderSecretStatus, Role, SecretString, SessionId, ThinkingConfig,
@@ -1648,6 +1709,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recover_thread_state_from_trace_rehydrates_compaction_prelude_messages() {
+        use argus_agent::TurnLogEvent;
+        use argus_protocol::llm::{ChatMessageMetadata, ChatMessageMetadataMode};
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let turns_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("turns");
+        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+
+        let prelude_messages = vec![
+            ChatMessage::user("请总结较早历史").with_metadata(ChatMessageMetadata {
+                summary: false,
+                mode: Some(ChatMessageMetadataMode::CompactionPrompt),
+                synthetic: true,
+                collapsed_by_default: true,
+            }),
+            ChatMessage::assistant("这里是压缩摘要").with_metadata(ChatMessageMetadata {
+                summary: true,
+                mode: Some(ChatMessageMetadataMode::CompactionSummary),
+                synthetic: true,
+                collapsed_by_default: true,
+            }),
+            ChatMessage::user("请基于摘要和保留尾部继续").with_metadata(ChatMessageMetadata {
+                summary: false,
+                mode: Some(ChatMessageMetadataMode::CompactionReplay),
+                synthetic: true,
+                collapsed_by_default: true,
+            }),
+        ];
+
+        let lines = vec![
+            serde_json::to_string(&TurnLogEvent::HistoryPrelude {
+                messages: prelude_messages,
+            })
+            .expect("prelude should serialize"),
+            serde_json::to_string(&TurnLogEvent::UserInput {
+                content: "真正的新问题".to_string(),
+                role: "user".to_string(),
+                metadata: None,
+            })
+            .expect("user input should serialize"),
+            serde_json::to_string(&TurnLogEvent::LlmResponse {
+                content: "回答".to_string(),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                finish_reason: "stop".to_string(),
+                metadata: None,
+            })
+            .expect("response should serialize"),
+            serde_json::to_string(&TurnLogEvent::TurnEnd {
+                token_usage: argus_protocol::TokenUsage {
+                    input_tokens: 21,
+                    output_tokens: 9,
+                    total_tokens: 30,
+                },
+                finish_reason: "stop".to_string(),
+            })
+            .expect("turn end should serialize"),
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(turns_dir.join("1.jsonl"), lines).expect("trace should write");
+
+        let recovered =
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, Some(1))
+                .await
+                .expect("trace recovery should succeed");
+
+        assert_eq!(recovered.turn_count, 1);
+        assert_eq!(recovered.token_count, 30);
+        assert_eq!(recovered.messages.len(), 5);
+        assert_eq!(recovered.messages[0].content, "请总结较早历史");
+        assert_eq!(
+            recovered.messages[1].metadata.as_ref().and_then(|m| m.mode),
+            Some(ChatMessageMetadataMode::CompactionSummary)
+        );
+        assert_eq!(recovered.messages[3].content, "真正的新问题");
+        assert_eq!(recovered.messages[4].content, "回答");
+    }
+
+    #[tokio::test]
     async fn busy_thread_remains_visible_while_orchestrator_runs_turn() {
         let session_id = SessionId::new();
         let session = Arc::new(Session::new(session_id, "Test".to_string()));
@@ -1762,7 +1909,7 @@ mod tests {
             .await
             .expect("session should create");
         let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None)
+            .create_thread(session_id, AgentId::new(7), None, None, None)
             .await
             .expect("thread should create");
 
@@ -1776,6 +1923,46 @@ mod tests {
             session.get_thread(&thread_id).is_some(),
             "loaded session should expose persisted live threads"
         );
+    }
+
+    #[tokio::test]
+    async fn create_thread_defaults_compact_agent_to_builtin_template() {
+        let manager = test_session_manager().await;
+
+        let compact_agent = manager
+            .template_manager
+            .find_by_display_name("Compact Context")
+            .await
+            .expect("compact template lookup before thread create should succeed");
+        assert!(
+            compact_agent.is_none(),
+            "test helper intentionally starts without builtin compact agent seeded"
+        );
+
+        let session_id = manager
+            .create("compact-by-default".to_string())
+            .await
+            .expect("session should create");
+        let thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .await
+            .expect("thread should create");
+
+        let compact_agent = manager
+            .template_manager
+            .find_by_display_name("Compact Context")
+            .await
+            .expect("compact template lookup should succeed after thread create")
+            .expect("compact template should exist");
+
+        let thread = manager
+            .thread_repo
+            .get_thread(&thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread should persist");
+
+        assert_eq!(thread.compact_agent_id, Some(compact_agent.id));
     }
 
     #[tokio::test]

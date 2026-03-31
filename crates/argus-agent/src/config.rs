@@ -9,7 +9,7 @@ use derive_builder::Builder;
 use tokio::sync::broadcast;
 
 use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
-use argus_protocol::{AgentRecord, HookRegistry, SafetyConfig, ThreadEvent};
+use argus_protocol::{AgentId, AgentRecord, HookRegistry, SafetyConfig, ThreadEvent};
 use argus_tool::ToolManager;
 
 use super::TraceConfig;
@@ -228,6 +228,10 @@ pub struct ThreadConfig {
     /// This currently acts as a thread-level threshold override for the built-in compactors.
     #[builder(default = 0.8)]
     pub compact_threshold_ratio: f32,
+
+    /// Optional compact agent binding used for hidden pre-turn summarization.
+    #[builder(default)]
+    pub compact_agent_id: Option<AgentId>,
 
     /// Underlying Turn configuration.
     #[builder(default)]
