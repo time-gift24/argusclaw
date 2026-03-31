@@ -829,7 +829,7 @@ impl SessionManager {
             &self.trace_dir,
             &session_id,
             thread_id,
-            thread_record.turn_count.max(0) as u32,
+            thread_record.turn_count as u32,
         )
         .await
     }

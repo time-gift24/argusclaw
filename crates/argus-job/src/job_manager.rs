@@ -111,6 +111,7 @@ impl JobManager {
     }
 
     /// Create a new JobManager wired with repository-backed persistence.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_repositories(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,

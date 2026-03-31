@@ -241,10 +241,8 @@ async fn run(command: Command, interactive: bool, hold_ms: u64) -> serde_json::V
     let (action, request) = payload_for_command(&command);
     let result = manager.execute("chrome", request, make_ctx()).await;
 
-    if hold_ms > 0 {
-        if matches!(command, Command::Open { .. }) && interactive {
-            tokio::time::sleep(Duration::from_millis(hold_ms)).await;
-        }
+    if hold_ms > 0 && matches!(command, Command::Open { .. }) && interactive {
+        tokio::time::sleep(Duration::from_millis(hold_ms)).await;
     }
 
     match result {

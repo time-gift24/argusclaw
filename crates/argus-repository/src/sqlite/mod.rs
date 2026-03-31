@@ -17,7 +17,6 @@ mod job;
 mod llm_provider;
 mod session;
 mod thread;
-mod workflow;
 
 /// Local result type alias to avoid conflict with argus_protocol::Result.
 type DbResult<T> = std::result::Result<T, DbError>;
@@ -316,6 +315,8 @@ impl ArgusSqlite {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::Row;
+
     #[test]
     fn build_script_watches_migrations_directory() {
         let build_script =
@@ -325,6 +326,37 @@ mod tests {
         assert!(
             build_script.contains("cargo:rerun-if-changed=migrations"),
             "build.rs should watch the migrations directory so embedded sqlx migrations stay fresh after rebases"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_does_not_create_legacy_workflows_table() {
+        let pool = super::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        super::migrate(&pool)
+            .await
+            .expect("repository migrations should succeed");
+
+        let rows = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('jobs', 'workflows')",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("schema query should succeed");
+
+        let table_names: Vec<String> = rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+
+        assert!(
+            table_names.iter().any(|name| name == "jobs"),
+            "job table should still exist after migrations"
+        );
+        assert!(
+            table_names.iter().all(|name| name != "workflows"),
+            "legacy workflows table should no longer be created"
         );
     }
 }

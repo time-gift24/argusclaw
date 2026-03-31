@@ -1,11 +1,108 @@
 //! Job persistence types.
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AgentId, WorkflowId, WorkflowStatus};
+use super::AgentId;
 use argus_protocol::{ThreadId, TokenUsage};
+
+/// Unique identifier for a job.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JobId(String);
+
+impl JobId {
+    /// Creates a new job ID.
+    ///
+    /// # Panics
+    /// Panics in debug mode if `id` is empty.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "JobId cannot be empty");
+        Self(id)
+    }
+}
+
+impl AsRef<str> for JobId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+
+impl FromStr for JobId {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s))
+    }
+}
+
+/// The execution status of a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JobStatus {
+    /// Job is pending execution.
+    Pending,
+    /// Job has been admitted to the thread pool and is waiting for execution.
+    Queued,
+    /// Job is currently running.
+    Running,
+    /// Job completed successfully.
+    Succeeded,
+    /// Job failed.
+    Failed,
+    /// Job was cancelled.
+    Cancelled,
+}
+
+impl JobStatus {
+    /// Returns the string representation of this status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parses a job status from a string.
+    pub fn parse_str(s: &str) -> Result<Self, String> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("invalid job status: {s}")),
+        }
+    }
+}
+
+impl fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for JobStatus {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse_str(value)
+    }
+}
 
 /// Result of a completed job (persisted in database).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,8 +127,6 @@ pub struct JobResult {
 pub enum JobType {
     /// Standalone job.
     Standalone,
-    /// Job within a workflow.
-    Workflow,
     /// Scheduled cron job.
     Cron,
 }
@@ -42,7 +137,6 @@ impl JobType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Standalone => "standalone",
-            Self::Workflow => "workflow",
             Self::Cron => "cron",
         }
     }
@@ -51,7 +145,6 @@ impl JobType {
     pub fn parse_str(s: &str) -> Result<Self, String> {
         match s {
             "standalone" => Ok(Self::Standalone),
-            "workflow" => Ok(Self::Workflow),
             "cron" => Ok(Self::Cron),
             _ => Err(format!("invalid job type: {s}")),
         }
@@ -66,22 +159,22 @@ impl fmt::Display for JobType {
 
 /// Full job record stored in database.
 pub struct JobRecord {
-    pub id: WorkflowId,
+    pub id: JobId,
     pub job_type: JobType,
     pub name: String,
-    pub status: WorkflowStatus,
+    pub status: JobStatus,
     pub agent_id: AgentId,
     pub context: Option<String>,
     pub prompt: String,
     pub thread_id: Option<ThreadId>,
     pub group_id: Option<String>,
-    pub depends_on: Vec<WorkflowId>,
+    pub depends_on: Vec<JobId>,
     pub cron_expr: Option<String>,
     pub scheduled_at: Option<String>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     /// Parent job ID (for subagent-dispatched jobs).
-    pub parent_job_id: Option<WorkflowId>,
+    pub parent_job_id: Option<JobId>,
     /// Job execution result (set when job completes).
     pub result: Option<JobResult>,
 }
@@ -92,10 +185,10 @@ impl JobRecord {
     #[must_use]
     pub fn for_test(id: &str, agent_id: i64, name: &str, prompt: &str) -> Self {
         Self {
-            id: WorkflowId::new(id),
+            id: JobId::new(id),
             job_type: JobType::Standalone,
             name: name.to_string(),
-            status: WorkflowStatus::Pending,
+            status: JobStatus::Pending,
             agent_id: AgentId::new(agent_id),
             context: None,
             prompt: prompt.to_string(),
@@ -109,5 +202,58 @@ impl JobRecord {
             parent_job_id: None,
             result: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_id_from_str() {
+        let id = JobId::from_str("job-123").unwrap();
+        assert_eq!(id.as_ref(), "job-123");
+    }
+
+    #[test]
+    fn job_id_new_preserves_string_value() {
+        let id = JobId::new("job-xyz");
+        assert_eq!(id.as_ref(), "job-xyz");
+    }
+
+    #[test]
+    fn job_status_as_str() {
+        assert_eq!(JobStatus::Pending.as_str(), "pending");
+        assert_eq!(JobStatus::Queued.as_str(), "queued");
+        assert_eq!(JobStatus::Running.as_str(), "running");
+        assert_eq!(JobStatus::Succeeded.as_str(), "succeeded");
+        assert_eq!(JobStatus::Failed.as_str(), "failed");
+        assert_eq!(JobStatus::Cancelled.as_str(), "cancelled");
+    }
+
+    #[test]
+    fn job_status_from_str_valid() {
+        assert_eq!(JobStatus::parse_str("pending").unwrap(), JobStatus::Pending);
+        assert_eq!(JobStatus::parse_str("queued").unwrap(), JobStatus::Queued);
+        assert_eq!(JobStatus::parse_str("running").unwrap(), JobStatus::Running);
+        assert_eq!(
+            JobStatus::parse_str("succeeded").unwrap(),
+            JobStatus::Succeeded
+        );
+        assert_eq!(JobStatus::parse_str("failed").unwrap(), JobStatus::Failed);
+        assert_eq!(
+            JobStatus::parse_str("cancelled").unwrap(),
+            JobStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn job_status_from_str_invalid() {
+        assert!(JobStatus::parse_str("invalid").is_err());
+    }
+
+    #[test]
+    fn job_type_rejects_legacy_workflow_kind() {
+        assert!(JobType::parse_str("workflow").is_err());
     }
 }

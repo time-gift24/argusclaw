@@ -21,7 +21,7 @@ use argus_protocol::{
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
-    AgentId as RepoAgentId, JobRecord, JobResult, JobType, ThreadRecord, WorkflowId, WorkflowStatus,
+    AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobStatus, JobType, ThreadRecord,
 };
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
@@ -276,7 +276,7 @@ impl ThreadPool {
     pub async fn enqueue_job(&self, request: ThreadPoolJobRequest) -> Result<ThreadId, JobError> {
         let now = Utc::now().to_rfc3339();
         let thread_id = self.persist_binding(&request, &now).await?;
-        self.persist_job_status(&request.job_id, WorkflowStatus::Queued, None, None)
+        self.persist_job_status(&request.job_id, JobStatus::Queued, None, None)
             .await?;
         let runtime = ThreadPoolRuntimeRef {
             thread_id,
@@ -486,7 +486,7 @@ impl ThreadPool {
         if let Err(error) = self
             .persist_job_status(
                 &request.job_id,
-                WorkflowStatus::Running,
+                JobStatus::Running,
                 Some(started_at.as_str()),
                 None,
             )
@@ -739,6 +739,7 @@ impl ThreadPool {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn upsert_runtime_summary(
         &self,
         runtime: ThreadPoolRuntimeRef,
@@ -1487,7 +1488,7 @@ impl ThreadPool {
     async fn persist_job_status(
         &self,
         job_id: &str,
-        status: WorkflowStatus,
+        status: JobStatus,
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> Result<(), JobError> {
@@ -1496,7 +1497,7 @@ impl ThreadPool {
         };
         persistence
             .job_repository
-            .update_status(&WorkflowId::new(job_id), status, started_at, finished_at)
+            .update_status(&JobId::new(job_id), status, started_at, finished_at)
             .await
             .map_err(|err| {
                 JobError::ExecutionFailed(format!("failed to persist job status: {err}"))
@@ -1522,7 +1523,7 @@ impl ThreadPool {
         };
         if let Err(error) = persistence
             .job_repository
-            .update_result(&WorkflowId::new(job_id), &persisted_result)
+            .update_result(&JobId::new(job_id), &persisted_result)
             .await
         {
             tracing::warn!(
@@ -1535,14 +1536,14 @@ impl ThreadPool {
 
         let finished_at = Utc::now().to_rfc3339();
         let status = if result.success {
-            WorkflowStatus::Succeeded
+            JobStatus::Succeeded
         } else {
-            WorkflowStatus::Failed
+            JobStatus::Failed
         };
         if let Err(error) = persistence
             .job_repository
             .update_status(
-                &WorkflowId::new(job_id),
+                &JobId::new(job_id),
                 status,
                 started_at,
                 Some(finished_at.as_str()),
@@ -1598,7 +1599,7 @@ impl ThreadPool {
                 })?,
         };
         let model_override = agent_record.model_id;
-        let job_id = WorkflowId::new(request.job_id.clone());
+        let job_id = JobId::new(request.job_id.clone());
         let existing_job = persistence
             .job_repository
             .get(&job_id)
@@ -1666,7 +1667,7 @@ impl ThreadPool {
             id: job_id,
             job_type: JobType::Standalone,
             name: format!("job:{}", request.job_id),
-            status: WorkflowStatus::Pending,
+            status: JobStatus::Pending,
             agent_id: RepoAgentId::new(request.agent_id.inner()),
             context: request
                 .context
@@ -1698,7 +1699,7 @@ impl ThreadPool {
 
     async fn persist_existing_job_binding(
         persistence: &ThreadPoolPersistence,
-        job_id: &WorkflowId,
+        job_id: &JobId,
         thread_id: ThreadId,
     ) -> Result<(), JobError> {
         persistence
@@ -1806,15 +1807,14 @@ impl ThreadPool {
                         tool_calls,
                         ..
                     } => {
-                        if tool_calls.is_empty() {
-                            if !content.trim().is_empty()
-                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty()
-                            {
-                                messages.push(ChatMessage::assistant_with_reasoning(
-                                    content,
-                                    reasoning_content,
-                                ));
-                            }
+                        if tool_calls.is_empty()
+                            && (!content.trim().is_empty()
+                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty())
+                        {
+                            messages.push(ChatMessage::assistant_with_reasoning(
+                                content,
+                                reasoning_content,
+                            ));
                         }
                     }
                     TurnLogEvent::TurnEnd { token_usage, .. } => {
@@ -1877,15 +1877,14 @@ impl ThreadPool {
                         tool_calls,
                         ..
                     } => {
-                        if tool_calls.is_empty() {
-                            if !content.trim().is_empty()
-                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty()
-                            {
-                                messages.push(ChatMessage::assistant_with_reasoning(
-                                    content,
-                                    reasoning_content,
-                                ));
-                            }
+                        if tool_calls.is_empty()
+                            && (!content.trim().is_empty()
+                                || !reasoning_content.as_deref().unwrap_or("").trim().is_empty())
+                        {
+                            messages.push(ChatMessage::assistant_with_reasoning(
+                                content,
+                                reasoning_content,
+                            ));
                         }
                     }
                     TurnLogEvent::TurnEnd { token_usage, .. } => {
@@ -1998,8 +1997,8 @@ mod tests {
         AgentRepository, JobRepository, SessionRepository, ThreadRepository,
     };
     use argus_repository::types::{
-        AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobType, MessageId, MessageRecord,
-        ThreadRecord, WorkflowStatus,
+        AgentId as RepoAgentId, JobId, JobRecord, JobResult, JobStatus, JobType, MessageId,
+        MessageRecord, ThreadRecord,
     };
     use argus_repository::{ArgusSqlite, DbError, migrate};
     use argus_template::TemplateManager;
@@ -2596,7 +2595,7 @@ mod tests {
         async fn update_status(
             &self,
             _id: &JobId,
-            _status: WorkflowStatus,
+            _status: JobStatus,
             _started_at: Option<&str>,
             _finished_at: Option<&str>,
         ) -> Result<(), DbError> {
@@ -2663,7 +2662,7 @@ mod tests {
                 id: self.job_id.clone(),
                 job_type: JobType::Standalone,
                 name: format!("job:{}", self.job_id),
-                status: WorkflowStatus::Pending,
+                status: JobStatus::Pending,
                 agent_id: self.agent_id,
                 context: None,
                 prompt: "run test".to_string(),
@@ -2682,7 +2681,7 @@ mod tests {
         async fn update_status(
             &self,
             _id: &JobId,
-            _status: WorkflowStatus,
+            _status: JobStatus,
             _started_at: Option<&str>,
             _finished_at: Option<&str>,
         ) -> Result<(), DbError> {
@@ -2962,7 +2961,7 @@ mod tests {
             .await
             .expect("queued job lookup should succeed")
             .expect("queued job should persist");
-        assert_eq!(queued_job.status, WorkflowStatus::Queued);
+        assert_eq!(queued_job.status, JobStatus::Queued);
         assert_eq!(queued_job.thread_id, Some(execution_thread_id));
 
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
@@ -2976,7 +2975,7 @@ mod tests {
             .await
             .expect("completed job lookup should succeed")
             .expect("completed job should persist");
-        assert_eq!(persisted_job.status, WorkflowStatus::Succeeded);
+        assert_eq!(persisted_job.status, JobStatus::Succeeded);
         assert!(persisted_job.started_at.is_some());
         assert!(persisted_job.finished_at.is_some());
         let persisted_result = persisted_job.result.expect("job result should persist");
@@ -3021,7 +3020,7 @@ mod tests {
             .await
             .expect("failed job lookup should succeed")
             .expect("failed job should persist");
-        assert_eq!(persisted_job.status, WorkflowStatus::Failed);
+        assert_eq!(persisted_job.status, JobStatus::Failed);
         let persisted_result = persisted_job.result.expect("failed result should persist");
         assert!(!persisted_result.success);
         assert!(persisted_result.message.contains("job executor panicked"));

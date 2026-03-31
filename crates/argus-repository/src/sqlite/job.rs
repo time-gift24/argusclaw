@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use crate::error::DbError;
 use crate::traits::JobRepository;
-use crate::types::{AgentId, JobId, JobRecord, JobResult, JobType, WorkflowId, WorkflowStatus};
+use crate::types::{AgentId, JobId, JobRecord, JobResult, JobStatus, JobType};
 use argus_protocol::ThreadId;
 
 use super::{ArgusSqlite, DbResult};
@@ -62,7 +62,7 @@ impl JobRepository for ArgusSqlite {
     async fn update_status(
         &self,
         id: &JobId,
-        status: WorkflowStatus,
+        status: JobStatus,
         started_at: Option<&str>,
         finished_at: Option<&str>,
     ) -> DbResult<()> {
@@ -201,8 +201,8 @@ impl ArgusSqlite {
                 .unwrap_or_default();
         let thread_id: Option<ThreadId> = Self::get_column::<Option<String>>(&row, "thread_id")?
             .and_then(|s| ThreadId::parse(&s).ok());
-        let parent_job_id: Option<WorkflowId> =
-            Self::get_column::<Option<String>>(&row, "parent_job_id")?.map(|s| WorkflowId::new(&s));
+        let parent_job_id: Option<JobId> =
+            Self::get_column::<Option<String>>(&row, "parent_job_id")?.map(|s| JobId::new(&s));
         let result: Option<JobResult> = Self::get_column::<Option<String>>(&row, "result")?
             .and_then(|s| serde_json::from_str(&s).ok());
 
@@ -211,7 +211,7 @@ impl ArgusSqlite {
             job_type: JobType::parse_str(&Self::get_column::<String>(&row, "job_type")?)
                 .map_err(|e| DbError::QueryFailed { reason: e })?,
             name: Self::get_column(&row, "name")?,
-            status: WorkflowStatus::parse_str(&Self::get_column::<String>(&row, "status")?)
+            status: JobStatus::parse_str(&Self::get_column::<String>(&row, "status")?)
                 .map_err(|e| DbError::QueryFailed { reason: e })?,
             agent_id: AgentId::new(Self::get_column(&row, "agent_id")?),
             context: Self::get_column(&row, "context")?,
