@@ -19,8 +19,11 @@ pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, Repositor
 pub use markdown::{ParsedSection, parse_markdown_sections};
 pub use models::{
     ContentPage, ExploreTreeEntry, ExploreTreeResult, GitHubBlob, GitHubSnapshot, GitHubTree,
-    GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeNode, KnowledgeNodeKind,
-    KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
+    GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeCreatePrArgs,
+    KnowledgeCreatePrResult, KnowledgeFileWrite, KnowledgeManifestFilePatch,
+    KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
+    KnowledgeManifestRepoPatch, KnowledgeNode, KnowledgeNodeKind, KnowledgeRelation,
+    KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
 };
 pub use provider::{FileKnowledgeRepoProvider, StaticKnowledgeRepoProvider};
 pub use registry::KnowledgeRepoRegistry;
@@ -137,8 +140,110 @@ mod tests {
 
         assert_eq!(def.name, "knowledge");
         assert!(def.description.contains("GitHub"));
-        assert!(def.parameters.to_string().contains("resolve_snapshot"));
-        assert!(def.parameters.to_string().contains("search_nodes"));
+        let parameters = def.parameters.to_string();
+        assert!(parameters.contains("resolve_snapshot"));
+        assert!(parameters.contains("search_nodes"));
+        assert!(parameters.contains("create_knowledge_pr"));
+
+        assert!(def.parameters["properties"].get("target_repo").is_some());
+        assert!(def.parameters["properties"].get("files").is_some());
+        assert!(def.parameters["properties"].get("manifest").is_some());
+    }
+
+    #[test]
+    fn knowledge_tool_parses_create_knowledge_pr_payload() {
+        let args = KnowledgeToolArgs::parse(serde_json::json!({
+            "action": "create_knowledge_pr",
+            "target_repo": "acme/docs",
+            "base_ref": "main",
+            "branch": "docs-update",
+            "pr_title": "Update docs",
+            "pr_body": "This updates the docs.",
+            "draft": true,
+            "files": [
+                {
+                    "path": "docs/guide.md",
+                    "content": "# Guide\n"
+                }
+            ],
+            "manifest": {
+                "path": ".knowledge/repo.json",
+                "repo": {
+                    "title": "Docs",
+                    "default_branch": "main",
+                    "include": ["docs"],
+                    "exclude": ["tmp"],
+                    "entrypoints": ["README.md"]
+                },
+                "files": [
+                    {
+                        "path": "docs/guide.md",
+                        "title": "Guide",
+                        "summary": "Guide summary",
+                        "tags": ["docs"],
+                        "aliases": ["guide"]
+                    }
+                ],
+                "nodes": [
+                    {
+                        "id": "docs/guide#intro",
+                        "source": {
+                            "path": "docs/guide.md",
+                            "heading": "Intro"
+                        },
+                        "title": "Intro",
+                        "summary": "Intro summary",
+                        "tags": ["docs"],
+                        "aliases": ["intro"],
+                        "relations": [
+                            {
+                                "type": "related",
+                                "target": "docs/api#intro"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            args.action,
+            super::KnowledgeAction::CreateKnowledgePr
+        ));
+        assert_eq!(args.target_repo.as_deref(), Some("acme/docs"));
+        assert_eq!(args.base_ref.as_deref(), Some("main"));
+        assert_eq!(args.branch.as_deref(), Some("docs-update"));
+        assert_eq!(args.pr_title.as_deref(), Some("Update docs"));
+        assert_eq!(args.pr_body.as_deref(), Some("This updates the docs."));
+        assert_eq!(args.draft, Some(true));
+        assert_eq!(args.files.len(), 1);
+        assert_eq!(args.files[0].path, "docs/guide.md");
+        assert_eq!(args.files[0].content, "# Guide\n");
+        assert_eq!(
+            args.manifest
+                .as_ref()
+                .and_then(|manifest| manifest.path.as_deref()),
+            Some(".knowledge/repo.json")
+        );
+    }
+
+    #[test]
+    fn knowledge_tool_rejects_malformed_create_knowledge_pr_payload() {
+        let err = KnowledgeToolArgs::parse(serde_json::json!({
+            "action": "create_knowledge_pr",
+            "target_repo": "acme/docs",
+            "pr_title": "Update docs",
+            "pr_body": "This updates the docs.",
+            "files": [
+                {
+                    "path": "docs/guide.md"
+                }
+            ]
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("content"));
     }
 
     #[test]

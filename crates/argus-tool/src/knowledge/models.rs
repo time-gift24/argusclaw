@@ -1,11 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
 use super::error::KnowledgeToolError;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum KnowledgeAction {
     ListRepos,
     ResolveSnapshot,
@@ -14,6 +14,7 @@ pub enum KnowledgeAction {
     GetNode,
     GetContent,
     GetNeighbors,
+    CreateKnowledgePr,
 }
 
 impl fmt::Display for KnowledgeAction {
@@ -26,12 +27,120 @@ impl fmt::Display for KnowledgeAction {
             Self::GetNode => "get_node",
             Self::GetContent => "get_content",
             Self::GetNeighbors => "get_neighbors",
+            Self::CreateKnowledgePr => "create_knowledge_pr",
         };
         f.write_str(value)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeFileWrite {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeManifestRepoPatch {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
+    #[serde(default)]
+    pub exclude: Option<Vec<String>>,
+    #[serde(default)]
+    pub entrypoints: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeManifestFilePatch {
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub aliases: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeManifestNodeSourcePatch {
+    pub path: String,
+    #[serde(default)]
+    pub heading: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeManifestNodePatch {
+    pub id: String,
+    pub source: KnowledgeManifestNodeSourcePatch,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub aliases: Option<Vec<String>>,
+    #[serde(default)]
+    pub relations: Option<Vec<KnowledgeRelation>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeManifestPatch {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub repo: Option<KnowledgeManifestRepoPatch>,
+    #[serde(default)]
+    pub files: Option<Vec<KnowledgeManifestFilePatch>>,
+    #[serde(default)]
+    pub nodes: Option<Vec<KnowledgeManifestNodePatch>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeCreatePrArgs {
+    pub target_repo: String,
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    pub pr_title: String,
+    pub pr_body: String,
+    #[serde(default)]
+    pub draft: Option<bool>,
+    #[serde(default)]
+    pub files: Vec<KnowledgeFileWrite>,
+    #[serde(default)]
+    pub manifest: Option<KnowledgeManifestPatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct KnowledgeCreatePrResult {
+    pub target_repo: String,
+    pub base_ref: String,
+    pub branch: String,
+    pub commit_sha: String,
+    pub pr_url: String,
+    pub manifest_path: String,
+    pub changed_files: Vec<String>,
+    pub created_files: Vec<String>,
+    pub updated_files: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct KnowledgeToolArgs {
     pub action: KnowledgeAction,
@@ -59,6 +168,22 @@ pub struct KnowledgeToolArgs {
     pub max_chars: Option<usize>,
     #[serde(default)]
     pub relation_types: Vec<String>,
+    #[serde(default)]
+    pub target_repo: Option<String>,
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub pr_title: Option<String>,
+    #[serde(default)]
+    pub pr_body: Option<String>,
+    #[serde(default)]
+    pub draft: Option<bool>,
+    #[serde(default)]
+    pub files: Vec<KnowledgeFileWrite>,
+    #[serde(default)]
+    pub manifest: Option<KnowledgeManifestPatch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -118,7 +243,7 @@ pub struct GitHubBlob {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct KnowledgeRelation {
     #[serde(rename = "type")]
@@ -198,6 +323,54 @@ impl KnowledgeToolArgs {
                         action: self.action.clone(),
                     });
                 }
+                Ok(())
+            }
+            KnowledgeAction::CreateKnowledgePr => {
+                let target_repo = self
+                    .target_repo
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if target_repo.is_none() {
+                    return Err(KnowledgeToolError::InvalidArguments(
+                        "target_repo is required for action create_knowledge_pr".to_string(),
+                    ));
+                }
+
+                let pr_title = self
+                    .pr_title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if pr_title.is_none() {
+                    return Err(KnowledgeToolError::InvalidArguments(
+                        "pr_title is required for action create_knowledge_pr".to_string(),
+                    ));
+                }
+
+                let pr_body = self
+                    .pr_body
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if pr_body.is_none() {
+                    return Err(KnowledgeToolError::InvalidArguments(
+                        "pr_body is required for action create_knowledge_pr".to_string(),
+                    ));
+                }
+
+                if self.files.is_empty() {
+                    return Err(KnowledgeToolError::InvalidArguments(
+                        "files is required for action create_knowledge_pr".to_string(),
+                    ));
+                }
+
+                if self.files.iter().any(|file| file.path.trim().is_empty()) {
+                    return Err(KnowledgeToolError::InvalidArguments(
+                        "files[].path is required for action create_knowledge_pr".to_string(),
+                    ));
+                }
+
                 Ok(())
             }
             _ => {
