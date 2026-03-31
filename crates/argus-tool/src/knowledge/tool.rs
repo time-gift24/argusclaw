@@ -348,6 +348,10 @@ impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledge
                     "results": neighbors.iter().map(Self::render_node).collect::<Vec<_>>(),
                 }))
             }
+            KnowledgeAction::CreateKnowledgePr => Err(ToolError::ExecutionFailed {
+                tool_name: "knowledge".to_string(),
+                reason: "create_knowledge_pr is not implemented yet".to_string(),
+            }),
         }
     }
 }
@@ -392,74 +396,8 @@ impl<R: KnowledgeRuntime> NamedTool for KnowledgeTool<R> {
             description:
                 "Explore GitHub-backed knowledge bases progressively through snapshot, tree, search, and node actions."
                     .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "description": "The knowledge action to run",
-                        "enum": [
-                            "list_repos",
-                            "resolve_snapshot",
-                            "explore_tree",
-                            "search_nodes",
-                            "get_node",
-                            "get_content",
-                            "get_neighbors"
-                        ]
-                    },
-                    "repo_id": {
-                        "type": "string",
-                        "description": "Knowledge repository identifier"
-                    },
-                    "snapshot_id": {
-                        "type": "string",
-                        "description": "Resolved snapshot identifier"
-                    },
-                    "ref": {
-                        "type": "string",
-                        "description": "Git reference to resolve, defaults to the repository default branch"
-                    },
-                    "cursor": {
-                        "type": "string",
-                        "description": "Pagination cursor for bounded content reads"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Repository path scope for tree exploration"
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "Directory exploration depth"
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for progressive node search"
-                    },
-                    "scope_path": {
-                        "type": "string",
-                        "description": "Optional scope path for search"
-                    },
-                    "node_id": {
-                        "type": "string",
-                        "description": "Knowledge node identifier"
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "Maximum characters to return for content"
-                    },
-                    "relation_types": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Relationship types to include when fetching neighbors"
-                    }
-                },
-                "required": ["action"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(KnowledgeToolArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 
