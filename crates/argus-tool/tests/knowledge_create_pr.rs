@@ -1,19 +1,20 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tempfile::tempdir;
 
 use argus_protocol::ids::ThreadId;
 use argus_protocol::{NamedTool, ToolExecutionContext};
 use argus_tool::knowledge::{
-    DefaultKnowledgeRuntime, GitHubBlob, GitHubSnapshot, GitHubTree, GitPrExecutor,
-    GitPrOutcome, KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult,
+    CliGitPrExecutor, DefaultKnowledgeRuntime, GitHubBlob, GitHubSnapshot, GitHubTree,
+    GitPrExecutor, GitPrOutcome, KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult,
     KnowledgeManifestFilePatch, KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch,
-    KnowledgeManifestPatch, KnowledgeManifestRepoPatch, KnowledgePrRuntime,
-    KnowledgePrService, KnowledgeRepoDescriptor, KnowledgeRuntimeBackend, KnowledgeTool,
-    KnowledgeToolError, RepositoryManifest, merge_manifest, serialize_manifest,
-    validate_repo_relative_path,
+    KnowledgeManifestPatch, KnowledgeManifestRepoPatch, KnowledgePrRuntime, KnowledgePrService,
+    KnowledgeRepoDescriptor, KnowledgeRuntimeBackend, KnowledgeTool, KnowledgeToolError,
+    RepositoryManifest, merge_manifest, serialize_manifest, validate_repo_relative_path,
 };
 
 fn sample_existing_manifest() -> RepositoryManifest {
@@ -142,6 +143,80 @@ fn sample_create_pr_args() -> KnowledgeCreatePrArgs {
         }],
         manifest: Some(sample_patch()),
     }
+}
+
+fn run_git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {} failed\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {} failed\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn git_git_dir_output(git_dir: &Path, args: &[&str]) -> String {
+    let git_dir = git_dir.to_string_lossy().to_string();
+    let output = std::process::Command::new("git")
+        .args(["--git-dir", &git_dir])
+        .args(args)
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git --git-dir={} {} failed\nstdout:\n{}\nstderr:\n{}",
+        git_dir,
+        args.join(" "),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn configure_git_identity(repo_dir: &Path) {
+    run_git(repo_dir, &["config", "user.email", "test@example.com"]);
+    run_git(repo_dir, &["config", "user.name", "Codex Test"]);
+}
+
+fn init_origin_with_main() -> tempfile::TempDir {
+    let temp = tempdir().expect("tempdir should create");
+    let origin = temp.path().join("origin.git");
+    let origin_str = origin.to_string_lossy().to_string();
+    run_git(temp.path(), &["init", "--bare", &origin_str]);
+    let _ = git_git_dir_output(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+    let seed = temp.path().join("seed");
+    let seed_str = seed.to_string_lossy().to_string();
+    run_git(temp.path(), &["clone", &origin_str, &seed_str]);
+    configure_git_identity(&seed);
+    std::fs::write(seed.join("README.md"), "base\n").expect("seed file should write");
+    run_git(&seed, &["add", "README.md"]);
+    run_git(&seed, &["commit", "-m", "base"]);
+    run_git(&seed, &["branch", "-M", "main"]);
+    run_git(&seed, &["push", "origin", "main"]);
+
+    temp
 }
 
 #[derive(Debug, Default)]
@@ -358,6 +433,62 @@ impl KnowledgePrRuntime for FakePrRuntime {
     }
 }
 
+#[derive(Clone)]
+struct SymlinkSeedExecutor {
+    outside_dir: Arc<std::path::PathBuf>,
+    commit_called: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl GitPrExecutor for SymlinkSeedExecutor {
+    async fn ensure_auth(&self) -> Result<(), KnowledgeToolError> {
+        Ok(())
+    }
+
+    async fn clone_repo(
+        &self,
+        _target_repo: &str,
+        destination: &Path,
+    ) -> Result<(), KnowledgeToolError> {
+        std::fs::create_dir_all(destination).expect("destination should exist");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(self.outside_dir.as_path(), destination.join("docs"))
+            .expect("symlink should create");
+        Ok(())
+    }
+
+    async fn prepare_branch(
+        &self,
+        _repo_dir: &Path,
+        _base_ref: &str,
+        _branch: &str,
+    ) -> Result<(), KnowledgeToolError> {
+        Ok(())
+    }
+
+    async fn commit_and_push(
+        &self,
+        _repo_dir: &Path,
+        _branch: &str,
+        _commit_message: &str,
+    ) -> Result<String, KnowledgeToolError> {
+        self.commit_called.store(true, Ordering::SeqCst);
+        Ok("unexpected".to_string())
+    }
+
+    async fn create_or_reuse_pr(
+        &self,
+        _repo_dir: &Path,
+        _base_ref: &str,
+        _branch: &str,
+        _title: &str,
+        _body: &str,
+        _draft: bool,
+    ) -> Result<GitPrOutcome, KnowledgeToolError> {
+        panic!("create_or_reuse_pr should not be called after a write rejection");
+    }
+}
+
 #[test]
 fn validate_repo_relative_path_rejects_absolute_paths() {
     let err = validate_repo_relative_path("/etc/passwd").unwrap_err();
@@ -429,6 +560,57 @@ fn merge_manifest_upserts_files_and_nodes_by_path_and_id() {
         .find(|node| node.id == "docs/api#overview")
         .expect("overview node should exist");
     assert_eq!(overview.source.path, "docs/api.md");
+}
+
+#[test]
+fn merge_manifest_preserves_omitted_fields_for_existing_entries() {
+    let patch = KnowledgeManifestPatch {
+        path: Some(".knowledge/repo.json".to_string()),
+        repo: None,
+        files: Some(vec![KnowledgeManifestFilePatch {
+            path: "docs/guide.md".to_string(),
+            title: None,
+            summary: Some("Updated summary".to_string()),
+            tags: None,
+            aliases: None,
+        }]),
+        nodes: Some(vec![KnowledgeManifestNodePatch {
+            id: "docs/guide#intro".to_string(),
+            source: KnowledgeManifestNodeSourcePatch {
+                path: "docs/guide.md".to_string(),
+                heading: Some("Intro".to_string()),
+            },
+            title: None,
+            summary: Some("Updated node".to_string()),
+            tags: None,
+            aliases: None,
+            relations: None,
+        }]),
+    };
+
+    let merged = merge_manifest(Some(sample_existing_manifest()), &patch).unwrap();
+
+    let guide = merged
+        .files
+        .iter()
+        .find(|file| file.path == "docs/guide.md")
+        .expect("guide file should exist");
+    assert_eq!(guide.title.as_deref(), Some("Old guide"));
+    assert_eq!(guide.summary.as_deref(), Some("Updated summary"));
+    assert_eq!(guide.tags, vec!["legacy"]);
+    assert_eq!(guide.aliases, vec!["guide"]);
+
+    let intro = merged
+        .nodes
+        .iter()
+        .find(|node| node.id == "docs/guide#intro")
+        .expect("intro node should exist");
+    assert_eq!(intro.title.as_deref(), Some("Old intro"));
+    assert_eq!(intro.summary.as_deref(), Some("Updated node"));
+    assert_eq!(intro.tags, vec!["legacy"]);
+    assert_eq!(intro.aliases, vec!["intro"]);
+    assert_eq!(intro.relations.len(), 1);
+    assert_eq!(intro.relations[0].target, "docs/api#intro");
 }
 
 #[test]
@@ -592,6 +774,41 @@ async fn dispatch_create_knowledge_pr_returns_result_payload() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn executor_rejects_writes_through_symlinked_parents() {
+    let temp = tempdir().expect("tempdir should create");
+    let outside_dir = temp.path().join("outside");
+    std::fs::create_dir_all(&outside_dir).expect("outside dir should exist");
+
+    let commit_called = Arc::new(AtomicBool::new(false));
+    let service = KnowledgePrService::new_with_executor(SymlinkSeedExecutor {
+        outside_dir: Arc::new(outside_dir.clone()),
+        commit_called: commit_called.clone(),
+    });
+
+    let err = service
+        .create_pr(&KnowledgeCreatePrArgs {
+            target_repo: "acme/docs".to_string(),
+            base_ref: Some("main".to_string()),
+            branch: Some("codex/knowledge-bootstrap".to_string()),
+            pr_title: "Bootstrap knowledge docs".to_string(),
+            pr_body: "Adds knowledge docs.".to_string(),
+            draft: Some(true),
+            files: vec![argus_tool::knowledge::KnowledgeFileWrite {
+                path: "docs/escape.md".to_string(),
+                content: "escaped\n".to_string(),
+            }],
+            manifest: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("symlink"));
+    assert!(!outside_dir.join("escape.md").exists());
+    assert!(!commit_called.load(Ordering::SeqCst));
+}
+
 #[tokio::test]
 async fn executor_successful_flow_writes_files_and_opens_pr() {
     let executor = FakeGitPrExecutor::with_state(FakeExecutorState {
@@ -623,12 +840,16 @@ async fn executor_successful_flow_writes_files_and_opens_pr() {
     assert_eq!(result.commit_sha, "abc123");
     assert_eq!(result.pr_url, "https://example.com/pr/42");
     assert_eq!(result.manifest_path, ".knowledge/repo.json");
-    assert!(result
-        .changed_files
-        .contains(&"docs/knowledge/README.md".to_string()));
-    assert!(result
-        .changed_files
-        .contains(&".knowledge/repo.json".to_string()));
+    assert!(
+        result
+            .changed_files
+            .contains(&"docs/knowledge/README.md".to_string())
+    );
+    assert!(
+        result
+            .changed_files
+            .contains(&".knowledge/repo.json".to_string())
+    );
 
     let state = state.lock().expect("state should lock");
     assert_eq!(
@@ -663,7 +884,10 @@ async fn executor_auth_failure_stops_before_clone() {
     let state = executor.state.clone();
     let service = KnowledgePrService::new_with_executor(executor);
 
-    let err = service.create_pr(&sample_create_pr_args()).await.unwrap_err();
+    let err = service
+        .create_pr(&sample_create_pr_args())
+        .await
+        .unwrap_err();
 
     assert!(err.to_string().contains("gh auth status failed"));
     let state = state.lock().expect("state should lock");
@@ -680,7 +904,10 @@ async fn executor_pr_creation_failure_happens_after_push() {
     let state = executor.state.clone();
     let service = KnowledgePrService::new_with_executor(executor);
 
-    let err = service.create_pr(&sample_create_pr_args()).await.unwrap_err();
+    let err = service
+        .create_pr(&sample_create_pr_args())
+        .await
+        .unwrap_err();
 
     assert!(err.to_string().contains("gh pr create failed"));
     let state = state.lock().expect("state should lock");
@@ -709,4 +936,90 @@ async fn executor_reuses_existing_pr() {
 
     assert_eq!(result.pr_url, "https://example.com/pr/existing");
     assert!(result.summary.contains("Updated existing PR"));
+}
+
+#[tokio::test]
+async fn cli_executor_reuses_existing_remote_branch_history() {
+    let temp = init_origin_with_main();
+    let origin = temp.path().join("origin.git");
+    let origin_str = origin.to_string_lossy().to_string();
+    let executor = CliGitPrExecutor::new();
+    let branch = "codex/knowledge-pr-update";
+
+    let first = temp.path().join("first");
+    let first_str = first.to_string_lossy().to_string();
+    run_git(temp.path(), &["clone", &origin_str, &first_str]);
+    configure_git_identity(&first);
+    executor
+        .prepare_branch(&first, "main", branch)
+        .await
+        .unwrap();
+    std::fs::write(first.join("docs.txt"), "first\n").expect("file should write");
+    let first_sha = executor
+        .commit_and_push(&first, branch, "first change")
+        .await
+        .unwrap();
+
+    let second = temp.path().join("second");
+    let second_str = second.to_string_lossy().to_string();
+    run_git(temp.path(), &["clone", &origin_str, &second_str]);
+    configure_git_identity(&second);
+    executor
+        .prepare_branch(&second, "main", branch)
+        .await
+        .unwrap();
+    std::fs::write(second.join("docs.txt"), "second\n").expect("file should write");
+    let second_sha = executor
+        .commit_and_push(&second, branch, "second change")
+        .await
+        .unwrap();
+
+    run_git(
+        &second,
+        &["merge-base", "--is-ancestor", &first_sha, &second_sha],
+    );
+    let remote_head = git_git_dir_output(&origin, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(remote_head, second_sha);
+    let remote_content = git_output(&second, &["show", &format!("origin/{branch}:docs.txt")]);
+    assert_eq!(remote_content, "second");
+}
+
+#[tokio::test]
+async fn cli_executor_commit_and_push_is_noop_when_branch_is_already_up_to_date() {
+    let temp = init_origin_with_main();
+    let origin = temp.path().join("origin.git");
+    let origin_str = origin.to_string_lossy().to_string();
+    let executor = CliGitPrExecutor::new();
+    let branch = "codex/knowledge-pr-update";
+
+    let first = temp.path().join("first");
+    let first_str = first.to_string_lossy().to_string();
+    run_git(temp.path(), &["clone", &origin_str, &first_str]);
+    configure_git_identity(&first);
+    executor
+        .prepare_branch(&first, "main", branch)
+        .await
+        .unwrap();
+    std::fs::write(first.join("docs.txt"), "first\n").expect("file should write");
+    let first_sha = executor
+        .commit_and_push(&first, branch, "first change")
+        .await
+        .unwrap();
+
+    let second = temp.path().join("second");
+    let second_str = second.to_string_lossy().to_string();
+    run_git(temp.path(), &["clone", &origin_str, &second_str]);
+    configure_git_identity(&second);
+    executor
+        .prepare_branch(&second, "main", branch)
+        .await
+        .unwrap();
+    let second_sha = executor
+        .commit_and_push(&second, branch, "no-op change")
+        .await
+        .unwrap();
+
+    assert_eq!(second_sha, first_sha);
+    let remote_head = git_git_dir_output(&origin, &["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(remote_head, first_sha);
 }
