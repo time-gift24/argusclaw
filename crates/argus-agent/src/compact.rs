@@ -3,7 +3,6 @@
 //! This module provides:
 //! - `Compactor`: Async trait for implementing different compaction strategies.
 //! - `KeepRecentCompactor`: Keeps the most recent messages up to a count.
-//! - `KeepTokensCompactor`: Keeps messages within a token budget ratio.
 //! - `CompactorManager`: Shared manager that handles compaction using a strategy.
 
 use std::collections::HashMap;
@@ -13,7 +12,6 @@ use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use async_trait::async_trait;
 
 use super::error::CompactError;
-use crate::tokenizer::{count_total_tokens, estimate_tokens};
 
 /// Context for compaction operations.
 ///
@@ -58,12 +56,6 @@ impl<'a> CompactContext<'a> {
     #[must_use]
     pub fn threshold_ratio_override(&self) -> Option<f32> {
         self.threshold_ratio_override
-    }
-
-    /// Recalculate token count from messages.
-    pub fn recalculate_token_count(&mut self) -> Result<(), CompactError> {
-        *self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
-        Ok(())
     }
 
     /// Set the token count.
@@ -137,6 +129,7 @@ impl Compactor for KeepRecentCompactor {
 
         // Perform compaction
         let messages = &mut *context.messages;
+        let original_count = messages.len();
 
         // Extract system messages
         let system_msgs: Vec<_> = messages
@@ -159,8 +152,14 @@ impl Compactor for KeepRecentCompactor {
         // Reconstruct messages
         *messages = [system_msgs, recent].concat();
 
-        // Update token count
-        context.recalculate_token_count()?;
+        // Update token count using proportional estimation.
+        // The authoritative count will come from the next LLM response.
+        let new_count = messages.len();
+        if original_count > 0 {
+            context.set_token_count(
+                (*context.token_count as usize * new_count / original_count) as u32,
+            );
+        }
 
         tracing::debug!(
             compactor = self.name(),
@@ -173,101 +172,6 @@ impl Compactor for KeepRecentCompactor {
 
     fn name(&self) -> &'static str {
         "keep_recent"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// KeepTokensCompactor
-// ---------------------------------------------------------------------------
-
-/// KeepTokensCompactor: keeps messages within a token budget.
-///
-/// Compaction triggers when token count exceeds `threshold_ratio` of context window.
-/// When triggered, keeps system messages + messages totaling up to `target_ratio` of context window.
-pub struct KeepTokensCompactor {
-    /// Threshold ratio to trigger compaction (0.0 - 1.0).
-    threshold_ratio: f32,
-    /// Target ratio of context window to keep after compaction (0.0 - 1.0).
-    target_ratio: f32,
-}
-
-impl KeepTokensCompactor {
-    /// Create a new KeepTokensCompactor.
-    #[must_use]
-    pub fn new(threshold_ratio: f32, target_ratio: f32) -> Self {
-        Self {
-            threshold_ratio: threshold_ratio.clamp(0.1, 0.95),
-            target_ratio: target_ratio.clamp(0.1, 0.9),
-        }
-    }
-
-    /// Create with default settings (80% threshold, keep 50% of context).
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(0.8, 0.5)
-    }
-}
-
-#[async_trait]
-impl Compactor for KeepTokensCompactor {
-    async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError> {
-        let context_window = context.provider.context_window();
-        let threshold_ratio = context
-            .threshold_ratio_override()
-            .unwrap_or(self.threshold_ratio);
-        let threshold = (context_window as f32 * threshold_ratio) as u32;
-
-        // Check if compaction is needed
-        if *context.token_count < threshold {
-            return Ok(());
-        }
-
-        // Calculate target token budget
-        let target_tokens = (context_window as f32 * self.target_ratio) as usize;
-
-        // Perform compaction
-        let messages = &mut *context.messages;
-
-        // Extract system messages
-        let system_msgs: Vec<_> = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .cloned()
-            .collect();
-
-        // Build list from end, respecting token budget
-        let mut kept: Vec<ChatMessage> = Vec::new();
-        let mut current_tokens = 0u32;
-
-        for msg in messages.iter().rev() {
-            if msg.role == Role::System {
-                continue;
-            }
-            let msg_tokens = estimate_tokens(&msg.content)?;
-            if current_tokens + msg_tokens > target_tokens as u32 {
-                break;
-            }
-            kept.push(msg.clone());
-            current_tokens += msg_tokens;
-        }
-
-        kept.reverse();
-        *messages = [system_msgs, kept].concat();
-
-        // Update token count
-        context.recalculate_token_count()?;
-
-        tracing::debug!(
-            compactor = self.name(),
-            new_token_count = *context.token_count,
-            "Compaction completed"
-        );
-
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "keep_tokens"
     }
 }
 
@@ -381,26 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn keep_tokens_compactor_new_clamps_values() {
-        let compactor = KeepTokensCompactor::new(2.0, 2.0);
-        assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
-        assert!((compactor.target_ratio - 0.9).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn compactor_manager_defaults() {
         let manager = CompactorManager::with_defaults();
         assert_eq!(manager.default_compactor().name(), "keep_recent");
-    }
-
-    #[test]
-    fn compactor_manager_register_and_get() {
-        let mut manager = CompactorManager::with_defaults();
-        manager.register("tokens", Arc::new(KeepTokensCompactor::with_defaults()));
-
-        assert!(manager.get("tokens").is_some());
-        assert_eq!(manager.get("tokens").unwrap().name(), "keep_tokens");
-        assert!(manager.get("nonexistent").is_none());
     }
 
     #[tokio::test]
@@ -414,8 +301,8 @@ mod tests {
             ChatMessage::user(repeated.clone()),
             ChatMessage::user(repeated.clone()),
         ];
-        let mut token_count = count_total_tokens(messages.iter().map(|m| m.content.as_str()))
-            .expect("tokenization should succeed");
+        // Use a token count high enough to exceed the 20% threshold (20 tokens)
+        let mut token_count = 90u32;
         let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
             .with_threshold_ratio_override(0.2);
 
@@ -426,40 +313,7 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, repeated);
-        assert_eq!(
-            token_count,
-            estimate_tokens(&messages[0].content).expect("tokenization should succeed")
-        );
-    }
-
-    #[tokio::test]
-    async fn keep_tokens_compactor_uses_context_threshold_override() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(FixedContextProvider {
-            context_window: 100,
-        });
-        let repeated = ["test"; 10].join(" ");
-        let mut messages = vec![
-            ChatMessage::user(repeated.clone()),
-            ChatMessage::user(repeated.clone()),
-            ChatMessage::user(repeated.clone()),
-        ];
-        let mut token_count = count_total_tokens(messages.iter().map(|m| m.content.as_str()))
-            .expect("tokenization should succeed");
-        let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
-            .with_threshold_ratio_override(0.2);
-
-        KeepTokensCompactor::new(0.8, 0.2)
-            .compact(&mut context)
-            .await
-            .expect("override should force compaction");
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].content, repeated);
-        assert_eq!(messages[1].content, repeated);
-        assert_eq!(
-            token_count,
-            count_total_tokens(messages.iter().map(|m| m.content.as_str()))
-                .expect("tokenization should succeed")
-        );
+        // Proportional estimation: 90 * 1 / 3 = 30
+        assert_eq!(token_count, 30);
     }
 }
