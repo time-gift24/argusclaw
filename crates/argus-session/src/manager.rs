@@ -23,6 +23,8 @@ use uuid::Uuid;
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
+const DEFAULT_COMPACT_AGENT_DISPLAY_NAME: &str = "Compact Context";
+
 #[derive(Debug)]
 struct RecoveredThreadState {
     messages: Vec<ChatMessage>,
@@ -237,6 +239,30 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    async fn resolve_thread_compact_agent_id(
+        &self,
+        compact_agent_id: Option<AgentId>,
+    ) -> Result<Option<AgentId>> {
+        if compact_agent_id.is_some() {
+            return Ok(compact_agent_id);
+        }
+
+        match self
+            .template_manager
+            .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
+            .await?
+        {
+            Some(agent) => Ok(Some(agent.id)),
+            None => {
+                tracing::warn!(
+                    compact_agent = DEFAULT_COMPACT_AGENT_DISPLAY_NAME,
+                    "default compact agent is not seeded; threads will continue without it"
+                );
+                Ok(None)
+            }
+        }
+    }
+
     /// Create a new SessionManager.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -569,6 +595,9 @@ impl SessionManager {
         };
 
         let effective_model = provider.model_name().to_string();
+        let compact_agent_id = self
+            .resolve_thread_compact_agent_id(compact_agent_id)
+            .await?;
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
@@ -1887,6 +1916,41 @@ mod tests {
             session.get_thread(&thread_id).is_some(),
             "loaded session should expose persisted live threads"
         );
+    }
+
+    #[tokio::test]
+    async fn create_thread_defaults_compact_agent_to_builtin_template() {
+        let manager = test_session_manager().await;
+        manager
+            .template_manager
+            .seed_builtin_agents()
+            .await
+            .expect("builtin agents should seed");
+
+        let compact_agent = manager
+            .template_manager
+            .find_by_display_name("Compact Context")
+            .await
+            .expect("compact template lookup should succeed")
+            .expect("compact template should exist");
+
+        let session_id = manager
+            .create("compact-by-default".to_string())
+            .await
+            .expect("session should create");
+        let thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .await
+            .expect("thread should create");
+
+        let thread = manager
+            .thread_repo
+            .get_thread(&thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread should persist");
+
+        assert_eq!(thread.compact_agent_id, Some(compact_agent.id));
     }
 
     #[tokio::test]

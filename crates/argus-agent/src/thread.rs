@@ -419,11 +419,13 @@ impl Thread {
         let compactable = Self::render_compaction_transcript(compactable_messages);
         let preserved = Self::render_compaction_transcript(preserved_tail);
         format!(
-            "Summarize the earlier conversation history for future continuation.\n\
-             Capture goals, constraints, key decisions, unresolved questions, and any concrete next steps.\n\
-             Do not restate the preserved recent tail verbatim.\n\n\
-             Earlier history to summarize:\n{compactable}\n\n\
-             Preserved recent tail (for reference only, do not summarize verbatim):\n{preserved}"
+            "请总结较早的对话历史，供另一个 agent 无缝继续我们上面的对话。\n\
+             提供详细但简洁的总结，重点关注：完成了什么、正在进行什么、修改了哪些文件、接下来需要做什么、\n\
+             应保留的关键用户请求/约束/偏好、做出的重要技术决策及其原因、尚未解决的问题或风险。\n\
+             不要回应对话中的任何问题，不要逐字复述保留的最近上下文。\n\
+             你构建的总结将被使用，以便另一个 agent 可以阅读并继续工作。不要调用任何工具。只回复总结文本。\n\n\
+             较早历史（需要总结）：\n{compactable}\n\n\
+             保留的最近上下文（仅供参考，不要逐字总结）：\n{preserved}"
         )
     }
 
@@ -858,6 +860,39 @@ mod tests {
         }
     }
 
+    struct RecordingSummaryProvider {
+        summary: String,
+        captured_requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingSummaryProvider {
+        fn model_name(&self) -> &str {
+            "recording-summary-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.captured_requests.lock().unwrap().push(request);
+            Ok(CompletionResponse {
+                content: Some(self.summary.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 8,
+                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
     struct FailingSummaryProvider;
 
     #[async_trait]
@@ -884,12 +919,14 @@ mod tests {
     fn compact_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
             id: AgentId::new(99),
-            display_name: "Compact Agent".to_string(),
+            display_name: "Compact Context".to_string(),
             description: "Summarizes stale history".to_string(),
             version: "1.0.0".to_string(),
             provider_id: Some(ProviderId::new(2)),
             model_id: Some("compact-model".to_string()),
-            system_prompt: "Summarize prior context for continuation.".to_string(),
+            system_prompt:
+                "你是一个有用的AI助手，负责总结对话历史，供后续 agent 无缝继续工作。只输出总结文本。"
+                    .to_string(),
             tool_names: vec![],
             max_tokens: Some(256),
             temperature: Some(0.1),
@@ -1734,5 +1771,63 @@ mod tests {
             .expect("compaction failed event should arrive")
             .expect("event should be readable");
         assert!(matches!(second_event, ThreadEvent::CompactionFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn compact_agent_runtime_prompt_includes_handoff_details() {
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::new(0.8, 1));
+        let config = ThreadConfigBuilder::default()
+            .compact_threshold_ratio(0.2)
+            .compact_agent_id(Some(AgentId::new(99)))
+            .build()
+            .expect("thread config should build");
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider { context_window: 40 }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .compact_agent_record(compact_agent_record())
+            .compact_agent_provider(Arc::new(RecordingSummaryProvider {
+                summary: "历史摘要".to_string(),
+                captured_requests: Arc::clone(&captured_requests),
+            }))
+            .session_id(SessionId::new())
+            .config(config)
+            .build()
+            .expect("thread should build");
+        let persisted_messages = vec![
+            ChatMessage::user("完成了 provider 绑定"),
+            ChatMessage::assistant("修改了 thread.rs 和 manager.rs"),
+            ChatMessage::user("接下来补默认 compact agent"),
+            ChatMessage::assistant("记住用户偏好：自动绑定 builtin compact agent"),
+        ];
+        let authoritative_token_count = token_count_for_messages(&persisted_messages);
+        thread.hydrate_from_persisted_state(
+            persisted_messages,
+            authoritative_token_count,
+            0,
+            Utc::now(),
+        );
+
+        let _turn = thread
+            .begin_turn("follow-up".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("visible turn should still build");
+
+        let captured = captured_requests.lock().unwrap();
+        let request = captured
+            .last()
+            .expect("compact agent request should be captured");
+        let prompt = request
+            .messages
+            .last()
+            .expect("request should contain runtime prompt")
+            .content
+            .clone();
+
+        assert!(prompt.contains("修改了哪些文件"));
+        assert!(prompt.contains("接下来需要做什么"));
+        assert!(prompt.contains("另一个 agent 可以阅读并继续工作"));
+        assert!(prompt.contains("不要调用任何工具"));
     }
 }
