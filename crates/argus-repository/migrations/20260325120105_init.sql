@@ -98,17 +98,6 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_seq ON messages(thread_id, seq);
 
--- Workflows (TEXT ID)
-CREATE TABLE IF NOT EXISTS workflows (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
-
 -- Jobs (agent_id is INTEGER)
 CREATE TABLE IF NOT EXISTS jobs (
     id          TEXT PRIMARY KEY NOT NULL,

@@ -40,7 +40,7 @@ tauri-dev:
 
 # Build Tauri desktop app for production
 tauri-build:
-	cd crates/desktop && pnpm install && pnpm tauri build
+	cd crates/desktop && pnpm install && CI=true pnpm tauri build
 
 # Aliases for desktop development
 desktop-dev: tauri-dev
