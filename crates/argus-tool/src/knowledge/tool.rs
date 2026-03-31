@@ -3,11 +3,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use argus_protocol::knowledge::KnowledgeRepoProvider;
+use argus_protocol::knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
+use super::cli::RealCliRunner;
 use super::error::KnowledgeToolError;
 use super::github::{GitHubKnowledgeBackend, ReqwestGitHubTransport};
 use super::indexer::{KnowledgeBackend, KnowledgeIndexer};
@@ -17,8 +18,29 @@ use super::models::{
     KnowledgeToolArgs,
 };
 use super::pr::{CliPrExecutor, KnowledgePrRuntime, KnowledgePrService};
-use super::cli::RealCliRunner;
 use super::registry::KnowledgeRepoRegistry;
+
+fn repo_descriptor_from_record(record: &KnowledgeRepoRecord) -> KnowledgeRepoDescriptor {
+    KnowledgeRepoDescriptor {
+        repo_id: record.repo_id.clone(),
+        provider: record.provider.clone(),
+        owner: record.owner.clone(),
+        name: record.name.clone(),
+        default_branch: record.default_branch.clone(),
+        manifest_paths: record.manifest_paths.clone(),
+    }
+}
+
+pub(crate) async fn load_repo_descriptors_from_provider(
+    provider: Arc<dyn KnowledgeRepoProvider>,
+) -> Result<Vec<KnowledgeRepoDescriptor>, KnowledgeToolError> {
+    let records = provider
+        .list_repos(None)
+        .await
+        .map_err(|err| KnowledgeToolError::RequestFailed(err.to_string()))?;
+
+    Ok(records.iter().map(repo_descriptor_from_record).collect())
+}
 
 #[async_trait]
 pub trait KnowledgeRuntime: Send + Sync {
@@ -284,26 +306,23 @@ impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> Know
         match args.action {
             KnowledgeAction::ListRepos => {
                 let repos = if let Some(provider) = &self.repo_provider {
-                    let records = provider
-                        .list_repos(ctx.agent_id)
-                        .await
-                        .map_err(|err| ToolError::ExecutionFailed {
+                    let records = provider.list_repos(ctx.agent_id).await.map_err(|err| {
+                        ToolError::ExecutionFailed {
                             tool_name: "knowledge".to_string(),
                             reason: err.to_string(),
-                        })?;
+                        }
+                    })?;
                     records
                         .iter()
                         .map(Self::render_repo_record)
                         .collect::<Vec<_>>()
                 } else {
-                    let descs =
-                        self.backend
-                            .list_repos()
-                            .await
-                            .map_err(|err| ToolError::ExecutionFailed {
-                                tool_name: "knowledge".to_string(),
-                                reason: err.to_string(),
-                            })?;
+                    let descs = self.backend.list_repos().await.map_err(|err| {
+                        ToolError::ExecutionFailed {
+                            tool_name: "knowledge".to_string(),
+                            reason: err.to_string(),
+                        }
+                    })?;
                     descs.iter().map(Self::render_repo).collect::<Vec<_>>()
                 };
 
@@ -474,6 +493,20 @@ impl Default for KnowledgeTool<DefaultKnowledgeRuntime> {
 }
 
 impl KnowledgeTool<DefaultKnowledgeRuntime> {
+    fn new_with_provider_and_repos(
+        provider: Arc<dyn KnowledgeRepoProvider>,
+        repos: Vec<KnowledgeRepoDescriptor>,
+    ) -> Self {
+        let runtime = DefaultKnowledgeRuntime::new_with_provider(
+            GitHubKnowledgeBackend::new(repos, ReqwestGitHubTransport::new()),
+            KnowledgePrService::new(),
+            provider,
+        );
+        Self {
+            runtime: Arc::new(runtime),
+        }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -482,19 +515,11 @@ impl KnowledgeTool<DefaultKnowledgeRuntime> {
     }
 
     /// Create a `KnowledgeTool` with agent-scoped repo filtering via a [`KnowledgeRepoProvider`].
-    #[must_use]
-    pub fn new_with_repo_provider(provider: Arc<dyn KnowledgeRepoProvider>) -> Self {
-        let runtime = DefaultKnowledgeRuntime::new_with_provider(
-            GitHubKnowledgeBackend::new(
-                KnowledgeRepoRegistry::load_default(),
-                ReqwestGitHubTransport::new(),
-            ),
-            KnowledgePrService::new(),
-            provider,
-        );
-        Self {
-            runtime: Arc::new(runtime),
-        }
+    pub async fn new_with_repo_provider(
+        provider: Arc<dyn KnowledgeRepoProvider>,
+    ) -> Result<Self, KnowledgeToolError> {
+        let repos = load_repo_descriptors_from_provider(provider.clone()).await?;
+        Ok(Self::new_with_provider_and_repos(provider, repos))
     }
 }
 

@@ -275,9 +275,12 @@ impl ArgusWing {
 
         let knowledge_provider: Arc<dyn KnowledgeRepoProvider> =
             Arc::new(ArgusSqlite::new(self.pool.clone()));
-        self.tool_manager.register(Arc::new(
-            KnowledgeTool::new_with_repo_provider(knowledge_provider),
-        ));
+        let knowledge_tool = KnowledgeTool::new_with_repo_provider(knowledge_provider)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        self.tool_manager.register(Arc::new(knowledge_tool));
 
         Ok(())
     }
@@ -795,15 +798,18 @@ mod tests {
     use super::*;
     use argus_protocol::{AgentType, ThinkingConfig};
 
-    fn make_test_wing() -> Arc<ArgusWing> {
+    async fn make_test_wing() -> Arc<ArgusWing> {
         let pool = SqlitePool::connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool should build for tests");
+        migrate(&pool)
+            .await
+            .expect("test migrations should succeed");
         ArgusWing::with_pool(pool)
     }
 
     #[tokio::test]
     async fn register_default_tools_includes_chrome() {
-        let wing = make_test_wing();
+        let wing = make_test_wing().await;
         wing.register_default_tools()
             .await
             .expect("default tool registration should succeed");
@@ -1859,7 +1865,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_job_surfaces_job_error_instead_of_database_error() {
-        let wing = make_test_wing();
+        let wing = make_test_wing().await;
 
         let error = wing
             .stop_job("missing-job".to_string())

@@ -15,8 +15,8 @@ pub use cache::SnapshotCache;
 pub use cli::{CliOutput, CliRunner, RealCliRunner};
 pub use error::KnowledgeToolError;
 pub use github::{
-    GitHubApiMethod, GitHubCommit, GitHubKnowledgeBackend, GitHubKnowledgeClient,
-    GitHubTransport, ReqwestGitHubTransport,
+    GitHubApiMethod, GitHubCommit, GitHubKnowledgeBackend, GitHubKnowledgeClient, GitHubTransport,
+    ReqwestGitHubTransport,
 };
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
@@ -44,10 +44,11 @@ mod tests {
         GitHubApiMethod, GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree,
         GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer,
         KnowledgeRepoRegistry, KnowledgeRuntime, KnowledgeTool, KnowledgeToolArgs,
-        RepositoryManifest, parse_markdown_sections,
+        RepositoryManifest, StaticKnowledgeRepoProvider, parse_markdown_sections,
     };
     use argus_protocol::NamedTool;
     use argus_protocol::ids::ThreadId;
+    use argus_protocol::knowledge::KnowledgeRepoRecord;
     use async_trait::async_trait;
     use serde_json::Value;
     use std::collections::HashMap;
@@ -351,6 +352,41 @@ mod tests {
 
         let blob = client.read_blob("acme", "docs", "blob-1").await.unwrap();
         assert!(blob.text.contains("# Title"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_provider_records_are_mapped_to_backend_descriptors() {
+        let provider = Arc::new(StaticKnowledgeRepoProvider::new(vec![
+            KnowledgeRepoRecord {
+                id: 7,
+                repo: "acme/docs".to_string(),
+                repo_id: "acme-docs".to_string(),
+                provider: "github".to_string(),
+                owner: "acme".to_string(),
+                name: "docs".to_string(),
+                default_branch: "trunk".to_string(),
+                manifest_paths: vec![
+                    "knowledge.json".to_string(),
+                    "docs/knowledge.json".to_string(),
+                ],
+                workspace: "payments".to_string(),
+            },
+        ]));
+
+        let repos = super::tool::load_repo_descriptors_from_provider(provider)
+            .await
+            .unwrap();
+
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repo_id, "acme-docs");
+        assert_eq!(repos[0].default_branch, "trunk");
+        assert_eq!(
+            repos[0].manifest_paths,
+            vec![
+                "knowledge.json".to_string(),
+                "docs/knowledge.json".to_string(),
+            ]
+        );
     }
 
     #[test]
