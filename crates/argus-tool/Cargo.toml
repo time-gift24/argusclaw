@@ -32,7 +32,7 @@ thirtyfour = { workspace = true }
 zip = { workspace = true }
 dirs = { workspace = true }
 base64 = { workspace = true }
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { workspace = true }

@@ -11,9 +11,11 @@ use super::error::KnowledgeToolError;
 use super::github::{GitHubKnowledgeBackend, ReqwestGitHubTransport};
 use super::indexer::{KnowledgeBackend, KnowledgeIndexer};
 use super::models::{
-    ContentPage, ExploreTreeEntry, GitHubSnapshot, KnowledgeAction, KnowledgeNode,
-    KnowledgeNodeKind, KnowledgeRepoDescriptor, KnowledgeToolArgs,
+    ContentPage, ExploreTreeEntry, GitHubSnapshot, KnowledgeAction, KnowledgeCreatePrArgs,
+    KnowledgeCreatePrResult, KnowledgeNode, KnowledgeNodeKind, KnowledgeRepoDescriptor,
+    KnowledgeToolArgs,
 };
+use super::pr::{GitHubPrExecutor, KnowledgePrRuntime, KnowledgePrService};
 use super::registry::KnowledgeRepoRegistry;
 
 #[async_trait]
@@ -38,32 +40,59 @@ pub trait KnowledgeRuntimeBackend: KnowledgeBackend {
     ) -> Result<(String, GitHubSnapshot), KnowledgeToolError>;
 }
 
-pub struct DefaultKnowledgeRuntime<B = GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+pub struct DefaultKnowledgeRuntime<
+    B = GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+    P = KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+> {
     backend: Arc<B>,
     indexer: KnowledgeIndexer<Arc<B>>,
+    pr_runtime: Arc<P>,
 }
 
-impl DefaultKnowledgeRuntime<GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+impl
+    DefaultKnowledgeRuntime<
+        GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+    >
+{
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_backend(GitHubKnowledgeBackend::new(
-            KnowledgeRepoRegistry::load_default(),
-            ReqwestGitHubTransport::new(),
-        ))
+        Self::new_with_backend_and_pr_runtime(
+            GitHubKnowledgeBackend::new(
+                KnowledgeRepoRegistry::load_default(),
+                ReqwestGitHubTransport::new(),
+            ),
+            KnowledgePrService::new(),
+        )
     }
 }
 
-impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
+impl<B: KnowledgeRuntimeBackend + 'static>
+    DefaultKnowledgeRuntime<B, KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>>
+{
     #[must_use]
     pub fn new_for_test(backend: B) -> Self {
-        Self::new_with_backend(backend)
+        Self::new_with_backend_and_pr_runtime(backend, KnowledgePrService::new())
+    }
+}
+
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static>
+    DefaultKnowledgeRuntime<B, P>
+{
+    #[must_use]
+    pub fn new_for_test_with_pr_runtime(backend: B, pr_runtime: P) -> Self {
+        Self::new_with_backend_and_pr_runtime(backend, pr_runtime)
     }
 
     #[must_use]
-    pub fn new_with_backend(backend: B) -> Self {
+    pub fn new_with_backend_and_pr_runtime(backend: B, pr_runtime: P) -> Self {
         let backend = Arc::new(backend);
         let indexer = KnowledgeIndexer::new(backend.clone());
-        Self { backend, indexer }
+        Self {
+            backend,
+            indexer,
+            pr_runtime: Arc::new(pr_runtime),
+        }
     }
 
     async fn resolve_snapshot_id(&self, args: &KnowledgeToolArgs) -> Result<String, ToolError> {
@@ -184,16 +213,38 @@ impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
             }
         })
     }
+
+    fn render_create_pr_result(result: &KnowledgeCreatePrResult) -> Value {
+        json!({
+            "target_repo": result.target_repo,
+            "base_ref": result.base_ref,
+            "branch": result.branch,
+            "commit_sha": result.commit_sha,
+            "pr_url": result.pr_url,
+            "manifest_path": result.manifest_path,
+            "changed_files": result.changed_files,
+            "created_files": result.created_files,
+            "updated_files": result.updated_files,
+            "summary": result.summary,
+        })
+    }
 }
 
-impl Default for DefaultKnowledgeRuntime<GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+impl Default
+    for DefaultKnowledgeRuntime<
+        GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        KnowledgePrService<GitHubPrExecutor<ReqwestGitHubTransport>>,
+    >
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledgeRuntime<B> {
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> KnowledgeRuntime
+    for DefaultKnowledgeRuntime<B, P>
+{
     async fn dispatch(
         &self,
         args: KnowledgeToolArgs,
@@ -348,6 +399,22 @@ impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledge
                     "results": neighbors.iter().map(Self::render_node).collect::<Vec<_>>(),
                 }))
             }
+            KnowledgeAction::CreateKnowledgePr => {
+                let request = KnowledgeCreatePrArgs::try_from(args).map_err(|err| {
+                    ToolError::ExecutionFailed {
+                        tool_name: "knowledge".to_string(),
+                        reason: err.to_string(),
+                    }
+                })?;
+                let result = self.pr_runtime.create_pr(&request).await.map_err(|err| {
+                    ToolError::ExecutionFailed {
+                        tool_name: "knowledge".to_string(),
+                        reason: err.to_string(),
+                    }
+                })?;
+
+                Ok(Self::render_create_pr_result(&result))
+            }
         }
     }
 }
@@ -392,74 +459,8 @@ impl<R: KnowledgeRuntime> NamedTool for KnowledgeTool<R> {
             description:
                 "Explore GitHub-backed knowledge bases progressively through snapshot, tree, search, and node actions."
                     .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "description": "The knowledge action to run",
-                        "enum": [
-                            "list_repos",
-                            "resolve_snapshot",
-                            "explore_tree",
-                            "search_nodes",
-                            "get_node",
-                            "get_content",
-                            "get_neighbors"
-                        ]
-                    },
-                    "repo_id": {
-                        "type": "string",
-                        "description": "Knowledge repository identifier"
-                    },
-                    "snapshot_id": {
-                        "type": "string",
-                        "description": "Resolved snapshot identifier"
-                    },
-                    "ref": {
-                        "type": "string",
-                        "description": "Git reference to resolve, defaults to the repository default branch"
-                    },
-                    "cursor": {
-                        "type": "string",
-                        "description": "Pagination cursor for bounded content reads"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Repository path scope for tree exploration"
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "Directory exploration depth"
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for progressive node search"
-                    },
-                    "scope_path": {
-                        "type": "string",
-                        "description": "Optional scope path for search"
-                    },
-                    "node_id": {
-                        "type": "string",
-                        "description": "Knowledge node identifier"
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "Maximum characters to return for content"
-                    },
-                    "relation_types": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Relationship types to include when fetching neighbors"
-                    }
-                },
-                "required": ["action"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(KnowledgeToolArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

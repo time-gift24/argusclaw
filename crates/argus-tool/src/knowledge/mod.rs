@@ -5,6 +5,7 @@ mod indexer;
 mod manifest;
 mod markdown;
 mod models;
+mod pr;
 mod provider;
 mod registry;
 mod tool;
@@ -12,15 +13,24 @@ mod tool;
 pub use cache::SnapshotCache;
 pub use error::KnowledgeToolError;
 pub use github::{
-    GitHubKnowledgeBackend, GitHubKnowledgeClient, GitHubTransport, ReqwestGitHubTransport,
+    GitHubApiMethod, GitHubCommit, GitHubKnowledgeBackend, GitHubKnowledgeClient,
+    GitHubPullRequest, GitHubTransport, GitHubTreeWrite, ReqwestGitHubTransport,
 };
 pub use indexer::{KnowledgeBackend, KnowledgeIndexer};
 pub use manifest::{DEFAULT_MANIFEST_PATHS, FileOverride, NodeOverride, RepositoryManifest};
 pub use markdown::{ParsedSection, parse_markdown_sections};
 pub use models::{
     ContentPage, ExploreTreeEntry, ExploreTreeResult, GitHubBlob, GitHubSnapshot, GitHubTree,
-    GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeNode, KnowledgeNodeKind,
-    KnowledgeRelation, KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
+    GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeAction, KnowledgeCreatePrArgs,
+    KnowledgeCreatePrResult, KnowledgeFileWrite, KnowledgeManifestFilePatch,
+    KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
+    KnowledgeManifestRepoPatch, KnowledgeNode, KnowledgeNodeKind, KnowledgeRelation,
+    KnowledgeRepoDescriptor, KnowledgeSource, KnowledgeToolArgs,
+};
+pub use pr::{
+    GitHubPrExecutor, GitPrExecutor, GitPrOutcome, KnowledgePrRemoteEntry, KnowledgePrRuntime,
+    KnowledgePrService, KnowledgePrWorkspace, KnowledgePrWorkspaceFile, merge_manifest,
+    serialize_manifest, validate_repo_relative_path,
 };
 pub use provider::{FileKnowledgeRepoProvider, StaticKnowledgeRepoProvider};
 pub use registry::KnowledgeRepoRegistry;
@@ -29,10 +39,10 @@ pub use tool::{DefaultKnowledgeRuntime, KnowledgeRuntime, KnowledgeRuntimeBacken
 #[cfg(test)]
 mod tests {
     use super::{
-        GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree, GitHubTreeEntry,
-        GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer, KnowledgeRepoRegistry,
-        KnowledgeRuntime, KnowledgeTool, KnowledgeToolArgs, RepositoryManifest,
-        parse_markdown_sections,
+        GitHubApiMethod, GitHubBlob, GitHubKnowledgeClient, GitHubTransport, GitHubTree,
+        GitHubTreeEntry, GitHubTreeEntryKind, KnowledgeBackend, KnowledgeIndexer,
+        KnowledgeRepoRegistry, KnowledgeRuntime, KnowledgeTool, KnowledgeToolArgs,
+        RepositoryManifest, parse_markdown_sections,
     };
     use argus_protocol::NamedTool;
     use argus_protocol::ids::ThreadId;
@@ -61,7 +71,12 @@ mod tests {
 
     #[async_trait]
     impl GitHubTransport for FakeGitHubTransport {
-        async fn get_json(&self, _url: &str) -> Result<Value, super::KnowledgeToolError> {
+        async fn request_json(
+            &self,
+            _method: GitHubApiMethod,
+            _url: &str,
+            _body: Option<Value>,
+        ) -> Result<Value, super::KnowledgeToolError> {
             self.responses
                 .lock()
                 .unwrap()
@@ -137,8 +152,110 @@ mod tests {
 
         assert_eq!(def.name, "knowledge");
         assert!(def.description.contains("GitHub"));
-        assert!(def.parameters.to_string().contains("resolve_snapshot"));
-        assert!(def.parameters.to_string().contains("search_nodes"));
+        let parameters = def.parameters.to_string();
+        assert!(parameters.contains("resolve_snapshot"));
+        assert!(parameters.contains("search_nodes"));
+        assert!(parameters.contains("create_knowledge_pr"));
+
+        assert!(def.parameters["properties"].get("target_repo").is_some());
+        assert!(def.parameters["properties"].get("files").is_some());
+        assert!(def.parameters["properties"].get("manifest").is_some());
+    }
+
+    #[test]
+    fn knowledge_tool_parses_create_knowledge_pr_payload() {
+        let args = KnowledgeToolArgs::parse(serde_json::json!({
+            "action": "create_knowledge_pr",
+            "target_repo": "acme/docs",
+            "base_ref": "main",
+            "branch": "docs-update",
+            "pr_title": "Update docs",
+            "pr_body": "This updates the docs.",
+            "draft": true,
+            "files": [
+                {
+                    "path": "docs/guide.md",
+                    "content": "# Guide\n"
+                }
+            ],
+            "manifest": {
+                "path": ".knowledge/repo.json",
+                "repo": {
+                    "title": "Docs",
+                    "default_branch": "main",
+                    "include": ["docs"],
+                    "exclude": ["tmp"],
+                    "entrypoints": ["README.md"]
+                },
+                "files": [
+                    {
+                        "path": "docs/guide.md",
+                        "title": "Guide",
+                        "summary": "Guide summary",
+                        "tags": ["docs"],
+                        "aliases": ["guide"]
+                    }
+                ],
+                "nodes": [
+                    {
+                        "id": "docs/guide#intro",
+                        "source": {
+                            "path": "docs/guide.md",
+                            "heading": "Intro"
+                        },
+                        "title": "Intro",
+                        "summary": "Intro summary",
+                        "tags": ["docs"],
+                        "aliases": ["intro"],
+                        "relations": [
+                            {
+                                "type": "related",
+                                "target": "docs/api#intro"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            args.action,
+            super::KnowledgeAction::CreateKnowledgePr
+        ));
+        assert_eq!(args.target_repo.as_deref(), Some("acme/docs"));
+        assert_eq!(args.base_ref.as_deref(), Some("main"));
+        assert_eq!(args.branch.as_deref(), Some("docs-update"));
+        assert_eq!(args.pr_title.as_deref(), Some("Update docs"));
+        assert_eq!(args.pr_body.as_deref(), Some("This updates the docs."));
+        assert_eq!(args.draft, Some(true));
+        assert_eq!(args.files.len(), 1);
+        assert_eq!(args.files[0].path, "docs/guide.md");
+        assert_eq!(args.files[0].content, "# Guide\n");
+        assert_eq!(
+            args.manifest
+                .as_ref()
+                .and_then(|manifest| manifest.path.as_deref()),
+            Some(".knowledge/repo.json")
+        );
+    }
+
+    #[test]
+    fn knowledge_tool_rejects_malformed_create_knowledge_pr_payload() {
+        let err = KnowledgeToolArgs::parse(serde_json::json!({
+            "action": "create_knowledge_pr",
+            "target_repo": "acme/docs",
+            "pr_title": "Update docs",
+            "pr_body": "This updates the docs.",
+            "files": [
+                {
+                    "path": "docs/guide.md"
+                }
+            ]
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("content"));
     }
 
     #[test]
@@ -186,6 +303,7 @@ mod tests {
     async fn knowledge_github_read_tree_maps_entries() {
         let client = GitHubKnowledgeClient::new_for_test(FakeGitHubTransport::with_json(vec![
             serde_json::json!({
+                "sha": "abc123",
                 "tree": { "sha": "tree-1" }
             }),
             serde_json::json!({
@@ -204,6 +322,7 @@ mod tests {
     async fn knowledge_github_read_tree_resolves_commit_to_tree_sha() {
         let client = GitHubKnowledgeClient::new_for_test(FakeGitHubTransport::with_json(vec![
             serde_json::json!({
+                "sha": "abc123",
                 "tree": { "sha": "tree-1" }
             }),
             serde_json::json!({
@@ -301,11 +420,13 @@ mod tests {
                         GitHubTreeEntry {
                             path: "docs/auth.md".to_string(),
                             sha: "blob-auth".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                         GitHubTreeEntry {
                             path: "docs/login.md".to_string(),
                             sha: "blob-login".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                     ],
@@ -362,26 +483,31 @@ mod tests {
                         GitHubTreeEntry {
                             path: "README.md".to_string(),
                             sha: "blob-readme".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                         GitHubTreeEntry {
                             path: "docs".to_string(),
                             sha: "tree-docs".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Tree,
                         },
                         GitHubTreeEntry {
                             path: "docs/auth.md".to_string(),
                             sha: "blob-auth".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                         GitHubTreeEntry {
                             path: "docs/guides".to_string(),
                             sha: "tree-guides".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Tree,
                         },
                         GitHubTreeEntry {
                             path: "docs/guides/setup.md".to_string(),
                             sha: "blob-setup".to_string(),
+                            mode: None,
                             kind: GitHubTreeEntryKind::Blob,
                         },
                     ],

@@ -18,6 +18,17 @@ pub const MIN_TIMEOUT_SECS: u64 = 10;
 /// Maximum approval timeout in seconds.
 pub const MAX_TIMEOUT_SECS: u64 = 300;
 
+/// Approval key for the write-capable knowledge PR action.
+pub const KNOWLEDGE_CREATE_PR_APPROVAL_KEY: &str = "knowledge_create_knowledge_pr";
+
+fn default_required_approval_tools() -> Vec<String> {
+    vec![
+        "shell".to_string(),
+        "http".to_string(),
+        KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string(),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // ApprovalPolicy
 // ---------------------------------------------------------------------------
@@ -26,11 +37,12 @@ pub const MAX_TIMEOUT_SECS: u64 = 300;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ApprovalPolicy {
-    /// Tools that always require approval. Default: `["shell", "http"]`.
+    /// Tools that always require approval. Default:
+    /// `["shell", "http", "knowledge_create_knowledge_pr"]`.
     ///
     /// Accepts either a list of tool names or a boolean shorthand:
     /// - `require_approval = false` → empty list (no tools require approval)
-    /// - `require_approval = true`  → `["shell", "http"]` (the default set)
+    /// - `require_approval = true`  → the default approval set
     #[serde(deserialize_with = "deserialize_require_approval")]
     pub require_approval: Vec<String>,
     /// Timeout in seconds. Default: 60, range: 10..=300.
@@ -45,7 +57,7 @@ pub struct ApprovalPolicy {
 impl Default for ApprovalPolicy {
     fn default() -> Self {
         Self {
-            require_approval: vec!["shell".to_string(), "http".to_string()],
+            require_approval: default_required_approval_tools(),
             timeout_secs: 60,
             auto_approve_autonomous: false,
             auto_approve: false,
@@ -55,7 +67,7 @@ impl Default for ApprovalPolicy {
 
 /// Custom deserializer that accepts:
 /// - A list of strings: `["shell", "http", "file_write"]`
-/// - A boolean: `false` → `[]`, `true` → `["shell", "http"]`
+/// - A boolean: `false` → `[]`, `true` → the default approval set
 fn deserialize_require_approval<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -73,7 +85,7 @@ where
 
         fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
             Ok(if v {
-                vec!["shell".to_string(), "http".to_string()]
+                default_required_approval_tools()
             } else {
                 vec![]
             })
@@ -166,7 +178,11 @@ mod tests {
         assert!(policy.validate().is_ok());
         assert_eq!(
             policy.require_approval,
-            vec!["shell".to_string(), "http".to_string()]
+            vec![
+                "shell".to_string(),
+                "http".to_string(),
+                KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string()
+            ]
         );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
@@ -179,7 +195,11 @@ mod tests {
         assert_eq!(policy.timeout_secs, 60);
         assert_eq!(
             policy.require_approval,
-            vec!["shell".to_string(), "http".to_string()]
+            vec![
+                "shell".to_string(),
+                "http".to_string(),
+                KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string()
+            ]
         );
         assert!(!policy.auto_approve_autonomous);
     }
@@ -194,7 +214,10 @@ mod tests {
     #[test]
     fn policy_require_approval_bool_true() {
         let policy: ApprovalPolicy = serde_json::from_str(r#"{"require_approval": true}"#).unwrap();
-        assert_eq!(policy.require_approval, vec!["shell", "http"]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell", "http", KNOWLEDGE_CREATE_PR_APPROVAL_KEY]
+        );
     }
 
     #[test]
@@ -203,6 +226,7 @@ mod tests {
         assert!(policy.requires_approval("shell"));
         assert!(!policy.requires_approval("file_read"));
         assert!(policy.requires_approval("http"));
+        assert!(policy.requires_approval(KNOWLEDGE_CREATE_PR_APPROVAL_KEY));
     }
 
     #[test]
