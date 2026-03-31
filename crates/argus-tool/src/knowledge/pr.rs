@@ -1,12 +1,13 @@
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+use std::process::Output;
 
 use async_trait::async_trait;
 use tempfile::TempDir;
 use tokio::fs;
 use tokio::process::Command;
 
-use super::manifest::DEFAULT_MANIFEST_PATHS;
 use super::error::KnowledgeToolError;
+use super::manifest::DEFAULT_MANIFEST_PATHS;
 use super::manifest::{FileOverride, NodeOverride, RepositoryManifest, RepositoryManifestMeta};
 use super::models::{
     KnowledgeCreatePrArgs, KnowledgeCreatePrResult, KnowledgeManifestFilePatch,
@@ -23,7 +24,11 @@ pub struct GitPrOutcome {
 pub trait GitPrExecutor: Send + Sync {
     async fn ensure_auth(&self) -> Result<(), KnowledgeToolError>;
 
-    async fn clone_repo(&self, target_repo: &str, destination: &Path) -> Result<(), KnowledgeToolError>;
+    async fn clone_repo(
+        &self,
+        target_repo: &str,
+        destination: &Path,
+    ) -> Result<(), KnowledgeToolError>;
 
     async fn prepare_branch(
         &self,
@@ -59,40 +64,125 @@ impl CliGitPrExecutor {
         Self
     }
 
-    async fn run_command(
+    async fn run_command_output(
         &self,
         repo_dir: Option<&Path>,
         program: &str,
         args: &[&str],
-    ) -> Result<String, KnowledgeToolError> {
+    ) -> Result<Output, KnowledgeToolError> {
         let mut command = Command::new(program);
         command.args(args);
         if let Some(repo_dir) = repo_dir {
             command.current_dir(repo_dir);
         }
 
-        let output = command
-            .output()
-            .await
-            .map_err(|err| KnowledgeToolError::RequestFailed(format!(
+        command.output().await.map_err(|err| {
+            KnowledgeToolError::RequestFailed(format!(
                 "failed to run {}: {}",
                 render_command(program, args),
                 err
-            )))?;
+            ))
+        })
+    }
 
+    async fn run_command(
+        &self,
+        repo_dir: Option<&Path>,
+        program: &str,
+        args: &[&str],
+    ) -> Result<String, KnowledgeToolError> {
+        let output = self.run_command_output(repo_dir, program, args).await?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let details = if !stderr.is_empty() { stderr } else { stdout };
-            return Err(KnowledgeToolError::RequestFailed(format!(
-                "{} failed: {}",
-                render_command(program, args),
-                details
-            )));
+            return Err(command_failed(program, args, &output));
         }
-
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
+
+    async fn remote_branch_exists(
+        &self,
+        repo_dir: &Path,
+        branch: &str,
+    ) -> Result<bool, KnowledgeToolError> {
+        let branch_ref = format!("refs/heads/{branch}");
+        let args = ["ls-remote", "--heads", "origin", branch_ref.as_str()];
+        let output = self
+            .run_command_output(Some(repo_dir), "git", &args)
+            .await?;
+        if !output.status.success() {
+            return Err(command_failed("git", &args, &output));
+        }
+
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    }
+
+    async fn has_pending_changes(&self, repo_dir: &Path) -> Result<bool, KnowledgeToolError> {
+        let args = ["status", "--short"];
+        let output = self
+            .run_command_output(Some(repo_dir), "git", &args)
+            .await?;
+        if !output.status.success() {
+            return Err(command_failed("git", &args, &output));
+        }
+
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    }
+}
+
+fn command_failed(program: &str, args: &[&str], output: &Output) -> KnowledgeToolError {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() { stderr } else { stdout };
+    KnowledgeToolError::RequestFailed(format!(
+        "{} failed: {}",
+        render_command(program, args),
+        details
+    ))
+}
+
+async fn resolve_repo_destination(
+    repo_dir: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, KnowledgeToolError> {
+    let repo_root = fs::canonicalize(repo_dir).await.map_err(|err| {
+        KnowledgeToolError::RequestFailed(format!(
+            "failed to resolve checkout root {}: {}",
+            repo_dir.display(),
+            err
+        ))
+    })?;
+    let mut current = repo_root.clone();
+
+    for component in Path::new(relative_path).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => {
+                current.push(part);
+                match fs::symlink_metadata(&current).await {
+                    Ok(metadata) => {
+                        if metadata.file_type().is_symlink() {
+                            return Err(KnowledgeToolError::invalid_arguments(format!(
+                                "repo-relative path must not traverse symlinks: {relative_path}"
+                            )));
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(err) => {
+                        return Err(KnowledgeToolError::RequestFailed(format!(
+                            "failed to inspect {}: {}",
+                            relative_path, err
+                        )));
+                    }
+                }
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(KnowledgeToolError::invalid_arguments(format!(
+                    "repo-relative path must stay inside checkout: {relative_path}"
+                )));
+            }
+        }
+    }
+
+    Ok(repo_root.join(relative_path))
 }
 
 #[async_trait]
@@ -121,16 +211,27 @@ impl GitPrExecutor for CliGitPrExecutor {
     ) -> Result<(), KnowledgeToolError> {
         self.run_command(Some(repo_dir), "git", &["fetch", "origin", base_ref])
             .await?;
-        self.run_command(Some(repo_dir), "git", &["checkout", base_ref])
+        if self.remote_branch_exists(repo_dir, branch).await? {
+            self.run_command(Some(repo_dir), "git", &["fetch", "origin", branch])
+                .await?;
+            let remote_branch = format!("origin/{branch}");
+            self.run_command(
+                Some(repo_dir),
+                "git",
+                &["checkout", "-B", branch, &remote_branch],
+            )
             .await?;
-        self.run_command(
-            Some(repo_dir),
-            "git",
-            &["pull", "--ff-only", "origin", base_ref],
-        )
-        .await?;
-        self.run_command(Some(repo_dir), "git", &["checkout", "-B", branch])
+        } else {
+            let remote_base = format!("origin/{base_ref}");
+            self.run_command(
+                Some(repo_dir),
+                "git",
+                &["checkout", "-B", base_ref, &remote_base],
+            )
             .await?;
+            self.run_command(Some(repo_dir), "git", &["checkout", "-B", branch])
+                .await?;
+        }
         Ok(())
     }
 
@@ -140,9 +241,12 @@ impl GitPrExecutor for CliGitPrExecutor {
         branch: &str,
         commit_message: &str,
     ) -> Result<String, KnowledgeToolError> {
-        self.run_command(Some(repo_dir), "git", &["add", "--all"]).await?;
-        self.run_command(Some(repo_dir), "git", &["commit", "-m", commit_message])
+        self.run_command(Some(repo_dir), "git", &["add", "--all"])
             .await?;
+        if self.has_pending_changes(repo_dir).await? {
+            self.run_command(Some(repo_dir), "git", &["commit", "-m", commit_message])
+                .await?;
+        }
         self.run_command(
             Some(repo_dir),
             "git",
@@ -179,16 +283,7 @@ impl GitPrExecutor for CliGitPrExecutor {
         }
 
         let mut args = vec![
-            "pr",
-            "create",
-            "--base",
-            base_ref,
-            "--head",
-            branch,
-            "--title",
-            title,
-            "--body",
-            body,
+            "pr", "create", "--base", base_ref, "--head", branch, "--title", title, "--body", body,
         ];
         if draft {
             args.push("--draft");
@@ -246,10 +341,7 @@ impl<E: GitPrExecutor> KnowledgePrService<E> {
             .clone_repo(&args.target_repo, checkout.path())
             .await?;
 
-        let base_ref = args
-            .base_ref
-            .clone()
-            .unwrap_or_else(|| "main".to_string());
+        let base_ref = args.base_ref.clone().unwrap_or_else(|| "main".to_string());
         let branch = args
             .branch
             .clone()
@@ -296,7 +388,11 @@ impl<E: GitPrExecutor> KnowledgePrService<E> {
             changed_files: write_summary.changed_files.clone(),
             created_files: write_summary.created_files.clone(),
             updated_files: write_summary.updated_files.clone(),
-            summary: format!("{action} for {} with {} changed files", args.target_repo, write_summary.changed_files.len()),
+            summary: format!(
+                "{action} for {} with {} changed files",
+                args.target_repo,
+                write_summary.changed_files.len()
+            ),
         })
     }
 }
@@ -391,8 +487,13 @@ async fn write_repo_file(
     content: &str,
     summary: &mut WriteSummary,
 ) -> Result<(), KnowledgeToolError> {
-    let destination = repo_dir.join(relative_path);
-    let existed = destination.exists();
+    let destination = resolve_repo_destination(repo_dir, relative_path).await?;
+    let existed = fs::try_exists(&destination).await.map_err(|err| {
+        KnowledgeToolError::RequestFailed(format!(
+            "failed to inspect destination {}: {}",
+            relative_path, err
+        ))
+    })?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).await.map_err(|err| {
             KnowledgeToolError::RequestFailed(format!(
@@ -536,39 +637,64 @@ fn merge_repo(
 }
 
 fn upsert_file(files: &mut Vec<FileOverride>, patch: &KnowledgeManifestFilePatch) {
-    let replacement = FileOverride {
-        path: patch.path.clone(),
-        title: patch.title.clone(),
-        summary: patch.summary.clone(),
-        tags: patch.tags.clone().unwrap_or_default(),
-        aliases: patch.aliases.clone().unwrap_or_default(),
-    };
-
-    if let Some(index) = files.iter().position(|file| file.path == replacement.path) {
-        files[index] = replacement;
+    if let Some(existing) = files.iter_mut().find(|file| file.path == patch.path) {
+        if let Some(title) = &patch.title {
+            existing.title = Some(title.clone());
+        }
+        if let Some(summary) = &patch.summary {
+            existing.summary = Some(summary.clone());
+        }
+        if let Some(tags) = &patch.tags {
+            existing.tags = tags.clone();
+        }
+        if let Some(aliases) = &patch.aliases {
+            existing.aliases = aliases.clone();
+        }
     } else {
-        files.push(replacement);
+        files.push(FileOverride {
+            path: patch.path.clone(),
+            title: patch.title.clone(),
+            summary: patch.summary.clone(),
+            tags: patch.tags.clone().unwrap_or_default(),
+            aliases: patch.aliases.clone().unwrap_or_default(),
+        });
     }
 }
 
 fn upsert_node(nodes: &mut Vec<NodeOverride>, patch: &KnowledgeManifestNodePatch) {
-    let replacement = NodeOverride {
-        id: patch.id.clone(),
-        source: super::manifest::NodeSource {
-            path: patch.source.path.clone(),
-            heading: patch.source.heading.clone(),
-        },
-        title: patch.title.clone(),
-        summary: patch.summary.clone(),
-        tags: patch.tags.clone().unwrap_or_default(),
-        aliases: patch.aliases.clone().unwrap_or_default(),
-        relations: patch.relations.clone().unwrap_or_default(),
-    };
-
-    if let Some(index) = nodes.iter().position(|node| node.id == replacement.id) {
-        nodes[index] = replacement;
+    if let Some(existing) = nodes.iter_mut().find(|node| node.id == patch.id) {
+        existing.source.path = patch.source.path.clone();
+        if let Some(heading) = &patch.source.heading {
+            existing.source.heading = Some(heading.clone());
+        }
+        if let Some(title) = &patch.title {
+            existing.title = Some(title.clone());
+        }
+        if let Some(summary) = &patch.summary {
+            existing.summary = Some(summary.clone());
+        }
+        if let Some(tags) = &patch.tags {
+            existing.tags = tags.clone();
+        }
+        if let Some(aliases) = &patch.aliases {
+            existing.aliases = aliases.clone();
+        }
+        if let Some(relations) = &patch.relations {
+            existing.relations = relations.clone();
+        }
     } else {
-        nodes.push(replacement);
+        nodes.push(NodeOverride {
+            id: patch.id.clone(),
+            source: super::manifest::NodeSource {
+                path: patch.source.path.clone(),
+                heading: patch.source.heading.clone(),
+            },
+            title: patch.title.clone(),
+            summary: patch.summary.clone(),
+            tags: patch.tags.clone().unwrap_or_default(),
+            aliases: patch.aliases.clone().unwrap_or_default(),
+            relations: patch.relations.clone().unwrap_or_default(),
+        });
     }
 }
 
@@ -782,20 +908,25 @@ fn write_relations(
     relations: &[super::models::KnowledgeRelation],
     indent: usize,
 ) -> Result<(), KnowledgeToolError> {
-    write_array(output, relations, indent, |output, relation, item_indent| {
-        output.push_str("{\n");
-        let mut first = true;
-        write_field(output, item_indent + 1, &mut first, "type", |output| {
-            push_json_string(output, &relation.relation_type)
-        })?;
-        write_field(output, item_indent + 1, &mut first, "target", |output| {
-            push_json_string(output, &relation.target)
-        })?;
-        output.push('\n');
-        push_indent(output, item_indent);
-        output.push('}');
-        Ok(())
-    })
+    write_array(
+        output,
+        relations,
+        indent,
+        |output, relation, item_indent| {
+            output.push_str("{\n");
+            let mut first = true;
+            write_field(output, item_indent + 1, &mut first, "type", |output| {
+                push_json_string(output, &relation.relation_type)
+            })?;
+            write_field(output, item_indent + 1, &mut first, "target", |output| {
+                push_json_string(output, &relation.target)
+            })?;
+            output.push('\n');
+            push_indent(output, item_indent);
+            output.push('}');
+            Ok(())
+        },
+    )
 }
 
 fn write_array<T, F>(
