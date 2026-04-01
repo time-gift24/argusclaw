@@ -836,6 +836,13 @@ mod tests {
         async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
             Ok(self.cookies.clone())
         }
+
+        async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+            Ok(PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Navigated to {url}"),
+            })
+        }
     }
 
     #[async_trait::async_trait]

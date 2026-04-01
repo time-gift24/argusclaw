@@ -23,6 +23,7 @@ use super::policy::ExplorePolicy;
 const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Install,
     ChromeAction::Open,
+    ChromeAction::Navigate,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
@@ -33,6 +34,7 @@ const RO_ACTIONS: &[ChromeAction] = &[
 const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Install,
     ChromeAction::Open,
+    ChromeAction::Navigate,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
@@ -263,6 +265,25 @@ impl NamedTool for ChromeTool {
 
                 Ok(json!({
                     "action": "open",
+                    "session_id": opened.session_id,
+                    "final_url": opened.final_url,
+                    "page_title": opened.page_title,
+                }))
+            }
+            ChromeAction::Navigate => {
+                let session_id = required_session_id(&args)?;
+                let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
+                    tool_name: "chrome".to_string(),
+                    reason: "missing url for navigate action".to_string(),
+                })?;
+                let opened = self
+                    .manager
+                    .navigate(&session_id, &url)
+                    .await
+                    .map_err(Self::map_error)?;
+
+                Ok(json!({
+                    "action": "navigate",
                     "session_id": opened.session_id,
                     "final_url": opened.final_url,
                     "page_title": opened.page_title,

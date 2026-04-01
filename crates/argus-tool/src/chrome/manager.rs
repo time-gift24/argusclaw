@@ -21,7 +21,8 @@ use super::models::{
     CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, OpenedSession, PageMetadata,
 };
 use super::session::{
-    BrowserSession, ChromeSession, ManagedWebDriverSession, shutdown_child_process,
+    BrowserSession, ChromeDriverProcess, ChromeSession, ManagedWebDriverSession,
+    shutdown_child_process,
 };
 
 pub struct BackendOpenResult {
@@ -70,6 +71,7 @@ struct ManagedChromeBackend {
 struct ManagedChromeSupport {
     host: Arc<dyn ChromeHost>,
     installer: Arc<ChromeInstaller>,
+    shared_host: Option<Arc<SystemChromeHost>>,
 }
 
 impl ManagedChromeBackend {
@@ -150,12 +152,14 @@ impl ChromeManager {
 
     #[must_use]
     pub fn new_production(paths: ChromePaths) -> Self {
-        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
+        let shared_host = Arc::new(SystemChromeHost::default());
+        let host: Arc<dyn ChromeHost> = shared_host.clone();
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
+            shared_host: Some(shared_host),
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
@@ -172,12 +176,14 @@ impl ChromeManager {
 
     #[must_use]
     pub fn new_interactive_production(paths: ChromePaths) -> Self {
-        let host: Arc<dyn ChromeHost> = Arc::new(SystemChromeHost);
+        let shared_host = Arc::new(SystemChromeHost::default());
+        let host: Arc<dyn ChromeHost> = shared_host.clone();
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
         let installer = Arc::new(ChromeInstaller::new(paths.clone(), downloader));
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
+            shared_host: Some(shared_host),
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
@@ -203,6 +209,7 @@ impl ChromeManager {
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
+            shared_host: None,
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
@@ -228,6 +235,7 @@ impl ChromeManager {
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
+            shared_host: None,
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
             host,
@@ -373,6 +381,29 @@ impl ChromeManager {
             .await
     }
 
+    pub async fn navigate(
+        &self,
+        session_id: &str,
+        url: &str,
+    ) -> Result<OpenedSession, ChromeToolError> {
+        let metadata = self
+            .session_interaction(session_id)
+            .await?
+            .navigate(url)
+            .await?;
+
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.update_metadata(metadata.clone());
+        }
+
+        Ok(OpenedSession {
+            session_id: session_id.to_string(),
+            final_url: metadata.final_url,
+            page_title: metadata.page_title,
+        })
+    }
+
     pub async fn get_cookies(
         &self,
         session_id: &str,
@@ -436,7 +467,11 @@ impl Drop for ChromeManager {
     fn drop(&mut self) {
         let sessions = std::mem::take(self.sessions.get_mut());
         self.session_order.get_mut().clear();
-        if sessions.is_empty() {
+        let shared_host = self
+            .managed_support
+            .as_ref()
+            .and_then(|support| support.shared_host.clone());
+        if sessions.is_empty() && shared_host.is_none() {
             return;
         }
 
@@ -453,6 +488,9 @@ impl Drop for ChromeManager {
                     for interaction in interactions {
                         let _ = interaction.shutdown().await;
                     }
+                    if let Some(shared_host) = shared_host {
+                        let _ = shared_host.shutdown().await;
+                    }
                 });
             }
         })
@@ -460,8 +498,18 @@ impl Drop for ChromeManager {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct SystemChromeHost;
+#[derive(Debug)]
+pub struct SystemChromeHost {
+    driver_process: RwLock<Option<Arc<ChromeDriverProcess>>>,
+}
+
+impl Default for SystemChromeHost {
+    fn default() -> Self {
+        Self {
+            driver_process: RwLock::new(None),
+        }
+    }
+}
 
 #[async_trait]
 impl ChromeHost for SystemChromeHost {
@@ -483,8 +531,96 @@ impl ChromeHost for SystemChromeHost {
         driver_binary: &Path,
         session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError> {
+        let process = self.ensure_driver_process(driver_binary).await?;
+        let server_url = process.server_url();
+
+        let capabilities =
+            build_chrome_capabilities(browser_binary, browser_version, session_mode)?;
+
+        let driver = match WebDriver::new(&server_url, capabilities).await {
+            Ok(driver) => driver,
+            Err(err) => {
+                return Err(ChromeToolError::DriverStartFailed {
+                    reason: err.to_string(),
+                });
+            }
+        };
+
+        if let Err(err) = driver.goto(url).await {
+            let _ = driver.clone().quit().await;
+            return Err(ChromeToolError::NavigationFailed {
+                url: url.to_string(),
+                reason: err.to_string(),
+            });
+        }
+        let final_url = driver
+            .current_url()
+            .await
+            .map(|u| u.to_string())
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+        let page_title = driver
+            .title()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+
+        let session: Arc<dyn BrowserSession> = Arc::new(ManagedWebDriverSession::new(driver));
+        Ok(BackendOpenResult {
+            metadata: PageMetadata {
+                final_url,
+                page_title,
+            },
+            session,
+        })
+    }
+}
+
+impl SystemChromeHost {
+    async fn shutdown(&self) -> Result<(), ChromeToolError> {
+        let process = { self.driver_process.write().await.take() };
+        if let Some(process) = process {
+            process.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    async fn take_reusable_driver_process(
+        &self,
+        driver_binary: &Path,
+    ) -> Result<Option<Arc<ChromeDriverProcess>>, ChromeToolError> {
+        let cached_process = { self.driver_process.read().await.clone() };
+        let Some(process) = cached_process else {
+            return Ok(None);
+        };
+
+        if process.matches_driver_binary(driver_binary) && process.is_alive().await {
+            return Ok(Some(process));
+        }
+
+        {
+            let mut guard = self.driver_process.write().await;
+            if let Some(current) = guard.as_ref()
+                && Arc::ptr_eq(current, &process)
+            {
+                guard.take();
+            }
+        }
+        process.shutdown().await?;
+        Ok(None)
+    }
+
+    async fn ensure_driver_process(
+        &self,
+        driver_binary: &Path,
+    ) -> Result<Arc<ChromeDriverProcess>, ChromeToolError> {
+        if let Some(process) = self.take_reusable_driver_process(driver_binary).await? {
+            return Ok(process);
+        }
+
         let port = reserve_free_port()?;
-        let server_url = format!("http://127.0.0.1:{port}");
         let mut child = Command::new(driver_binary)
             .arg(format!("--port={port}"))
             .stdout(Stdio::null())
@@ -499,57 +635,13 @@ impl ChromeHost for SystemChromeHost {
             return Err(err);
         }
 
-        let capabilities =
-            build_chrome_capabilities(browser_binary, browser_version, session_mode)?;
-
-        let driver = match WebDriver::new(&server_url, capabilities).await {
-            Ok(driver) => driver,
-            Err(err) => {
-                let _ = shutdown_child_process(&mut child).await;
-                return Err(ChromeToolError::DriverStartFailed {
-                    reason: err.to_string(),
-                });
-            }
-        };
-
-        if let Err(err) = driver.goto(url).await {
-            let _ = driver.clone().quit().await;
-            let _ = shutdown_child_process(&mut child).await;
-            return Err(ChromeToolError::NavigationFailed {
-                url: url.to_string(),
-                reason: err.to_string(),
-            });
-        }
-        let final_url = match driver.current_url().await {
-            Ok(value) => value.to_string(),
-            Err(err) => {
-                let _ = driver.clone().quit().await;
-                let _ = shutdown_child_process(&mut child).await;
-                return Err(ChromeToolError::PageReadFailed {
-                    reason: err.to_string(),
-                });
-            }
-        };
-        let page_title = match driver.title().await {
-            Ok(value) => value,
-            Err(err) => {
-                let _ = driver.clone().quit().await;
-                let _ = shutdown_child_process(&mut child).await;
-                return Err(ChromeToolError::PageReadFailed {
-                    reason: err.to_string(),
-                });
-            }
-        };
-
-        let session: Arc<dyn BrowserSession> =
-            Arc::new(ManagedWebDriverSession::new(driver, child));
-        Ok(BackendOpenResult {
-            metadata: PageMetadata {
-                final_url,
-                page_title,
-            },
-            session,
-        })
+        let process = Arc::new(ChromeDriverProcess::new(
+            child,
+            port,
+            driver_binary.to_path_buf(),
+        ));
+        *self.driver_process.write().await = Some(Arc::clone(&process));
+        Ok(process)
     }
 }
 
@@ -837,20 +929,27 @@ fn chrome_binary_candidates() -> Vec<PathBuf> {
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
+    #[cfg(unix)]
+    use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     use serde_json::json;
+    use tempfile::tempdir;
+    #[cfg(unix)]
+    use tokio::process::Command;
 
     use crate::chrome::error::ChromeToolError;
+    use crate::chrome::installer::{ChromeInstaller, ChromePaths, DriverDownloader};
     use crate::chrome::models::{
         CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, PageMetadata,
     };
-    use crate::chrome::session::BrowserSession;
+    use crate::chrome::session::{BrowserSession, ChromeDriverProcess};
 
     use super::{
-        BackendOpenResult, BrowserBackend, ChromeManager, SessionMode, build_chrome_capabilities,
-        interactive_user_agent_for_os, parse_browser_version_output,
+        BackendOpenResult, BrowserBackend, ChromeHost, ChromeManager, ManagedChromeSupport,
+        SessionMode, SystemChromeHost, build_chrome_capabilities, interactive_user_agent_for_os,
+        parse_browser_version_output,
     };
 
     #[derive(Debug, Clone)]
@@ -981,6 +1080,13 @@ mod tests {
         async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
             Ok(self.cookies.clone())
         }
+
+        async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+            Ok(PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Navigated to {url}"),
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -1037,6 +1143,16 @@ mod tests {
                     "Org text",
                 ),
         )
+    }
+
+    #[derive(Debug, Default)]
+    struct PanicDownloader;
+
+    #[async_trait::async_trait]
+    impl DriverDownloader for PanicDownloader {
+        async fn fetch(&self, url: &str) -> Result<Vec<u8>, ChromeToolError> {
+            panic!("unexpected download request in test: {url}");
+        }
     }
 
     #[tokio::test]
@@ -1136,6 +1252,80 @@ mod tests {
             shutdowns.lock().unwrap().as_slice(),
             &["https://example.com/drop".to_string()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manager_drop_shuts_down_shared_driver_even_without_live_sessions() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let host = Arc::new(SystemChromeHost::default());
+        let shared_process = runtime.block_on(async {
+            let child = Command::new("sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let process = Arc::new(ChromeDriverProcess::new(
+                child,
+                9515,
+                Path::new("/tmp/chromedriver-v1").to_path_buf(),
+            ));
+            *host.driver_process.write().await = Some(Arc::clone(&process));
+            process
+        });
+
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let installer = Arc::new(ChromeInstaller::new(
+            paths.clone(),
+            Arc::new(PanicDownloader),
+        ));
+        let host_trait: Arc<dyn ChromeHost> = host.clone();
+        let manager = ChromeManager::new_with_session_limit(
+            sample_backend(),
+            Some(ManagedChromeSupport {
+                host: host_trait,
+                installer,
+                shared_host: Some(host.clone()),
+            }),
+            paths,
+            ChromeManager::PRODUCTION_SESSION_LIMIT,
+        );
+
+        drop(manager);
+
+        assert!(!runtime.block_on(shared_process.is_alive()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn system_chrome_host_does_not_reuse_cached_process_for_different_driver_binary() {
+        let host = SystemChromeHost::default();
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let cached_process = Arc::new(ChromeDriverProcess::new(
+            child,
+            9515,
+            Path::new("/tmp/chromedriver-v1").to_path_buf(),
+        ));
+        *host.driver_process.write().await = Some(Arc::clone(&cached_process));
+
+        let reused = host
+            .take_reusable_driver_process(Path::new("/tmp/chromedriver-v2"))
+            .await
+            .unwrap();
+
+        assert!(reused.is_none());
+        assert!(!cached_process.is_alive().await);
+        assert!(host.driver_process.read().await.is_none());
     }
 
     #[tokio::test]
