@@ -93,6 +93,11 @@ export interface ChatSessionState {
     reasoning: string;
     toolCalls: PendingToolCall[];
     plan: PlanItem[] | null;
+    retry: {
+      attempt: number;
+      maxRetries: number;
+      error: string;
+    } | null;
   } | null;
   pendingApprovalRequest: {
     id: string;
@@ -606,6 +611,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             reasoning: "",
             toolCalls: [],
             plan: null,
+            retry: null,
           },
           error: null,
         },
@@ -902,24 +908,48 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     const { payload } = envelope;
 
-    switch (payload.type) {
-      case "reasoning_delta":
-        set((state) => {
-          const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
-          return {
-            sessionsByKey: {
-              ...state.sessionsByKey,
-              [sessionKey]: {
-                ...session,
-                pendingAssistant: {
-                  ...session.pendingAssistant,
-                  reasoning: session.pendingAssistant.reasoning + payload.delta,
+      switch (payload.type) {
+        case "retry_attempt":
+          set((state) => {
+            const session = state.sessionsByKey[sessionKey];
+            if (!session?.pendingAssistant) return {};
+            return {
+              sessionsByKey: {
+                ...state.sessionsByKey,
+                [sessionKey]: {
+                  ...session,
+                  pendingAssistant: {
+                    ...session.pendingAssistant,
+                    retry: {
+                      attempt: payload.attempt,
+                      maxRetries: payload.max_retries,
+                      error: payload.error,
+                    },
+                  },
                 },
               },
-            },
-          };
-        });
+            };
+          });
+          break;
+
+        case "reasoning_delta":
+          set((state) => {
+            const session = state.sessionsByKey[sessionKey];
+            if (!session?.pendingAssistant) return {};
+            return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+                [sessionKey]: {
+                  ...session,
+                  pendingAssistant: {
+                    ...session.pendingAssistant,
+                    reasoning: session.pendingAssistant.reasoning + payload.delta,
+                    retry: null,
+                  },
+                },
+              },
+            };
+          });
         break;
 
       case "content_delta":
@@ -929,16 +959,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
-              [sessionKey]: {
-                ...session,
-                pendingAssistant: {
-                  ...session.pendingAssistant,
-                  content: session.pendingAssistant.content + payload.delta,
+                [sessionKey]: {
+                  ...session,
+                  pendingAssistant: {
+                    ...session.pendingAssistant,
+                    content: session.pendingAssistant.content + payload.delta,
+                    retry: null,
+                  },
                 },
               },
-            },
-          };
-        });
+            };
+          });
         break;
 
       case "tool_call_delta": {
@@ -972,16 +1003,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
-              [sessionKey]: {
-                ...session,
-                pendingAssistant: {
-                  ...session.pendingAssistant,
-                  toolCalls,
+                [sessionKey]: {
+                  ...session,
+                  pendingAssistant: {
+                    ...session.pendingAssistant,
+                    toolCalls,
+                    retry: null,
+                  },
                 },
               },
-            },
-          };
-        });
+            };
+          });
         break;
       }
 
@@ -1011,6 +1043,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             pendingAssistant: {
               ...session.pendingAssistant,
               toolCalls,
+              retry: null,
             },
           };
           if (payload.tool_name === "update_plan" && payload.arguments) {
@@ -1055,6 +1088,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             pendingAssistant: {
               ...session.pendingAssistant,
               toolCalls,
+              retry: null,
             },
           };
           if (payload.tool_name === "update_plan") {
@@ -1154,6 +1188,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
               tokenCount: payload.total_tokens,
+              pendingAssistant: state.sessionsByKey[sessionKey]?.pendingAssistant
+                ? {
+                    ...state.sessionsByKey[sessionKey].pendingAssistant!,
+                    retry: null,
+                  }
+                : null,
             },
           },
         }));

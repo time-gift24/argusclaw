@@ -311,9 +311,10 @@ const PendingAssistantArtifacts: FC = () => {
   if (!pendingAssistant) return null;
 
   const hasPlan = !!pendingAssistant.plan && pendingAssistant.plan.length > 0;
+  const retryState = pendingAssistant.retry;
   const toolCalls = pendingAssistant.toolCalls;
 
-  if (!hasPlan && toolCalls.length === 0) return null;
+  if (!hasPlan && !retryState && toolCalls.length === 0) return null;
 
   const ManualToolFallback = ToolFallbackImpl as (props: {
     toolName: string;
@@ -327,6 +328,29 @@ const PendingAssistantArtifacts: FC = () => {
 
   return (
     <div className="mx-auto w-full max-w-(--thread-max-width) px-4 pb-2 flex flex-col gap-3">
+      {retryState && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2.5 text-amber-900 shadow-sm">
+          <div className="mt-0.5 rounded-full bg-amber-100 p-1 text-amber-700">
+            <Loader2 className="size-3.5 animate-spin" />
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-widest">
+                正在重试请求
+              </span>
+              <Badge
+                variant="secondary"
+                className="border border-amber-200 bg-amber-100/80 text-[10px] text-amber-800"
+              >
+                {retryState.attempt}/{retryState.maxRetries}
+              </Badge>
+            </div>
+            <p className="text-sm leading-relaxed text-amber-950/85">
+              {retryState.error}
+            </p>
+          </div>
+        </div>
+      )}
       {hasPlan && <PlanPanel plan={pendingAssistant.plan!} />}
       {toolCalls.length > 0 && (
         <details className="group/tools w-full" open={false}>
