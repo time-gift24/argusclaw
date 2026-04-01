@@ -108,6 +108,8 @@ export interface JobStatusPayload {
   agent_description?: string | null;
 }
 
+export type ThreadNoticeLevel = "info" | "warning" | "error";
+
 export type ThreadEventPayload =
   | { type: "reasoning_delta"; delta: string }
   | { type: "content_delta"; delta: string }
@@ -149,6 +151,7 @@ export type ThreadEventPayload =
       output_tokens: number;
       total_tokens: number;
     }
+  | { type: "notice"; level: ThreadNoticeLevel; message: string }
   | { type: "turn_failed"; error: string }
   | { type: "idle" }
   | { type: "compacted"; new_token_count: number }
