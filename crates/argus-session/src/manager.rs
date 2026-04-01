@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEvent};
+use argus_agent::{TurnLogEvent, read_jsonl_events, tool_context::current_agent_id};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
     AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
     ThreadEvent, ThreadId, ToolError,
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1199,7 +1199,7 @@ mod tests {
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
-    use argus_repository::{migrate, ArgusSqlite};
+    use argus_repository::{ArgusSqlite, migrate};
     use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
@@ -1208,7 +1208,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
+        Session, SessionManager, recover_messages_from_trace, recover_thread_state_from_trace,
     };
 
     #[derive(Debug)]
@@ -1625,6 +1625,50 @@ mod tests {
             .expect_err("missing turn file should fail");
 
         assert!(error.to_string().contains("failed to recover turn 2"));
+    }
+
+    #[tokio::test]
+    async fn recover_messages_from_trace_restores_partial_failed_turn_response() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let turns_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("turns");
+        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+
+        fs::write(
+            turns_dir.join("1.jsonl"),
+            [
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"用户问题一","role":"user"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"部分回答","reasoning_content":null,"tool_calls":[],"finish_reason":"error"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:02Z","type":"turn_error","error":"stream timeout","at_iteration":0}}"#,
+                    thread_id
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("failed turn trace should write");
+
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
+            .await
+            .expect("failed turn trace should still recover messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].content, "用户问题一");
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert_eq!(messages[1].content, "部分回答");
     }
 
     #[tokio::test]

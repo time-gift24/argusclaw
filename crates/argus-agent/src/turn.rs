@@ -109,6 +109,14 @@ enum NextAction {
     LengthExceeded,
 }
 
+enum StreamingCallOutcome {
+    Completed(CompletionResponse),
+    Failed {
+        partial_response: CompletionResponse,
+        error: argus_protocol::llm::LlmError,
+    },
+}
+
 /// Result of a tool execution.
 struct ToolExecutionResult {
     tool_call_id: String,
@@ -210,6 +218,35 @@ impl StreamingAccumulator {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }
+    }
+}
+
+fn has_traceable_response(response: &CompletionResponse) -> bool {
+    response
+        .content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty())
+        || response
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|reasoning| !reasoning.trim().is_empty())
+        || !response.tool_calls.is_empty()
+}
+
+fn build_trace_response_event(
+    response: &CompletionResponse,
+    finish_reason: String,
+) -> TurnLogEvent {
+    TurnLogEvent::LlmResponse {
+        content: response.content.clone().unwrap_or_default(),
+        reasoning_content: response.reasoning_content.clone(),
+        tool_calls: response
+            .tool_calls
+            .iter()
+            .filter_map(|tc| serde_json::to_value(tc).ok())
+            .collect(),
+        finish_reason,
+        metadata: None,
     }
 }
 
@@ -461,7 +498,7 @@ impl Turn {
         let loop_result = self.execute_loop(trace_writer).await;
         let (result, trace_writer) = match loop_result {
             Ok((output, tw)) => (Ok(output), tw),
-            Err(e) => (Err(e), None),
+            Err((error, tw)) => (Err(error), tw),
         };
 
         tracing::info!(
@@ -685,7 +722,7 @@ impl Turn {
     async fn execute_loop(
         &mut self,
         trace_writer: Option<TraceWriter>,
-    ) -> Result<(TurnOutput, Option<TraceWriter>), TurnError> {
+    ) -> Result<(TurnOutput, Option<TraceWriter>), (TurnError, Option<TraceWriter>)> {
         let mut messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
@@ -708,7 +745,7 @@ impl Turn {
 
         for iteration in 0..max_iterations {
             if self.cancellation.is_cancelled() {
-                return Err(TurnError::Cancelled);
+                return Err((TurnError::Cancelled, trace_writer));
             }
 
             let pending_inputs = {
@@ -740,10 +777,14 @@ impl Turn {
                 tools: tools.clone(),
                 iteration,
             };
-            match self
+            let before_call_action = match self
                 .fire_hooks(HookEvent::BeforeCallLLM, &HookContext::BeforeCallLLM(ctx))
-                .await?
+                .await
             {
+                Ok(action) => action,
+                Err(error) => return Err((error, trace_writer)),
+            };
+            match before_call_action {
                 HookAction::Continue => {}
                 HookAction::ModifyMessages(modified_messages) => {
                     messages = modified_messages;
@@ -760,7 +801,7 @@ impl Turn {
                     messages = modified_messages;
                 }
                 HookAction::Block(reason) => {
-                    return Err(TurnError::LlmCallBlocked { reason });
+                    return Err((TurnError::LlmCallBlocked { reason }, trace_writer));
                 }
                 HookAction::ContinueWithMessage(message) => {
                     tracing::warn!(
@@ -808,7 +849,26 @@ impl Turn {
                 message_count = %messages.len(),
                 "Calling LLM"
             );
-            let response = self.call_llm_streaming(request).await?;
+            let response = match self.call_llm_streaming(request).await {
+                Ok(StreamingCallOutcome::Completed(response)) => response,
+                Ok(StreamingCallOutcome::Failed {
+                    partial_response,
+                    error,
+                }) => {
+                    if let Some(writer) = trace_writer.as_mut()
+                        && has_traceable_response(&partial_response)
+                    {
+                        let _ = writer
+                            .write_event(&build_trace_response_event(
+                                &partial_response,
+                                "error".to_string(),
+                            ))
+                            .await;
+                    }
+                    return Err((TurnError::LlmFailed(error), trace_writer));
+                }
+                Err(error) => return Err((error, trace_writer)),
+            };
             tracing::debug!(
                 thread_id = %self.thread_id,
                 turn_number = %self.turn_number,
@@ -829,7 +889,12 @@ impl Turn {
             };
 
             // Process response
-            match self.process_finish_reason(response, &mut messages, &mut token_usage)? {
+            let next_action =
+                match self.process_finish_reason(response, &mut messages, &mut token_usage) {
+                    Ok(next_action) => next_action,
+                    Err(error) => return Err((error, trace_writer)),
+                };
+            match next_action {
                 NextAction::Return(output) => {
                     // Fire TurnEnd hook
                     let ctx = ToolHookContext {
@@ -850,17 +915,10 @@ impl Turn {
 
                     // Record LLM response to trace
                     if let Some(writer) = trace_writer.as_mut() {
-                        let llm_resp_event = TurnLogEvent::LlmResponse {
-                            content: trace_response.content.clone().unwrap_or_default(),
-                            reasoning_content: trace_response.reasoning_content.clone(),
-                            tool_calls: trace_response
-                                .tool_calls
-                                .iter()
-                                .filter_map(|tc| serde_json::to_value(tc).ok())
-                                .collect(),
-                            finish_reason: format!("{:?}", trace_response.finish_reason),
-                            metadata: None,
-                        };
+                        let llm_resp_event = build_trace_response_event(
+                            &trace_response,
+                            format!("{:?}", trace_response.finish_reason),
+                        );
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
 
@@ -933,7 +991,8 @@ impl Turn {
                     let trace_writer_arc = Arc::new(Mutex::new(trace_writer.take()));
                     let tool_results = tokio::select! {
                         _ = self.cancellation.cancelled() => {
-                            return Err(TurnError::Cancelled);
+                            let mut guard = trace_writer_arc.lock().await;
+                            return Err((TurnError::Cancelled, guard.take()));
                         }
                         tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs, trace_writer_arc.clone()) => tool_results,
                     };
@@ -944,17 +1003,10 @@ impl Turn {
 
                     // Record LLM response to trace (tool results are written in execute_single_tool)
                     if let Some(writer) = trace_writer.as_mut() {
-                        let llm_resp_event = TurnLogEvent::LlmResponse {
-                            content: trace_response.content.clone().unwrap_or_default(),
-                            reasoning_content: trace_response.reasoning_content.clone(),
-                            tool_calls: trace_response
-                                .tool_calls
-                                .iter()
-                                .filter_map(|tc| serde_json::to_value(tc).ok())
-                                .collect(),
-                            finish_reason: format!("{:?}", trace_response.finish_reason),
-                            metadata: None,
-                        };
+                        let llm_resp_event = build_trace_response_event(
+                            &trace_response,
+                            format!("{:?}", trace_response.finish_reason),
+                        );
                         let _ = writer.write_event(&llm_resp_event).await;
                     }
 
@@ -1005,15 +1057,21 @@ impl Turn {
                     // Continue the loop with updated messages
                 }
                 NextAction::LengthExceeded => {
-                    return Err(TurnError::ContextLengthExceeded(
-                        (token_usage.input_tokens + token_usage.output_tokens) as usize,
+                    return Err((
+                        TurnError::ContextLengthExceeded(
+                            (token_usage.input_tokens + token_usage.output_tokens) as usize,
+                        ),
+                        trace_writer,
                     ));
                 }
             }
         }
 
         // Max iterations reached
-        Err(TurnError::MaxIterationsReached(max_iterations))
+        Err((
+            TurnError::MaxIterationsReached(max_iterations),
+            trace_writer,
+        ))
     }
 
     /// Calls the LLM in streaming mode, accumulating the response.
@@ -1022,7 +1080,7 @@ impl Turn {
     async fn call_llm_streaming(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, TurnError> {
+    ) -> Result<StreamingCallOutcome, TurnError> {
         if self.cancellation.is_cancelled() {
             return Err(TurnError::Cancelled);
         }
@@ -1048,7 +1106,15 @@ impl Turn {
                                 break;
                             };
 
-                            let event = event_result.map_err(TurnError::LlmFailed)?;
+                            let event = match event_result {
+                                Ok(event) => event,
+                                Err(error) => {
+                                    return Ok(StreamingCallOutcome::Failed {
+                                        partial_response: accumulator.into_response(),
+                                        error,
+                                    });
+                                }
+                            };
                             // Forward to stream_tx
                             let _ = self
                                 .stream_tx
@@ -1065,14 +1131,14 @@ impl Turn {
                     tool_call_count = %response.tool_calls.len(),
                     "LLM stream completed"
                 );
-                Ok(response)
+                Ok(StreamingCallOutcome::Completed(response))
             }
             Err(argus_protocol::llm::LlmError::UnsupportedCapability { .. }) => {
                 // Fallback to non-streaming
                 tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
                 tokio::select! {
                     _ = self.cancellation.cancelled() => Err(TurnError::Cancelled),
-                    result = self.provider.complete(request) => result.map_err(TurnError::LlmFailed),
+                    result = self.provider.complete(request) => result.map(StreamingCallOutcome::Completed).map_err(TurnError::LlmFailed),
                 }
             }
             Err(e) => Err(TurnError::LlmFailed(e)),
