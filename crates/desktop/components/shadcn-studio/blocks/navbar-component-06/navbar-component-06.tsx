@@ -1,10 +1,10 @@
 "use client"
 
 import { useState, useEffect, useMemo } from 'react'
-import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft } from 'lucide-react'
+import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft, Server } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -41,13 +41,9 @@ type NavigationItem = {
 }[]
 
 // Generate breadcrumb items based on current path
-function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
+function useBreadcrumbItems(pathname: string, searchParams: ReturnType<typeof useSearchParams>): BreadcrumbItem[] {
   const [agentNames, setAgentNames] = useState<Record<string, string>>({})
   const [providerNames, setProviderNames] = useState<Record<string, string>>({})
-  const [editIds, setEditIds] = useState<{ agentId: string | null; providerId: string | null }>({
-    agentId: null,
-    providerId: null,
-  })
 
   // Load agent and provider names for breadcrumb display
   useEffect(() => {
@@ -74,17 +70,13 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
     loadNames()
   }, [])
 
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return
-    }
-
-    const params = new URLSearchParams(window.location.search)
-    setEditIds({
-      agentId: pathname === "/settings/agents/edit" ? params.get("id") : null,
-      providerId: pathname === "/settings/providers/edit" ? params.get("id") : null,
-    })
-  }, [pathname])
+  const editIds = useMemo(
+    () => ({
+      agentId: pathname === "/settings/agents/edit" ? searchParams?.get("id") ?? null : null,
+      providerId: pathname === "/settings/providers/edit" ? searchParams?.get("id") ?? null : null,
+    }),
+    [pathname, searchParams],
+  )
 
   return useMemo(() => {
     const items: BreadcrumbItem[] = []
@@ -131,6 +123,14 @@ function useBreadcrumbItems(pathname: string): BreadcrumbItem[] {
             items.push({ label: agentName })
           }
         }
+      } else if (pathname.startsWith("/settings/mcp")) {
+        items.push({ label: "MCP", href: "/settings/mcp" })
+
+        if (pathname === "/settings/mcp/new") {
+          items.push({ label: "新建" })
+        } else if (pathname === "/settings/mcp/edit") {
+          items.push({ label: "编辑" })
+        }
       }
     }
 
@@ -147,8 +147,9 @@ const Navbar = ({
   const { username, isLoggedIn } = useAuthStore()
   const [loginDialogOpen, setLoginDialogOpen] = useState(false)
   const pathname = usePathname()
+  const searchParams = useSearchParams()
   const router = useRouter()
-  const breadcrumbItems = useBreadcrumbItems(pathname)
+  const breadcrumbItems = useBreadcrumbItems(pathname, searchParams)
 
   // Get avatar fallback based on auth state
   const avatarFallback = isLoggedIn && username ? username.charAt(0).toUpperCase() : '?'
@@ -209,6 +210,12 @@ const Navbar = ({
                   <Link href='/settings/providers' className='flex items-center gap-2 w-full'>
                     <Cloud className='h-4 w-4' />
                     <span>LLMProvider 配置</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem>
+                  <Link href='/settings/mcp' className='flex items-center gap-2 w-full'>
+                    <Server className='h-4 w-4' />
+                    <span>MCP 配置</span>
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>

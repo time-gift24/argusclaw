@@ -19,6 +19,7 @@ import {
   Moon,
   PanelLeft,
   BookOpen,
+  Server,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 
@@ -135,6 +136,18 @@ export default function DashboardShell({
             >
               <Cloud className="h-4 w-4 shrink-0" />
               {!isSidebarCollapsed && <span className="whitespace-nowrap">模型配置</span>}
+            </Link>
+            <Link
+              href="/settings/mcp"
+              className={cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
+                pathname.startsWith("/settings/mcp")
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground"
+              )}
+            >
+              <Server className="h-4 w-4 shrink-0" />
+              {!isSidebarCollapsed && <span className="whitespace-nowrap">MCP 配置</span>}
             </Link>
             <Link
               href="/settings/knowledge"
@@ -305,6 +318,14 @@ export default function DashboardShell({
                 >
                   <Cloud className="h-4 w-4" />
                   模型配置
+                </Link>
+                <Link
+                  href="/settings/mcp"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
+                >
+                  <Server className="h-4 w-4" />
+                  MCP 配置
                 </Link>
                 <Link
                   href="/settings/knowledge"

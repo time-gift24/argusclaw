@@ -3,15 +3,27 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useRouter } from "next/navigation"
-import { CircleHelp, Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2 } from "lucide-react"
-import { agents, providers, tools, knowledge, type AgentRecord, type LlmProviderSummary, type ToolInfo, type KnowledgeRepoRecord } from "@/lib/tauri"
+import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2, Server } from "lucide-react"
+import {
+  agents,
+  providers,
+  tools,
+  knowledge,
+  mcp,
+  type AgentMcpBinding,
+  type AgentRecord,
+  type KnowledgeRepoRecord,
+  type LlmProviderSummary,
+  type McpDiscoveredToolRecord,
+  type McpServerRecord,
+  type ToolInfo,
+} from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useToast } from "@/components/ui/toast"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -21,8 +33,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogClose,
 } from "@/components/ui/dialog"
+import { AgentMcpBindingCard } from "@/components/settings/agent-mcp-binding-card"
 import { cn } from "@/lib/utils"
 
 interface AgentEditorProps {
@@ -54,6 +66,14 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
   }
 }
 
+async function loadMcpServers() {
+  return await mcp.listServers()
+}
+
+async function loadAgentMcpBindings(agentId: number) {
+  return await mcp.listAgentBindings(agentId)
+}
+
 export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const router = useRouter()
   const { addToast } = useToast()
@@ -64,13 +84,18 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [toolList, setToolList] = React.useState<ToolInfo[]>([])
   const [knowledgeRepoList, setKnowledgeRepoList] = React.useState<KnowledgeRepoRecord[]>([])
+  const [mcpServerList, setMcpServerList] = React.useState<McpServerRecord[]>([])
+  const [mcpBindings, setMcpBindings] = React.useState<AgentMcpBinding[]>([])
+  const [mcpToolsByServerId, setMcpToolsByServerId] = React.useState<Record<number, McpDiscoveredToolRecord[]>>({})
+  const mcpToolsByServerIdRef = React.useRef<Record<number, McpDiscoveredToolRecord[]>>({})
   const [agentWorkspaces, setAgentWorkspaces] = React.useState<string[]>([])
   const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
-  const [savingWorkspaces, setSavingWorkspaces] = React.useState(false)
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = React.useState(false)
+  const [mcpDialogOpen, setMcpDialogOpen] = React.useState(false)
   const [addRepoInput, setAddRepoInput] = React.useState("")
   const [addWorkspaceInput, setAddWorkspaceInput] = React.useState("")
   const [addingRepo, setAddingRepo] = React.useState(false)
+  const [loadingMcpToolsByServerId, setLoadingMcpToolsByServerId] = React.useState<Record<number, boolean>>({})
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -108,26 +133,103 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     () => toolList.filter((t) => t.name !== "knowledge"),
     [toolList],
   )
+  const mcpEnabledCount = React.useMemo(() => mcpBindings.length, [mcpBindings])
+  const selectedMcpToolCount = React.useMemo(
+    () =>
+      mcpBindings.reduce((count, binding) => {
+        if (binding.allowed_tools === null) {
+          return count + (mcpToolsByServerId[binding.server_id]?.length ?? 0)
+        }
+        return count + binding.allowed_tools.length
+      }, 0),
+    [mcpBindings, mcpToolsByServerId],
+  )
 
   const canSave = Boolean(
     formData.display_name.trim() &&
       formData.system_prompt.trim(),
   )
 
+  React.useEffect(() => {
+    mcpToolsByServerIdRef.current = mcpToolsByServerId
+  }, [mcpToolsByServerId])
+
+  const loadMcpTools = React.useCallback(async (serverId: number) => {
+    if (mcpToolsByServerIdRef.current[serverId]) return
+    setLoadingMcpToolsByServerId((prev) => ({ ...prev, [serverId]: true }))
+    try {
+      const discoveredTools = await mcp.listServerTools(serverId)
+      setMcpToolsByServerId((prev) => ({ ...prev, [serverId]: discoveredTools }))
+    } catch (error) {
+      console.error("Failed to load MCP tools:", error)
+    } finally {
+      setLoadingMcpToolsByServerId((prev) => ({ ...prev, [serverId]: false }))
+    }
+  }, [])
+
+  const toggleMcpServerBinding = React.useCallback(async (serverId: number) => {
+    const alreadyBound = mcpBindings.some((binding) => binding.server_id === serverId)
+    if (alreadyBound) {
+      setMcpBindings((prev) => prev.filter((binding) => binding.server_id !== serverId))
+      return
+    }
+
+    await loadMcpTools(serverId)
+    setMcpBindings((prev) => [...prev, { server_id: serverId, allowed_tools: null }])
+  }, [loadMcpTools, mcpBindings])
+
+  const setServerFullAccess = React.useCallback((serverId: number, enabled: boolean) => {
+    setMcpBindings((prev) =>
+      prev.map((binding) => {
+        if (binding.server_id !== serverId) return binding
+        const discoveredTools = mcpToolsByServerIdRef.current[serverId] ?? []
+        return {
+          ...binding,
+          allowed_tools: enabled
+            ? null
+            : discoveredTools.length === 0
+              ? null
+              : discoveredTools.map((tool) => tool.tool_name_original),
+        }
+      }),
+    )
+  }, [])
+
+  const toggleMcpTool = React.useCallback((serverId: number, toolName: string) => {
+    setMcpBindings((prev) =>
+      prev.map((binding) => {
+        if (binding.server_id !== serverId) return binding
+        const discoveredTools = mcpToolsByServerIdRef.current[serverId] ?? []
+        const baseSelection =
+          binding.allowed_tools ??
+          discoveredTools.map((tool) => tool.tool_name_original)
+        const nextSelection = baseSelection.includes(toolName)
+          ? baseSelection.filter((name) => name !== toolName)
+          : [...baseSelection, toolName]
+        return {
+          ...binding,
+          allowed_tools: nextSelection.length === 0 ? null : nextSelection,
+        }
+      }),
+    )
+  }, [])
+
   // Load data
   React.useEffect(() => {
     const loadData = async () => {
       try {
-        const providersData = await providers.list()
+        const [providersData, toolsData, knowledgeReposData, allAgents, mcpServersData] =
+          await Promise.all([
+            providers.list(),
+            tools.list(),
+            knowledge.list(),
+            agents.list(),
+            loadMcpServers(),
+          ])
         setProviderList(providersData)
-
-        const toolsData = await tools.list()
         setToolList(toolsData)
-
-        const knowledgeReposData = await knowledge.list()
         setKnowledgeRepoList(knowledgeReposData)
-
-        const allAgents = await agents.list()
+        setMcpServerList(mcpServersData)
         const candidates = allAgents.filter(
           (a) => !a.parent_agent_id && a.agent_type !== "subagent" && a.id !== agentId
         )
@@ -135,18 +237,24 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
 
         const preferredProviderId = getPreferredProviderId(providersData)
         if (agentId !== undefined) {
-          const agent = await agents.get(agentId)
+          const [agent, workspaces, bindings] = await Promise.all([
+            agents.get(agentId),
+            knowledge.listAgentWorkspaces(agentId).catch(() => []),
+            loadAgentMcpBindings(agentId).catch(() => []),
+          ])
           if (agent) setFormData(agent)
-          try {
-            const workspaces = await knowledge.listAgentWorkspaces(agentId)
-            setAgentWorkspaces(workspaces)
-          } catch {
-            // Agent may not have knowledge workspaces yet
-          }
-        } else if (parentId !== undefined) {
-          setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
+          setAgentWorkspaces(workspaces)
+          setMcpBindings(bindings)
+          await Promise.all(
+            bindings.map((binding) => loadMcpTools(binding.server_id)),
+          )
         } else {
-          setFormData(createDefaultFormData(preferredProviderId))
+          setMcpBindings([])
+          if (parentId !== undefined) {
+            setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
+          } else {
+            setFormData(createDefaultFormData(preferredProviderId))
+          }
         }
       } catch (error) {
         console.error("Failed to load data:", error)
@@ -155,7 +263,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId, parentId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agentId, loadMcpTools, parentId])
 
   const handleSave = async () => {
     if (!canSave) return
@@ -165,13 +273,11 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       // Save knowledge workspace bindings
       if (isEditing || savedId) {
         const targetId = isEditing ? agentId! : savedId
-        setSavingWorkspaces(true)
         try {
           await knowledge.setAgentWorkspaces(targetId, agentWorkspaces)
+          await mcp.setAgentBindings(targetId, mcpBindings)
         } catch (wsError) {
-          console.error("Failed to save knowledge workspaces:", wsError)
-        } finally {
-          setSavingWorkspaces(false)
+          console.error("Failed to save agent capability bindings:", wsError)
         }
       }
       addToast("success", isEditing ? "配置已保存" : "创建成功")
@@ -468,8 +574,8 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             </div>
           </div>
 
-          {/* 第二排：能力与工具 + 知识库 */}
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-6">
+          {/* 第二排：能力与工具 + 知识库 + MCP */}
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px_280px] gap-6">
             {/* 通用工具箱 */}
             <div className="space-y-4">
               <div className="flex items-center justify-between text-sm font-bold text-foreground px-1">
@@ -564,6 +670,42 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                     {knowledgeEnabled
                       ? `${agentWorkspaces.length} 个工作区 · ${knowledgeRepoList.length} 个仓库`
                       : "为智能体绑定知识来源"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* MCP 独立卡片 */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Server className="h-4 w-4" />
+                </div>
+                MCP Servers
+              </div>
+              <div
+                onClick={() => setMcpDialogOpen(true)}
+                className={cn(
+                  "flex flex-col items-center justify-center gap-3 p-6 rounded-3xl border cursor-pointer transition-all min-h-[200px]",
+                  mcpEnabledCount > 0
+                    ? "border-primary bg-primary/5 shadow-inner"
+                    : "border-muted/60 bg-muted/20 hover:border-primary/30",
+                )}
+              >
+                <div className={cn(
+                  "p-3 rounded-2xl transition-colors",
+                  mcpEnabledCount > 0 ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+                )}>
+                  <Server className="h-6 w-6" />
+                </div>
+                <div className="text-center space-y-1">
+                  <p className="text-xs font-bold">
+                    {mcpEnabledCount > 0 ? "已绑定 MCP" : "点击配置 MCP"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {mcpEnabledCount > 0
+                      ? `${mcpEnabledCount} 个 server · ${selectedMcpToolCount} 个 tools`
+                      : "为智能体绑定可动态注入的 MCP servers"}
                   </p>
                 </div>
               </div>
@@ -716,6 +858,65 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                   size="sm"
                   onClick={() => setKnowledgeDialogOpen(false)}
                 >
+                  完成
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={mcpDialogOpen} onOpenChange={setMcpDialogOpen}>
+            <DialogContent className="sm:max-w-3xl max-h-[80vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Server className="h-4 w-4 text-primary" />
+                  MCP 配置
+                </DialogTitle>
+                <DialogDescription>
+                  绑定设置页中已配置的 MCP server，并按 tool 配置白名单。只有后台处于 ready 状态的 server 会在实际对话中注入。
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="flex-1 overflow-y-auto space-y-5 py-2 custom-scrollbar">
+                {mcpServerList.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-muted/60 bg-muted/20 p-6 text-center space-y-3">
+                    <p className="text-sm font-semibold">还没有 MCP Server</p>
+                    <p className="text-xs text-muted-foreground">
+                      先去设置页新增并测试连接，再回来为当前智能体绑定。
+                    </p>
+                    <Button size="sm" variant="outline" onClick={() => router.push("/settings/mcp")}>
+                      前往 MCP 设置页
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {mcpServerList.map((server) => {
+                      const serverId = server.id ?? 0
+                      const binding = mcpBindings.find((item) => item.server_id === serverId) ?? null
+                      const discoveredTools = mcpToolsByServerId[serverId] ?? []
+                      const loadingTools = loadingMcpToolsByServerId[serverId] ?? false
+
+                      return (
+                        <AgentMcpBindingCard
+                          key={serverId}
+                          server={server}
+                          binding={binding}
+                          discoveredTools={discoveredTools}
+                          loadingTools={loadingTools}
+                          onToggleBinding={toggleMcpServerBinding}
+                          onSetFullAccess={setServerFullAccess}
+                          onToggleTool={toggleMcpTool}
+                          onOpenSettings={(targetServerId) => {
+                            router.push(`/settings/mcp/edit?id=${targetServerId}`)
+                          }}
+                        />
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <DialogFooter showCloseButton>
+                <Button size="sm" onClick={() => setMcpDialogOpen(false)}>
                   完成
                 </Button>
               </DialogFooter>

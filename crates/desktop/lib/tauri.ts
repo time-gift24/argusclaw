@@ -184,6 +184,92 @@ export const knowledge = {
     invoke<void>("set_agent_knowledge_workspaces", { agentId, workspaces }),
 };
 
+// MCP API
+export type McpServerStatus =
+  | "ready"
+  | "connecting"
+  | "retrying"
+  | "failed"
+  | "disabled";
+
+export type McpTransportConfig =
+  | {
+      kind: "stdio";
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+    }
+  | {
+      kind: "http";
+      url: string;
+      headers: Record<string, string>;
+    }
+  | {
+      kind: "sse";
+      url: string;
+      headers: Record<string, string>;
+    };
+
+export interface McpServerRecord {
+  id: number | null;
+  display_name: string;
+  enabled: boolean;
+  transport: McpTransportConfig;
+  timeout_ms: number;
+  status: McpServerStatus;
+  last_checked_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  discovered_tool_count: number;
+}
+
+export interface McpDiscoveredToolRecord {
+  server_id: number;
+  tool_name_original: string;
+  description: string;
+  schema: Record<string, unknown>;
+  annotations: Record<string, unknown> | null;
+}
+
+export interface McpConnectionTestResult {
+  status: McpServerStatus;
+  checked_at: string;
+  latency_ms: number;
+  discovered_tools: McpDiscoveredToolRecord[];
+  message: string;
+}
+
+export interface AgentMcpBinding {
+  server_id: number;
+  allowed_tools: string[] | null;
+}
+
+export const mcp = {
+  listServers: () => invoke<McpServerRecord[]>("list_mcp_servers"),
+
+  getServer: (id: number) => invoke<McpServerRecord | null>("get_mcp_server", { id }),
+
+  upsertServer: (record: McpServerRecord) =>
+    invoke<number>("upsert_mcp_server", { record }),
+
+  deleteServer: (id: number) => invoke<boolean>("delete_mcp_server", { id }),
+
+  testInput: (record: McpServerRecord) =>
+    invoke<McpConnectionTestResult>("test_mcp_server_input", { record }),
+
+  testConnection: (id: number) =>
+    invoke<McpConnectionTestResult>("test_mcp_server_connection", { id }),
+
+  listServerTools: (serverId: number) =>
+    invoke<McpDiscoveredToolRecord[]>("list_mcp_server_tools", { serverId }),
+
+  listAgentBindings: (agentId: number) =>
+    invoke<AgentMcpBinding[]>("list_agent_mcp_bindings", { agentId }),
+
+  setAgentBindings: (agentId: number, bindings: AgentMcpBinding[]) =>
+    invoke<void>("set_agent_mcp_bindings", { agentId, bindings }),
+};
+
 // Session API
 export interface SessionSummary {
   id: string;
