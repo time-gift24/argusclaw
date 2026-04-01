@@ -5,8 +5,8 @@ use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEven
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
-    AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
-    ThreadEvent, ThreadId, ToolError,
+    AgentId, ArgusError, LlmProviderId, McpToolResolver, ProviderId, Result, SessionId,
+    ThreadControlEvent, ThreadEvent, ThreadId, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -232,6 +232,7 @@ pub struct SessionManager {
     sessions: DashMap<SessionId, Arc<Session>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
+    mcp_tool_resolver: Arc<dyn McpToolResolver>,
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
 }
@@ -279,6 +280,7 @@ impl SessionManager {
         llm_provider_repo: Arc<dyn LlmProviderRepository>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
+        mcp_tool_resolver: Arc<dyn McpToolResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
         thread_pool: Arc<ThreadPool>,
@@ -297,9 +299,29 @@ impl SessionManager {
             sessions: DashMap::new(),
             template_manager,
             provider_resolver,
+            mcp_tool_resolver,
             trace_dir,
             thread_pool,
         }
+    }
+
+    async fn ensure_thread_runtime_with_mcp(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Arc<tokio::sync::RwLock<argus_agent::Thread>>> {
+        let thread = self
+            .thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .map_err(|error| ArgusError::LlmError {
+                reason: error.to_string(),
+            })?;
+        thread
+            .write()
+            .await
+            .set_mcp_tool_resolver(Some(Arc::clone(&self.mcp_tool_resolver)));
+        Ok(thread)
     }
 
     /// Broadcast a ThreadEvent to all active sessions.
@@ -373,8 +395,7 @@ impl SessionManager {
             self.thread_pool
                 .register_chat_thread(session_id, thread_record.id);
             match self
-                .thread_pool
-                .ensure_chat_runtime(session_id, thread_record.id)
+                .ensure_thread_runtime_with_mcp(session_id, thread_record.id)
                 .await
             {
                 Ok(thread) => session.add_thread(thread),
@@ -632,17 +653,14 @@ impl SessionManager {
             })?;
         self.thread_pool.register_chat_thread(session_id, thread_id);
         let thread = match self
-            .thread_pool
-            .ensure_chat_runtime(session_id, thread_id)
+            .ensure_thread_runtime_with_mcp(session_id, thread_id)
             .await
         {
             Ok(thread) => thread,
             Err(error) => {
                 self.thread_pool.remove_runtime(&thread_id);
                 let _ = self.thread_repo.delete_thread(&thread_id).await;
-                return Err(ArgusError::LlmError {
-                    reason: error.to_string(),
-                });
+                return Err(error);
             }
         };
         session.add_thread(thread);
@@ -802,6 +820,8 @@ impl SessionManager {
     ) -> Result<()> {
         self.load(session_id).await?;
         self.ensure_thread_in_session(session_id, thread_id).await?;
+        self.ensure_thread_runtime_with_mcp(session_id, *thread_id)
+            .await?;
         self.thread_pool
             .send_chat_message(session_id, *thread_id, message)
             .await
@@ -1187,14 +1207,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use argus_agent::{CompactorManager, KeepRecentCompactor, ThreadBuilder};
+    use argus_agent::{CompactorManager, KeepRecentCompactor, ThreadBuilder, TurnCancellation};
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
     };
     use argus_protocol::{
-        AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, ProviderId,
-        ProviderResolver, ProviderSecretStatus, Role, SecretString, SessionId, ThinkingConfig,
-        ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
+        AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, McpToolResolver,
+        ProviderId, ProviderResolver, ProviderSecretStatus, ResolvedMcpTools, Role, SecretString,
+        SessionId, ThinkingConfig, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
+        ToolDefinition, ToolError, ToolExecutionContext,
     };
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
@@ -1204,6 +1225,7 @@ mod tests {
     use argus_tool::ToolManager;
     use async_trait::async_trait;
     use rust_decimal::Decimal;
+    use serde_json::json;
     use sqlx::SqlitePool;
     use tokio::time::{sleep, timeout};
 
@@ -1307,6 +1329,67 @@ mod tests {
         }
     }
 
+    struct NoopMcpResolver;
+
+    #[async_trait]
+    impl McpToolResolver for NoopMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            Ok(ResolvedMcpTools::default())
+        }
+    }
+
+    struct StaticMcpResolver {
+        tools: Vec<Arc<dyn argus_protocol::NamedTool>>,
+    }
+
+    #[async_trait]
+    impl McpToolResolver for StaticMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            Ok(ResolvedMcpTools::new(self.tools.clone(), Vec::new()))
+        }
+    }
+
+    struct TestMcpTool {
+        name: String,
+    }
+
+    impl TestMcpTool {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl argus_protocol::NamedTool for TestMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.clone(),
+                description: "Test MCP tool".to_string(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> std::result::Result<serde_json::Value, ToolError> {
+            Ok(input)
+        }
+    }
+
     fn sample_provider_record(is_default: bool) -> LlmProviderRecord {
         LlmProviderRecord {
             id: argus_protocol::LlmProviderId::new(0),
@@ -1325,6 +1408,12 @@ mod tests {
     }
 
     async fn test_session_manager() -> SessionManager {
+        test_session_manager_with_mcp_resolver(Arc::new(NoopMcpResolver)).await
+    }
+
+    async fn test_session_manager_with_mcp_resolver(
+        mcp_tool_resolver: Arc<dyn McpToolResolver>,
+    ) -> SessionManager {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("sqlite memory pool should connect");
@@ -1381,6 +1470,7 @@ mod tests {
             sqlite as Arc<dyn LlmProviderRepository>,
             template_manager,
             provider_resolver,
+            mcp_tool_resolver,
             tool_manager,
             trace_dir,
             job_manager.thread_pool(),
@@ -1446,6 +1536,7 @@ mod tests {
                 sqlite as Arc<dyn LlmProviderRepository>,
                 template_manager,
                 provider_resolver,
+                Arc::new(NoopMcpResolver),
                 tool_manager.clone(),
                 trace_dir,
                 job_manager.thread_pool(),
@@ -1975,5 +2066,33 @@ mod tests {
         assert!(!tool_ids.iter().any(|id| id == "dispath_job"));
         assert!(!tool_ids.iter().any(|id| id == "get_job_result"));
         assert!(!tool_ids.iter().any(|id| id == "list_subagents"));
+    }
+
+    #[tokio::test]
+    async fn create_thread_injects_mcp_resolver_into_loaded_runtime() {
+        let manager = test_session_manager_with_mcp_resolver(Arc::new(StaticMcpResolver {
+            tools: vec![Arc::new(TestMcpTool::new("mcp__session__inspect"))],
+        }))
+        .await;
+        let session_id = manager
+            .create("mcp session".to_string())
+            .await
+            .expect("session should create");
+        let thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .await
+            .expect("thread should create");
+        let session = manager.load(session_id).await.expect("session should load");
+        let thread = session
+            .get_thread(&thread_id)
+            .expect("thread runtime should be loaded");
+        let turn = thread
+            .write()
+            .await
+            .begin_turn("hello".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("thread should resolve injected mcp tools");
+
+        assert!(format!("{turn:?}").contains("tools: 2"));
     }
 }

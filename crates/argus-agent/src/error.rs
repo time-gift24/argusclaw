@@ -148,6 +148,10 @@ pub enum ThreadError {
     #[error("Turn build failed: {0}")]
     TurnBuildFailed(String),
 
+    /// MCP tools could not be resolved for the upcoming turn.
+    #[error("Failed to resolve MCP tools: {reason}")]
+    McpToolResolutionFailed { reason: String },
+
     /// Compact operation failed.
     #[error("Compact failed: {0}")]
     CompactFailed(#[from] CompactError),

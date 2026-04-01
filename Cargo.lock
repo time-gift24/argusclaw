@@ -413,6 +413,7 @@ dependencies = [
  "argus-crypto",
  "argus-job",
  "argus-llm",
+ "argus-mcp",
  "argus-protocol",
  "argus-repository",
  "argus-session",

@@ -13,8 +13,8 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadControlEvent,
-    ThreadEvent, ThreadId, ThreadMailbox,
+    AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, SessionId,
+    ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadNoticeLevel,
 };
 use argus_tool::ToolManager;
 
@@ -110,6 +110,10 @@ pub struct Thread {
     #[builder(default = "Arc::new(Mutex::new(ThreadMailbox::default()))")]
     mailbox: Arc<Mutex<ThreadMailbox>>,
 
+    /// Optional runtime resolver that injects ready MCP tools for this agent.
+    #[builder(default, setter(strip_option))]
+    mcp_tool_resolver: Option<Arc<dyn McpToolResolver>>,
+
     /// Whether a Turn is currently running.
     #[builder(default)]
     turn_running: bool,
@@ -191,6 +195,7 @@ impl ThreadBuilder {
             control_tx,
             control_rx: Some(control_rx),
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
+            mcp_tool_resolver: self.mcp_tool_resolver.flatten(),
             turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
             pending_trace_prelude_messages: self.pending_trace_prelude_messages.unwrap_or_default(),
@@ -329,6 +334,11 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
+    /// Replace the runtime MCP tool resolver for subsequent turns.
+    pub fn set_mcp_tool_resolver(&mut self, resolver: Option<Arc<dyn McpToolResolver>>) {
+        self.mcp_tool_resolver = resolver;
+    }
+
     /// Get mutable access to messages (for Compactor).
     pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
         &mut self.messages
@@ -409,6 +419,39 @@ impl Thread {
             })
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    fn emit_mcp_notice(&self, message: String) {
+        self.broadcast_to_self(ThreadEvent::Notice {
+            thread_id: self.id.to_string(),
+            level: ThreadNoticeLevel::Warning,
+            message,
+        });
+    }
+
+    async fn resolve_mcp_tools(
+        &self,
+        agent_record: &Arc<AgentRecord>,
+    ) -> Result<Vec<Arc<dyn NamedTool>>, ThreadError> {
+        let Some(resolver) = self.mcp_tool_resolver.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let resolved = resolver
+            .resolve_for_agent(agent_record.id)
+            .await
+            .map_err(|error| ThreadError::McpToolResolutionFailed {
+                reason: error.to_string(),
+            })?;
+
+        for unavailable in &resolved.unavailable_servers {
+            self.emit_mcp_notice(format!(
+                "MCP server '{}' is unavailable for this turn: {}",
+                unavailable.display_name, unavailable.reason
+            ));
+        }
+
+        Ok(resolved.tools)
     }
 
     fn build_compaction_prompt(
@@ -639,8 +682,16 @@ impl Thread {
             self.agent_record.clone()
         };
 
+        let resolved_mcp_tools = match self.resolve_mcp_tools(&effective_record).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                self.set_turn_running(false);
+                return Err(error);
+            }
+        };
+
         self.messages.push(ChatMessage::user(user_input));
-        match self.build_turn(effective_record, cancellation) {
+        match self.build_turn(effective_record, cancellation, resolved_mcp_tools) {
             Ok(turn) => Ok(turn),
             Err(error) => {
                 self.set_turn_running(false);
@@ -670,6 +721,7 @@ impl Thread {
         &mut self,
         agent_record: Arc<AgentRecord>,
         cancellation: TurnCancellation,
+        mcp_tools: Vec<Arc<dyn NamedTool>>,
     ) -> Result<crate::Turn, ThreadError> {
         self.turn_count += 1;
         let turn_number = self.turn_count;
@@ -688,6 +740,7 @@ impl Thread {
             .filter(|name| enabled_tool_names.contains(name))
             .filter_map(|name| self.tool_manager.get(name))
             .collect();
+        tools.extend(mcp_tools);
 
         // Append UpdatePlanTool with the thread's plan store
         tools.push(Arc::new(UpdatePlanTool::new(Arc::new(
@@ -754,7 +807,11 @@ mod tests {
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
+    use argus_protocol::{
+        AgentId, AgentType, McpToolResolver, McpUnavailableServerSummary, ProviderId,
+        ResolvedMcpTools, ThreadCommand, ThreadNoticeLevel, ThreadRuntimeState, ToolDefinition,
+        ToolError, ToolExecutionContext,
+    };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use serde_json::json;
@@ -1046,6 +1103,104 @@ mod tests {
         ))
     }
 
+    struct TestMcpTool {
+        name: String,
+    }
+
+    impl TestMcpTool {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NamedTool for TestMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.clone(),
+                description: "Test MCP tool".to_string(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(input)
+        }
+    }
+
+    enum FakeMcpResolverPlan {
+        Success {
+            tools: Vec<Arc<dyn NamedTool>>,
+            unavailable_servers: Vec<McpUnavailableServerSummary>,
+        },
+        Failure(String),
+    }
+
+    struct FakeMcpResolver {
+        plan: FakeMcpResolverPlan,
+    }
+
+    impl FakeMcpResolver {
+        fn ready(tools: Vec<Arc<dyn NamedTool>>) -> Self {
+            Self {
+                plan: FakeMcpResolverPlan::Success {
+                    tools,
+                    unavailable_servers: Vec::new(),
+                },
+            }
+        }
+
+        fn unavailable(display_name: &str, reason: &str) -> Self {
+            Self {
+                plan: FakeMcpResolverPlan::Success {
+                    tools: Vec::new(),
+                    unavailable_servers: vec![McpUnavailableServerSummary {
+                        server_id: 7,
+                        display_name: display_name.to_string(),
+                        reason: reason.to_string(),
+                    }],
+                },
+            }
+        }
+
+        fn failure(reason: &str) -> Self {
+            Self {
+                plan: FakeMcpResolverPlan::Failure(reason.to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl McpToolResolver for FakeMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            match &self.plan {
+                FakeMcpResolverPlan::Success {
+                    tools,
+                    unavailable_servers,
+                } => Ok(ResolvedMcpTools::new(
+                    tools.iter().cloned().collect(),
+                    unavailable_servers.clone(),
+                )),
+                FakeMcpResolverPlan::Failure(reason) => Err(argus_protocol::ArgusError::LlmError {
+                    reason: reason.clone(),
+                }),
+            }
+        }
+    }
+
     fn repeated_test_message() -> String {
         ["test"; 10].join(" ")
     }
@@ -1124,6 +1279,112 @@ mod tests {
             .agent_record(test_agent_record())
             .build();
         assert!(matches!(result, Err(ThreadError::SessionIdNotSet)));
+    }
+
+    #[test]
+    fn build_turn_accepts_pre_resolved_mcp_tools_synchronously() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        thread.messages.push(ChatMessage::user("hello"));
+
+        let turn = thread
+            .build_turn(
+                thread.agent_record.clone(),
+                TurnCancellation::new(),
+                vec![Arc::new(TestMcpTool::new("mcp__test__inspect"))],
+            )
+            .expect("turn should build synchronously");
+
+        assert!(format!("{turn:?}").contains("tools: 2"));
+    }
+
+    #[tokio::test]
+    async fn begin_turn_injects_ready_mcp_tools_without_connecting_inline() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .mcp_tool_resolver(Arc::new(FakeMcpResolver::ready(vec![Arc::new(
+                TestMcpTool::new("mcp__test__inspect"),
+            )])))
+            .build()
+            .expect("thread should build");
+
+        let turn = thread
+            .begin_turn("hello".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+
+        assert!(format!("{turn:?}").contains("tools: 2"));
+    }
+
+    #[tokio::test]
+    async fn begin_turn_skips_unavailable_mcp_tools_and_emits_notice() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .mcp_tool_resolver(Arc::new(FakeMcpResolver::unavailable(
+                "Slack MCP",
+                "offline",
+            )))
+            .build()
+            .expect("thread should build");
+        let mut rx = thread.subscribe();
+
+        let turn = thread
+            .begin_turn("hello".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+
+        assert!(format!("{turn:?}").contains("tools: 1"));
+        let event = timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("thread should emit a notice")
+            .expect("notice event should be readable");
+        assert!(matches!(
+            event,
+            ThreadEvent::Notice {
+                level: ThreadNoticeLevel::Warning,
+                message,
+                ..
+            } if message.contains("Slack MCP") && message.contains("offline")
+        ));
+    }
+
+    #[tokio::test]
+    async fn begin_turn_returns_resolution_error_when_mcp_resolver_fails() {
+        let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .mcp_tool_resolver(Arc::new(FakeMcpResolver::failure("resolver boom")))
+            .build()
+            .expect("thread should build");
+
+        let error = thread
+            .begin_turn("hello".to_string(), None, TurnCancellation::new())
+            .await
+            .expect_err("turn should fail when mcp resolution fails");
+
+        assert!(matches!(
+            error,
+            ThreadError::McpToolResolutionFailed { reason } if reason.contains("resolver boom")
+        ));
+        assert!(!thread.is_turn_running());
+        assert_eq!(thread.history().len(), 0);
     }
 
     #[test]
