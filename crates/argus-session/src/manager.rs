@@ -1118,11 +1118,17 @@ async fn resolve_turn_numbers(
     turns_dir: &std::path::Path,
     turn_count_hint: Option<u32>,
 ) -> Result<Vec<u32>> {
-    if let Some(turn_count) = turn_count_hint {
-        return Ok((1..=turn_count).collect());
-    }
-
     if !turns_dir.exists() {
+        if let Some(turn_count) = turn_count_hint {
+            if turn_count > 0 {
+                return Err(ArgusError::DatabaseError {
+                    reason: format!(
+                        "missing turn trace file 1; turns directory not found at {}",
+                        turns_dir.display()
+                    ),
+                });
+            }
+        }
         return Ok(Vec::new());
     }
 
@@ -1168,16 +1174,19 @@ async fn resolve_turn_numbers(
     }
 
     turn_numbers.sort_unstable();
-    for (index, turn_number) in turn_numbers.iter().enumerate() {
-        let expected = index as u32 + 1;
-        if *turn_number != expected {
+    turn_numbers.dedup();
+
+    let highest_discovered_turn = turn_numbers.last().copied().unwrap_or(0);
+    let highest_expected_turn = highest_discovered_turn.max(turn_count_hint.unwrap_or(0));
+    for expected in 1..=highest_expected_turn {
+        if turn_numbers.get((expected - 1) as usize).copied() != Some(expected) {
             return Err(ArgusError::DatabaseError {
-                reason: format!("missing turn trace file {expected}; found {turn_number} instead"),
+                reason: format!("missing turn trace file {expected}"),
             });
         }
     }
 
-    Ok(turn_numbers)
+    Ok((1..=highest_expected_turn).collect())
 }
 
 #[cfg(test)]
@@ -1624,7 +1633,112 @@ mod tests {
             .await
             .expect_err("missing turn file should fail");
 
-        assert!(error.to_string().contains("failed to recover turn 2"));
+        assert!(error.to_string().contains("missing turn trace file 2"));
+    }
+
+    #[tokio::test]
+    async fn recover_messages_from_trace_restores_partial_failed_turn_response() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let turns_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("turns");
+        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+
+        fs::write(
+            turns_dir.join("1.jsonl"),
+            [
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"用户问题一","role":"user"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"部分回答","reasoning_content":null,"tool_calls":[],"finish_reason":"error"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:02Z","type":"turn_error","error":"stream timeout","at_iteration":0}}"#,
+                    thread_id
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("failed turn trace should write");
+
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
+            .await
+            .expect("failed turn trace should still recover messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].content, "用户问题一");
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert_eq!(messages[1].content, "部分回答");
+    }
+
+    #[tokio::test]
+    async fn recover_messages_from_trace_uses_trace_turns_beyond_persisted_count_hint() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let turns_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("turns");
+        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+
+        fs::write(
+            turns_dir.join("1.jsonl"),
+            [
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"用户问题一","role":"user"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"回答一","reasoning_content":null,"tool_calls":[],"finish_reason":"stop"}}"#,
+                    thread_id
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("turn one should write");
+
+        fs::write(
+            turns_dir.join("2.jsonl"),
+            [
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:00Z","type":"user_input","content":"用户问题二","role":"user"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:01Z","type":"llm_response","content":"失败前的部分回答","reasoning_content":null,"tool_calls":[],"finish_reason":"error"}}"#,
+                    thread_id
+                ),
+                format!(
+                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:02Z","type":"turn_error","error":"stream timeout","at_iteration":0}}"#,
+                    thread_id
+                ),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .expect("turn two should write");
+
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
+            .await
+            .expect("trace recovery should use newer trace files than the persisted count hint");
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content, "用户问题一");
+        assert_eq!(messages[1].content, "回答一");
+        assert_eq!(messages[2].content, "用户问题二");
+        assert_eq!(messages[3].content, "失败前的部分回答");
     }
 
     #[tokio::test]

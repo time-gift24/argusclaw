@@ -2012,9 +2012,6 @@ impl ThreadPool {
         }
         turn_numbers.sort_unstable();
         turn_numbers.dedup();
-        if let Some(turn_count) = turn_count_hint {
-            turn_numbers.retain(|number| *number <= turn_count);
-        }
         Ok(turn_numbers)
     }
 
@@ -3821,6 +3818,37 @@ mod tests {
                 .any(|message| message.content == "third reply")
         );
         assert_eq!(recovered.token_count, 33);
+    }
+
+    #[tokio::test]
+    async fn recover_thread_state_from_trace_uses_turns_beyond_persisted_count_hint() {
+        let trace_dir = unique_trace_dir("argus-thread-pool-trace-ahead");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let base_dir = trace_dir
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+
+        write_trace_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        write_trace_turn(&base_dir, 2, "second prompt", "partial second reply", 22).await;
+
+        let recovered = ThreadPool::recover_thread_state_from_trace(
+            &trace_dir,
+            &session_id,
+            &thread_id,
+            Some(1),
+        )
+        .await
+        .expect("trace recovery should discover turns beyond the persisted count hint");
+
+        assert_eq!(recovered.turn_count, 2);
+        assert!(
+            recovered
+                .messages
+                .iter()
+                .any(|message| message.content == "partial second reply")
+        );
+        assert_eq!(recovered.token_count, 22);
     }
 
     #[tokio::test]

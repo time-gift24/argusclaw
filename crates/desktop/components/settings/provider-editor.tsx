@@ -130,6 +130,10 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     formData.base_url.trim() &&
     formData.models.length > 0,
   )
+  const canRunConnectionTest = Boolean(
+    formData.api_key.trim() ||
+    formData.meta_data.account_token_source === "true",
+  )
 
   const handleSubmit = async () => {
     if (!canSave) return
@@ -196,7 +200,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
       default_model: formData.default_model || model,
     })
     setNewModel("")
-    if (formData.base_url.trim() && formData.api_key.trim()) {
+    if (formData.base_url.trim() && canRunConnectionTest) {
       await testModel(model, newModels)
     }
   }
@@ -419,7 +423,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                               查看报文
                             </Button>
                           )}
-                          <Button variant="ghost" size="sm" className="h-8 text-xs hover:bg-primary/5 hover:text-primary" onClick={() => testModel(model, formData.models)} disabled={isTesting || !formData.api_key.trim()}>重新测试</Button>
+                          <Button variant="ghost" size="sm" className="h-8 text-xs hover:bg-primary/5 hover:text-primary" onClick={() => testModel(model, formData.models)} disabled={isTesting || !canRunConnectionTest}>重新测试</Button>
                         </div>
                       </div>
                       <CollapsibleContent className="bg-muted/20 border-t border-muted/40">

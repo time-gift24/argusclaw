@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
-use argus_agent::trace::TraceConfig;
+use argus_agent::trace::{TraceConfig, read_jsonl_events};
 use argus_agent::{TurnBuilder, TurnConfig};
 use argus_protocol::AgentRecord;
 use argus_protocol::ToolExecutionContext;
@@ -198,6 +198,42 @@ impl LlmProvider for ToolCallMockProvider {
     }
 }
 
+struct PartialFailureMockProvider;
+
+#[async_trait]
+impl LlmProvider for PartialFailureMockProvider {
+    fn model_name(&self) -> &str {
+        "partial-failure"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability {
+            provider: "partial-failure".to_string(),
+            capability: "complete".to_string(),
+        })
+    }
+
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        let stream = futures_util::stream::iter(vec![
+            Ok(LlmStreamEvent::ContentDelta {
+                delta: "partial answer".to_string(),
+            }),
+            Err(LlmError::RequestFailed {
+                provider: "partial-failure".to_string(),
+                reason: "stream timeout".to_string(),
+            }),
+        ]);
+        Ok(Box::pin(stream))
+    }
+}
+
 #[tokio::test]
 async fn test_turn_trace_file_created_on_success() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -350,6 +386,63 @@ async fn test_turn_trace_contains_tool_execution() {
     assert!(found_tool_call_start, "Should have tool_call_start event");
     assert!(found_tool_result, "Should have tool_result event");
     assert!(found_turn_end, "Should have turn_end event on success");
+}
+
+#[tokio::test]
+async fn test_turn_trace_keeps_partial_llm_response_on_stream_failure() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+
+    let provider = Arc::new(PartialFailureMockProvider);
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .trace_config(trace_config)
+        .build()
+        .unwrap();
+
+    let error = turn
+        .execute()
+        .await
+        .expect_err("stream failure should fail the turn");
+    assert!(matches!(error, argus_agent::TurnError::LlmFailed(_)));
+
+    let trace_path = temp_dir
+        .path()
+        .join("test-thread")
+        .join("turns")
+        .join("1.jsonl");
+    assert!(trace_path.exists(), "trace file should exist on failure");
+
+    let events = read_jsonl_events(&trace_path)
+        .await
+        .expect("trace file should remain readable on failure");
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            argus_agent::TurnLogEvent::LlmResponse { content, .. } if content == "partial answer"
+        )),
+        "partial llm response should be preserved in the trace before failure"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            argus_agent::TurnLogEvent::TurnError { error, .. } if error.contains("stream timeout")
+        )),
+        "failure trace should end with turn_error"
+    );
 }
 
 #[tokio::test]

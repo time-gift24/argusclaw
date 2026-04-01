@@ -79,11 +79,30 @@ test("chat store guards thread-event listener registration against concurrent in
 test("chat store tracks pending reasoning alongside streamed assistant text", () => {
   assert.match(
     storeSource,
-    /pendingAssistant:[\s\S]*content:\s*string;[\s\S]*reasoning:\s*string;[\s\S]*toolCalls:\s*PendingToolCall\[\];[\s\S]*plan:\s*PlanItem\[\]\s*\|\s*null[\s\S]*\}\s*\|\s*null/,
+    /pendingAssistant:[\s\S]*content:\s*string;[\s\S]*reasoning:\s*string;[\s\S]*toolCalls:\s*PendingToolCall\[\];[\s\S]*plan:\s*PlanItem\[\]\s*\|\s*null[\s\S]*retry:[\s\S]*attempt:\s*number;[\s\S]*maxRetries:\s*number;[\s\S]*error:\s*string[\s\S]*\|\s*null[\s\S]*\}\s*\|\s*null/,
   );
   assert.match(
     storeSource,
     /case "reasoning_delta":[\s\S]*?pendingAssistant:[\s\S]*?reasoning:\s*session\.pendingAssistant\.reasoning \+ payload\.delta/,
+  );
+});
+
+test("chat store surfaces retry attempts on the pending assistant and clears them once output resumes", () => {
+  assert.match(
+    storeSource,
+    /case "retry_attempt":[\s\S]*?pendingAssistant:[\s\S]*?retry:\s*\{[\s\S]*attempt:\s*payload\.attempt,[\s\S]*maxRetries:\s*payload\.max_retries,[\s\S]*error:\s*payload\.error[\s\S]*\}/,
+  );
+  assert.match(
+    storeSource,
+    /case "content_delta":[\s\S]*?retry:\s*null/,
+  );
+  assert.match(
+    storeSource,
+    /case "reasoning_delta":[\s\S]*?retry:\s*null/,
+  );
+  assert.match(
+    storeSource,
+    /case "tool_call_delta":[\s\S]*?retry:\s*null/,
   );
 });
 

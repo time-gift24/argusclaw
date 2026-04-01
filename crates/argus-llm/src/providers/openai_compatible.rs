@@ -176,7 +176,7 @@ impl SseFrameDecoder {
 
         let frame = std::mem::take(&mut self.buffer);
         extract_sse_data(&frame)
-            .map(|data| parse_stream_frame(&data))
+            .map(|data| parse_final_stream_frame(&data))
             .unwrap_or_default()
     }
 }
@@ -240,7 +240,7 @@ impl Stream for SseEventStream {
                 Poll::Ready(Some(Err(err))) => {
                     log_stream_transport_error(self.stage, &err, &self.raw_stream_capture);
                     self.done = true;
-                    return Poll::Ready(Some(Err(LlmError::RequestFailed {
+                    return Poll::Ready(Some(Err(LlmError::StreamInterrupted {
                         provider: "openai-compatible".to_string(),
                         reason: err.to_string(),
                     })));
@@ -879,22 +879,14 @@ struct ChatCompletionChunkFunction {
     arguments: Option<String>,
 }
 
-fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
+fn parse_stream_frame_impl(
+    data: &str,
+) -> Result<Vec<Result<LlmStreamEvent, LlmError>>, serde_json::Error> {
     if data == "[DONE]" {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
-        Ok(chunk) => chunk,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                raw_sse_frame = %data,
-                "failed to parse SSE frame as JSON; skipping malformed frame"
-            );
-            return Vec::new();
-        }
-    };
+    let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
 
     let mut events = Vec::new();
 
@@ -939,7 +931,38 @@ fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
         }
     }
 
-    events
+    Ok(events)
+}
+
+fn parse_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
+    match parse_stream_frame_impl(data) {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                raw_sse_frame = %data,
+                "failed to parse SSE frame as JSON; skipping malformed frame"
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn parse_final_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>> {
+    match parse_stream_frame_impl(data) {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                raw_sse_frame = %data,
+                "failed to parse trailing SSE frame as JSON; treating stream as truncated"
+            );
+            vec![Err(LlmError::StreamInterrupted {
+                provider: "openai-compatible".to_string(),
+                reason: format!("truncated SSE frame at end of stream: {e}"),
+            })]
+        }
+    }
 }
 
 fn parse_finish_reason(reason: Option<&str>) -> argus_protocol::llm::FinishReason {
@@ -1373,6 +1396,27 @@ data: {\"choices\":[{\"delta\":{\"content\":\"ok-2\"},\"finish_reason\":null}]}\
                 delta: "tail".to_string(),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn sse_event_stream_reports_truncated_final_frame_as_stream_interrupted() {
+        let stream = stream::iter(vec![Ok::<Vec<u8>, reqwest::Error>(
+            br#"data: {"choices":[{"delta":{"content":"tail"#.to_vec(),
+        )]);
+        let events = SseEventStream::new("test", Box::pin(stream))
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(
+            events.len(),
+            1,
+            "truncated frame should surface exactly one error"
+        );
+        assert!(matches!(
+            &events[0],
+            Err(LlmError::StreamInterrupted { provider, reason })
+                if provider == "openai-compatible" && reason.contains("truncated SSE frame")
+        ));
     }
 
     #[test]

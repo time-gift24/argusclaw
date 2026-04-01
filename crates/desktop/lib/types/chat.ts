@@ -127,6 +127,12 @@ export type ThreadEventPayload =
   | { type: "reasoning_delta"; delta: string }
   | { type: "content_delta"; delta: string }
   | {
+      type: "retry_attempt";
+      attempt: number;
+      max_retries: number;
+      error: string;
+    }
+  | {
       type: "tool_call_delta";
       index: number;
       id?: string | null;

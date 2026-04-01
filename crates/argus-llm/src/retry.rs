@@ -31,6 +31,7 @@ fn is_retryable(err: &LlmError) -> bool {
     matches!(
         err,
         LlmError::RequestFailed { .. }
+            | LlmError::StreamInterrupted { .. }
             | LlmError::RateLimited { .. }
             | LlmError::InvalidResponse { .. }
             | LlmError::SessionRenewalFailed { .. }
@@ -773,6 +774,14 @@ mod tests {
             Err(LlmError::RequestFailed { provider, reason })
                 if provider == "recoverable-stream" && reason == "connection reset"
         ));
+    }
+
+    #[test]
+    fn stream_interrupted_errors_are_retryable() {
+        assert!(is_retryable(&LlmError::StreamInterrupted {
+            provider: "recoverable-stream".to_string(),
+            reason: "timed out while waiting for SSE chunk".to_string(),
+        }));
     }
 
     #[test]

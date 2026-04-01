@@ -46,6 +46,10 @@ const providerCardPath = new URL(
   "../components/settings/provider-card.tsx",
   import.meta.url,
 );
+const providerEditorPath = new URL(
+  "../components/settings/provider-editor.tsx",
+  import.meta.url,
+);
 const loginDialogPath = new URL(
   "../components/auth/login-dialog.tsx",
   import.meta.url,
@@ -189,6 +193,23 @@ test("provider cards and agent editor surface providers that require api key ree
   assert.match(providerDialogSource, /secret_status === "requires_reentry"/);
   assert.match(agentEditorSource, /secret_status === "requires_reentry"/);
   assert.match(agentEditorSource, /disabled=\{.*secret_status === "requires_reentry"/);
+});
+
+test("provider editor allows connection tests when account token auth is enabled", () => {
+  const providerEditorSource = readFileSync(providerEditorPath, "utf8");
+
+  assert.match(
+    providerEditorSource,
+    /const canRunConnectionTest = Boolean\([\s\S]*formData\.api_key\.trim\(\)[\s\S]*formData\.meta_data\.account_token_source === "true"[\s\S]*\)/,
+  );
+  assert.match(
+    providerEditorSource,
+    /if \(formData\.base_url\.trim\(\) && canRunConnectionTest\) \{/,
+  );
+  assert.match(
+    providerEditorSource,
+    /disabled=\{isTesting \|\| !canRunConnectionTest\}/,
+  );
 });
 
 
