@@ -46,6 +46,10 @@ pub enum LlmError {
     #[error("Invalid response from {provider}: {reason}")]
     InvalidResponse { provider: String, reason: String },
 
+    /// Streaming response was interrupted before a complete payload arrived.
+    #[error("Provider {provider} stream interrupted: {reason}")]
+    StreamInterrupted { provider: String, reason: String },
+
     /// Request exceeded the model context window.
     #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
     ContextLengthExceeded { used: usize, limit: usize },

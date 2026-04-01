@@ -240,7 +240,7 @@ impl Stream for SseEventStream {
                 Poll::Ready(Some(Err(err))) => {
                     log_stream_transport_error(self.stage, &err, &self.raw_stream_capture);
                     self.done = true;
-                    return Poll::Ready(Some(Err(LlmError::RequestFailed {
+                    return Poll::Ready(Some(Err(LlmError::StreamInterrupted {
                         provider: "openai-compatible".to_string(),
                         reason: err.to_string(),
                     })));
@@ -957,7 +957,7 @@ fn parse_final_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>>
                 raw_sse_frame = %data,
                 "failed to parse trailing SSE frame as JSON; treating stream as truncated"
             );
-            vec![Err(LlmError::RequestFailed {
+            vec![Err(LlmError::StreamInterrupted {
                 provider: "openai-compatible".to_string(),
                 reason: format!("truncated SSE frame at end of stream: {e}"),
             })]
@@ -1399,7 +1399,7 @@ data: {\"choices\":[{\"delta\":{\"content\":\"ok-2\"},\"finish_reason\":null}]}\
     }
 
     #[tokio::test]
-    async fn sse_event_stream_reports_truncated_final_frame_as_request_failure() {
+    async fn sse_event_stream_reports_truncated_final_frame_as_stream_interrupted() {
         let stream = stream::iter(vec![Ok::<Vec<u8>, reqwest::Error>(
             br#"data: {"choices":[{"delta":{"content":"tail"#.to_vec(),
         )]);
@@ -1414,7 +1414,7 @@ data: {\"choices\":[{\"delta\":{\"content\":\"ok-2\"},\"finish_reason\":null}]}\
         );
         assert!(matches!(
             &events[0],
-            Err(LlmError::RequestFailed { provider, reason })
+            Err(LlmError::StreamInterrupted { provider, reason })
                 if provider == "openai-compatible" && reason.contains("truncated SSE frame")
         ));
     }

@@ -684,6 +684,7 @@ fn map_llm_error_to_test_status(error: &LlmError) -> ProviderTestStatus {
         LlmError::RateLimited { .. } => ProviderTestStatus::RateLimited,
         LlmError::InvalidResponse { .. } => ProviderTestStatus::InvalidResponse,
         LlmError::RequestFailed { .. }
+        | LlmError::StreamInterrupted { .. }
         | LlmError::ContextLengthExceeded { .. }
         | LlmError::SessionExpired { .. }
         | LlmError::SessionRenewalFailed { .. }
@@ -832,6 +833,13 @@ mod tests {
             map_llm_error_to_test_status(&LlmError::RequestFailed {
                 provider: "openai-compatible".to_string(),
                 reason: "boom".to_string(),
+            }),
+            ProviderTestStatus::RequestFailed
+        );
+        assert_eq!(
+            map_llm_error_to_test_status(&LlmError::StreamInterrupted {
+                provider: "openai-compatible".to_string(),
+                reason: "timed out while waiting for SSE chunk".to_string(),
             }),
             ProviderTestStatus::RequestFailed
         );
