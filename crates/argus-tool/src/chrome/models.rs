@@ -22,6 +22,10 @@ pub enum ChromeAction {
     Type,
     GetUrl,
     GetCookies,
+    NewTab,
+    SwitchTab,
+    CloseTab,
+    ListTabs,
 }
 
 impl ChromeAction {
@@ -40,6 +44,10 @@ impl ChromeAction {
             Self::Type => "type",
             Self::GetUrl => "get_url",
             Self::GetCookies => "get_cookies",
+            Self::NewTab => "new_tab",
+            Self::SwitchTab => "switch_tab",
+            Self::CloseTab => "close_tab",
+            Self::ListTabs => "list_tabs",
         }
     }
 }
@@ -60,6 +68,10 @@ pub struct ChromeToolArgs {
     pub max_requests: Option<u32>,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 impl ChromeToolArgs {
@@ -73,6 +85,8 @@ impl ChromeToolArgs {
         args.session_id = normalized_optional_string(args.session_id);
         args.selector = normalized_optional_string(args.selector);
         args.text = normalized_optional_string(args.text);
+        args.tab_id = normalized_optional_string(args.tab_id);
+        args.domain = normalized_optional_string(args.domain);
 
         match args.action {
             ChromeAction::Install => {
@@ -119,6 +133,22 @@ impl ChromeToolArgs {
             ChromeAction::GetCookies => {
                 require_session_id(&args)?;
                 validate_for_get_cookies(&args)?;
+            }
+            ChromeAction::NewTab => {
+                require_session_id(&args)?;
+                validate_for_new_tab(&mut args)?;
+            }
+            ChromeAction::SwitchTab => {
+                require_session_id(&args)?;
+                validate_for_switch_tab(&args)?;
+            }
+            ChromeAction::CloseTab => {
+                require_session_id(&args)?;
+                validate_for_close_tab(&args)?;
+            }
+            ChromeAction::ListTabs => {
+                require_session_id(&args)?;
+                validate_for_list_tabs(&args)?;
             }
         }
 
@@ -168,6 +198,21 @@ pub struct NetworkRequestSummary {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TabInfo {
+    pub tab_id: String,
+    pub url: String,
+    pub title: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTabResult {
+    pub tab_id: String,
+    pub url: String,
+    pub page_title: String,
+}
+
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
     value
         .as_deref()
@@ -187,15 +232,7 @@ fn require_session_id(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some() || args.selector.is_some() || args.max_requests.is_some() {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "fields 'url', 'selector', and 'max_requests' are not allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
-    Ok(())
+    allow_only_fields(args, &["session_id", "timeout_ms"])
 }
 
 fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
@@ -206,18 +243,7 @@ fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
             action: args.action.as_str().to_string(),
             field: "url",
         })?;
-    if args.session_id.is_some()
-        || args.selector.is_some()
-        || args.timeout_ms.is_some()
-        || args.max_requests.is_some()
-    {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "only 'url' is allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
+    allow_only_fields(args, &["url"])?;
     let url = validate_url_for_action(args.action.as_str(), url)?;
     args.url = Some(url);
     Ok(())
@@ -232,14 +258,7 @@ fn validate_for_navigate(args: &mut ChromeToolArgs) -> Result<(), ChromeToolErro
             action: args.action.as_str().to_string(),
             field: "url",
         })?;
-    if args.selector.is_some() || args.timeout_ms.is_some() || args.max_requests.is_some() {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "only 'session_id' and 'url' are allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
+    allow_only_fields(args, &["session_id", "url"])?;
     let url = validate_url_for_action(args.action.as_str(), url)?;
     args.url = Some(url);
     Ok(())
@@ -282,37 +301,15 @@ fn validate_url_for_action(action: &str, url: &str) -> Result<String, ChromeTool
 }
 
 fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if args.url.is_some()
-        || args.session_id.is_some()
-        || args.selector.is_some()
-        || args.timeout_ms.is_some()
-        || args.max_requests.is_some()
-        || args.text.is_some()
-    {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "only 'action' is allowed for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
-    Ok(())
+    allow_only_fields(args, &[])
 }
 
 fn validate_for_extract_text(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    reject_fields(
-        args,
-        &["url", "text", "timeout_ms", "max_requests"],
-        "fields 'url', 'text', 'timeout_ms', and 'max_requests' are not allowed",
-    )
+    allow_only_fields(args, &["session_id", "selector"])
 }
 
 fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    reject_fields(
-        args,
-        &["url", "selector", "text", "timeout_ms", "max_requests"],
-        "only 'session_id' is allowed",
-    )
+    allow_only_fields(args, &["session_id"])
 }
 
 fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
@@ -327,54 +324,58 @@ fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeTool
         });
     }
 
-    reject_fields(
-        args,
-        &["url", "selector", "text", "timeout_ms"],
-        "only 'session_id' and 'max_requests' are allowed",
-    )
+    allow_only_fields(args, &["session_id", "max_requests"])
 }
 
 fn validate_for_dom_summary(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    reject_fields(
-        args,
-        &["url", "selector", "text", "timeout_ms", "max_requests"],
-        "only 'session_id' is allowed",
-    )
+    allow_only_fields(args, &["session_id"])
 }
 
 fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("selector", &args.selector, args.action.as_str())?;
-    reject_fields(
-        args,
-        &["url", "text", "timeout_ms", "max_requests"],
-        "only 'session_id' and 'selector' are allowed",
-    )
+    allow_only_fields(args, &["session_id", "selector"])
 }
 
 fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("selector", &args.selector, args.action.as_str())?;
     require_field("text", &args.text, args.action.as_str())?;
-    reject_fields(
-        args,
-        &["url", "timeout_ms", "max_requests"],
-        "only 'session_id', 'selector', and 'text' are allowed",
-    )
+    allow_only_fields(args, &["session_id", "selector", "text"])
 }
 
 fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    reject_fields(
-        args,
-        &["url", "selector", "text", "timeout_ms", "max_requests"],
-        "only 'session_id' is allowed",
-    )
+    allow_only_fields(args, &["session_id"])
 }
 
 fn validate_for_get_cookies(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    reject_fields(
-        args,
-        &["url", "selector", "text", "timeout_ms", "max_requests"],
-        "only 'session_id' is allowed",
-    )
+    allow_only_fields(args, &["session_id", "domain"])
+}
+
+fn validate_for_new_tab(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| ChromeToolError::MissingRequiredField {
+            action: args.action.as_str().to_string(),
+            field: "url",
+        })?;
+    allow_only_fields(args, &["session_id", "url"])?;
+    let url = validate_url_for_action(args.action.as_str(), url)?;
+    args.url = Some(url);
+    Ok(())
+}
+
+fn validate_for_switch_tab(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_field("tab_id", &args.tab_id, args.action.as_str())?;
+    allow_only_fields(args, &["session_id", "tab_id"])
+}
+
+fn validate_for_close_tab(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_field("tab_id", &args.tab_id, args.action.as_str())?;
+    allow_only_fields(args, &["session_id", "tab_id"])
+}
+
+fn validate_for_list_tabs(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    allow_only_fields(args, &["session_id"])
 }
 
 fn require_field(
@@ -391,28 +392,73 @@ fn require_field(
     Ok(())
 }
 
-fn reject_fields(
-    args: &ChromeToolArgs,
-    fields: &[&str],
-    message: &str,
-) -> Result<(), ChromeToolError> {
-    let present: Vec<&str> = fields
-        .iter()
-        .filter(|&&f| match f {
-            "url" => args.url.is_some(),
-            "selector" => args.selector.is_some(),
-            "text" => args.text.is_some(),
-            "timeout_ms" => args.timeout_ms.is_some(),
-            "max_requests" => args.max_requests.is_some(),
-            _ => false,
-        })
-        .copied()
+fn allow_only_fields(args: &ChromeToolArgs, allowed: &[&str]) -> Result<(), ChromeToolError> {
+    let unexpected: Vec<&str> = present_fields(args)
+        .into_iter()
+        .filter(|field| !allowed.contains(field))
         .collect();
-    if present.is_empty() {
+
+    if unexpected.is_empty() {
         Ok(())
     } else {
         Err(ChromeToolError::InvalidArguments {
-            reason: format!("{message} for action '{}'", args.action.as_str()),
+            reason: format!(
+                "{} for action '{}'",
+                allowed_fields_message(allowed),
+                args.action.as_str()
+            ),
         })
+    }
+}
+
+fn present_fields(args: &ChromeToolArgs) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+
+    if args.url.is_some() {
+        fields.push("url");
+    }
+    if args.session_id.is_some() {
+        fields.push("session_id");
+    }
+    if args.selector.is_some() {
+        fields.push("selector");
+    }
+    if args.timeout_ms.is_some() {
+        fields.push("timeout_ms");
+    }
+    if args.max_requests.is_some() {
+        fields.push("max_requests");
+    }
+    if args.text.is_some() {
+        fields.push("text");
+    }
+    if args.tab_id.is_some() {
+        fields.push("tab_id");
+    }
+    if args.domain.is_some() {
+        fields.push("domain");
+    }
+
+    fields
+}
+
+fn allowed_fields_message(allowed: &[&str]) -> String {
+    if allowed.is_empty() {
+        "only 'action' is allowed".to_string()
+    } else {
+        format!("only {} are allowed", quoted_field_list(allowed))
+    }
+}
+
+fn quoted_field_list(fields: &[&str]) -> String {
+    match fields {
+        [] => String::new(),
+        [field] => format!("'{field}'"),
+        [first, second] => format!("'{first}' and '{second}'"),
+        _ => {
+            let mut quoted: Vec<String> = fields.iter().map(|field| format!("'{field}'")).collect();
+            let last = quoted.pop().unwrap_or_default();
+            format!("{}, and {last}", quoted.join(", "))
+        }
     }
 }

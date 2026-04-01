@@ -112,6 +112,43 @@ mod tests {
     }
 
     #[test]
+    fn open_and_navigate_reject_stray_tab_fields() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "open",
+            "url": "https://example.com",
+            "text": "hello",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "open",
+            "url": "https://example.com",
+            "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "session_id": "session-1",
+            "url": "https://example.com",
+            "text": "hello",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "session_id": "session-1",
+            "url": "https://example.com",
+            "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
     fn click_requires_session_id_and_selector() {
         // Missing session_id
         let err = ChromeToolArgs::validate(json!({
@@ -153,6 +190,24 @@ mod tests {
             "action": "wait",
             "session_id": "session-1",
             "selector": "#hero"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
+    fn install_and_wait_reject_tab_id_argument() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "install",
+            "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "wait",
+            "session_id": "session-1",
+            "tab_id": "tab-1",
         }))
         .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
@@ -345,6 +400,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_cookies_filters_by_domain() {
+        let tool = ChromeTool::new_interactive_with_backend(Arc::new(
+            FakeChromeBackend::default().with_page_and_cookies(
+                "https://www.example.com",
+                "https://www.example.com",
+                "Example",
+                vec![],
+                "Visible page text",
+                vec![
+                    CookieSummary {
+                        name: "shared".to_string(),
+                        value: "1".to_string(),
+                        domain: Some(".example.com".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                    CookieSummary {
+                        name: "host".to_string(),
+                        value: "2".to_string(),
+                        domain: Some("www.example.com".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                    CookieSummary {
+                        name: "api".to_string(),
+                        value: "3".to_string(),
+                        domain: Some("api.example.com".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                    CookieSummary {
+                        name: "other".to_string(),
+                        value: "4".to_string(),
+                        domain: Some("other.example.net".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                ],
+            ),
+        ));
+
+        let open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://www.example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("open should succeed");
+        let session_id = open["session_id"]
+            .as_str()
+            .expect("open should return a session id");
+
+        let cookies = tool
+            .execute(
+                json!({
+                    "action": "get_cookies",
+                    "session_id": session_id,
+                    "domain": "www.example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("get_cookies should succeed");
+
+        let names: Vec<&str> = cookies["cookies"]
+            .as_array()
+            .expect("cookies should be an array")
+            .iter()
+            .filter_map(|cookie| cookie["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["shared", "host"]);
+    }
+
+    #[tokio::test]
     async fn chrome_tool_install_installs_and_reports_result() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
@@ -527,7 +655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_constructor_keeps_only_latest_session_live() {
+    async fn managed_constructor_reuses_session_on_second_open() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -570,9 +698,11 @@ mod tests {
             .await
             .expect("second open should succeed");
 
-        assert_ne!(first_open["session_id"], second_open["session_id"]);
+        // Production mode (limit=1) reuses the session instead of creating a new one
+        assert_eq!(first_open["session_id"], second_open["session_id"]);
 
-        let err = tool
+        // The reused session is still alive and usable
+        let result = tool
             .execute(
                 json!({
                     "action": "extract_text",
@@ -581,13 +711,8 @@ mod tests {
                 make_ctx(),
             )
             .await
-            .expect_err("previous production session should be evicted");
-
-        assert!(matches!(
-            err,
-            ToolError::ExecutionFailed { tool_name, reason }
-                if tool_name == "chrome" && reason.contains("session not found")
-        ));
+            .expect("session should still be alive");
+        assert_eq!(result["action"], "extract_text");
     }
 
     #[test]
@@ -668,6 +793,11 @@ mod tests {
                 network_requests: Vec::new(),
                 url: url.to_string(),
                 cookies: vec![],
+                tabs: StdMutex::new(vec![FakeTab {
+                    handle: "tab-1".to_string(),
+                    url: url.to_string(),
+                    title: self.page_title.clone(),
+                }]),
             });
 
             Ok(BackendOpenResult {
@@ -769,6 +899,30 @@ mod tests {
                     links,
                     text: text.into(),
                     network_requests: Vec::new(),
+                    cookies: Vec::new(),
+                },
+            );
+            self
+        }
+
+        fn with_page_and_cookies(
+            mut self,
+            requested_url: impl Into<String>,
+            final_url: impl Into<String>,
+            page_title: impl Into<String>,
+            links: Vec<LinkSummary>,
+            text: impl Into<String>,
+            cookies: Vec<CookieSummary>,
+        ) -> Self {
+            self.pages.insert(
+                requested_url.into(),
+                FakePage {
+                    final_url: final_url.into(),
+                    page_title: page_title.into(),
+                    links,
+                    text: text.into(),
+                    network_requests: Vec::new(),
+                    cookies,
                 },
             );
             self
@@ -782,6 +936,7 @@ mod tests {
         links: Vec<LinkSummary>,
         text: String,
         network_requests: Vec<NetworkRequestSummary>,
+        cookies: Vec<CookieSummary>,
     }
 
     #[derive(Debug)]
@@ -791,6 +946,14 @@ mod tests {
         network_requests: Vec<NetworkRequestSummary>,
         url: String,
         cookies: Vec<CookieSummary>,
+        tabs: StdMutex<Vec<FakeTab>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeTab {
+        handle: String,
+        url: String,
+        title: String,
     }
 
     #[async_trait::async_trait]
@@ -843,6 +1006,61 @@ mod tests {
                 page_title: format!("Navigated to {url}"),
             })
         }
+
+        async fn create_new_tab(
+            &self,
+            url: &str,
+        ) -> Result<(String, PageMetadata), ChromeToolError> {
+            let handle = format!("tab-{}", self.tabs.lock().unwrap().len() + 2);
+            let metadata = PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Tab {url}"),
+            };
+            self.tabs.lock().unwrap().push(FakeTab {
+                handle: handle.clone(),
+                url: metadata.final_url.clone(),
+                title: metadata.page_title.clone(),
+            });
+            Ok((handle, metadata))
+        }
+
+        async fn switch_to_window(
+            &self,
+            window_handle: &str,
+        ) -> Result<PageMetadata, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            let tab = tabs
+                .iter()
+                .find(|t| t.handle == window_handle)
+                .ok_or_else(|| ChromeToolError::TabNotFound {
+                    tab_id: window_handle.to_string(),
+                })?;
+            Ok(PageMetadata {
+                final_url: tab.url.clone(),
+                page_title: tab.title.clone(),
+            })
+        }
+
+        async fn close_current_window(&self) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            Ok(tabs
+                .iter()
+                .map(|t| (t.handle.clone(), t.url.clone(), t.title.clone()))
+                .collect())
+        }
+
+        async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.first().map(|t| t.handle.clone()).ok_or_else(|| {
+                ChromeToolError::TabOperationFailed {
+                    reason: "no tabs".to_string(),
+                }
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -860,7 +1078,12 @@ mod tests {
                 text: page.text.clone(),
                 network_requests: page.network_requests.clone(),
                 url: page.final_url.clone(),
-                cookies: vec![],
+                cookies: page.cookies.clone(),
+                tabs: StdMutex::new(vec![FakeTab {
+                    handle: "tab-1".to_string(),
+                    url: page.final_url.clone(),
+                    title: page.page_title.clone(),
+                }]),
             });
 
             Ok(BackendOpenResult {
