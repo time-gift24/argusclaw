@@ -1744,7 +1744,7 @@ mod tests {
             }),
         ];
 
-        let lines = vec![
+        let lines = [
             serde_json::to_string(&TurnLogEvent::HistoryPrelude {
                 messages: prelude_messages,
             })

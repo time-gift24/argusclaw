@@ -2609,6 +2609,7 @@ mod tests {
             .write_event(&TurnLogEvent::UserInput {
                 content: user_content.to_string(),
                 role: "user".to_string(),
+                metadata: None,
             })
             .await
             .expect("user input should persist");
@@ -2618,6 +2619,7 @@ mod tests {
                 reasoning_content: None,
                 tool_calls: Vec::new(),
                 finish_reason: "stop".to_string(),
+                metadata: None,
             })
             .await
             .expect("assistant response should persist");
