@@ -15,7 +15,7 @@ mod tests {
         ThinkingConfig,
     };
 
-    use crate::ArgusSqlite;
+    use crate::{ArgusSqlite, DbError};
     use crate::sqlite::migrate;
     use crate::traits::{AgentRepository, McpRepository};
 
@@ -213,6 +213,83 @@ mod tests {
             binding.server.server_id == github_server_id && binding.allowed_tools.is_none()
         }));
     }
+
+    #[tokio::test]
+    async fn mcp_agent_bindings_preserve_explicit_empty_whitelists() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        migrate(&pool).await.expect("migrations should succeed");
+
+        let sqlite = ArgusSqlite::new_with_key_material(pool, vec![7; 32]);
+        let server_id = McpRepository::upsert_mcp_server(&sqlite, &sample_server("Slack"))
+            .await
+            .expect("server upsert should succeed");
+        let _ = AgentRepository::upsert(&sqlite, &sample_agent(88))
+            .await
+            .expect("agent upsert should succeed");
+
+        let bindings = vec![AgentMcpBinding {
+            server: AgentMcpServerBinding {
+                agent_id: AgentId::new(88),
+                server_id,
+            },
+            allowed_tools: Some(vec![]),
+        }];
+
+        McpRepository::set_agent_mcp_bindings(&sqlite, AgentId::new(88), &bindings)
+            .await
+            .expect("binding replace should succeed");
+
+        let stored = McpRepository::list_agent_mcp_bindings(&sqlite, AgentId::new(88))
+            .await
+            .expect("binding list should succeed");
+        assert_eq!(stored, bindings);
+    }
+
+    #[tokio::test]
+    async fn mcp_repository_rejects_mismatched_tool_and_binding_ids() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        migrate(&pool).await.expect("migrations should succeed");
+
+        let sqlite = ArgusSqlite::new_with_key_material(pool, vec![7; 32]);
+        let server_id = McpRepository::upsert_mcp_server(&sqlite, &sample_server("Slack"))
+            .await
+            .expect("server upsert should succeed");
+        let _ = AgentRepository::upsert(&sqlite, &sample_agent(99))
+            .await
+            .expect("agent upsert should succeed");
+
+        let tool_error = McpRepository::replace_mcp_server_tools(
+            &sqlite,
+            server_id,
+            &[sample_tool(server_id + 1, "post_message", "Send a message")],
+        )
+        .await
+        .expect_err("mismatched tool server ids should fail");
+        assert!(matches!(tool_error, DbError::QueryFailed { .. }));
+
+        let binding_error = McpRepository::set_agent_mcp_bindings(
+            &sqlite,
+            AgentId::new(99),
+            &[AgentMcpBinding {
+                server: AgentMcpServerBinding {
+                    agent_id: AgentId::new(100),
+                    server_id,
+                },
+                allowed_tools: None,
+            }],
+        )
+        .await
+        .expect_err("mismatched binding agent ids should fail");
+        assert!(matches!(binding_error, DbError::QueryFailed { .. }));
+    }
 }
 
 fn status_to_db(status: &argus_protocol::mcp::McpServerStatus) -> &'static str {
@@ -387,6 +464,15 @@ impl crate::traits::McpRepository for ArgusSqlite {
         server_id: i64,
         tools: &[argus_protocol::McpDiscoveredToolRecord],
     ) -> Result<(), DbError> {
+        if let Some(mismatched_tool) = tools.iter().find(|tool| tool.server_id != server_id) {
+            return Err(DbError::QueryFailed {
+                reason: format!(
+                    "mcp tool '{}' belongs to server {} but was written under server {}",
+                    mismatched_tool.tool_name_original, mismatched_tool.server_id, server_id
+                ),
+            });
+        }
+
         let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
@@ -470,6 +556,20 @@ impl crate::traits::McpRepository for ArgusSqlite {
         bindings: &[argus_protocol::AgentMcpBinding],
     ) -> Result<(), DbError> {
         let agent_id = agent_id.inner();
+        if let Some(mismatched_binding) = bindings
+            .iter()
+            .find(|binding| binding.server.agent_id.inner() != agent_id)
+        {
+            return Err(DbError::QueryFailed {
+                reason: format!(
+                    "mcp binding for server {} belongs to agent {} but was written under agent {}",
+                    mismatched_binding.server.server_id,
+                    mismatched_binding.server.agent_id.inner(),
+                    agent_id
+                ),
+            });
+        }
+
         let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
@@ -491,9 +591,17 @@ impl crate::traits::McpRepository for ArgusSqlite {
             })?;
 
         for binding in bindings {
-            sqlx::query("INSERT INTO agent_mcp_servers (agent_id, server_id) VALUES (?, ?)")
+            sqlx::query(
+                "INSERT INTO agent_mcp_servers (agent_id, server_id, use_tool_whitelist)
+                 VALUES (?, ?, ?)",
+            )
                 .bind(agent_id)
                 .bind(binding.server.server_id)
+                .bind(if binding.allowed_tools.is_some() {
+                    1_i64
+                } else {
+                    0_i64
+                })
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| DbError::QueryFailed {
@@ -531,7 +639,7 @@ impl crate::traits::McpRepository for ArgusSqlite {
     ) -> Result<Vec<argus_protocol::AgentMcpBinding>, DbError> {
         let agent_id = agent_id.inner();
         let server_rows = sqlx::query(
-            "SELECT server_id
+            "SELECT server_id, use_tool_whitelist
              FROM agent_mcp_servers
              WHERE agent_id = ?
              ORDER BY server_id",
@@ -547,6 +655,7 @@ impl crate::traits::McpRepository for ArgusSqlite {
 
         for row in server_rows {
             let server_id: i64 = ArgusSqlite::get_column(&row, "server_id")?;
+            let use_tool_whitelist = ArgusSqlite::get_column::<i64>(&row, "use_tool_whitelist")? != 0;
             let tool_rows = sqlx::query(
                 "SELECT tool_name_original
                  FROM agent_mcp_tools
@@ -561,15 +670,15 @@ impl crate::traits::McpRepository for ArgusSqlite {
                 reason: e.to_string(),
             })?;
 
-            let allowed_tools = if tool_rows.is_empty() {
-                None
-            } else {
+            let allowed_tools = if use_tool_whitelist {
                 Some(
                     tool_rows
                         .iter()
                         .map(|tool_row| ArgusSqlite::get_column(tool_row, "tool_name_original"))
                         .collect::<Result<Vec<String>, DbError>>()?,
                 )
+            } else {
+                None
             };
 
             bindings.push(argus_protocol::AgentMcpBinding {
