@@ -15,9 +15,9 @@ mod tests {
         ThinkingConfig,
     };
 
-    use crate::{ArgusSqlite, DbError};
     use crate::sqlite::migrate;
     use crate::traits::{AgentRepository, McpRepository};
+    use crate::{ArgusSqlite, DbError};
 
     fn sample_server(display_name: &str) -> McpServerRecord {
         McpServerRecord {
@@ -595,18 +595,18 @@ impl crate::traits::McpRepository for ArgusSqlite {
                 "INSERT INTO agent_mcp_servers (agent_id, server_id, use_tool_whitelist)
                  VALUES (?, ?, ?)",
             )
-                .bind(agent_id)
-                .bind(binding.server.server_id)
-                .bind(if binding.allowed_tools.is_some() {
-                    1_i64
-                } else {
-                    0_i64
-                })
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?;
+            .bind(agent_id)
+            .bind(binding.server.server_id)
+            .bind(if binding.allowed_tools.is_some() {
+                1_i64
+            } else {
+                0_i64
+            })
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
             if let Some(allowed_tools) = &binding.allowed_tools {
                 for tool_name_original in allowed_tools {
@@ -655,7 +655,8 @@ impl crate::traits::McpRepository for ArgusSqlite {
 
         for row in server_rows {
             let server_id: i64 = ArgusSqlite::get_column(&row, "server_id")?;
-            let use_tool_whitelist = ArgusSqlite::get_column::<i64>(&row, "use_tool_whitelist")? != 0;
+            let use_tool_whitelist =
+                ArgusSqlite::get_column::<i64>(&row, "use_tool_whitelist")? != 0;
             let tool_rows = sqlx::query(
                 "SELECT tool_name_original
                  FROM agent_mcp_tools
