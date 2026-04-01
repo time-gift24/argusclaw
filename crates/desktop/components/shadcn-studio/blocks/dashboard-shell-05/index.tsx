@@ -1,10 +1,12 @@
 "use client"
 
 import * as React from "react"
-import { Link, useLocation } from "react-router-dom"
+import Link from "next/link"
+import { usePathname } from "next/navigation"
 import {
   Bell,
   ChevronLeft,
+  ChevronRight,
   Menu,
   Search,
   Settings,
@@ -17,7 +19,9 @@ import {
   Moon,
   PanelLeft,
   BookOpen,
+  Server,
 } from "lucide-react"
+import { useTheme } from "next-themes"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -35,7 +39,6 @@ import { Separator } from "@/components/ui/separator"
 import LogoSvg from "@/assets/svg/logo"
 import { useAuthStore } from "@/components/auth/use-auth-store"
 import { LoginDialog } from "@/components/auth/login-dialog"
-import { useTheme } from "@/components/theme-provider"
 
 interface DashboardShellProps {
   children: React.ReactNode
@@ -55,8 +58,7 @@ export default function DashboardShell({
   const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false)
   const [loginDialogOpen, setLoginDialogOpen] = React.useState(false)
   const { resolvedTheme, setTheme } = useTheme()
-  const location = useLocation()
-  const pathname = location.pathname
+  const pathname = usePathname()
   const { username, isLoggedIn, logout } = useAuthStore()
 
   const toggleSidebar = () => setIsSidebarCollapsed(!isSidebarCollapsed)
@@ -77,7 +79,7 @@ export default function DashboardShell({
         )}
       >
         <div className="flex h-14 items-center px-4 border-b">
-          <Link to="/" className="flex items-center gap-2 overflow-hidden">
+          <Link href="/" className="flex items-center gap-2 overflow-hidden">
             <LogoSvg className="h-8 w-8 shrink-0" />
             {!isSidebarCollapsed && (
               <span className="font-semibold text-sm whitespace-nowrap">ArgusWing</span>
@@ -90,7 +92,7 @@ export default function DashboardShell({
             {navigationItems.map((item, index) => (
               <Link
                 key={index}
-                to={item.href}
+                href={item.href}
                 className={cn(
                   "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
                   pathname === item.href || item.isActive
@@ -112,7 +114,7 @@ export default function DashboardShell({
 
           <nav className="grid gap-1">
             <Link
-              to="/settings/agents"
+              href="/settings/agents"
               className={cn(
                 "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
                 pathname.startsWith("/settings/agents")
@@ -124,7 +126,7 @@ export default function DashboardShell({
               {!isSidebarCollapsed && <span className="whitespace-nowrap">智能体配置</span>}
             </Link>
             <Link
-              to="/settings/providers"
+              href="/settings/providers"
               className={cn(
                 "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
                 pathname.startsWith("/settings/providers")
@@ -136,7 +138,19 @@ export default function DashboardShell({
               {!isSidebarCollapsed && <span className="whitespace-nowrap">模型配置</span>}
             </Link>
             <Link
-              to="/settings/knowledge"
+              href="/settings/mcp"
+              className={cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
+                pathname.startsWith("/settings/mcp")
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground"
+              )}
+            >
+              <Server className="h-4 w-4 shrink-0" />
+              {!isSidebarCollapsed && <span className="whitespace-nowrap">MCP 配置</span>}
+            </Link>
+            <Link
+              href="/settings/knowledge"
               className={cn(
                 "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
                 pathname.startsWith("/settings/knowledge")
@@ -263,7 +277,7 @@ export default function DashboardShell({
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm md:hidden">
           <div className="fixed inset-y-0 left-0 z-50 w-64 border-r bg-background p-6 shadow-lg animate-in slide-in-from-left">
              <div className="flex items-center justify-between mb-8">
-                <Link to="/" className="flex items-center gap-2">
+                <Link href="/" className="flex items-center gap-2">
                   <LogoSvg className="h-8 w-8" />
                   <span className="font-semibold">ArgusWing</span>
                 </Link>
@@ -275,7 +289,7 @@ export default function DashboardShell({
                {navigationItems.map((item, index) => (
                  <Link
                    key={index}
-                   to={item.href}
+                   href={item.href}
                    onClick={() => setIsMobileMenuOpen(false)}
                    className={cn(
                      "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
@@ -290,7 +304,7 @@ export default function DashboardShell({
                ))}
                <Separator className="my-2" />
                <Link
-                  to="/settings/agents"
+                  href="/settings/agents"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
@@ -298,7 +312,7 @@ export default function DashboardShell({
                   智能体配置
                 </Link>
                 <Link
-                  to="/settings/providers"
+                  href="/settings/providers"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
@@ -306,7 +320,15 @@ export default function DashboardShell({
                   模型配置
                 </Link>
                 <Link
-                  to="/settings/knowledge"
+                  href="/settings/mcp"
+                  onClick={() => setIsMobileMenuOpen(false)}
+                  className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
+                >
+                  <Server className="h-4 w-4" />
+                  MCP 配置
+                </Link>
+                <Link
+                  href="/settings/knowledge"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
