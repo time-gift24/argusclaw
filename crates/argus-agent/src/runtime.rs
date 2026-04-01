@@ -4,15 +4,14 @@ use std::sync::Arc;
 
 use crate::turn::TurnCancellation;
 use argus_protocol::{
-    MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent, ThreadInbox,
-    ThreadJobResult, ThreadRuntimeState,
+    MailboxMessage, MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
+    ThreadMailbox, ThreadRuntimeState,
 };
 use tokio::sync::{RwLock, mpsc};
 
 use crate::command::ThreadRuntimeSnapshot;
 use crate::error::ThreadError;
 use crate::thread::Thread;
-use crate::thread_handle::ThreadHandle;
 
 /// Runtime decisions that the outer orchestrator can act on.
 #[derive(Debug, Clone)]
@@ -40,7 +39,6 @@ pub(crate) enum ThreadRuntimeAction {
 pub(crate) struct ThreadRuntime {
     state: ThreadRuntimeState,
     next_turn_number: u32,
-    inbox: ThreadInbox,
     queue_depth: usize,
 }
 
@@ -49,7 +47,6 @@ impl Default for ThreadRuntime {
         Self {
             state: ThreadRuntimeState::Idle,
             next_turn_number: 1,
-            inbox: ThreadInbox::default(),
             queue_depth: 0,
         }
     }
@@ -65,35 +62,45 @@ impl ThreadRuntime {
         Self {
             state: ThreadRuntimeState::Idle,
             next_turn_number: turn_count.saturating_add(1),
-            inbox: ThreadInbox::default(),
             queue_depth: 0,
         }
     }
 
     /// Handle a runtime command and return the immediate action.
-    pub(crate) fn apply_command(&mut self, command: ThreadCommand) -> ThreadRuntimeAction {
+    pub(crate) fn apply_command(
+        &mut self,
+        command: ThreadCommand,
+        mailbox: &mut ThreadMailbox,
+    ) -> ThreadRuntimeAction {
         match command {
             ThreadCommand::EnqueueUserMessage {
                 content,
                 msg_override,
             } => {
-                self.inbox.enqueue_user_message(content, msg_override);
-                self.queue_depth = self.queue_depth.saturating_add(1);
-                self.try_start_next_turn()
+                mailbox.push(ThreadControlEvent::UserMessage {
+                    content,
+                    msg_override,
+                });
+                self.queue_depth = mailbox.pending_len();
+                self.try_start_next_turn(mailbox)
             }
-            ThreadCommand::DeliverJobResult(result) => {
-                self.inbox.deliver_job_result(result);
-                self.queue_depth = self.queue_depth.saturating_add(1);
-                self.try_start_next_turn()
+            ThreadCommand::EnqueueMailboxMessage(message) => {
+                mailbox.push(ThreadControlEvent::DeliverMailboxMessage(message));
+                self.queue_depth = mailbox.pending_len();
+                self.try_start_next_turn(mailbox)
             }
             ThreadCommand::CancelActiveTurn => self.cancel_active_turn(),
         }
     }
 
     /// Mark the current turn as finished and decide the next action.
-    pub(crate) fn finish_active_turn(&mut self) -> ThreadRuntimeAction {
+    pub(crate) fn finish_active_turn(
+        &mut self,
+        mailbox: &mut ThreadMailbox,
+    ) -> ThreadRuntimeAction {
         self.state = ThreadRuntimeState::Idle;
-        self.try_start_next_turn()
+        self.queue_depth = mailbox.pending_len();
+        self.try_start_next_turn(mailbox)
     }
 
     /// Return an immutable runtime snapshot.
@@ -111,20 +118,24 @@ impl ThreadRuntime {
         self.state
     }
 
-    pub(crate) fn claim_queued_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
-        let claimed = self.inbox.claim_job_result(job_id);
+    pub(crate) fn claim_queued_job_result(
+        &mut self,
+        mailbox: &mut ThreadMailbox,
+        job_id: &str,
+    ) -> Option<MailboxMessage> {
+        let claimed = mailbox.claim_job_result(job_id);
         if claimed.is_some() {
-            self.queue_depth = self.queue_depth.saturating_sub(1);
+            self.queue_depth = mailbox.pending_len();
         }
         claimed
     }
 
-    fn try_start_next_turn(&mut self) -> ThreadRuntimeAction {
+    fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadRuntimeAction {
         if !matches!(self.state, ThreadRuntimeState::Idle) {
             return ThreadRuntimeAction::Noop;
         }
 
-        match self.take_next_turn_message() {
+        match self.take_next_turn_message(mailbox) {
             Some(message) => self.start_turn(message),
             None => ThreadRuntimeAction::Noop,
         }
@@ -155,11 +166,9 @@ impl ThreadRuntime {
         }
     }
 
-    fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
-        let message = self.inbox.take_next_turn_message();
-        if message.is_some() {
-            self.queue_depth = self.queue_depth.saturating_sub(1);
-        }
+    fn take_next_turn_message(&mut self, mailbox: &mut ThreadMailbox) -> Option<QueuedUserMessage> {
+        let message = mailbox.take_next_turn_message();
+        self.queue_depth = mailbox.pending_len();
         message
     }
 }
@@ -180,8 +189,7 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
         };
 
         let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
-        let mut runtime_handle =
-            ThreadHandle::with_runtime(ThreadRuntime::seeded_from_turn_count(seeded_turn_count));
+        let mut runtime = ThreadRuntime::seeded_from_turn_count(seeded_turn_count);
         let mut active_turn_cancellation: Option<TurnCancellation> = None;
         let mut shutdown_requested = false;
 
@@ -198,38 +206,49 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     let runtime_action = match control_event {
                         ThreadControlEvent::UserMessage { content, msg_override } => {
                             // Production: user messages are queued FIFO while a turn is running.
-                            runtime_handle.dispatch(ThreadCommand::EnqueueUserMessage {
-                                content,
-                                msg_override,
-                            })
+                            let mut mailbox = mailbox.lock().await;
+                            runtime.apply_command(
+                                ThreadCommand::EnqueueUserMessage {
+                                    content,
+                                    msg_override,
+                                },
+                                &mut mailbox,
+                            )
                         }
-                        ThreadControlEvent::JobResult(result) => {
-                            // Production: job results are queued FIFO while a turn is running.
-                            runtime_handle.dispatch(ThreadCommand::DeliverJobResult(result))
+                        ThreadControlEvent::DeliverMailboxMessage(message) => {
+                            // Production: mailbox messages are queued FIFO while a turn is running.
+                            let mut mailbox = mailbox.lock().await;
+                            runtime.apply_command(
+                                ThreadCommand::EnqueueMailboxMessage(message),
+                                &mut mailbox,
+                            )
                         }
                         ThreadControlEvent::UserInterrupt { content } => {
                             // Production: UserInterrupt is an immediate stop signal for the active
                             // turn. The interrupt content is not currently used as redirect text.
                             let _ = content;
-                            runtime_handle.dispatch(ThreadCommand::CancelActiveTurn)
+                            runtime.cancel_active_turn()
                         }
                         ThreadControlEvent::ClaimQueuedJobResult { job_id, reply_tx } => {
-                            let claimed = runtime_handle.claim_queued_job_result(&job_id);
+                            let claimed = {
+                                let mut mailbox = mailbox.lock().await;
+                                runtime.claim_queued_job_result(&mut mailbox, &job_id)
+                            };
                             let _ = reply_tx.send(claimed);
                             ThreadRuntimeAction::Noop
                         }
                         ThreadControlEvent::ShutdownRuntime => {
                             shutdown_requested = true;
-                            match runtime_handle.state() {
+                            match runtime.state() {
                                 ThreadRuntimeState::Idle => break,
-                                _ => runtime_handle.dispatch(ThreadCommand::CancelActiveTurn),
+                                _ => runtime.cancel_active_turn(),
                             }
                         }
                     };
 
                     process_runtime_action(
                         Arc::clone(&thread),
-                        &mut runtime_handle,
+                        &mut runtime,
                         &mut active_turn_cancellation,
                         runtime_action,
                         &turn_done_tx,
@@ -238,6 +257,12 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                 }
                 Some(result) = turn_done_rx.recv() => {
                     active_turn_cancellation = None;
+                    let settled_turn_number = match runtime.state() {
+                        ThreadRuntimeState::Running { turn_number }
+                        | ThreadRuntimeState::WaitingForApproval { turn_number }
+                        | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
+                        ThreadRuntimeState::Idle => None,
+                    };
                     let finish_result = {
                         let mut guard = thread.write().await;
                         guard.finish_turn(result)
@@ -251,15 +276,29 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         let mut guard = mailbox.lock().await;
                         guard.clear_interrupts_for_idle_handoff();
                     }
+                    if let Some(turn_number) = settled_turn_number {
+                        let thread_id = {
+                            let guard = thread.read().await;
+                            guard.id().inner().to_string()
+                        };
+                        let guard = thread.read().await;
+                        guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
+                            thread_id,
+                            turn_number,
+                        });
+                    }
 
                     if shutdown_requested {
                         break;
                     }
 
-                    let runtime_action = runtime_handle.finish_active_turn();
+                    let runtime_action = {
+                        let mut mailbox = mailbox.lock().await;
+                        runtime.finish_active_turn(&mut mailbox)
+                    };
                     process_runtime_action(
                         Arc::clone(&thread),
-                        &mut runtime_handle,
+                        &mut runtime,
                         &mut active_turn_cancellation,
                         runtime_action,
                         &turn_done_tx,
@@ -275,27 +314,40 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argus_protocol::{AgentId, ThreadJobResult};
+    use argus_protocol::{AgentId, MailboxMessage, MailboxMessageType};
 
-    fn queued_job_result(job_id: &str) -> ThreadJobResult {
-        ThreadJobResult {
-            job_id: job_id.to_string(),
-            success: true,
-            message: format!("result for {job_id}"),
-            token_usage: None,
-            agent_id: AgentId::new(7),
-            agent_display_name: "Worker".to_string(),
-            agent_description: "Background worker".to_string(),
+    fn queued_job_result(job_id: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("msg-{job_id}"),
+            from_thread_id: argus_protocol::ThreadId::new(),
+            to_thread_id: argus_protocol::ThreadId::new(),
+            from_label: "Worker".to_string(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: job_id.to_string(),
+                success: true,
+                token_usage: None,
+                agent_id: AgentId::new(7),
+                agent_display_name: "Worker".to_string(),
+                agent_description: "Background worker".to_string(),
+            },
+            text: format!("result for {job_id}"),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: None,
         }
     }
 
     #[test]
     fn runtime_turn_numbering_starts_after_seeded_turn_count() {
         let mut runtime = ThreadRuntime::seeded_from_turn_count(3);
-        let action = runtime.apply_command(ThreadCommand::EnqueueUserMessage {
-            content: "hello".to_string(),
-            msg_override: None,
-        });
+        let mut mailbox = ThreadMailbox::default();
+        let action = runtime.apply_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "hello".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
 
         assert!(matches!(
             action,
@@ -306,23 +358,30 @@ mod tests {
     #[test]
     fn runtime_cancelled_turn_starts_next_queued_turn_after_finish() {
         let mut runtime = ThreadRuntime::default();
+        let mut mailbox = ThreadMailbox::default();
 
-        let first = runtime.apply_command(ThreadCommand::EnqueueUserMessage {
-            content: "first".to_string(),
-            msg_override: None,
-        });
+        let first = runtime.apply_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "first".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
         assert!(matches!(
             first,
             ThreadRuntimeAction::StartTurn { turn_number: 1, .. }
         ));
 
-        let second = runtime.apply_command(ThreadCommand::EnqueueUserMessage {
-            content: "second".to_string(),
-            msg_override: None,
-        });
+        let second = runtime.apply_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "second".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
         assert!(matches!(second, ThreadRuntimeAction::Noop));
 
-        let stop = runtime.apply_command(ThreadCommand::CancelActiveTurn);
+        let stop = runtime.cancel_active_turn();
         assert!(matches!(
             stop,
             ThreadRuntimeAction::StopTurn { turn_number: 1 }
@@ -332,7 +391,7 @@ mod tests {
             ThreadRuntimeState::Stopping { turn_number: 1 }
         );
 
-        let next = runtime.finish_active_turn();
+        let next = runtime.finish_active_turn(&mut mailbox);
         assert!(matches!(
             next,
             ThreadRuntimeAction::StartTurn { turn_number: 2, .. }
@@ -342,37 +401,47 @@ mod tests {
     #[test]
     fn claiming_queued_job_result_removes_it_and_preserves_other_work() {
         let mut runtime = ThreadRuntime::default();
+        let mut mailbox = ThreadMailbox::default();
 
-        let first = runtime.apply_command(ThreadCommand::EnqueueUserMessage {
-            content: "first".to_string(),
-            msg_override: None,
-        });
+        let first = runtime.apply_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "first".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
         assert!(matches!(
             first,
             ThreadRuntimeAction::StartTurn { turn_number: 1, .. }
         ));
 
         assert!(matches!(
-            runtime.apply_command(ThreadCommand::DeliverJobResult(queued_job_result("job-1"))),
+            runtime.apply_command(
+                ThreadCommand::EnqueueMailboxMessage(queued_job_result("job-1")),
+                &mut mailbox,
+            ),
             ThreadRuntimeAction::Noop
         ));
         assert!(matches!(
-            runtime.apply_command(ThreadCommand::EnqueueUserMessage {
-                content: "follow-up".to_string(),
-                msg_override: None,
-            }),
+            runtime.apply_command(
+                ThreadCommand::EnqueueUserMessage {
+                    content: "follow-up".to_string(),
+                    msg_override: None,
+                },
+                &mut mailbox,
+            ),
             ThreadRuntimeAction::Noop
         ));
         assert_eq!(runtime.snapshot().queue_depth, 2);
 
-        let claimed = runtime.claim_queued_job_result("job-1");
+        let claimed = runtime.claim_queued_job_result(&mut mailbox, "job-1");
         assert_eq!(
-            claimed.as_ref().map(|result| result.job_id.as_str()),
+            claimed.as_ref().and_then(MailboxMessage::job_id),
             Some("job-1")
         );
         assert_eq!(runtime.snapshot().queue_depth, 1);
 
-        let next = runtime.finish_active_turn();
+        let next = runtime.finish_active_turn(&mut mailbox);
         assert!(matches!(
             next,
             ThreadRuntimeAction::StartTurn { content, .. } if content == "follow-up"
@@ -383,7 +452,7 @@ mod tests {
 #[allow(clippy::items_after_test_module)]
 async fn process_runtime_action(
     thread: Arc<RwLock<Thread>>,
-    runtime_handle: &mut ThreadHandle,
+    runtime: &mut ThreadRuntime,
     active_turn_cancellation: &mut Option<TurnCancellation>,
     action: ThreadRuntimeAction,
     turn_done_tx: &mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
@@ -408,13 +477,42 @@ async fn process_runtime_action(
                         *active_turn_cancellation = Some(cancellation);
                     }
                     Err(error) => {
+                        let thread_id = {
+                            let guard = thread.read().await;
+                            guard.id().inner().to_string()
+                        };
+                        {
+                            let guard = thread.read().await;
+                            guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnFailed {
+                                thread_id: thread_id.clone(),
+                                turn_number,
+                                error: error.to_string(),
+                            });
+                        }
                         tracing::error!(
                             turn_number,
-                            queue_depth = runtime_handle.snapshot().queue_depth,
+                            queue_depth = runtime.snapshot().queue_depth,
                             "failed to start queued turn: {}",
                             error
                         );
-                        next_action = runtime_handle.finish_active_turn();
+                        let mailbox = {
+                            let guard = thread.read().await;
+                            guard.mailbox()
+                        };
+                        let mut mailbox = mailbox.lock().await;
+                        next_action = runtime.finish_active_turn(&mut mailbox);
+                        {
+                            let guard = thread.read().await;
+                            guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
+                                thread_id: thread_id.clone(),
+                                turn_number,
+                            });
+                        }
+                        if matches!(next_action, ThreadRuntimeAction::Noop) {
+                            let guard = thread.read().await;
+                            guard
+                                .broadcast_to_self(argus_protocol::ThreadEvent::Idle { thread_id });
+                        }
                         continue;
                     }
                 }

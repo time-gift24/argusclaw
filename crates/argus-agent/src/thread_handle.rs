@@ -1,16 +1,19 @@
 //! Thread handle actor façade.
 
-use argus_protocol::{ThreadCommand, ThreadJobResult, ThreadRuntimeState};
+use argus_protocol::{MailboxMessage, ThreadCommand, ThreadMailbox, ThreadRuntimeState};
 
 use crate::command::ThreadRuntimeSnapshot;
 use crate::runtime::{ThreadRuntime, ThreadRuntimeAction};
 
 /// Handle API for interacting with a thread runtime.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct ThreadHandle {
     runtime: ThreadRuntime,
+    mailbox: ThreadMailbox,
 }
 
+#[allow(dead_code)]
 impl ThreadHandle {
     /// Create a handle with a fresh runtime.
     #[must_use]
@@ -21,22 +24,26 @@ impl ThreadHandle {
     /// Create a handle around an existing runtime.
     #[must_use]
     pub(crate) fn with_runtime(runtime: ThreadRuntime) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            mailbox: ThreadMailbox::default(),
+        }
     }
 
     /// Dispatch a low-level runtime command.
     pub(crate) fn dispatch(&mut self, command: ThreadCommand) -> ThreadRuntimeAction {
-        self.runtime.apply_command(command)
+        self.runtime.apply_command(command, &mut self.mailbox)
     }
 
     /// Mark the active turn finished so runtime can pick queued work.
     pub(crate) fn finish_active_turn(&mut self) -> ThreadRuntimeAction {
-        self.runtime.finish_active_turn()
+        self.runtime.finish_active_turn(&mut self.mailbox)
     }
 
     /// Claim a queued job result from the runtime inbox.
-    pub(crate) fn claim_queued_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
-        self.runtime.claim_queued_job_result(job_id)
+    pub(crate) fn claim_queued_job_result(&mut self, job_id: &str) -> Option<MailboxMessage> {
+        self.runtime
+            .claim_queued_job_result(&mut self.mailbox, job_id)
     }
 
     /// Read runtime snapshot for diagnostics/testing.

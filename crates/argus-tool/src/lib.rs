@@ -37,8 +37,9 @@ pub use list::ListDirTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadTool;
 pub use scheduler::{
-    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
-    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool,
+    CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
+    SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
+    SchedulerTool, SendMessageRequest, SendMessageResponse,
 };
 pub use shell::ShellTool;
 pub use write::WriteFileTool;

@@ -4,12 +4,15 @@
 //! - `dispatch_job`
 //! - `list_subagents`
 //! - `get_job_result`
+//! - `send_message`
+//! - `check_inbox`
+//! - `mark_read`
 
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, NamedTool, RiskLevel, ThreadControlEvent, ThreadEvent, ThreadId, ToolDefinition,
-    ToolError, ToolExecutionContext,
+    AgentId, MailboxMessage, NamedTool, RiskLevel, ThreadControlEvent, ThreadEvent, ThreadId,
+    ToolDefinition, ToolError, ToolExecutionContext,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -33,6 +36,17 @@ enum SchedulerInput {
         #[serde(default)]
         consume: Option<bool>,
     },
+    #[serde(rename = "send_message")]
+    SendMessage {
+        to: String,
+        message: String,
+        #[serde(default)]
+        summary: Option<String>,
+    },
+    #[serde(rename = "check_inbox")]
+    CheckInbox,
+    #[serde(rename = "mark_read")]
+    MarkRead { message_id: String },
 }
 
 /// Serialized job result payload returned by scheduler lookups.
@@ -84,6 +98,35 @@ pub struct SchedulerLookupRequest {
     pub control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
 }
 
+/// Request payload for sending a mailbox message.
+#[derive(Debug, Clone)]
+pub struct SendMessageRequest {
+    pub thread_id: ThreadId,
+    pub to: String,
+    pub message: String,
+    pub summary: Option<String>,
+}
+
+/// Response payload for sending a mailbox message.
+#[derive(Debug, Clone, Serialize)]
+pub struct SendMessageResponse {
+    pub delivered: usize,
+    pub thread_ids: Vec<ThreadId>,
+}
+
+/// Request payload for checking a thread inbox.
+#[derive(Debug, Clone)]
+pub struct CheckInboxRequest {
+    pub thread_id: ThreadId,
+}
+
+/// Request payload for marking an inbox message as read.
+#[derive(Debug, Clone)]
+pub struct MarkReadRequest {
+    pub thread_id: ThreadId,
+    pub message_id: String,
+}
+
 /// Backend integration point implemented by orchestration crates.
 #[async_trait]
 pub trait SchedulerBackend: Send + Sync {
@@ -95,6 +138,18 @@ pub trait SchedulerBackend: Send + Sync {
         &self,
         request: SchedulerLookupRequest,
     ) -> Result<SchedulerJobLookup, ToolError>;
+
+    async fn send_message(
+        &self,
+        request: SendMessageRequest,
+    ) -> Result<SendMessageResponse, ToolError>;
+
+    async fn check_inbox(
+        &self,
+        request: CheckInboxRequest,
+    ) -> Result<Vec<MailboxMessage>, ToolError>;
+
+    async fn mark_read(&self, request: MarkReadRequest) -> Result<(), ToolError>;
 }
 
 fn parse_input<T: serde::de::DeserializeOwned>(
@@ -181,15 +236,76 @@ fn scheduler_get_result_variant() -> serde_json::Value {
     })
 }
 
+fn scheduler_send_message_variant() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "const": "send_message",
+                "description": "Scheduler operation to perform"
+            },
+            "to": {
+                "type": "string",
+                "description": "Mailbox target: job:<job_id>, thread:<thread_id>, parent, *, or a unique direct-child agent name"
+            },
+            "message": {
+                "type": "string",
+                "description": "Mailbox message content"
+            },
+            "summary": {
+                "type": "string",
+                "description": "Optional short summary metadata for the message"
+            }
+        },
+        "required": ["action", "to", "message"],
+        "additionalProperties": false
+    })
+}
+
+fn scheduler_check_inbox_variant() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "const": "check_inbox",
+                "description": "Scheduler operation to perform"
+            }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
+}
+
+fn scheduler_mark_read_variant() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "const": "mark_read",
+                "description": "Scheduler operation to perform"
+            },
+            "message_id": {
+                "type": "string",
+                "description": "Stable mailbox message ID to mark as read"
+            }
+        },
+        "required": ["action", "message_id"],
+        "additionalProperties": false
+    })
+}
+
 fn scheduler_definition() -> ToolDefinition {
     ToolDefinition {
         name: "scheduler".to_string(),
-        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, and get_job_result operations.".to_string(),
+        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, get_job_result, send_message, check_inbox, and mark_read operations.".to_string(),
         parameters: serde_json::json!({
             "oneOf": [
                 scheduler_dispatch_variant(),
                 scheduler_list_variant(),
-                scheduler_get_result_variant()
+                scheduler_get_result_variant(),
+                scheduler_send_message_variant(),
+                scheduler_check_inbox_variant(),
+                scheduler_mark_read_variant()
             ]
         }),
     }
@@ -293,6 +409,43 @@ impl NamedTool for SchedulerTool {
                     })),
                 }
             }
+            SchedulerInput::SendMessage {
+                to,
+                message,
+                summary,
+            } => {
+                let response = self
+                    .backend
+                    .send_message(SendMessageRequest {
+                        thread_id: ctx.thread_id,
+                        to,
+                        message,
+                        summary,
+                    })
+                    .await?;
+                serialize_value(response, self.name(), "send message response")
+            }
+            SchedulerInput::CheckInbox => {
+                let messages = self
+                    .backend
+                    .check_inbox(CheckInboxRequest {
+                        thread_id: ctx.thread_id,
+                    })
+                    .await?;
+                serialize_value(messages, self.name(), "mailbox messages")
+            }
+            SchedulerInput::MarkRead { message_id } => {
+                self.backend
+                    .mark_read(MarkReadRequest {
+                        thread_id: ctx.thread_id,
+                        message_id: message_id.clone(),
+                    })
+                    .await?;
+                Ok(serde_json::json!({
+                    "message_id": message_id,
+                    "status": "marked_read",
+                }))
+            }
         }
     }
 }
@@ -302,7 +455,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use argus_protocol::ThreadJobResult;
+    use argus_protocol::{MailboxMessageType, ThreadJobResult};
     use tokio::sync::broadcast;
 
     #[derive(Debug, Clone)]
@@ -318,6 +471,10 @@ mod tests {
         dispatch_calls: Mutex<Vec<RecordedDispatch>>,
         list_response: Vec<SchedulerSubagent>,
         lookup_response: SchedulerJobLookup,
+        send_calls: Mutex<Vec<SendMessageRequest>>,
+        send_response: SendMessageResponse,
+        inbox_response: Vec<MailboxMessage>,
+        mark_read_calls: Mutex<Vec<MarkReadRequest>>,
     }
 
     #[async_trait]
@@ -348,6 +505,32 @@ mod tests {
         ) -> Result<SchedulerJobLookup, ToolError> {
             Ok(self.lookup_response.clone())
         }
+
+        async fn send_message(
+            &self,
+            request: SendMessageRequest,
+        ) -> Result<SendMessageResponse, ToolError> {
+            self.send_calls
+                .lock()
+                .expect("send_calls mutex poisoned")
+                .push(request);
+            Ok(self.send_response.clone())
+        }
+
+        async fn check_inbox(
+            &self,
+            _request: CheckInboxRequest,
+        ) -> Result<Vec<MailboxMessage>, ToolError> {
+            Ok(self.inbox_response.clone())
+        }
+
+        async fn mark_read(&self, request: MarkReadRequest) -> Result<(), ToolError> {
+            self.mark_read_calls
+                .lock()
+                .expect("mark_read_calls mutex poisoned")
+                .push(request);
+            Ok(())
+        }
     }
 
     fn make_ctx() -> Arc<ToolExecutionContext> {
@@ -372,6 +555,20 @@ mod tests {
         }
     }
 
+    fn sample_mailbox_message() -> MailboxMessage {
+        MailboxMessage {
+            id: "msg-1".to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Planner".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: "hello from planner".to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some("hello".to_string()),
+        }
+    }
+
     #[test]
     fn scheduler_name_and_risk_level() {
         let backend = Arc::new(MockSchedulerBackend {
@@ -379,6 +576,13 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
         });
         let tool = SchedulerTool::new(backend);
         assert_eq!(tool.name(), "scheduler");
@@ -392,6 +596,13 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
         });
         let tool = SchedulerTool::new(backend);
         let definition = tool.definition();
@@ -425,6 +636,17 @@ mod tests {
             get_result_variant["required"],
             serde_json::json!(["action", "job_id"])
         );
+
+        let send_message_variant = variants
+            .iter()
+            .find(|variant| {
+                variant["properties"]["action"]["const"] == serde_json::json!("send_message")
+            })
+            .expect("send_message variant should exist");
+        assert_eq!(
+            send_message_variant["required"],
+            serde_json::json!(["action", "to", "message"])
+        );
     }
 
     #[tokio::test]
@@ -434,6 +656,13 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
         });
         let tool = SchedulerTool::new(backend.clone());
         let ctx = make_ctx();
@@ -474,6 +703,13 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
         });
         let tool = SchedulerTool::new(backend.clone());
 
@@ -509,6 +745,13 @@ mod tests {
                 description: "Plans work".to_string(),
             }],
             lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
         });
         let tool = SchedulerTool::new(backend);
 
@@ -528,6 +771,13 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Completed(sample_result()),
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
         });
         let tool = SchedulerTool::new(backend);
 
@@ -546,6 +796,119 @@ mod tests {
         assert_eq!(response["job_id"], serde_json::json!("job-42"));
         assert_eq!(response["status"], serde_json::json!("completed"));
         assert_eq!(response["result"]["message"], serde_json::json!("finished"));
+    }
+
+    #[tokio::test]
+    async fn send_message_action_calls_backend_and_returns_delivery_metadata() {
+        let delivered_thread_id = ThreadId::new();
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-42".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 1,
+                thread_ids: vec![delivered_thread_id],
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
+        });
+        let tool = SchedulerTool::new(backend.clone());
+        let ctx = make_ctx();
+
+        let response = tool
+            .execute(
+                serde_json::json!({
+                    "action": "send_message",
+                    "to": "parent",
+                    "message": "hello",
+                    "summary": "greeting"
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("send_message should succeed");
+
+        assert_eq!(response["delivered"], serde_json::json!(1));
+        assert_eq!(
+            response["thread_ids"][0],
+            serde_json::json!(delivered_thread_id)
+        );
+        let calls = backend
+            .send_calls
+            .lock()
+            .expect("send_calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].thread_id, ctx.thread_id);
+        assert_eq!(calls[0].to, "parent");
+        assert_eq!(calls[0].message, "hello");
+        assert_eq!(calls[0].summary, Some("greeting".to_string()));
+    }
+
+    #[tokio::test]
+    async fn check_inbox_action_returns_serialized_mailbox_messages() {
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-42".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: vec![sample_mailbox_message()],
+            mark_read_calls: Mutex::new(Vec::new()),
+        });
+        let tool = SchedulerTool::new(backend);
+
+        let response = tool
+            .execute(serde_json::json!({"action": "check_inbox"}), make_ctx())
+            .await
+            .expect("check_inbox should succeed");
+
+        assert_eq!(response[0]["id"], serde_json::json!("msg-1"));
+        assert_eq!(response[0]["text"], serde_json::json!("hello from planner"));
+    }
+
+    #[tokio::test]
+    async fn mark_read_action_passes_message_id_to_backend() {
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-42".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
+        });
+        let tool = SchedulerTool::new(backend.clone());
+        let ctx = make_ctx();
+
+        let response = tool
+            .execute(
+                serde_json::json!({
+                    "action": "mark_read",
+                    "message_id": "msg-1",
+                }),
+                ctx.clone(),
+            )
+            .await
+            .expect("mark_read should succeed");
+
+        assert_eq!(response["status"], serde_json::json!("marked_read"));
+        let calls = backend
+            .mark_read_calls
+            .lock()
+            .expect("mark_read_calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].thread_id, ctx.thread_id);
+        assert_eq!(calls[0].message_id, "msg-1");
     }
 
     #[test]

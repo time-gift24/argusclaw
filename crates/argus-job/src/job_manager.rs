@@ -14,14 +14,15 @@ use argus_agent::{CompactorManager, TurnCancellation};
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
-    AgentId, ProviderResolver, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
-    ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeStatus,
+    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadControlEvent, ThreadEvent,
+    ThreadId, ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use tokio::sync::{broadcast, mpsc};
+use uuid::Uuid;
 
 use crate::error::JobError;
 use crate::thread_pool::{ThreadPool, ThreadPoolPersistence};
@@ -326,7 +327,12 @@ impl JobManager {
                 )
                 .await;
 
-            Self::forward_job_result_to_runtime(&control_tx_clone, result.clone());
+            Self::forward_job_result_to_runtime(
+                &control_tx_clone,
+                originating_thread_id,
+                execution_thread_id,
+                result.clone(),
+            );
             Self::record_completed_job_result_in_store(
                 &tracked_jobs,
                 originating_thread_id,
@@ -449,9 +455,41 @@ impl JobManager {
 
     fn forward_job_result_to_runtime(
         control_tx: &mpsc::UnboundedSender<ThreadControlEvent>,
+        originating_thread_id: ThreadId,
+        execution_thread_id: ThreadId,
         result: ThreadJobResult,
     ) {
-        let _ = control_tx.send(ThreadControlEvent::JobResult(result));
+        let mailbox_message = MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: execution_thread_id,
+            to_thread_id: originating_thread_id,
+            from_label: result.agent_display_name.clone(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: result.job_id.clone(),
+                success: result.success,
+                token_usage: result.token_usage.clone(),
+                agent_id: result.agent_id,
+                agent_display_name: result.agent_display_name.clone(),
+                agent_description: result.agent_description.clone(),
+            },
+            text: result.message.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: None,
+        };
+        let _ = control_tx.send(ThreadControlEvent::DeliverMailboxMessage(mailbox_message));
+    }
+
+    pub fn is_job_pending(&self, job_id: &str) -> bool {
+        let tracked_jobs = self
+            .tracked_jobs
+            .lock()
+            .expect("job tracking mutex poisoned");
+
+        tracked_jobs
+            .jobs
+            .get(job_id)
+            .is_some_and(|tracked_job| matches!(tracked_job.state, TrackedJobState::Pending))
     }
 
     fn broadcast_job_result(
@@ -480,7 +518,8 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentRecord, AgentType, LlmProvider, ProviderId, ThinkingConfig, ThreadRuntimeStatus,
+        AgentRecord, AgentType, LlmProvider, MailboxMessageType, ProviderId, ThinkingConfig,
+        ThreadRuntimeStatus,
     };
     use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
@@ -946,8 +985,12 @@ mod tests {
             .expect("control channel should stay open");
         assert!(matches!(
             control_event,
-            ThreadControlEvent::JobResult(result)
-                if result.job_id == job_id && !result.success
+            ThreadControlEvent::DeliverMailboxMessage(message)
+                if matches!(
+                    &message.message_type,
+                    MailboxMessageType::JobResult { job_id: forwarded_job_id, success, .. }
+                        if forwarded_job_id == &job_id && !success
+                )
         ));
 
         let execution_thread_id = bound_thread_id.expect("job should bind to an execution thread");
@@ -1114,8 +1157,12 @@ mod tests {
             .expect("control channel should stay open");
         assert!(matches!(
             control_event,
-            ThreadControlEvent::JobResult(result)
-                if result.job_id == job_id && !result.success && result.message.contains("Turn cancelled")
+            ThreadControlEvent::DeliverMailboxMessage(message)
+                if matches!(
+                    &message.message_type,
+                    MailboxMessageType::JobResult { job_id: forwarded_job_id, success, .. }
+                        if forwarded_job_id == &job_id && !success
+                ) && message.text.contains("Turn cancelled")
         ));
 
         assert!(matches!(

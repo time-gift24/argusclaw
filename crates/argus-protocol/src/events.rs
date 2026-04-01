@@ -14,6 +14,7 @@ use crate::llm::LlmStreamEvent;
 use crate::message_override::MessageOverride;
 
 /// Internal control-plane event for thread orchestration.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ThreadCommand {
     /// Queue a user message for the runtime inbox.
@@ -23,8 +24,8 @@ pub enum ThreadCommand {
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
-    /// Deliver a completed job result back to the thread runtime.
-    DeliverJobResult(ThreadJobResult),
+    /// Deliver a mailbox message back to the thread runtime.
+    EnqueueMailboxMessage(MailboxMessage),
     /// Request cancellation of the currently active turn.
     CancelActiveTurn,
 }
@@ -52,6 +53,7 @@ pub enum ThreadRuntimeState {
 }
 
 /// Legacy compatibility control event surface for pre-runtime callers.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum ThreadControlEvent {
     /// A new user message entered the thread control plane.
@@ -77,12 +79,12 @@ pub enum ThreadControlEvent {
         /// Interrupt content (e.g. "stop", "cancel", or a new instruction).
         content: String,
     },
-    /// A background job produced a result.
+    /// Deliver a mailbox message to the thread runtime.
     ///
     /// Production semantics: if a turn is currently running, the thread runtime actor
-    /// enqueues the job result (FIFO) for a subsequent turn. Frontends typically render
-    /// this as "queued" work.
-    JobResult(ThreadJobResult),
+    /// enqueues the mailbox message (FIFO) for a subsequent turn. Frontends typically
+    /// render this as "queued" work.
+    DeliverMailboxMessage(MailboxMessage),
     /// Claim a queued job result by job ID so it is not replayed as a future turn.
     ///
     /// This is an internal runtime-actor query path used by `get_job_result(consume=true)`.
@@ -90,7 +92,7 @@ pub enum ThreadControlEvent {
         /// Job ID to remove from the runtime inbox.
         job_id: String,
         /// One-shot reply channel containing the removed queued result, if any.
-        reply_tx: oneshot::Sender<Option<ThreadJobResult>>,
+        reply_tx: oneshot::Sender<Option<MailboxMessage>>,
     },
     /// Request the runtime actor to stop and release its owned thread state.
     ///
@@ -136,6 +138,108 @@ impl ThreadJobResult {
     }
 }
 
+/// Mailbox message type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MailboxMessageType {
+    /// Plain text message.
+    Plain,
+    /// Job completion result.
+    JobResult {
+        job_id: String,
+        success: bool,
+        token_usage: Option<TokenUsage>,
+        agent_id: AgentId,
+        agent_display_name: String,
+        agent_description: String,
+    },
+    /// Structured task assignment.
+    TaskAssignment {
+        task_id: String,
+        subject: String,
+        description: String,
+    },
+}
+
+impl MailboxMessageType {
+    #[must_use]
+    pub fn job_id(&self) -> Option<&str> {
+        match self {
+            Self::JobResult { job_id, .. } => Some(job_id.as_str()),
+            Self::Plain | Self::TaskAssignment { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn into_message_text(self, text: String) -> String {
+        match self {
+            Self::Plain => text,
+            Self::JobResult {
+                job_id,
+                agent_display_name,
+                agent_description,
+                ..
+            } => format!(
+                "Job: {}\nSubagent: {}\nDescription: {}\nResult: {}",
+                job_id,
+                agent_display_name,
+                if agent_description.trim().is_empty() {
+                    "No description provided."
+                } else {
+                    agent_description.as_str()
+                },
+                text
+            ),
+            Self::TaskAssignment {
+                task_id,
+                subject,
+                description,
+            } => format!(
+                "Task: {}\nSubject: {}\nDescription: {}\nMessage: {}",
+                task_id, subject, description, text
+            ),
+        }
+    }
+}
+
+/// Unified mailbox message for cross-thread communication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailboxMessage {
+    pub id: String,
+    pub from_thread_id: ThreadId,
+    pub to_thread_id: ThreadId,
+    pub from_label: String,
+    pub message_type: MailboxMessageType,
+    pub text: String,
+    pub timestamp: String,
+    pub read: bool,
+    pub summary: Option<String>,
+}
+
+impl MailboxMessage {
+    #[must_use]
+    pub fn job_id(&self) -> Option<&str> {
+        self.message_type.job_id()
+    }
+
+    #[must_use]
+    pub fn into_message_text(self) -> String {
+        self.message_type.into_message_text(self.text)
+    }
+
+    #[must_use]
+    pub fn into_queued_user_message(self) -> QueuedUserMessage {
+        QueuedUserMessage {
+            content: self.into_message_text(),
+            msg_override: None,
+        }
+    }
+
+    pub fn mark_read(&mut self) {
+        self.read = true;
+    }
+}
+
 /// A queued user message retained by the mailbox.
 #[derive(Debug, Clone)]
 pub struct QueuedUserMessage {
@@ -146,6 +250,7 @@ pub struct QueuedUserMessage {
 }
 
 /// A control item that can be injected into a running turn as a user message.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TurnControlInput {
     /// User interrupt content.
@@ -157,8 +262,8 @@ pub enum TurnControlInput {
         /// Optional per-message overrides (temperature, max_tokens, etc.).
         msg_override: Option<MessageOverride>,
     },
-    /// Background job result.
-    JobResult(ThreadJobResult),
+    /// Mailbox message.
+    MailboxMessage(MailboxMessage),
 }
 
 impl TurnControlInput {
@@ -169,7 +274,7 @@ impl TurnControlInput {
         match self {
             Self::UserInterrupt { content } => content,
             Self::UserMessage { content, .. } => content,
-            Self::JobResult(result) => result.into_message_text(),
+            Self::MailboxMessage(message) => message.into_message_text(),
         }
     }
 }
@@ -180,10 +285,11 @@ pub struct ThreadInbox {
     items: VecDeque<ThreadInboxItem>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum ThreadInboxItem {
     UserMessage(QueuedUserMessage),
-    JobResult(ThreadJobResult),
+    MailboxMessage(MailboxMessage),
 }
 
 impl ThreadInbox {
@@ -196,20 +302,21 @@ impl ThreadInbox {
             }));
     }
 
-    /// Queue a job result.
-    pub fn deliver_job_result(&mut self, result: ThreadJobResult) {
-        self.items.push_back(ThreadInboxItem::JobResult(result));
+    /// Queue a mailbox message.
+    pub fn deliver_mailbox_message(&mut self, message: MailboxMessage) {
+        self.items
+            .push_back(ThreadInboxItem::MailboxMessage(message));
     }
 
     /// Remove a queued job result by job ID while preserving FIFO order for remaining items.
-    pub fn claim_job_result(&mut self, job_id: &str) -> Option<ThreadJobResult> {
+    pub fn claim_job_result(&mut self, job_id: &str) -> Option<MailboxMessage> {
         let index = self.items.iter().position(|item| match item {
-            ThreadInboxItem::JobResult(result) => result.job_id == job_id,
+            ThreadInboxItem::MailboxMessage(message) => message.job_id() == Some(job_id),
             ThreadInboxItem::UserMessage(_) => false,
         })?;
 
         match self.items.remove(index) {
-            Some(ThreadInboxItem::JobResult(result)) => Some(result),
+            Some(ThreadInboxItem::MailboxMessage(message)) => Some(message),
             Some(ThreadInboxItem::UserMessage(_)) | None => None,
         }
     }
@@ -229,8 +336,8 @@ impl ThreadInbox {
                         msg_override: message.msg_override,
                     });
                 }
-                ThreadInboxItem::JobResult(result) => {
-                    drained.push(TurnControlInput::JobResult(result));
+                ThreadInboxItem::MailboxMessage(message) => {
+                    drained.push(TurnControlInput::MailboxMessage(message));
                 }
             }
         }
@@ -244,18 +351,49 @@ impl ThreadInbox {
     pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
         match self.items.pop_front() {
             Some(ThreadInboxItem::UserMessage(message)) => Some(message),
-            Some(ThreadInboxItem::JobResult(result)) => Some(QueuedUserMessage {
-                content: result.into_message_text(),
-                msg_override: None,
-            }),
+            Some(ThreadInboxItem::MailboxMessage(message)) => {
+                Some(message.into_queued_user_message())
+            }
             None => None,
         }
+    }
+
+    /// Return the number of queued inbox items.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.items.len()
     }
 
     /// Returns true when no pending control items remain.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Return unread mailbox messages that are still queued.
+    #[must_use]
+    pub fn unread_mailbox_messages(&self) -> Vec<MailboxMessage> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ThreadInboxItem::MailboxMessage(message) if !message.read => Some(message.clone()),
+                ThreadInboxItem::UserMessage(_) | ThreadInboxItem::MailboxMessage(_) => None,
+            })
+            .collect()
+    }
+
+    /// Mark a queued mailbox message as read by message ID.
+    pub fn mark_mailbox_message_read(&mut self, message_id: &str) -> bool {
+        for item in &mut self.items {
+            if let ThreadInboxItem::MailboxMessage(message) = item
+                && message.id == message_id
+            {
+                message.mark_read();
+                return true;
+            }
+        }
+
+        false
     }
 }
 
@@ -285,7 +423,9 @@ impl ThreadMailbox {
             ThreadControlEvent::UserInterrupt { content } => {
                 self.user_interrupts.push_back(content)
             }
-            ThreadControlEvent::JobResult(result) => self.inbox.deliver_job_result(result),
+            ThreadControlEvent::DeliverMailboxMessage(message) => {
+                self.inbox.deliver_mailbox_message(message)
+            }
             ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } => {
                 let _ = reply_tx.send(None);
             }
@@ -325,10 +465,32 @@ impl ThreadMailbox {
         self.user_interrupts.clear();
     }
 
+    /// Remove a queued job result by job ID while preserving remaining FIFO order.
+    pub fn claim_job_result(&mut self, job_id: &str) -> Option<MailboxMessage> {
+        self.inbox.claim_job_result(job_id)
+    }
+
+    /// Return the number of pending mailbox items, including legacy interrupts.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.user_interrupts.len() + self.inbox.len()
+    }
+
     /// Returns true when no pending control items remain.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.user_interrupts.is_empty() && self.inbox.is_empty()
+    }
+
+    /// Return unread mailbox messages that remain queued.
+    #[must_use]
+    pub fn unread_mailbox_messages(&self) -> Vec<MailboxMessage> {
+        self.inbox.unread_mailbox_messages()
+    }
+
+    /// Mark a queued mailbox message as read by message ID.
+    pub fn mark_mailbox_message_read(&mut self, message_id: &str) -> bool {
+        self.inbox.mark_mailbox_message_read(message_id)
     }
 }
 
@@ -503,6 +665,13 @@ pub enum ThreadEvent {
         /// Error message.
         error: String,
     },
+    /// Turn output has been applied to authoritative thread state.
+    TurnSettled {
+        /// Thread ID.
+        thread_id: String,
+        /// Turn number.
+        turn_number: u32,
+    },
     /// Thread entered idle state.
     Idle {
         /// Thread ID.
@@ -581,6 +750,13 @@ pub enum ThreadEvent {
         agent_display_name: String,
         /// Subagent description.
         agent_description: String,
+    },
+    /// A mailbox message was queued for a thread.
+    MailboxMessageQueued {
+        /// Thread ID that received the message.
+        thread_id: ThreadId,
+        /// Queued mailbox message.
+        message: MailboxMessage,
     },
     /// Job has been bound to a concrete thread runtime.
     ThreadBoundToJob {
@@ -661,28 +837,37 @@ pub(crate) fn assert_thread_pool_snapshot_round_trip() {
 mod tests {
     use super::*;
 
-    fn job_result(job_id: &str) -> ThreadJobResult {
-        ThreadJobResult {
-            job_id: job_id.to_string(),
-            success: true,
-            message: format!("result for {job_id}"),
-            token_usage: None,
-            agent_id: AgentId::new(7),
-            agent_display_name: "Worker".to_string(),
-            agent_description: "Background worker".to_string(),
+    fn job_result_message(job_id: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: format!("msg-{job_id}"),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: ThreadId::new(),
+            from_label: "Worker".to_string(),
+            message_type: MailboxMessageType::JobResult {
+                job_id: job_id.to_string(),
+                success: true,
+                token_usage: None,
+                agent_id: AgentId::new(7),
+                agent_display_name: "Worker".to_string(),
+                agent_description: "Background worker".to_string(),
+            },
+            text: format!("result for {job_id}"),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some(format!("summary {job_id}")),
         }
     }
 
     #[test]
-    fn thread_inbox_claim_job_result_removes_only_matching_job() {
+    fn thread_inbox_claim_job_result_mailbox_removes_only_matching_job() {
         let mut inbox = ThreadInbox::default();
         inbox.enqueue_user_message("first".to_string(), None);
-        inbox.deliver_job_result(job_result("job-1"));
-        inbox.deliver_job_result(job_result("job-2"));
+        inbox.deliver_mailbox_message(job_result_message("job-1"));
+        inbox.deliver_mailbox_message(job_result_message("job-2"));
 
         let claimed = inbox.claim_job_result("job-1");
         assert_eq!(
-            claimed.as_ref().map(|result| result.job_id.as_str()),
+            claimed.as_ref().and_then(MailboxMessage::job_id),
             Some("job-1")
         );
 
@@ -694,8 +879,20 @@ mod tests {
         ));
         assert!(matches!(
             &remaining[1],
-            TurnControlInput::JobResult(result) if result.job_id == "job-2"
+            TurnControlInput::MailboxMessage(message)
+                if message.job_id() == Some("job-2")
         ));
+    }
+
+    #[test]
+    fn mailbox_job_result_renders_as_synthetic_message_text() {
+        let rendered =
+            TurnControlInput::MailboxMessage(job_result_message("job-render")).into_message_text();
+
+        assert!(rendered.contains("Job: job-render"));
+        assert!(rendered.contains("Subagent: Worker"));
+        assert!(rendered.contains("Description: Background worker"));
+        assert!(rendered.contains("Result: result for job-render"));
     }
 
     #[test]
