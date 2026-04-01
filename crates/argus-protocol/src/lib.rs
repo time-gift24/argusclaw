@@ -36,7 +36,7 @@ pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
 pub use knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
 pub use mcp::{
     AgentMcpBinding, AgentMcpServerBinding, AgentMcpToolBinding, McpDiscoveredToolRecord,
-    McpServerRecord, McpToolResolver, McpTransportConfig, McpTransportKind,
+    McpServerRecord, McpServerStatus, McpToolResolver, McpTransportConfig, McpTransportKind,
     McpUnavailableServerSummary, ResolvedMcpTools, ThreadNoticeLevel,
 };
 pub use message_override::MessageOverride;
