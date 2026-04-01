@@ -75,7 +75,10 @@ impl ApprovalHook {
 
     fn approval_keys(&self, ctx: &ToolHookContext) -> Vec<String> {
         if ctx.tool_name == "knowledge"
-            && ctx.tool_input.get("action").and_then(|value| value.as_str())
+            && ctx
+                .tool_input
+                .get("action")
+                .and_then(|value| value.as_str())
                 == Some("create_knowledge_pr")
         {
             return vec![

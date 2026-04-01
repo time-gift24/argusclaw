@@ -49,8 +49,6 @@ impl CliRunner for RealCliRunner {
             )));
         }
 
-        Ok(CliOutput {
-            stdout,
-        })
+        Ok(CliOutput { stdout })
     }
 }

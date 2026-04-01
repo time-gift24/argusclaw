@@ -8,11 +8,10 @@ use argus_protocol::ids::ThreadId;
 use argus_protocol::{NamedTool, ToolExecutionContext};
 use argus_tool::knowledge::{
     DefaultKnowledgeRuntime, GitHubBlob, GitHubSnapshot, GitHubTree, GitHubTreeEntryKind,
-    GitPrExecutor, GitPrOutcome,
-    KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult, KnowledgeManifestFilePatch,
-    KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch, KnowledgeManifestPatch,
-    KnowledgeManifestRepoPatch, KnowledgePrRemoteEntry, KnowledgePrRuntime, KnowledgePrService,
-    KnowledgePrWorkspace, KnowledgePrWorkspaceFile, KnowledgeRepoDescriptor,
+    GitPrExecutor, GitPrOutcome, KnowledgeBackend, KnowledgeCreatePrArgs, KnowledgeCreatePrResult,
+    KnowledgeManifestFilePatch, KnowledgeManifestNodePatch, KnowledgeManifestNodeSourcePatch,
+    KnowledgeManifestPatch, KnowledgeManifestRepoPatch, KnowledgePrRemoteEntry, KnowledgePrRuntime,
+    KnowledgePrService, KnowledgePrWorkspace, KnowledgePrWorkspaceFile, KnowledgeRepoDescriptor,
     KnowledgeRuntimeBackend, KnowledgeTool, KnowledgeToolError, RepositoryManifest, merge_manifest,
     serialize_manifest, validate_repo_relative_path,
 };
@@ -867,4 +866,3 @@ async fn executor_reuses_existing_pr() {
     assert_eq!(result.pr_url, "https://example.com/pr/existing");
     assert!(result.summary.contains("Updated existing PR"));
 }
-

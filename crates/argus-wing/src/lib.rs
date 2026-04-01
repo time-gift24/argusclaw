@@ -36,9 +36,9 @@ use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider,
-    LlmProviderId, LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel,
-    SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
+    knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId,
+    LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
+    ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, KnowledgeRepoRepository,

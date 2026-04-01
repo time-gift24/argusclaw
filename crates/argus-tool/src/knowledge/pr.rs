@@ -177,7 +177,11 @@ impl<R: CliRunner + 'static> GitPrExecutor for CliPrExecutor<R> {
 
         if branch_exists {
             self.runner
-                .run("git", &["fetch", "origin", &format!("{branch}:{branch}")], &tmp_path)
+                .run(
+                    "git",
+                    &["fetch", "origin", &format!("{branch}:{branch}")],
+                    &tmp_path,
+                )
                 .await?;
             self.runner
                 .run("git", &["checkout", &branch], &tmp_path)
@@ -272,12 +276,9 @@ impl<R: CliRunner + 'static> GitPrExecutor for CliPrExecutor<R> {
         workspace: &mut KnowledgePrWorkspace,
         commit_message: &str,
     ) -> Result<String, KnowledgeToolError> {
-        let work_dir = workspace
-            .work_dir
-            .as_ref()
-            .ok_or_else(|| {
-                KnowledgeToolError::RequestFailed("workspace has no work_dir".to_string())
-            })?;
+        let work_dir = workspace.work_dir.as_ref().ok_or_else(|| {
+            KnowledgeToolError::RequestFailed("workspace has no work_dir".to_string())
+        })?;
 
         let has_changes = workspace
             .files
@@ -305,9 +306,7 @@ impl<R: CliRunner + 'static> GitPrExecutor for CliPrExecutor<R> {
                     .map_err(|e| KnowledgeToolError::RequestFailed(e.to_string()))?;
             }
 
-            self.runner
-                .run("git", &["add", "-A"], work_dir)
-                .await?;
+            self.runner.run("git", &["add", "-A"], work_dir).await?;
             self.runner
                 .run(
                     "git",
@@ -386,8 +385,8 @@ impl<R: CliRunner + 'static> GitPrExecutor for CliPrExecutor<R> {
             )
             .await?;
 
-        let urls: Vec<serde_json::Value> = serde_json::from_str(list_output.stdout.trim())
-            .unwrap_or_default();
+        let urls: Vec<serde_json::Value> =
+            serde_json::from_str(list_output.stdout.trim()).unwrap_or_default();
         if let Some(url_val) = urls.first().and_then(|v| v.get("url"))
             && let Some(pr_url) = url_val.as_str()
         {
@@ -416,10 +415,7 @@ impl<R: CliRunner + 'static> GitPrExecutor for CliPrExecutor<R> {
         }
 
         let args_strs: Vec<&str> = pr_args.iter().map(String::as_str).collect();
-        let create_output = self
-            .runner
-            .run("gh", &args_strs, Path::new("."))
-            .await?;
+        let create_output = self.runner.run("gh", &args_strs, Path::new(".")).await?;
 
         let pr_url = create_output
             .stdout
