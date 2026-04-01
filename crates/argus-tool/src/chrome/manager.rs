@@ -452,7 +452,15 @@ impl ChromeManager {
         url: &str,
     ) -> Result<NewTabResult, ChromeToolError> {
         let session = self.session(session_id).await?;
-        session.create_new_tab(url).await
+        let result = session.create_new_tab(url).await?;
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.update_metadata(PageMetadata {
+                final_url: result.url.clone(),
+                page_title: result.page_title.clone(),
+            });
+        }
+        Ok(result)
     }
 
     pub async fn switch_tab(
@@ -471,7 +479,12 @@ impl ChromeManager {
 
     pub async fn close_tab(&self, session_id: &str, tab_id: &str) -> Result<(), ChromeToolError> {
         let session = self.session(session_id).await?;
-        session.close_tab(tab_id).await
+        let metadata = session.close_tab(tab_id).await?;
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.update_metadata(metadata);
+        }
+        Ok(())
     }
 
     pub async fn list_tabs(&self, session_id: &str) -> Result<Vec<TabInfo>, ChromeToolError> {
@@ -1015,6 +1028,7 @@ mod tests {
     use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -1042,6 +1056,7 @@ mod tests {
         text: String,
         network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
+        extra_tabs: Vec<FakeTab>,
     }
 
     #[derive(Debug, Default)]
@@ -1074,6 +1089,7 @@ mod tests {
                     text: text.into(),
                     network_requests: Vec::new(),
                     shutdown_label: requested_url,
+                    extra_tabs: Vec::new(),
                 },
             );
             self
@@ -1098,10 +1114,49 @@ mod tests {
                     text: text.into(),
                     network_requests,
                     shutdown_label: requested_url,
+                    extra_tabs: Vec::new(),
                 },
             );
             self
         }
+
+        fn with_page_with_extra_tabs(
+            mut self,
+            requested_url: impl Into<String>,
+            final_url: impl Into<String>,
+            page_title: impl Into<String>,
+            links: Vec<LinkSummary>,
+            text: impl Into<String>,
+            extra_tabs: Vec<FakeTab>,
+        ) -> Self {
+            let requested_url = requested_url.into();
+            self.pages.insert(
+                requested_url.clone(),
+                FakePage {
+                    final_url: final_url.into(),
+                    page_title: page_title.into(),
+                    links,
+                    text: text.into(),
+                    network_requests: Vec::new(),
+                    shutdown_label: requested_url,
+                    extra_tabs,
+                },
+            );
+            self
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FakeTab {
+        handle: String,
+        url: String,
+        title: String,
+    }
+
+    #[derive(Debug)]
+    struct FakeBrowserTabState {
+        tabs: Vec<FakeTab>,
+        active_handle: Option<String>,
     }
 
     #[derive(Debug)]
@@ -1111,9 +1166,8 @@ mod tests {
         network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
         shutdowns: Arc<StdMutex<Vec<String>>>,
-        url: String,
         cookies: Vec<CookieSummary>,
-        tabs: StdMutex<Vec<(String, String, String)>>,
+        tabs: StdMutex<FakeBrowserTabState>,
     }
 
     #[async_trait::async_trait]
@@ -1157,7 +1211,19 @@ mod tests {
         }
 
         async fn current_url(&self) -> Result<String, ChromeToolError> {
-            Ok(self.url.clone())
+            let tabs = self.tabs.lock().unwrap();
+            let active_handle = tabs.active_handle.as_deref().ok_or_else(|| {
+                ChromeToolError::TabOperationFailed {
+                    reason: "no active tab".to_string(),
+                }
+            })?;
+            tabs.tabs
+                .iter()
+                .find(|tab| tab.handle == active_handle)
+                .map(|tab| tab.url.clone())
+                .ok_or_else(|| ChromeToolError::TabOperationFailed {
+                    reason: "active tab not found".to_string(),
+                })
         }
 
         async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
@@ -1165,9 +1231,25 @@ mod tests {
         }
 
         async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+            let mut tabs = self.tabs.lock().unwrap();
+            let active_handle =
+                tabs.active_handle
+                    .clone()
+                    .ok_or_else(|| ChromeToolError::TabOperationFailed {
+                        reason: "no active tab".to_string(),
+                    })?;
+            let tab = tabs
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.handle == active_handle)
+                .ok_or_else(|| ChromeToolError::TabOperationFailed {
+                    reason: "active tab not found".to_string(),
+                })?;
+            tab.url = url.to_string();
+            tab.title = format!("Navigated to {url}");
             Ok(PageMetadata {
-                final_url: url.to_string(),
-                page_title: format!("Navigated to {url}"),
+                final_url: tab.url.clone(),
+                page_title: tab.title.clone(),
             })
         }
 
@@ -1175,16 +1257,18 @@ mod tests {
             &self,
             url: &str,
         ) -> Result<(String, PageMetadata), ChromeToolError> {
-            let handle = format!("handle-{}", self.tabs.lock().unwrap().len() + 2);
+            let mut tabs = self.tabs.lock().unwrap();
+            let handle = format!("handle-{}", tabs.tabs.len() + 1);
             let metadata = PageMetadata {
                 final_url: url.to_string(),
                 page_title: format!("Tab {url}"),
             };
-            self.tabs.lock().unwrap().push((
-                handle.clone(),
-                metadata.final_url.clone(),
-                metadata.page_title.clone(),
-            ));
+            tabs.tabs.push(FakeTab {
+                handle: handle.clone(),
+                url: metadata.final_url.clone(),
+                title: metadata.page_title.clone(),
+            });
+            tabs.active_handle = Some(handle.clone());
             Ok((handle, metadata))
         }
 
@@ -1192,32 +1276,49 @@ mod tests {
             &self,
             window_handle: &str,
         ) -> Result<PageMetadata, ChromeToolError> {
-            let tabs = self.tabs.lock().unwrap();
-            tabs.iter()
-                .find(|(h, _, _)| h == window_handle)
-                .map(|(_, url, title)| PageMetadata {
-                    final_url: url.clone(),
-                    page_title: title.clone(),
-                })
+            let mut tabs = self.tabs.lock().unwrap();
+            let tab = tabs
+                .tabs
+                .iter()
+                .find(|tab| tab.handle == window_handle)
+                .cloned()
                 .ok_or_else(|| ChromeToolError::TabNotFound {
                     tab_id: window_handle.to_string(),
-                })
+                })?;
+            tabs.active_handle = Some(window_handle.to_string());
+            Ok(PageMetadata {
+                final_url: tab.url,
+                page_title: tab.title,
+            })
         }
 
         async fn close_current_window(&self) -> Result<(), ChromeToolError> {
+            let mut tabs = self.tabs.lock().unwrap();
+            let Some(active_handle) = tabs.active_handle.clone() else {
+                return Err(ChromeToolError::TabOperationFailed {
+                    reason: "no active tab".to_string(),
+                });
+            };
+            tabs.tabs.retain(|tab| tab.handle != active_handle);
+            tabs.active_handle = tabs.tabs.first().map(|tab| tab.handle.clone());
             Ok(())
         }
 
         async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
-            Ok(self.tabs.lock().unwrap().clone())
+            let tabs = self.tabs.lock().unwrap();
+            Ok(tabs
+                .tabs
+                .iter()
+                .map(|tab| (tab.handle.clone(), tab.url.clone(), tab.title.clone()))
+                .collect())
         }
 
         async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
             self.tabs
                 .lock()
                 .unwrap()
-                .first()
-                .map(|(h, _, _)| h.clone())
+                .active_handle
+                .clone()
                 .ok_or_else(|| ChromeToolError::TabOperationFailed {
                     reason: "no tabs".to_string(),
                 })
@@ -1240,13 +1341,19 @@ mod tests {
                 network_requests: page.network_requests.clone(),
                 shutdown_label: page.shutdown_label.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
-                url: page.final_url.clone(),
                 cookies: vec![],
-                tabs: StdMutex::new(vec![(
-                    "handle-1".to_string(),
-                    page.final_url.clone(),
-                    page.page_title.clone(),
-                )]),
+                tabs: StdMutex::new(FakeBrowserTabState {
+                    tabs: {
+                        let mut tabs = vec![FakeTab {
+                            handle: "handle-1".to_string(),
+                            url: page.final_url.clone(),
+                            title: page.page_title.clone(),
+                        }];
+                        tabs.extend(page.extra_tabs.clone());
+                        tabs
+                    },
+                    active_handle: Some("handle-1".to_string()),
+                }),
             });
 
             Ok(BackendOpenResult {
@@ -1540,6 +1647,82 @@ mod tests {
         let second_summary = manager.get_dom_summary(&second.session_id).await.unwrap();
         assert_eq!(first_text, "Example text [#hero]");
         assert_eq!(second_summary, "Org text");
+    }
+
+    #[tokio::test]
+    async fn manager_close_active_tab_updates_session_metadata() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let new_tab = manager
+            .new_tab(&opened.session_id, "https://example.org")
+            .await
+            .unwrap();
+        manager
+            .switch_tab(&opened.session_id, &new_tab.tab_id)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            manager.close_tab(&opened.session_id, &new_tab.tab_id),
+        )
+        .await
+        .expect("close_tab should not deadlock")
+        .unwrap();
+
+        let session = manager.session(&opened.session_id).await.unwrap();
+        assert_eq!(session.current_url, "https://example.com");
+        assert_eq!(session.page_title, "Example");
+
+        let tabs = manager.list_tabs(&opened.session_id).await.unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert!(tabs[0].active);
+        assert_eq!(tabs[0].url, "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn manager_list_tabs_returns_ids_that_can_be_switched_to() {
+        let manager = ChromeManager::new_for_test(Arc::new(
+            FakeBrowserBackend::default().with_page_with_extra_tabs(
+                "https://example.com",
+                "https://example.com",
+                "Example",
+                vec![],
+                "Example text",
+                vec![FakeTab {
+                    handle: "popup-1".to_string(),
+                    url: "https://example.org/popup".to_string(),
+                    title: "Popup".to_string(),
+                }],
+            ),
+        ));
+
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let tabs = manager.list_tabs(&opened.session_id).await.unwrap();
+        assert_eq!(tabs.len(), 2);
+        let popup = tabs
+            .iter()
+            .find(|tab| tab.url == "https://example.org/popup")
+            .expect("popup tab should be listed");
+
+        let metadata = manager
+            .switch_tab(&opened.session_id, &popup.tab_id)
+            .await
+            .unwrap();
+        assert_eq!(metadata.final_url, "https://example.org/popup");
+        assert_eq!(metadata.page_title, "Popup");
     }
 
     #[tokio::test]

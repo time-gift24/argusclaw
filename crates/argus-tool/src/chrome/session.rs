@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,10 +39,15 @@ pub trait BrowserSession: Send + Sync {
 
 struct TabEntry {
     window_handle: String,
-    #[expect(dead_code, reason = "reserved for future use in tab listing")]
     url: String,
-    #[expect(dead_code, reason = "reserved for future use in tab listing")]
     title: String,
+}
+
+#[derive(Default)]
+struct TabState {
+    tabs: HashMap<String, TabEntry>,
+    handle_to_tab_id: HashMap<String, String>,
+    active_tab_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -51,9 +56,7 @@ pub struct ChromeSession {
     pub current_url: String,
     pub page_title: String,
     interaction: Arc<dyn BrowserSession>,
-    tabs: Arc<Mutex<HashMap<String, TabEntry>>>,
-    handle_to_tab_id: Arc<Mutex<HashMap<String, String>>>,
-    active_tab_id: Arc<Mutex<Option<String>>>,
+    tab_state: Arc<Mutex<TabState>>,
     next_tab_counter: Arc<AtomicU64>,
 }
 
@@ -80,9 +83,7 @@ impl ChromeSession {
             current_url,
             page_title,
             interaction,
-            tabs: Arc::new(Mutex::new(HashMap::new())),
-            handle_to_tab_id: Arc::new(Mutex::new(HashMap::new())),
-            active_tab_id: Arc::new(Mutex::new(None)),
+            tab_state: Arc::new(Mutex::new(TabState::default())),
             next_tab_counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -98,20 +99,14 @@ impl ChromeSession {
     }
 
     pub async fn register_initial_tab(&self, window_handle: String) {
-        let tab_id = self.allocate_tab_id();
-        let mut tabs = self.tabs.lock().await;
-        let mut handle_map = self.handle_to_tab_id.lock().await;
-        let mut active = self.active_tab_id.lock().await;
-        tabs.insert(
-            tab_id.clone(),
-            TabEntry {
-                window_handle: window_handle.clone(),
-                url: self.current_url.clone(),
-                title: self.page_title.clone(),
-            },
+        let mut state = self.tab_state.lock().await;
+        let tab_id = self.ensure_tab_for_window(
+            &mut state,
+            window_handle,
+            self.current_url.clone(),
+            self.page_title.clone(),
         );
-        handle_map.insert(window_handle, tab_id.clone());
-        *active = Some(tab_id);
+        state.active_tab_id = Some(tab_id);
     }
 
     pub async fn create_new_tab(
@@ -120,21 +115,17 @@ impl ChromeSession {
     ) -> Result<super::models::NewTabResult, ChromeToolError> {
         let (window_handle, metadata) = self.interaction.create_new_tab(url).await?;
         let tab_id = self.allocate_tab_id();
-        {
-            let mut tabs = self.tabs.lock().await;
-            let mut handle_map = self.handle_to_tab_id.lock().await;
-            let mut active = self.active_tab_id.lock().await;
-            tabs.insert(
-                tab_id.clone(),
-                TabEntry {
-                    window_handle: window_handle.clone(),
-                    url: metadata.final_url.clone(),
-                    title: metadata.page_title.clone(),
-                },
-            );
-            handle_map.insert(window_handle, tab_id.clone());
-            *active = Some(tab_id.clone());
-        }
+        let mut state = self.tab_state.lock().await;
+        state.tabs.insert(
+            tab_id.clone(),
+            TabEntry {
+                window_handle: window_handle.clone(),
+                url: metadata.final_url.clone(),
+                title: metadata.page_title.clone(),
+            },
+        );
+        state.handle_to_tab_id.insert(window_handle, tab_id.clone());
+        state.active_tab_id = Some(tab_id.clone());
         Ok(super::models::NewTabResult {
             tab_id,
             url: metadata.final_url,
@@ -143,103 +134,180 @@ impl ChromeSession {
     }
 
     pub async fn switch_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
-        let tabs = self.tabs.lock().await;
-        let entry = tabs
+        let window_handle = self
+            .tab_state
+            .lock()
+            .await
+            .tabs
             .get(tab_id)
+            .map(|entry| entry.window_handle.clone())
             .ok_or_else(|| ChromeToolError::TabNotFound {
                 tab_id: tab_id.to_string(),
             })?;
-        let window_handle = entry.window_handle.clone();
-        drop(tabs);
 
         let metadata = self.interaction.switch_to_window(&window_handle).await?;
         {
-            let mut active = self.active_tab_id.lock().await;
-            *active = Some(tab_id.to_string());
+            let mut state = self.tab_state.lock().await;
+            if let Some(entry) = state.tabs.get_mut(tab_id) {
+                entry.url = metadata.final_url.clone();
+                entry.title = metadata.page_title.clone();
+            }
+            state.active_tab_id = Some(tab_id.to_string());
         }
         Ok(metadata)
     }
 
-    pub async fn close_tab(&self, tab_id: &str) -> Result<(), ChromeToolError> {
-        let tabs = self.tabs.lock().await;
-        if tabs.len() <= 1 {
-            return Err(ChromeToolError::CannotCloseLastTab {
-                session_id: self.session_id.clone(),
-            });
-        }
-        let entry = tabs
-            .get(tab_id)
-            .ok_or_else(|| ChromeToolError::TabNotFound {
-                tab_id: tab_id.to_string(),
-            })?;
-        let window_handle = entry.window_handle.clone();
-        let is_active = self
-            .active_tab_id
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|active| active == tab_id);
-        drop(tabs);
+    pub async fn close_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
+        let (window_handle, was_active, previous_active_handle) = {
+            let state = self.tab_state.lock().await;
+            if state.tabs.len() <= 1 {
+                return Err(ChromeToolError::CannotCloseLastTab {
+                    session_id: self.session_id.clone(),
+                });
+            }
+            let entry = state
+                .tabs
+                .get(tab_id)
+                .ok_or_else(|| ChromeToolError::TabNotFound {
+                    tab_id: tab_id.to_string(),
+                })?;
+            let previous_active_handle = state
+                .active_tab_id
+                .as_deref()
+                .and_then(|active_id| state.tabs.get(active_id))
+                .map(|entry| entry.window_handle.clone());
+            (
+                entry.window_handle.clone(),
+                state.active_tab_id.as_deref() == Some(tab_id),
+                previous_active_handle,
+            )
+        };
 
-        // Close the target tab — WebDriver only closes the currently focused window
         self.interaction.switch_to_window(&window_handle).await?;
         self.interaction.close_current_window().await?;
 
-        // After closing, WebDriver shifts focus to a remaining window.
-        // If we closed a background tab, switch back to the previously active one.
-        if !is_active {
-            let tabs = self.tabs.lock().await;
-            if let Some(active_id) = self.active_tab_id.lock().await.as_ref()
-                && let Some(active_entry) = tabs.get(active_id)
-            {
-                self.interaction
-                    .switch_to_window(&active_entry.window_handle)
-                    .await?;
-            }
+        if !was_active && let Some(previous_active_handle) = previous_active_handle.as_deref() {
+            self.interaction
+                .switch_to_window(previous_active_handle)
+                .await?;
         }
 
-        // Update bookkeeping: remove the closed tab and fix up active_tab_id
-        {
-            let mut tabs = self.tabs.lock().await;
-            let mut handle_map = self.handle_to_tab_id.lock().await;
-            if let Some(removed) = tabs.remove(tab_id) {
-                handle_map.remove(&removed.window_handle);
-            }
-            if is_active {
-                // Sync active_tab_id with the window WebDriver actually focused
-                if let Ok(actual_handle) = self.interaction.current_window_handle().await {
-                    let handle_map = self.handle_to_tab_id.lock().await;
-                    let mut active = self.active_tab_id.lock().await;
-                    *active = handle_map.get(&actual_handle).cloned();
-                } else {
-                    let mut active = self.active_tab_id.lock().await;
-                    *active = tabs.keys().next().cloned();
-                }
-            }
-        }
+        let active_window_handle = self.interaction.current_window_handle().await?;
+        let metadata = self
+            .interaction
+            .switch_to_window(&active_window_handle)
+            .await?;
 
-        Ok(())
+        let mut state = self.tab_state.lock().await;
+        self.remove_tab(&mut state, tab_id);
+        let active_tab_id = self.ensure_tab_for_window(
+            &mut state,
+            active_window_handle,
+            metadata.final_url.clone(),
+            metadata.page_title.clone(),
+        );
+        state.active_tab_id = Some(active_tab_id);
+        Ok(metadata)
     }
 
     pub async fn list_tabs(&self) -> Result<Vec<super::models::TabInfo>, ChromeToolError> {
         let windows = self.interaction.list_windows().await?;
-        let active_id = self.active_tab_id.lock().await;
-        let handle_map = self.handle_to_tab_id.lock().await;
+        let active_window_handle = self.interaction.current_window_handle().await.ok();
+
+        let mut state = self.tab_state.lock().await;
+        self.reconcile_windows(&mut state, &windows);
+
+        if let Some(active_window_handle) = active_window_handle
+            && let Some(active_tab_id) = state.handle_to_tab_id.get(&active_window_handle).cloned()
+        {
+            state.active_tab_id = Some(active_tab_id);
+        }
+
+        let active_tab_id = state.active_tab_id.clone();
         let mut result = Vec::with_capacity(windows.len());
-        for (handle, url, title) in &windows {
-            let tab_id = handle_map
-                .get(handle)
+        for (handle, url, title) in windows {
+            let tab_id = state
+                .handle_to_tab_id
+                .get(&handle)
                 .cloned()
-                .unwrap_or_else(|| handle.clone());
-            let active = active_id.as_ref() == Some(&tab_id);
+                .ok_or_else(|| ChromeToolError::TabOperationFailed {
+                    reason: format!("missing tab mapping for window '{handle}'"),
+                })?;
             result.push(super::models::TabInfo {
+                active: active_tab_id.as_ref() == Some(&tab_id),
                 tab_id,
-                url: url.clone(),
-                title: title.clone(),
-                active,
+                url,
+                title,
             });
         }
         Ok(result)
+    }
+
+    fn ensure_tab_for_window(
+        &self,
+        state: &mut TabState,
+        window_handle: String,
+        url: String,
+        title: String,
+    ) -> String {
+        if let Some(tab_id) = state.handle_to_tab_id.get(&window_handle).cloned() {
+            state.tabs.insert(
+                tab_id.clone(),
+                TabEntry {
+                    window_handle,
+                    url,
+                    title,
+                },
+            );
+            return tab_id;
+        }
+
+        let tab_id = self.allocate_tab_id();
+        state.tabs.insert(
+            tab_id.clone(),
+            TabEntry {
+                window_handle: window_handle.clone(),
+                url,
+                title,
+            },
+        );
+        state.handle_to_tab_id.insert(window_handle, tab_id.clone());
+        tab_id
+    }
+
+    fn reconcile_windows(&self, state: &mut TabState, windows: &[(String, String, String)]) {
+        let live_handles: HashSet<&str> = windows
+            .iter()
+            .map(|(handle, _, _)| handle.as_str())
+            .collect();
+        let removed_handles: Vec<String> = state
+            .handle_to_tab_id
+            .keys()
+            .filter(|handle| !live_handles.contains(handle.as_str()))
+            .cloned()
+            .collect();
+
+        for handle in removed_handles {
+            if let Some(tab_id) = state.handle_to_tab_id.remove(&handle) {
+                state.tabs.remove(&tab_id);
+                if state.active_tab_id.as_ref() == Some(&tab_id) {
+                    state.active_tab_id = None;
+                }
+            }
+        }
+
+        for (handle, url, title) in windows {
+            self.ensure_tab_for_window(state, handle.clone(), url.clone(), title.clone());
+        }
+    }
+
+    fn remove_tab(&self, state: &mut TabState, tab_id: &str) {
+        if let Some(removed) = state.tabs.remove(tab_id) {
+            state.handle_to_tab_id.remove(&removed.window_handle);
+        }
+        if state.active_tab_id.as_deref() == Some(tab_id) {
+            state.active_tab_id = None;
+        }
     }
 
     fn allocate_tab_id(&self) -> String {
