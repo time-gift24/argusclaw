@@ -1248,6 +1248,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }));
         break;
 
+      case "notice":
+        if (payload.level === "warning" || payload.level === "error") {
+          set({ errorMessage: payload.message });
+        }
+        break;
+
       case "turn_failed":
         set((store) => ({
           errorMessage: payload.error,
