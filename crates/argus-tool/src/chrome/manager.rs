@@ -428,11 +428,22 @@ impl ChromeManager {
     pub async fn get_cookies(
         &self,
         session_id: &str,
+        domain: Option<&str>,
     ) -> Result<Vec<CookieSummary>, ChromeToolError> {
-        self.session_interaction(session_id)
+        let cookies = self
+            .session_interaction(session_id)
             .await?
             .get_cookies()
-            .await
+            .await?;
+
+        let Some(domain) = domain.and_then(normalize_cookie_domain) else {
+            return Ok(cookies);
+        };
+
+        Ok(cookies
+            .into_iter()
+            .filter(|cookie| cookie_matches_domain(cookie.domain.as_deref(), &domain))
+            .collect())
     }
 
     pub async fn new_tab(
@@ -514,6 +525,23 @@ impl ChromeManager {
         ChromeToolError::SessionNotFound {
             session_id: session_id.to_string(),
         }
+    }
+}
+
+fn cookie_matches_domain(cookie_domain: Option<&str>, requested_domain: &str) -> bool {
+    let Some(cookie_domain) = cookie_domain.and_then(normalize_cookie_domain) else {
+        return false;
+    };
+
+    requested_domain == cookie_domain || requested_domain.ends_with(&format!(".{cookie_domain}"))
+}
+
+fn normalize_cookie_domain(domain: &str) -> Option<String> {
+    let normalized = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
     }
 }
 

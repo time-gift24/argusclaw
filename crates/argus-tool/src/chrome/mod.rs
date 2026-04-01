@@ -112,6 +112,43 @@ mod tests {
     }
 
     #[test]
+    fn open_and_navigate_reject_stray_tab_fields() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "open",
+            "url": "https://example.com",
+            "text": "hello",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "open",
+            "url": "https://example.com",
+            "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "session_id": "session-1",
+            "url": "https://example.com",
+            "text": "hello",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "session_id": "session-1",
+            "url": "https://example.com",
+            "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
     fn click_requires_session_id_and_selector() {
         // Missing session_id
         let err = ChromeToolArgs::validate(json!({
@@ -153,6 +190,24 @@ mod tests {
             "action": "wait",
             "session_id": "session-1",
             "selector": "#hero"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
+    fn install_and_wait_reject_tab_id_argument() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "install",
+            "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "wait",
+            "session_id": "session-1",
+            "tab_id": "tab-1",
         }))
         .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
@@ -342,6 +397,79 @@ mod tests {
             .await
             .expect("network_requests should succeed");
         assert!(network["requests"].is_array());
+    }
+
+    #[tokio::test]
+    async fn get_cookies_filters_by_domain() {
+        let tool = ChromeTool::new_interactive_with_backend(Arc::new(
+            FakeChromeBackend::default().with_page_and_cookies(
+                "https://www.example.com",
+                "https://www.example.com",
+                "Example",
+                vec![],
+                "Visible page text",
+                vec![
+                    CookieSummary {
+                        name: "shared".to_string(),
+                        value: "1".to_string(),
+                        domain: Some(".example.com".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                    CookieSummary {
+                        name: "host".to_string(),
+                        value: "2".to_string(),
+                        domain: Some("www.example.com".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                    CookieSummary {
+                        name: "api".to_string(),
+                        value: "3".to_string(),
+                        domain: Some("api.example.com".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                    CookieSummary {
+                        name: "other".to_string(),
+                        value: "4".to_string(),
+                        domain: Some("other.example.net".to_string()),
+                        path: Some("/".to_string()),
+                    },
+                ],
+            ),
+        ));
+
+        let open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://www.example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("open should succeed");
+        let session_id = open["session_id"]
+            .as_str()
+            .expect("open should return a session id");
+
+        let cookies = tool
+            .execute(
+                json!({
+                    "action": "get_cookies",
+                    "session_id": session_id,
+                    "domain": "www.example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("get_cookies should succeed");
+
+        let names: Vec<&str> = cookies["cookies"]
+            .as_array()
+            .expect("cookies should be an array")
+            .iter()
+            .filter_map(|cookie| cookie["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["shared", "host"]);
     }
 
     #[tokio::test]
@@ -771,6 +899,30 @@ mod tests {
                     links,
                     text: text.into(),
                     network_requests: Vec::new(),
+                    cookies: Vec::new(),
+                },
+            );
+            self
+        }
+
+        fn with_page_and_cookies(
+            mut self,
+            requested_url: impl Into<String>,
+            final_url: impl Into<String>,
+            page_title: impl Into<String>,
+            links: Vec<LinkSummary>,
+            text: impl Into<String>,
+            cookies: Vec<CookieSummary>,
+        ) -> Self {
+            self.pages.insert(
+                requested_url.into(),
+                FakePage {
+                    final_url: final_url.into(),
+                    page_title: page_title.into(),
+                    links,
+                    text: text.into(),
+                    network_requests: Vec::new(),
+                    cookies,
                 },
             );
             self
@@ -784,6 +936,7 @@ mod tests {
         links: Vec<LinkSummary>,
         text: String,
         network_requests: Vec<NetworkRequestSummary>,
+        cookies: Vec<CookieSummary>,
     }
 
     #[derive(Debug)]
@@ -925,7 +1078,7 @@ mod tests {
                 text: page.text.clone(),
                 network_requests: page.network_requests.clone(),
                 url: page.final_url.clone(),
-                cookies: vec![],
+                cookies: page.cookies.clone(),
                 tabs: StdMutex::new(vec![FakeTab {
                     handle: "tab-1".to_string(),
                     url: page.final_url.clone(),

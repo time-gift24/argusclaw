@@ -184,12 +184,14 @@ impl ChromeTool {
             }
         });
 
-        if interactive
-            && let Some(map) = properties.as_object_mut()
-        {
+        if interactive && let Some(map) = properties.as_object_mut() {
             map.insert(
                 "text".to_string(),
                 json!({"type": "string", "description": "Text to type into element (for type action)"}),
+            );
+            map.insert(
+                "domain".to_string(),
+                json!({"type": "string", "description": "Optional cookie domain filter for get_cookies"}),
             );
         }
 
@@ -416,7 +418,7 @@ impl NamedTool for ChromeTool {
                 let session_id = required_session_id(&args)?;
                 let cookies = self
                     .manager
-                    .get_cookies(&session_id)
+                    .get_cookies(&session_id, args.domain.as_deref())
                     .await
                     .map_err(Self::map_error)?;
                 Ok(json!({
