@@ -182,6 +182,56 @@ impl SessionSchedulerBackend {
             .collect()
     }
 
+    fn mailbox_ready_child_thread_ids(&self, thread_id: ThreadId) -> Vec<ThreadId> {
+        let thread_pool = self.thread_pool();
+        self.active_child_thread_ids(thread_id)
+            .into_iter()
+            .filter(|child_thread_id| thread_pool.loaded_thread(child_thread_id).is_some())
+            .collect()
+    }
+
+    fn is_thread_target_reachable(
+        &self,
+        source_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> bool {
+        if source_thread_id == target_thread_id {
+            return true;
+        }
+
+        let thread_pool = self.thread_pool();
+        if thread_pool.parent_thread_id(&source_thread_id) == Some(target_thread_id) {
+            return true;
+        }
+
+        thread_pool
+            .child_thread_ids(&source_thread_id)
+            .into_iter()
+            .any(|child_thread_id| child_thread_id == target_thread_id)
+    }
+
+    fn validate_mailbox_target_ready(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> std::result::Result<(), ToolError> {
+        let thread_pool = self.thread_pool();
+        let summary = thread_pool
+            .runtime_summary(&target_thread_id)
+            .ok_or_else(|| {
+                Self::scheduler_error(format!("thread {target_thread_id} is not registered"))
+            })?;
+
+        if summary.runtime.kind == ThreadPoolRuntimeKind::Job
+            && thread_pool.loaded_thread(&target_thread_id).is_none()
+        {
+            return Err(Self::scheduler_error(format!(
+                "thread {target_thread_id} is not ready to receive mailbox messages"
+            )));
+        }
+
+        Ok(())
+    }
+
     async fn resolve_agent_name_target(
         &self,
         thread_id: ThreadId,
@@ -190,7 +240,7 @@ impl SessionSchedulerBackend {
         let thread_pool = self.thread_pool();
         let mut matches = Vec::new();
 
-        for child_thread_id in self.active_child_thread_ids(thread_id) {
+        for child_thread_id in self.mailbox_ready_child_thread_ids(thread_id) {
             let Some(thread) = thread_pool.loaded_thread(&child_thread_id) else {
                 continue;
             };
@@ -228,6 +278,11 @@ impl SessionSchedulerBackend {
             let target = thread_pool.get_thread_binding(job_id).ok_or_else(|| {
                 Self::scheduler_error(format!("job {job_id} is not bound to a thread"))
             })?;
+            self.validate_mailbox_target_ready(target).map_err(|_| {
+                Self::scheduler_error(format!(
+                    "job {job_id} is not ready to receive mailbox messages"
+                ))
+            })?;
             return Ok(vec![target]);
         }
 
@@ -235,11 +290,12 @@ impl SessionSchedulerBackend {
             let target = ThreadId::parse(thread_id_str).map_err(|error| {
                 Self::scheduler_error(format!("invalid thread target {thread_id_str}: {error}"))
             })?;
-            if thread_pool.runtime_summary(&target).is_none() {
+            if !self.is_thread_target_reachable(thread_id, target) {
                 return Err(Self::scheduler_error(format!(
-                    "thread {target} is not registered"
+                    "thread {target} is not reachable from the current thread"
                 )));
             }
+            self.validate_mailbox_target_ready(target)?;
             return Ok(vec![target]);
         }
 
@@ -247,14 +303,15 @@ impl SessionSchedulerBackend {
             let parent = thread_pool.parent_thread_id(&thread_id).ok_or_else(|| {
                 Self::scheduler_error("current thread does not have a direct parent")
             })?;
+            self.validate_mailbox_target_ready(parent)?;
             return Ok(vec![parent]);
         }
 
         if to == "*" {
-            let children = self.active_child_thread_ids(thread_id);
+            let children = self.mailbox_ready_child_thread_ids(thread_id);
             if children.is_empty() {
                 return Err(Self::scheduler_error(
-                    "current thread does not have any active direct child jobs",
+                    "current thread does not have any mailbox-ready direct child jobs",
                 ));
             }
             return Ok(children);
@@ -1386,7 +1443,9 @@ mod tests {
     };
     use argus_repository::{migrate, ArgusSqlite};
     use argus_template::TemplateManager;
-    use argus_tool::{CheckInboxRequest, MarkReadRequest, SchedulerBackend, ToolManager};
+    use argus_tool::{
+        CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
+    };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
@@ -2181,7 +2240,14 @@ mod tests {
     async fn scheduler_backend_resolves_parent_route_to_direct_parent_thread() {
         let (manager, backend) =
             test_session_manager_with_provider_delay(Duration::from_millis(5)).await;
-        let parent_thread_id = ThreadId::new();
+        let session_id = manager
+            .create("parent-route".to_string())
+            .await
+            .expect("session should create");
+        let parent_thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .await
+            .expect("parent thread should create");
         let job_id = "job-parent-route".to_string();
 
         backend
@@ -2291,6 +2357,92 @@ mod tests {
             .await
             .expect("check_inbox should succeed after mark_read");
         assert!(unread.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduler_backend_rejects_thread_route_outside_direct_topology() {
+        let (manager, backend) =
+            test_session_manager_with_provider_delay(Duration::from_millis(5)).await;
+        let session_a = manager
+            .create("mailbox-topology-a".to_string())
+            .await
+            .expect("first session should create");
+        let thread_a = manager
+            .create_thread(session_a, AgentId::new(7), None, None, None)
+            .await
+            .expect("first thread should create");
+        let session_b = manager
+            .create("mailbox-topology-b".to_string())
+            .await
+            .expect("second session should create");
+        let thread_b = manager
+            .create_thread(session_b, AgentId::new(7), None, None, None)
+            .await
+            .expect("second thread should create");
+
+        let error = backend
+            .send_message(SendMessageRequest {
+                thread_id: thread_a,
+                to: format!("thread:{thread_b}"),
+                message: "hello from elsewhere".to_string(),
+                summary: None,
+            })
+            .await
+            .expect_err("unrelated thread route should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("not reachable from the current thread"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_backend_rejects_job_route_until_child_runtime_is_loaded() {
+        let (manager, backend) =
+            test_session_manager_with_provider_delay(Duration::from_millis(150)).await;
+        let session_id = manager
+            .create("mailbox-job-route".to_string())
+            .await
+            .expect("session should create");
+        let parent_thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .await
+            .expect("parent thread should create");
+        let job_id = "job-mailbox-unloaded-child".to_string();
+
+        backend
+            .job_manager
+            .record_dispatched_job(parent_thread_id, job_id.clone());
+        manager
+            .thread_pool
+            .enqueue_job(argus_job::types::ThreadPoolJobRequest {
+                originating_thread_id: parent_thread_id,
+                job_id: job_id.clone(),
+                agent_id: AgentId::new(7),
+                prompt: "not started yet".to_string(),
+                context: None,
+            })
+            .await
+            .expect("child job should enqueue");
+
+        let error = backend
+            .send_message(SendMessageRequest {
+                thread_id: parent_thread_id,
+                to: format!("job:{job_id}"),
+                message: "hello queued child".to_string(),
+                summary: None,
+            })
+            .await
+            .expect_err("queued child should not accept mailbox traffic yet");
+
+        assert!(
+            error
+                .to_string()
+                .contains("not ready to receive mailbox messages"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

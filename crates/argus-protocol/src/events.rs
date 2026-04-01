@@ -665,6 +665,13 @@ pub enum ThreadEvent {
         /// Error message.
         error: String,
     },
+    /// Turn output has been applied to authoritative thread state.
+    TurnSettled {
+        /// Thread ID.
+        thread_id: String,
+        /// Turn number.
+        turn_number: u32,
+    },
     /// Thread entered idle state.
     Idle {
         /// Thread ID.

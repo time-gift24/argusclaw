@@ -101,6 +101,15 @@ impl ThreadEventEnvelope {
                 turn_number: Some(turn_number),
                 payload: ThreadEventPayload::TurnFailed { error },
             }),
+            ThreadEvent::TurnSettled {
+                thread_id,
+                turn_number,
+            } => Some(Self {
+                session_id,
+                thread_id,
+                turn_number: Some(turn_number),
+                payload: ThreadEventPayload::TurnSettled,
+            }),
             ThreadEvent::Idle { thread_id } => Some(Self {
                 session_id,
                 thread_id,
@@ -291,6 +300,7 @@ pub enum ThreadEventPayload {
     TurnFailed {
         error: String,
     },
+    TurnSettled,
     Idle,
     Compacted {
         new_token_count: u32,

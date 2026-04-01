@@ -257,6 +257,12 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                 }
                 Some(result) = turn_done_rx.recv() => {
                     active_turn_cancellation = None;
+                    let settled_turn_number = match runtime.state() {
+                        ThreadRuntimeState::Running { turn_number }
+                        | ThreadRuntimeState::WaitingForApproval { turn_number }
+                        | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
+                        ThreadRuntimeState::Idle => None,
+                    };
                     let finish_result = {
                         let mut guard = thread.write().await;
                         guard.finish_turn(result)
@@ -269,6 +275,17 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     {
                         let mut guard = mailbox.lock().await;
                         guard.clear_interrupts_for_idle_handoff();
+                    }
+                    if let Some(turn_number) = settled_turn_number {
+                        let thread_id = {
+                            let guard = thread.read().await;
+                            guard.id().inner().to_string()
+                        };
+                        let guard = thread.read().await;
+                        guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
+                            thread_id,
+                            turn_number,
+                        });
                     }
 
                     if shutdown_requested {
@@ -484,6 +501,13 @@ async fn process_runtime_action(
                         };
                         let mut mailbox = mailbox.lock().await;
                         next_action = runtime.finish_active_turn(&mut mailbox);
+                        {
+                            let guard = thread.read().await;
+                            guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
+                                thread_id: thread_id.clone(),
+                                turn_number,
+                            });
+                        }
                         if matches!(next_action, ThreadRuntimeAction::Noop) {
                             let guard = thread.read().await;
                             guard

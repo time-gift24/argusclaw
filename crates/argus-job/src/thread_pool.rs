@@ -794,14 +794,6 @@ impl ThreadPool {
         });
 
         let cancellation_for_wait = cancellation.clone();
-        let cancellation_thread = Arc::clone(&thread);
-        let cancellation_forwarder = tokio::spawn(async move {
-            cancellation.cancelled().await;
-            let guard = cancellation_thread.read().await;
-            let _ = guard.send_control_event(ThreadControlEvent::UserInterrupt {
-                content: "cancel active job".to_string(),
-            });
-        });
 
         let result = if request.prompt == "__panic_thread_pool_execute_turn__" {
             Self::failure_result(
@@ -830,30 +822,52 @@ impl ThreadPool {
                 summary: request.context.as_ref().map(|context| context.to_string()),
             };
 
-            match self
-                .deliver_mailbox_message(execution_thread_id, task_assignment)
-                .await
-            {
-                Ok(()) => {
-                    self.await_job_turn_result(
-                        execution_thread_id,
-                        &thread,
-                        runtime_rx,
-                        request.job_id.clone(),
-                        cancellation_for_wait,
-                    )
-                    .await
-                }
-                Err(error) => Self::failure_result(
+            if cancellation_for_wait.is_cancelled() {
+                Self::failure_result(
                     fallback_job_id,
                     fallback_agent_id,
                     fallback_display_name,
                     String::new(),
-                    error.to_string(),
-                ),
+                    "Turn cancelled".to_string(),
+                )
+            } else {
+                match self
+                    .deliver_mailbox_message(execution_thread_id, task_assignment)
+                    .await
+                {
+                    Ok(()) => {
+                        let cancellation_thread = Arc::clone(&thread);
+                        let cancellation_signal = cancellation.clone();
+                        let cancellation_forwarder = tokio::spawn(async move {
+                            cancellation_signal.cancelled().await;
+                            let guard = cancellation_thread.read().await;
+                            let _ = guard.send_control_event(ThreadControlEvent::UserInterrupt {
+                                content: "cancel active job".to_string(),
+                            });
+                        });
+
+                        let result = self
+                            .await_job_turn_result(
+                                execution_thread_id,
+                                &thread,
+                                runtime_rx,
+                                request.job_id.clone(),
+                                cancellation_for_wait,
+                            )
+                            .await;
+                        cancellation_forwarder.abort();
+                        result
+                    }
+                    Err(error) => Self::failure_result(
+                        fallback_job_id,
+                        fallback_agent_id,
+                        fallback_display_name,
+                        String::new(),
+                        error.to_string(),
+                    ),
+                }
             }
         };
-        cancellation_forwarder.abort();
         self.persist_thread_stats(&execution_thread_id, &thread)
             .await;
         self.persist_job_completion(&request.job_id, &result, Some(started_at.as_str()))
@@ -1518,27 +1532,38 @@ impl ThreadPool {
         let mut token_usage = None;
         let mut failure = None;
         let thread_id_str = execution_thread_id.inner().to_string();
-        let mut observed_terminal_turn = false;
+        let mut terminal_turn_number = None;
 
         loop {
             match runtime_rx.recv().await {
                 Ok(ThreadEvent::TurnCompleted {
                     thread_id,
+                    turn_number,
                     token_usage: completed_usage,
                     ..
                 }) if thread_id == thread_id_str => {
                     token_usage = Some(completed_usage);
-                    observed_terminal_turn = true;
+                    terminal_turn_number = Some(turn_number);
                 }
                 Ok(ThreadEvent::TurnFailed {
-                    thread_id, error, ..
+                    thread_id,
+                    turn_number,
+                    error,
                 }) if thread_id == thread_id_str => {
                     failure = Some(error);
-                    observed_terminal_turn = true;
+                    terminal_turn_number = Some(turn_number);
+                }
+                Ok(ThreadEvent::TurnSettled {
+                    thread_id,
+                    turn_number,
+                }) if thread_id == thread_id_str => {
+                    if terminal_turn_number == Some(turn_number) {
+                        break;
+                    }
                 }
                 Ok(ThreadEvent::Idle { thread_id }) if thread_id == thread_id_str => {
-                    if observed_terminal_turn {
-                        break;
+                    if terminal_turn_number.is_some() {
+                        continue;
                     }
 
                     let message = if cancellation.is_cancelled() {
@@ -3581,6 +3606,59 @@ mod tests {
         let persisted_result = persisted_job.result.expect("job result should persist");
         assert!(persisted_result.success);
         assert_eq!(persisted_result.message, result.message);
+
+        let persisted_thread = ThreadRepository::get_thread(sqlite.as_ref(), &execution_thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread should persist");
+        assert_eq!(persisted_thread.turn_count, 1);
+        assert!(
+            persisted_thread.token_count > 0,
+            "job completion should persist authoritative thread stats"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_job_pre_cancelled_before_assignment_does_not_start_turn() {
+        let provider = Arc::new(CapturingProvider::new(
+            "should never run",
+            Duration::from_millis(100),
+            20,
+        ));
+        let (pool, sqlite, _provider_id) = test_runtime_pool_with_limit(1, provider).await;
+        let request = super::test_request("job-pre-cancelled");
+        let execution_thread_id = pool
+            .enqueue_job(request.clone())
+            .await
+            .expect("enqueue should succeed");
+        let (pipe_tx, _pipe_rx) = broadcast::channel(32);
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let cancellation = TurnCancellation::new();
+        cancellation.cancel();
+
+        let result = pool
+            .execute_job(
+                request,
+                execution_thread_id,
+                pipe_tx,
+                control_tx,
+                cancellation,
+            )
+            .await;
+
+        assert!(!result.success);
+        assert!(
+            result.message.to_lowercase().contains("cancel"),
+            "unexpected result message: {}",
+            result.message
+        );
+
+        let persisted_thread = ThreadRepository::get_thread(sqlite.as_ref(), &execution_thread_id)
+            .await
+            .expect("thread lookup should succeed")
+            .expect("thread should persist");
+        assert_eq!(persisted_thread.turn_count, 0);
+        assert_eq!(persisted_thread.token_count, 0);
     }
 
     #[tokio::test]

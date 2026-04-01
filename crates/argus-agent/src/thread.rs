@@ -1086,6 +1086,33 @@ mod tests {
         .expect("thread should emit idle");
     }
 
+    async fn wait_for_turn_settled_events(
+        thread: &Arc<tokio::sync::RwLock<Thread>>,
+        expected_count: usize,
+    ) {
+        let mut rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+        let mut settled_count = 0usize;
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ThreadEvent::TurnSettled { .. }) => {
+                        settled_count += 1;
+                        if settled_count >= expected_count {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("thread should emit turn_settled");
+    }
+
     #[test]
     fn thread_builder_requires_provider() {
         let compactor: Arc<dyn Compactor> = Arc::new(KeepRecentCompactor::with_defaults());
@@ -1277,6 +1304,30 @@ mod tests {
         assert_eq!(captured.len(), 2);
         assert_eq!(captured[0], "first queued");
         assert_eq!(captured[1], "second queued");
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_emits_turn_settled_after_completed_turn() {
+        let provider = Arc::new(SequencedProvider::new(
+            Duration::from_millis(20),
+            vec![ResponsePlan::Ok("settled reply".to_string())],
+        ));
+        let thread = build_test_thread(provider);
+
+        Thread::spawn_runtime_actor(Arc::clone(&thread));
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("settle this turn".to_string(), None)
+                .expect("message should queue");
+        }
+
+        wait_for_turn_settled_events(&thread, 1).await;
+
+        let guard = thread.read().await;
+        assert_eq!(guard.turn_count(), 1);
+        assert!(guard.token_count() > 0);
     }
 
     #[tokio::test]
