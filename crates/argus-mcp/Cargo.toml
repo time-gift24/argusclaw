@@ -1,0 +1,9 @@
+[package]
+name = "argus-mcp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+argus-protocol = { path = "../argus-protocol" }
+async-trait = { workspace = true }
