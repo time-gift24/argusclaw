@@ -101,7 +101,8 @@ pub enum ThinkingMode {
 }
 
 /// Why the completion finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     Stop,
     Length,
@@ -454,7 +455,8 @@ pub struct CompletionResponse {
 }
 
 /// A delta emitted while streaming a completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LlmStreamEvent {
     /// Incremental reasoning output from the model.
     ReasoningDelta { delta: String },
@@ -481,7 +483,7 @@ pub enum LlmStreamEvent {
 }
 
 /// A delta for a tool call emitted during streaming.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallDelta {
     pub index: usize,
     pub id: Option<String>,
