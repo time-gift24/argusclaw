@@ -297,6 +297,7 @@ pub struct ChatMessagePayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub enum ChatMessageMetadataModePayload {
     CompactionPrompt,
     CompactionSummary,

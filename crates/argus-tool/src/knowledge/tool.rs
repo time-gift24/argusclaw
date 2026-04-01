@@ -3,18 +3,44 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use argus_protocol::knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
+use super::cli::RealCliRunner;
 use super::error::KnowledgeToolError;
 use super::github::{GitHubKnowledgeBackend, ReqwestGitHubTransport};
 use super::indexer::{KnowledgeBackend, KnowledgeIndexer};
 use super::models::{
-    ContentPage, ExploreTreeEntry, GitHubSnapshot, KnowledgeAction, KnowledgeNode,
-    KnowledgeNodeKind, KnowledgeRepoDescriptor, KnowledgeToolArgs,
+    ContentPage, ExploreTreeEntry, GitHubSnapshot, KnowledgeAction, KnowledgeCreatePrArgs,
+    KnowledgeCreatePrResult, KnowledgeNode, KnowledgeNodeKind, KnowledgeRepoDescriptor,
+    KnowledgeToolArgs,
 };
+use super::pr::{CliPrExecutor, KnowledgePrRuntime, KnowledgePrService};
 use super::registry::KnowledgeRepoRegistry;
+
+fn repo_descriptor_from_record(record: &KnowledgeRepoRecord) -> KnowledgeRepoDescriptor {
+    KnowledgeRepoDescriptor {
+        repo_id: record.repo_id.clone(),
+        provider: record.provider.clone(),
+        owner: record.owner.clone(),
+        name: record.name.clone(),
+        default_branch: record.default_branch.clone(),
+        manifest_paths: record.manifest_paths.clone(),
+    }
+}
+
+pub(crate) async fn load_repo_descriptors_from_provider(
+    provider: Arc<dyn KnowledgeRepoProvider>,
+) -> Result<Vec<KnowledgeRepoDescriptor>, KnowledgeToolError> {
+    let records = provider
+        .list_repos(None)
+        .await
+        .map_err(|err| KnowledgeToolError::RequestFailed(err.to_string()))?;
+
+    Ok(records.iter().map(repo_descriptor_from_record).collect())
+}
 
 #[async_trait]
 pub trait KnowledgeRuntime: Send + Sync {
@@ -38,32 +64,76 @@ pub trait KnowledgeRuntimeBackend: KnowledgeBackend {
     ) -> Result<(String, GitHubSnapshot), KnowledgeToolError>;
 }
 
-pub struct DefaultKnowledgeRuntime<B = GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+pub struct DefaultKnowledgeRuntime<
+    B = GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+    P = KnowledgePrService<CliPrExecutor<RealCliRunner>>,
+> {
     backend: Arc<B>,
     indexer: KnowledgeIndexer<Arc<B>>,
+    pr_runtime: Arc<P>,
+    repo_provider: Option<Arc<dyn KnowledgeRepoProvider>>,
 }
 
-impl DefaultKnowledgeRuntime<GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+impl
+    DefaultKnowledgeRuntime<
+        GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        KnowledgePrService<CliPrExecutor<RealCliRunner>>,
+    >
+{
     #[must_use]
     pub fn new() -> Self {
-        Self::new_with_backend(GitHubKnowledgeBackend::new(
-            KnowledgeRepoRegistry::load_default(),
-            ReqwestGitHubTransport::new(),
-        ))
+        Self::new_with_backend_and_pr_runtime(
+            GitHubKnowledgeBackend::new(
+                KnowledgeRepoRegistry::load_default(),
+                ReqwestGitHubTransport::new(),
+            ),
+            KnowledgePrService::new(),
+            None,
+        )
+    }
+
+    /// Create a runtime with a [`KnowledgeRepoProvider`] for agent-scoped repo filtering.
+    #[must_use]
+    pub fn new_with_provider(
+        backend: GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        pr_runtime: KnowledgePrService<CliPrExecutor<RealCliRunner>>,
+        repo_provider: Arc<dyn KnowledgeRepoProvider>,
+    ) -> Self {
+        Self::new_with_backend_and_pr_runtime(backend, pr_runtime, Some(repo_provider))
     }
 }
 
-impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
+impl<B: KnowledgeRuntimeBackend + 'static>
+    DefaultKnowledgeRuntime<B, KnowledgePrService<CliPrExecutor<RealCliRunner>>>
+{
     #[must_use]
     pub fn new_for_test(backend: B) -> Self {
-        Self::new_with_backend(backend)
+        Self::new_with_backend_and_pr_runtime(backend, KnowledgePrService::new(), None)
+    }
+}
+
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static>
+    DefaultKnowledgeRuntime<B, P>
+{
+    #[must_use]
+    pub fn new_for_test_with_pr_runtime(backend: B, pr_runtime: P) -> Self {
+        Self::new_with_backend_and_pr_runtime(backend, pr_runtime, None)
     }
 
     #[must_use]
-    pub fn new_with_backend(backend: B) -> Self {
+    pub fn new_with_backend_and_pr_runtime(
+        backend: B,
+        pr_runtime: P,
+        repo_provider: Option<Arc<dyn KnowledgeRepoProvider>>,
+    ) -> Self {
         let backend = Arc::new(backend);
         let indexer = KnowledgeIndexer::new(backend.clone());
-        Self { backend, indexer }
+        Self {
+            backend,
+            indexer,
+            pr_runtime: Arc::new(pr_runtime),
+            repo_provider,
+        }
     }
 
     async fn resolve_snapshot_id(&self, args: &KnowledgeToolArgs) -> Result<String, ToolError> {
@@ -131,6 +201,18 @@ impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
         })
     }
 
+    fn render_repo_record(repo: &argus_protocol::knowledge::KnowledgeRepoRecord) -> Value {
+        json!({
+            "repo_id": repo.repo_id,
+            "provider": repo.provider,
+            "owner": repo.owner,
+            "name": repo.name,
+            "default_branch": repo.default_branch,
+            "manifest_paths": repo.manifest_paths,
+            "workspace": repo.workspace,
+        })
+    }
+
     fn render_tree_entry(entry: &ExploreTreeEntry) -> Value {
         json!({
             "path": entry.path,
@@ -184,35 +266,67 @@ impl<B: KnowledgeRuntimeBackend + 'static> DefaultKnowledgeRuntime<B> {
             }
         })
     }
+
+    fn render_create_pr_result(result: &KnowledgeCreatePrResult) -> Value {
+        json!({
+            "target_repo": result.target_repo,
+            "base_ref": result.base_ref,
+            "branch": result.branch,
+            "commit_sha": result.commit_sha,
+            "pr_url": result.pr_url,
+            "manifest_path": result.manifest_path,
+            "changed_files": result.changed_files,
+            "created_files": result.created_files,
+            "updated_files": result.updated_files,
+            "summary": result.summary,
+        })
+    }
 }
 
-impl Default for DefaultKnowledgeRuntime<GitHubKnowledgeBackend<ReqwestGitHubTransport>> {
+impl Default
+    for DefaultKnowledgeRuntime<
+        GitHubKnowledgeBackend<ReqwestGitHubTransport>,
+        KnowledgePrService<CliPrExecutor<RealCliRunner>>,
+    >
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledgeRuntime<B> {
+impl<B: KnowledgeRuntimeBackend + 'static, P: KnowledgePrRuntime + 'static> KnowledgeRuntime
+    for DefaultKnowledgeRuntime<B, P>
+{
     async fn dispatch(
         &self,
         args: KnowledgeToolArgs,
-        _ctx: Arc<ToolExecutionContext>,
+        ctx: Arc<ToolExecutionContext>,
     ) -> Result<Value, ToolError> {
         match args.action {
             KnowledgeAction::ListRepos => {
-                let repos =
-                    self.backend
-                        .list_repos()
-                        .await
-                        .map_err(|err| ToolError::ExecutionFailed {
+                let repos = if let Some(provider) = &self.repo_provider {
+                    let records = provider.list_repos(ctx.agent_id).await.map_err(|err| {
+                        ToolError::ExecutionFailed {
                             tool_name: "knowledge".to_string(),
                             reason: err.to_string(),
-                        })?;
+                        }
+                    })?;
+                    records
+                        .iter()
+                        .map(Self::render_repo_record)
+                        .collect::<Vec<_>>()
+                } else {
+                    let descs = self.backend.list_repos().await.map_err(|err| {
+                        ToolError::ExecutionFailed {
+                            tool_name: "knowledge".to_string(),
+                            reason: err.to_string(),
+                        }
+                    })?;
+                    descs.iter().map(Self::render_repo).collect::<Vec<_>>()
+                };
 
-                Ok(json!({
-                    "repos": repos.iter().map(Self::render_repo).collect::<Vec<_>>(),
-                }))
+                Ok(json!({ "repos": repos }))
             }
             KnowledgeAction::ResolveSnapshot => {
                 let repo_id =
@@ -348,6 +462,22 @@ impl<B: KnowledgeRuntimeBackend + 'static> KnowledgeRuntime for DefaultKnowledge
                     "results": neighbors.iter().map(Self::render_node).collect::<Vec<_>>(),
                 }))
             }
+            KnowledgeAction::CreateKnowledgePr => {
+                let request = KnowledgeCreatePrArgs::try_from(args).map_err(|err| {
+                    ToolError::ExecutionFailed {
+                        tool_name: "knowledge".to_string(),
+                        reason: err.to_string(),
+                    }
+                })?;
+                let result = self.pr_runtime.create_pr(&request).await.map_err(|err| {
+                    ToolError::ExecutionFailed {
+                        tool_name: "knowledge".to_string(),
+                        reason: err.to_string(),
+                    }
+                })?;
+
+                Ok(Self::render_create_pr_result(&result))
+            }
         }
     }
 }
@@ -363,11 +493,33 @@ impl Default for KnowledgeTool<DefaultKnowledgeRuntime> {
 }
 
 impl KnowledgeTool<DefaultKnowledgeRuntime> {
+    fn new_with_provider_and_repos(
+        provider: Arc<dyn KnowledgeRepoProvider>,
+        repos: Vec<KnowledgeRepoDescriptor>,
+    ) -> Self {
+        let runtime = DefaultKnowledgeRuntime::new_with_provider(
+            GitHubKnowledgeBackend::new(repos, ReqwestGitHubTransport::new()),
+            KnowledgePrService::new(),
+            provider,
+        );
+        Self {
+            runtime: Arc::new(runtime),
+        }
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
             runtime: Arc::new(DefaultKnowledgeRuntime::new()),
         }
+    }
+
+    /// Create a `KnowledgeTool` with agent-scoped repo filtering via a [`KnowledgeRepoProvider`].
+    pub async fn new_with_repo_provider(
+        provider: Arc<dyn KnowledgeRepoProvider>,
+    ) -> Result<Self, KnowledgeToolError> {
+        let repos = load_repo_descriptors_from_provider(provider.clone()).await?;
+        Ok(Self::new_with_provider_and_repos(provider, repos))
     }
 }
 
@@ -392,74 +544,8 @@ impl<R: KnowledgeRuntime> NamedTool for KnowledgeTool<R> {
             description:
                 "Explore GitHub-backed knowledge bases progressively through snapshot, tree, search, and node actions."
                     .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "description": "The knowledge action to run",
-                        "enum": [
-                            "list_repos",
-                            "resolve_snapshot",
-                            "explore_tree",
-                            "search_nodes",
-                            "get_node",
-                            "get_content",
-                            "get_neighbors"
-                        ]
-                    },
-                    "repo_id": {
-                        "type": "string",
-                        "description": "Knowledge repository identifier"
-                    },
-                    "snapshot_id": {
-                        "type": "string",
-                        "description": "Resolved snapshot identifier"
-                    },
-                    "ref": {
-                        "type": "string",
-                        "description": "Git reference to resolve, defaults to the repository default branch"
-                    },
-                    "cursor": {
-                        "type": "string",
-                        "description": "Pagination cursor for bounded content reads"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Repository path scope for tree exploration"
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "Directory exploration depth"
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query for progressive node search"
-                    },
-                    "scope_path": {
-                        "type": "string",
-                        "description": "Optional scope path for search"
-                    },
-                    "node_id": {
-                        "type": "string",
-                        "description": "Knowledge node identifier"
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "Maximum characters to return for content"
-                    },
-                    "relation_types": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Relationship types to include when fetching neighbors"
-                    }
-                },
-                "required": ["action"]
-            }),
+            parameters: serde_json::to_value(schemars::schema_for!(KnowledgeToolArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
         }
     }
 

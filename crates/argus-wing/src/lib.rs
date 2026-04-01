@@ -36,9 +36,9 @@ use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
-    ThreadPoolState,
+    knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId,
+    LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
+    ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, KnowledgeRepoRepository,
@@ -272,7 +272,15 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
-        self.tool_manager.register(Arc::new(KnowledgeTool::new()));
+
+        let knowledge_provider: Arc<dyn KnowledgeRepoProvider> =
+            Arc::new(ArgusSqlite::new(self.pool.clone()));
+        let knowledge_tool = KnowledgeTool::new_with_repo_provider(knowledge_provider)
+            .await
+            .map_err(|e| ArgusError::DatabaseError {
+                reason: e.to_string(),
+            })?;
+        self.tool_manager.register(Arc::new(knowledge_tool));
 
         Ok(())
     }
@@ -790,15 +798,18 @@ mod tests {
     use super::*;
     use argus_protocol::{AgentType, ThinkingConfig};
 
-    fn make_test_wing() -> Arc<ArgusWing> {
+    async fn make_test_wing() -> Arc<ArgusWing> {
         let pool = SqlitePool::connect_lazy("sqlite::memory:")
             .expect("lazy sqlite pool should build for tests");
+        migrate(&pool)
+            .await
+            .expect("test migrations should succeed");
         ArgusWing::with_pool(pool)
     }
 
     #[tokio::test]
     async fn register_default_tools_includes_chrome() {
-        let wing = make_test_wing();
+        let wing = make_test_wing().await;
         wing.register_default_tools()
             .await
             .expect("default tool registration should succeed");
@@ -1854,7 +1865,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_job_surfaces_job_error_instead_of_database_error() {
-        let wing = make_test_wing();
+        let wing = make_test_wing().await;
 
         let error = wing
             .stop_job("missing-job".to_string())

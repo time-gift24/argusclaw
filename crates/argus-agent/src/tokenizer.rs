@@ -32,7 +32,6 @@ fn is_cjk(ch: char) -> bool {
 /// This is intentionally approximate and exists to preserve public API
 /// compatibility for callers that previously depended on local token
 /// estimation between turns.
-#[must_use]
 #[deprecated(
     note = "Token counts are approximate between turns and authoritative after LLM responses."
 )]
