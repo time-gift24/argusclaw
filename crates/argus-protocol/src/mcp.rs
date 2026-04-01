@@ -72,6 +72,26 @@ fn thread_event_notice_round_trips_through_json() {
     assert_eq!(round_trip, value);
 }
 
+#[test]
+fn mcp_discovered_tool_record_round_trips_through_json() {
+    let record = McpDiscoveredToolRecord {
+        server_id: 7,
+        tool_name_original: "post_message".to_string(),
+        description: "Send a message".to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            }
+        }),
+        annotations: Some(serde_json::json!({ "title": "post_message" })),
+    };
+
+    let value = serde_json::to_value(&record).unwrap();
+    let decoded: McpDiscoveredToolRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded, record);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadNoticeLevel {
@@ -132,6 +152,7 @@ pub struct McpServerRecord {
 }
 
 impl McpServerRecord {
+    #[cfg(test)]
     #[must_use]
     pub fn for_test_stdio(display_name: &str) -> Self {
         Self {
@@ -167,6 +188,7 @@ pub enum McpServerStatus {
 pub struct McpDiscoveredToolRecord {
     pub server_id: i64,
     pub tool_name_original: String,
+    pub description: String,
     pub schema: serde_json::Value,
     pub annotations: Option<serde_json::Value>,
 }
