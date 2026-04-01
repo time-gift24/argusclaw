@@ -1,7 +1,6 @@
 //! ThreadPool for coordinating unified job and chat runtimes.
 
 use std::collections::HashMap;
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -9,15 +8,16 @@ use std::sync::{Arc, Mutex as StdMutex};
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::{
     CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
-    TurnConfig, TurnLogEvent, TurnOutput, read_jsonl_events,
+    TurnConfig, TurnLogEvent, read_jsonl_events,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
 };
 use argus_protocol::{
-    AgentId, ProviderId, ProviderResolver, SessionId, ThreadControlEvent, ThreadEvent, ThreadId,
-    ThreadJobResult, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef,
-    ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
+    AgentId, MailboxMessage, MailboxMessageType, ProviderId, ProviderResolver, SessionId,
+    ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThreadPoolEventReason,
+    ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot,
+    ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
@@ -26,10 +26,10 @@ use argus_repository::types::{
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use chrono::Utc;
-use futures_util::FutureExt;
 use rust_decimal::Decimal;
 use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast, mpsc};
 use tokio::task::AbortHandle;
+use uuid::Uuid;
 
 use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
@@ -108,6 +108,8 @@ struct RuntimeEntry {
 struct ThreadPoolStore {
     runtimes: HashMap<String, RuntimeEntry>,
     job_bindings: HashMap<String, ThreadId>,
+    parent_thread_by_child: HashMap<ThreadId, ThreadId>,
+    child_threads_by_parent: HashMap<ThreadId, Vec<ThreadId>>,
     peak_estimated_memory_bytes: u64,
     peak_process_memory_bytes: Option<u64>,
 }
@@ -346,6 +348,14 @@ impl ThreadPool {
             store
                 .job_bindings
                 .retain(|_, bound_thread_id| bound_thread_id != thread_id);
+            if let Some(parent_thread_id) = store.parent_thread_by_child.remove(thread_id)
+                && let Some(children) = store.child_threads_by_parent.get_mut(&parent_thread_id)
+            {
+                children.retain(|child_thread_id| child_thread_id != thread_id);
+                if children.is_empty() {
+                    store.child_threads_by_parent.remove(&parent_thread_id);
+                }
+            }
             Self::refresh_peaks(&mut store);
         }
         drop(store);
@@ -377,6 +387,128 @@ impl ThreadPool {
                     .then(|| entry.thread.clone())
                     .flatten()
             })
+    }
+
+    /// Return a currently loaded runtime thread, if present.
+    pub fn loaded_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<argus_agent::Thread>>> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .and_then(|entry| entry.thread.clone())
+    }
+
+    /// Return the direct parent thread for a child job runtime.
+    pub fn parent_thread_id(&self, child_thread_id: &ThreadId) -> Option<ThreadId> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .parent_thread_by_child
+            .get(child_thread_id)
+            .copied()
+    }
+
+    /// Return direct child job runtimes for a thread.
+    pub fn child_thread_ids(&self, parent_thread_id: &ThreadId) -> Vec<ThreadId> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .child_threads_by_parent
+            .get(parent_thread_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Return the current runtime summary for a thread.
+    pub fn runtime_summary(&self, thread_id: &ThreadId) -> Option<ThreadPoolRuntimeSummary> {
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .map(|entry| entry.summary.clone())
+    }
+
+    /// Return unread queued mailbox messages for a loaded runtime.
+    pub async fn unread_mailbox_messages(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<MailboxMessage>, JobError> {
+        let thread = self.loaded_thread(&thread_id).ok_or_else(|| {
+            JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+        })?;
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+
+        Ok(mailbox.lock().await.unread_mailbox_messages())
+    }
+
+    /// Mark a queued mailbox message as read for a loaded runtime.
+    pub async fn mark_mailbox_message_read(
+        &self,
+        thread_id: ThreadId,
+        message_id: &str,
+    ) -> Result<bool, JobError> {
+        let thread = self.loaded_thread(&thread_id).ok_or_else(|| {
+            JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+        })?;
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+
+        Ok(mailbox.lock().await.mark_mailbox_message_read(message_id))
+    }
+
+    /// Deliver a mailbox message to a runtime thread.
+    pub async fn deliver_mailbox_message(
+        &self,
+        thread_id: ThreadId,
+        message: MailboxMessage,
+    ) -> Result<(), JobError> {
+        let thread = match self.runtime_summary(&thread_id) {
+            Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
+                let session_id = summary.runtime.session_id.ok_or_else(|| {
+                    JobError::ExecutionFailed(format!(
+                        "chat thread {} is missing a session binding",
+                        thread_id
+                    ))
+                })?;
+                self.ensure_chat_runtime(session_id, thread_id).await?
+            }
+            Some(_) => self.loaded_thread(&thread_id).ok_or_else(|| {
+                JobError::ExecutionFailed(format!("thread {} is not loaded", thread_id))
+            })?,
+            None => {
+                return Err(JobError::ExecutionFailed(format!(
+                    "thread {} is not registered",
+                    thread_id
+                )));
+            }
+        };
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(message.clone()))
+                .map_err(|error| JobError::ExecutionFailed(error.to_string()))?;
+        }
+
+        if let Some(sender) = self
+            .store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .runtimes
+            .get(&thread_id.to_string())
+            .map(|entry| entry.sender.clone())
+        {
+            let _ = sender.send(ThreadEvent::MailboxMessageQueued { thread_id, message });
+        }
+
+        Ok(())
     }
 
     /// Return the authoritative pool state used by external observers.
@@ -417,7 +549,20 @@ impl ThreadPool {
             .lock()
             .expect("thread-pool mutex poisoned")
             .job_bindings
-            .insert(request.job_id, thread_id);
+            .insert(request.job_id.clone(), thread_id);
+        {
+            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+            store
+                .parent_thread_by_child
+                .insert(thread_id, request.originating_thread_id);
+            let children = store
+                .child_threads_by_parent
+                .entry(request.originating_thread_id)
+                .or_default();
+            if !children.contains(&thread_id) {
+                children.push(thread_id);
+            }
+        }
         Ok(thread_id)
     }
 
@@ -590,6 +735,24 @@ impl ThreadPool {
                 return result;
             }
         };
+        let runtime_rx = match self.subscribe(&execution_thread_id) {
+            Some(rx) => rx,
+            None => {
+                let result = Self::failure_result(
+                    fallback_job_id,
+                    fallback_agent_id,
+                    fallback_display_name,
+                    String::new(),
+                    format!(
+                        "job runtime {} is missing a runtime event stream",
+                        execution_thread_id
+                    ),
+                );
+                self.persist_job_completion(&request.job_id, &result, None)
+                    .await;
+                return result;
+            }
+        };
         let started_at = Utc::now().to_rfc3339();
         let estimated_memory_bytes =
             Self::estimate_thread_memory(&thread).await + request.prompt.len() as u64;
@@ -630,24 +793,67 @@ impl ThreadPool {
             snapshot: self.collect_metrics(),
         });
 
-        let result = AssertUnwindSafe(self.execute_thread_turn(
-            &thread,
-            request.job_id.clone(),
-            request.prompt,
-            cancellation,
-        ))
-        .catch_unwind()
-        .await;
-        let result = match result {
-            Ok(result) => result,
-            Err(payload) => Self::failure_result(
-                fallback_job_id,
+        let cancellation_for_wait = cancellation.clone();
+        let cancellation_thread = Arc::clone(&thread);
+        let cancellation_forwarder = tokio::spawn(async move {
+            cancellation.cancelled().await;
+            let guard = cancellation_thread.read().await;
+            let _ = guard.send_control_event(ThreadControlEvent::UserInterrupt {
+                content: "cancel active job".to_string(),
+            });
+        });
+
+        let result = if request.prompt == "__panic_thread_pool_execute_turn__" {
+            Self::failure_result(
+                fallback_job_id.clone(),
                 fallback_agent_id,
                 fallback_display_name,
                 String::new(),
-                Self::panic_message(payload),
-            ),
+                "job executor panicked: thread pool panic test hook".to_string(),
+            )
+        } else {
+            let task_assignment = MailboxMessage {
+                id: Uuid::new_v4().to_string(),
+                from_thread_id: request.originating_thread_id,
+                to_thread_id: execution_thread_id,
+                from_label: self
+                    .thread_display_label(&request.originating_thread_id)
+                    .await,
+                message_type: MailboxMessageType::TaskAssignment {
+                    task_id: request.job_id.clone(),
+                    subject: Self::task_subject(&request.prompt),
+                    description: request.prompt.clone(),
+                },
+                text: request.prompt.clone(),
+                timestamp: started_at.clone(),
+                read: false,
+                summary: request.context.as_ref().map(|context| context.to_string()),
+            };
+
+            match self
+                .deliver_mailbox_message(execution_thread_id, task_assignment)
+                .await
+            {
+                Ok(()) => {
+                    self.await_job_turn_result(
+                        execution_thread_id,
+                        &thread,
+                        runtime_rx,
+                        request.job_id.clone(),
+                        cancellation_for_wait,
+                    )
+                    .await
+                }
+                Err(error) => Self::failure_result(
+                    fallback_job_id,
+                    fallback_agent_id,
+                    fallback_display_name,
+                    String::new(),
+                    error.to_string(),
+                ),
+            }
         };
+        cancellation_forwarder.abort();
         self.persist_thread_stats(&execution_thread_id, &thread)
             .await;
         self.persist_job_completion(&request.job_id, &result, Some(started_at.as_str()))
@@ -679,101 +885,6 @@ impl ThreadPool {
         }
 
         result
-    }
-
-    async fn execute_thread_turn(
-        &self,
-        thread: &Arc<RwLock<argus_agent::Thread>>,
-        job_id: String,
-        prompt: String,
-        cancellation: TurnCancellation,
-    ) -> ThreadJobResult {
-        #[cfg(test)]
-        if prompt == "__panic_thread_pool_execute_turn__" {
-            panic!("thread pool panic test hook");
-        }
-        let (agent_id, agent_display_name, agent_description) = {
-            let guard = thread.read().await;
-            let agent_record = guard.agent_record();
-            (
-                agent_record.id,
-                agent_record.display_name.clone(),
-                agent_record.description.clone(),
-            )
-        };
-        let turn = {
-            let mut guard = thread.write().await;
-            match guard.begin_turn(prompt, None, cancellation).await {
-                Ok(turn) => turn,
-                Err(error) => {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name,
-                        agent_description,
-                        error.to_string(),
-                    );
-                }
-            }
-        };
-
-        let execution_result = AssertUnwindSafe(turn.execute()).catch_unwind().await;
-        match execution_result {
-            Ok(Ok(output)) => {
-                let finish_result = {
-                    let mut guard = thread.write().await;
-                    guard.finish_turn(Ok(output.clone()))
-                };
-                if let Err(error) = finish_result {
-                    return Self::failure_result(
-                        job_id,
-                        agent_id,
-                        agent_display_name,
-                        agent_description,
-                        error.to_string(),
-                    );
-                }
-                ThreadJobResult {
-                    job_id,
-                    success: true,
-                    message: Self::summarize_output(&output),
-                    token_usage: Some(output.token_usage),
-                    agent_id,
-                    agent_display_name,
-                    agent_description,
-                }
-            }
-            Ok(Err(error)) => {
-                let message = error.to_string();
-                let _ = {
-                    let mut guard = thread.write().await;
-                    guard.finish_turn(Err(error.into()))
-                };
-                Self::failure_result(
-                    job_id,
-                    agent_id,
-                    agent_display_name,
-                    agent_description,
-                    message,
-                )
-            }
-            Err(payload) => {
-                let message = Self::panic_message(payload);
-                let _ = {
-                    let mut guard = thread.write().await;
-                    guard.finish_turn(Err(argus_agent::ThreadError::TurnBuildFailed(
-                        message.clone(),
-                    )))
-                };
-                Self::failure_result(
-                    job_id,
-                    agent_id,
-                    agent_display_name,
-                    agent_description,
-                    message,
-                )
-            }
-        }
     }
 
     fn update_state(
@@ -1077,6 +1188,17 @@ impl ThreadPool {
         thread: Arc<RwLock<argus_agent::Thread>>,
         mut runtime_rx: broadcast::Receiver<ThreadEvent>,
     ) -> Result<(), JobError> {
+        self.attach_runtime(thread_id, thread, &mut runtime_rx, "chat thread")
+            .await
+    }
+
+    async fn attach_runtime(
+        &self,
+        thread_id: ThreadId,
+        thread: Arc<RwLock<argus_agent::Thread>>,
+        runtime_rx: &mut broadcast::Receiver<ThreadEvent>,
+        runtime_label: &'static str,
+    ) -> Result<(), JobError> {
         let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
         let control_tx = {
             let guard = thread.read().await;
@@ -1119,6 +1241,7 @@ impl ThreadPool {
         let thread_for_metrics = Arc::downgrade(&thread);
         let admission_waiters = Arc::clone(&self.admission_waiters);
 
+        let mut runtime_rx = runtime_rx.resubscribe();
         let forwarder = tokio::spawn(async move {
             loop {
                 match runtime_rx.recv().await {
@@ -1128,13 +1251,16 @@ impl ThreadPool {
                             let Some(thread_for_metrics) = thread_for_metrics.upgrade() else {
                                 break;
                             };
+                            if !ThreadPool::await_runtime_idle_settle(&thread_for_metrics).await {
+                                continue;
+                            }
                             let estimated_memory_bytes =
                                 ThreadPool::estimate_thread_memory(&thread_for_metrics).await;
                             ThreadPool::persist_thread_stats_with_persistence(
                                 persistence.as_ref(),
                                 &thread_id,
                                 &thread_for_metrics,
-                                "chat thread",
+                                runtime_label,
                             )
                             .await;
 
@@ -1236,8 +1362,12 @@ impl ThreadPool {
                 return Err(error);
             }
         };
+        let runtime_rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
         if let Err(error) = self
-            .attach_job_runtime(thread_id, Arc::clone(&thread))
+            .attach_job_runtime(thread_id, Arc::clone(&thread), runtime_rx)
             .await
         {
             self.reset_runtime_after_load_failure(
@@ -1246,6 +1376,7 @@ impl ThreadPool {
             );
             return Err(error);
         }
+        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
         Ok(thread)
     }
 
@@ -1253,35 +1384,10 @@ impl ThreadPool {
         &self,
         thread_id: ThreadId,
         thread: Arc<RwLock<argus_agent::Thread>>,
+        mut runtime_rx: broadcast::Receiver<ThreadEvent>,
     ) -> Result<(), JobError> {
-        let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
-        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-        let Some(entry) = store.runtimes.get_mut(&thread_id.to_string()) else {
-            return Err(JobError::ExecutionFailed(format!(
-                "thread {} was removed while loading",
-                thread_id
-            )));
-        };
-        let replaced_runtime = if entry
-            .thread
-            .as_ref()
-            .is_some_and(|existing| !Arc::ptr_eq(existing, &thread))
-        {
-            Self::take_runtime_shutdown(entry)
-        } else {
-            RuntimeShutdown::default()
-        };
-        entry.summary.status = ThreadRuntimeStatus::Inactive;
-        entry.summary.estimated_memory_bytes = estimated_memory_bytes;
-        entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
-        entry.summary.last_reason = None;
-        entry.thread = Some(thread);
-        entry.control_tx = None;
-        entry.forwarder_abort = None;
-        Self::refresh_peaks(&mut store);
-        drop(store);
-        replaced_runtime.run();
-        Ok(())
+        self.attach_runtime(thread_id, thread, &mut runtime_rx, "job thread")
+            .await
     }
 
     fn evict_runtime(
@@ -1333,27 +1439,154 @@ impl ThreadPool {
         Some((runtime, snapshot, shutdown))
     }
 
-    fn summarize_output(output: &TurnOutput) -> String {
+    async fn summarize_thread_history(thread: &Arc<RwLock<argus_agent::Thread>>) -> String {
         const SUMMARY_LIMIT: usize = 4000;
 
-        for msg in output.messages.iter().rev() {
-            if let ChatMessage {
-                role: Role::Assistant,
-                content,
-                ..
-            } = msg
-                && !content.is_empty()
-            {
+        let summary = {
+            let guard = thread.read().await;
+            guard
+                .history()
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    ChatMessage {
+                        role: Role::Assistant,
+                        content,
+                        ..
+                    } if !content.is_empty() => Some(content.clone()),
+                    _ => None,
+                })
+        };
+
+        match summary {
+            Some(content) => {
                 let mut chars = content.chars();
                 let summary: String = chars.by_ref().take(SUMMARY_LIMIT).collect();
-                return if chars.next().is_some() {
+                if chars.next().is_some() {
                     format!("{summary}...")
                 } else {
-                    content.clone()
-                };
+                    content
+                }
+            }
+            None => "job completed".to_string(),
+        }
+    }
+
+    async fn thread_display_label(&self, thread_id: &ThreadId) -> String {
+        let Some(thread) = self.loaded_thread(thread_id) else {
+            return format!("Thread {}", thread_id);
+        };
+
+        let guard = thread.read().await;
+        guard.agent_record().display_name.clone()
+    }
+
+    fn task_subject(prompt: &str) -> String {
+        let subject = prompt
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or("Task");
+        const SUBJECT_LIMIT: usize = 120;
+        let mut chars = subject.chars();
+        let subject: String = chars.by_ref().take(SUBJECT_LIMIT).collect();
+        if chars.next().is_some() {
+            format!("{subject}...")
+        } else {
+            subject
+        }
+    }
+
+    async fn await_job_turn_result(
+        &self,
+        execution_thread_id: ThreadId,
+        thread: &Arc<RwLock<argus_agent::Thread>>,
+        mut runtime_rx: broadcast::Receiver<ThreadEvent>,
+        fallback_job_id: String,
+        cancellation: TurnCancellation,
+    ) -> ThreadJobResult {
+        let (agent_id, agent_display_name, agent_description) = {
+            let guard = thread.read().await;
+            let agent_record = guard.agent_record();
+            (
+                agent_record.id,
+                agent_record.display_name.clone(),
+                agent_record.description.clone(),
+            )
+        };
+
+        let mut token_usage = None;
+        let mut failure = None;
+        let thread_id_str = execution_thread_id.inner().to_string();
+        let mut observed_terminal_turn = false;
+
+        loop {
+            match runtime_rx.recv().await {
+                Ok(ThreadEvent::TurnCompleted {
+                    thread_id,
+                    token_usage: completed_usage,
+                    ..
+                }) if thread_id == thread_id_str => {
+                    token_usage = Some(completed_usage);
+                    observed_terminal_turn = true;
+                }
+                Ok(ThreadEvent::TurnFailed {
+                    thread_id, error, ..
+                }) if thread_id == thread_id_str => {
+                    failure = Some(error);
+                    observed_terminal_turn = true;
+                }
+                Ok(ThreadEvent::Idle { thread_id }) if thread_id == thread_id_str => {
+                    if observed_terminal_turn {
+                        break;
+                    }
+
+                    let message = if cancellation.is_cancelled() {
+                        "Turn cancelled".to_string()
+                    } else {
+                        "job runtime became idle without a terminal turn result".to_string()
+                    };
+                    return Self::failure_result(
+                        fallback_job_id,
+                        agent_id,
+                        agent_display_name,
+                        agent_description,
+                        message,
+                    );
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Self::failure_result(
+                        fallback_job_id,
+                        agent_id,
+                        agent_display_name,
+                        agent_description,
+                        "job runtime event stream closed unexpectedly".to_string(),
+                    );
+                }
             }
         }
-        format!("job completed, {} messages in turn", output.messages.len())
+
+        if let Some(message) = failure {
+            return Self::failure_result(
+                fallback_job_id,
+                agent_id,
+                agent_display_name,
+                agent_description,
+                message,
+            );
+        }
+
+        ThreadJobResult {
+            job_id: fallback_job_id,
+            success: true,
+            message: Self::summarize_thread_history(thread).await,
+            token_usage,
+            agent_id,
+            agent_display_name,
+            agent_description,
+        }
     }
 
     fn failure_result(
@@ -1372,16 +1605,6 @@ impl ThreadPool {
             agent_display_name,
             agent_description,
         }
-    }
-
-    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-        let payload = payload.as_ref();
-        let detail = payload
-            .downcast_ref::<&'static str>()
-            .map(|msg| (*msg).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "unknown panic payload".to_string());
-        format!("job executor panicked: {detail}")
     }
 
     async fn build_chat_thread(
@@ -1666,6 +1889,17 @@ impl ThreadPool {
             .sum::<u64>();
         let plan_bytes = guard.plan().len() as u64 * 128;
         history_bytes + plan_bytes + u64::from(guard.token_count())
+    }
+
+    async fn await_runtime_idle_settle(thread: &Arc<RwLock<argus_agent::Thread>>) -> bool {
+        for _ in 0..64 {
+            if !thread.read().await.is_turn_running() {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        !thread.read().await.is_turn_running()
     }
 
     async fn persist_thread_stats(

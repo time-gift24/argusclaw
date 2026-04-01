@@ -5,16 +5,18 @@ use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEven
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
-    AgentId, ArgusError, LlmProviderId, ProviderId, Result, SessionId, ThreadControlEvent,
-    ThreadEvent, ThreadId, ToolError,
+    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
+    SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::{
-    SchedulerBackend, SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult,
-    SchedulerLookupRequest, SchedulerSubagent, SchedulerTool, ToolManager,
+    CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
+    SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
+    SchedulerTool, SendMessageRequest, SendMessageResponse, ToolManager,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
@@ -95,6 +97,17 @@ impl SessionSchedulerBackend {
         }
     }
 
+    fn scheduler_error(reason: impl Into<String>) -> ToolError {
+        ToolError::ExecutionFailed {
+            tool_name: "scheduler".to_string(),
+            reason: reason.into(),
+        }
+    }
+
+    fn thread_pool(&self) -> Arc<ThreadPool> {
+        self.job_manager.thread_pool()
+    }
+
     fn map_job_lookup(lookup: JobLookup) -> SchedulerJobLookup {
         match lookup {
             JobLookup::NotFound => SchedulerJobLookup::NotFound,
@@ -137,6 +150,117 @@ impl SessionSchedulerBackend {
         }
 
         Ok(())
+    }
+
+    async fn source_label(&self, thread_id: ThreadId) -> String {
+        let thread_pool = self.thread_pool();
+        let Some(thread) = thread_pool.loaded_thread(&thread_id) else {
+            return format!("Thread {}", thread_id);
+        };
+
+        let guard = thread.read().await;
+        guard.agent_record().display_name.clone()
+    }
+
+    fn active_child_thread_ids(&self, thread_id: ThreadId) -> Vec<ThreadId> {
+        let thread_pool = self.thread_pool();
+        thread_pool
+            .child_thread_ids(&thread_id)
+            .into_iter()
+            .filter(|child_thread_id| {
+                thread_pool
+                    .runtime_summary(child_thread_id)
+                    .is_some_and(|summary| {
+                        summary.runtime.kind == ThreadPoolRuntimeKind::Job
+                            && summary
+                                .runtime
+                                .job_id
+                                .as_deref()
+                                .is_some_and(|job_id| self.job_manager.is_job_pending(job_id))
+                    })
+            })
+            .collect()
+    }
+
+    async fn resolve_agent_name_target(
+        &self,
+        thread_id: ThreadId,
+        agent_name: &str,
+    ) -> std::result::Result<ThreadId, ToolError> {
+        let thread_pool = self.thread_pool();
+        let mut matches = Vec::new();
+
+        for child_thread_id in self.active_child_thread_ids(thread_id) {
+            let Some(thread) = thread_pool.loaded_thread(&child_thread_id) else {
+                continue;
+            };
+            let display_name = {
+                let guard = thread.read().await;
+                guard.agent_record().display_name.clone()
+            };
+            if display_name == agent_name {
+                matches.push(child_thread_id);
+            }
+        }
+
+        match matches.as_slice() {
+            [thread_id] => Ok(*thread_id),
+            [] => Err(Self::scheduler_error(format!(
+                "no active direct child agent named {agent_name}"
+            ))),
+            _ => Err(Self::scheduler_error(format!(
+                "agent name {agent_name} is ambiguous; use job:<job_id> or thread:<thread_id>"
+            ))),
+        }
+    }
+
+    async fn resolve_message_targets(
+        &self,
+        thread_id: ThreadId,
+        to: &str,
+    ) -> std::result::Result<Vec<ThreadId>, ToolError> {
+        let thread_pool = self.thread_pool();
+
+        if let Some(job_id) = to.strip_prefix("job:") {
+            if !self.job_manager.is_job_pending(job_id) {
+                return Err(Self::scheduler_error(format!("job {job_id} is not active")));
+            }
+            let target = thread_pool.get_thread_binding(job_id).ok_or_else(|| {
+                Self::scheduler_error(format!("job {job_id} is not bound to a thread"))
+            })?;
+            return Ok(vec![target]);
+        }
+
+        if let Some(thread_id_str) = to.strip_prefix("thread:") {
+            let target = ThreadId::parse(thread_id_str).map_err(|error| {
+                Self::scheduler_error(format!("invalid thread target {thread_id_str}: {error}"))
+            })?;
+            if thread_pool.runtime_summary(&target).is_none() {
+                return Err(Self::scheduler_error(format!(
+                    "thread {target} is not registered"
+                )));
+            }
+            return Ok(vec![target]);
+        }
+
+        if to == "parent" {
+            let parent = thread_pool.parent_thread_id(&thread_id).ok_or_else(|| {
+                Self::scheduler_error("current thread does not have a direct parent")
+            })?;
+            return Ok(vec![parent]);
+        }
+
+        if to == "*" {
+            let children = self.active_child_thread_ids(thread_id);
+            if children.is_empty() {
+                return Err(Self::scheduler_error(
+                    "current thread does not have any active direct child jobs",
+                ));
+            }
+            return Ok(children);
+        }
+
+        Ok(vec![self.resolve_agent_name_target(thread_id, to).await?])
     }
 }
 
@@ -220,6 +344,67 @@ impl SchedulerBackend for SessionSchedulerBackend {
         }
 
         Ok(Self::map_job_lookup(lookup))
+    }
+
+    async fn send_message(
+        &self,
+        request: SendMessageRequest,
+    ) -> std::result::Result<SendMessageResponse, ToolError> {
+        let targets = self
+            .resolve_message_targets(request.thread_id, &request.to)
+            .await?;
+        let source_label = self.source_label(request.thread_id).await;
+        let thread_pool = self.thread_pool();
+
+        for target in &targets {
+            let message = MailboxMessage {
+                id: Uuid::new_v4().to_string(),
+                from_thread_id: request.thread_id,
+                to_thread_id: *target,
+                from_label: source_label.clone(),
+                message_type: MailboxMessageType::Plain,
+                text: request.message.clone(),
+                timestamp: Utc::now().to_rfc3339(),
+                read: false,
+                summary: request.summary.clone(),
+            };
+
+            thread_pool
+                .deliver_mailbox_message(*target, message)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?;
+        }
+
+        Ok(SendMessageResponse {
+            delivered: targets.len(),
+            thread_ids: targets,
+        })
+    }
+
+    async fn check_inbox(
+        &self,
+        request: CheckInboxRequest,
+    ) -> std::result::Result<Vec<MailboxMessage>, ToolError> {
+        self.thread_pool()
+            .unread_mailbox_messages(request.thread_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))
+    }
+
+    async fn mark_read(&self, request: MarkReadRequest) -> std::result::Result<(), ToolError> {
+        let marked = self
+            .thread_pool()
+            .mark_mailbox_message_read(request.thread_id, &request.message_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?;
+        if !marked {
+            return Err(Self::scheduler_error(format!(
+                "message {} was not found in the current inbox",
+                request.message_id
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -1192,16 +1377,16 @@ mod tests {
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
     };
     use argus_protocol::{
-        AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, ProviderId,
-        ProviderResolver, ProviderSecretStatus, Role, SecretString, SessionId, ThinkingConfig,
-        ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
+        AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, MailboxMessage,
+        MailboxMessageType, ProviderId, ProviderResolver, ProviderSecretStatus, Role, SecretString,
+        SessionId, ThinkingConfig, ThreadControlEvent, ThreadEvent, ThreadId,
     };
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
     use argus_repository::{migrate, ArgusSqlite};
     use argus_template::TemplateManager;
-    use argus_tool::ToolManager;
+    use argus_tool::{CheckInboxRequest, MarkReadRequest, SchedulerBackend, ToolManager};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
@@ -1209,6 +1394,7 @@ mod tests {
 
     use super::{
         recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
+        SessionSchedulerBackend,
     };
 
     #[derive(Debug)]
@@ -1453,6 +1639,76 @@ mod tests {
             ),
             tool_manager,
         )
+    }
+
+    async fn test_session_manager_with_provider_delay(
+        delay: Duration,
+    ) -> (SessionManager, SessionSchedulerBackend) {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+        let provider_id =
+            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
+                .await
+                .expect("provider upsert should succeed");
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(7),
+                display_name: "Session Test Agent".to_string(),
+                description: "Used to verify session loading".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(provider_id.into_inner())),
+                model_id: Some("capturing".to_string()),
+                system_prompt: "You are a test session agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
+
+        let provider = Arc::new(CapturingProvider::new("hello", delay));
+        let provider_resolver =
+            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
+        let tool_manager = Arc::new(ToolManager::new());
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            template_manager.clone(),
+            Arc::clone(&provider_resolver),
+            tool_manager.clone(),
+            Arc::new(CompactorManager::with_defaults()),
+            trace_dir.clone(),
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+        ));
+
+        let backend =
+            SessionSchedulerBackend::new(template_manager.clone(), Arc::clone(&job_manager));
+        let manager = SessionManager::new(
+            sqlite.clone() as Arc<dyn SessionRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite as Arc<dyn LlmProviderRepository>,
+            template_manager,
+            provider_resolver,
+            tool_manager,
+            trace_dir,
+            job_manager.thread_pool(),
+            job_manager,
+        );
+
+        (manager, backend)
     }
 
     fn test_agent_record() -> Arc<AgentRecord> {
@@ -1829,20 +2085,30 @@ mod tests {
             Duration::from_millis(10),
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
+        let thread_id = thread.read().await.id();
 
         argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
             guard
-                .send_control_event(ThreadControlEvent::JobResult(ThreadJobResult {
-                    job_id: "job-42".to_string(),
-                    success: true,
-                    message: "completed successfully".to_string(),
-                    token_usage: None,
-                    agent_id: AgentId::new(99),
-                    agent_display_name: "Researcher".to_string(),
-                    agent_description: "Investigates background context".to_string(),
+                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
+                    id: "msg-job-42".to_string(),
+                    from_thread_id: ThreadId::new(),
+                    to_thread_id: thread_id,
+                    from_label: "Researcher".to_string(),
+                    message_type: MailboxMessageType::JobResult {
+                        job_id: "job-42".to_string(),
+                        success: true,
+                        token_usage: None,
+                        agent_id: AgentId::new(99),
+                        agent_display_name: "Researcher".to_string(),
+                        agent_description: "Investigates background context".to_string(),
+                    },
+                    text: "completed successfully".to_string(),
+                    timestamp: "2026-04-01T00:00:00Z".to_string(),
+                    read: false,
+                    summary: None,
                 }))
                 .expect("job result should queue");
         }
@@ -1865,6 +2131,7 @@ mod tests {
             Duration::from_millis(120),
         ));
         let thread = build_test_thread(session_id, Arc::clone(&provider));
+        let thread_id = thread.read().await.id();
 
         argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
 
@@ -1880,14 +2147,23 @@ mod tests {
         {
             let guard = thread.read().await;
             guard
-                .send_control_event(ThreadControlEvent::JobResult(ThreadJobResult {
-                    job_id: "job-late".to_string(),
-                    success: true,
-                    message: "late background answer".to_string(),
-                    token_usage: None,
-                    agent_id: AgentId::new(100),
-                    agent_display_name: "Builder".to_string(),
-                    agent_description: "Builds follow-up plans".to_string(),
+                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
+                    id: "msg-job-late".to_string(),
+                    from_thread_id: ThreadId::new(),
+                    to_thread_id: thread_id,
+                    from_label: "Builder".to_string(),
+                    message_type: MailboxMessageType::JobResult {
+                        job_id: "job-late".to_string(),
+                        success: true,
+                        token_usage: None,
+                        agent_id: AgentId::new(100),
+                        agent_display_name: "Builder".to_string(),
+                        agent_description: "Builds follow-up plans".to_string(),
+                    },
+                    text: "late background answer".to_string(),
+                    timestamp: "2026-04-01T00:00:01Z".to_string(),
+                    read: false,
+                    summary: None,
                 }))
                 .expect("job result should queue");
         }
@@ -1899,6 +2175,122 @@ mod tests {
         assert_eq!(captured[0], "initial request");
         assert!(captured[1].contains("Job: job-late"));
         assert!(captured[1].contains("Subagent: Builder"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_backend_resolves_parent_route_to_direct_parent_thread() {
+        let (manager, backend) =
+            test_session_manager_with_provider_delay(Duration::from_millis(5)).await;
+        let parent_thread_id = ThreadId::new();
+        let job_id = "job-parent-route".to_string();
+
+        backend
+            .job_manager
+            .record_dispatched_job(parent_thread_id, job_id.clone());
+        let child_thread_id = manager
+            .thread_pool
+            .enqueue_job(argus_job::types::ThreadPoolJobRequest {
+                originating_thread_id: parent_thread_id,
+                job_id,
+                agent_id: AgentId::new(7),
+                prompt: "route test".to_string(),
+                context: None,
+            })
+            .await
+            .expect("child job should enqueue");
+
+        let targets = backend
+            .resolve_message_targets(child_thread_id, "parent")
+            .await
+            .expect("parent target should resolve");
+
+        assert_eq!(targets, vec![parent_thread_id]);
+    }
+
+    #[tokio::test]
+    async fn scheduler_backend_check_inbox_and_mark_read_use_message_ids() {
+        let (manager, backend) =
+            test_session_manager_with_provider_delay(Duration::from_millis(150)).await;
+        let session_id = manager
+            .create("mailbox check".to_string())
+            .await
+            .expect("session should create");
+        let thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .await
+            .expect("thread should create");
+
+        manager
+            .thread_pool
+            .register_chat_thread(session_id, thread_id);
+        let thread = manager
+            .thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should load");
+        manager
+            .thread_pool
+            .send_chat_message(session_id, thread_id, "long running request".to_string())
+            .await
+            .expect("chat message should start a turn");
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("chat thread should become active");
+
+        let mailbox_message = MailboxMessage {
+            id: "msg-session-mailbox".to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: thread_id,
+            from_label: "Planner".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: "queued follow-up".to_string(),
+            timestamp: "2026-04-01T00:00:00Z".to_string(),
+            read: false,
+            summary: Some("queued".to_string()),
+        };
+        manager
+            .thread_pool
+            .deliver_mailbox_message(thread_id, mailbox_message.clone())
+            .await
+            .expect("mailbox message should queue");
+
+        let unread = timeout(Duration::from_secs(1), async {
+            loop {
+                let unread = backend
+                    .check_inbox(CheckInboxRequest { thread_id })
+                    .await
+                    .expect("check_inbox should succeed");
+                if !unread.is_empty() {
+                    break unread;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("mailbox message should become visible in inbox");
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].id, mailbox_message.id);
+
+        backend
+            .mark_read(MarkReadRequest {
+                thread_id,
+                message_id: mailbox_message.id.clone(),
+            })
+            .await
+            .expect("mark_read should succeed");
+
+        let unread = backend
+            .check_inbox(CheckInboxRequest { thread_id })
+            .await
+            .expect("check_inbox should succeed after mark_read");
+        assert!(unread.is_empty());
     }
 
     #[tokio::test]

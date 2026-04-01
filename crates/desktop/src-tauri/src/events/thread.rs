@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::{
-    LlmStreamEvent, ThreadEvent, ThreadPoolEventReason, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadPoolEventReason, ThreadPoolRuntimeRef,
+    ThreadPoolSnapshot,
 };
 
 /// Envelope for thread events sent to the frontend.
@@ -198,6 +199,12 @@ impl ThreadEventEnvelope {
                     agent_description,
                 },
             }),
+            ThreadEvent::MailboxMessageQueued { thread_id, message } => Some(Self {
+                session_id,
+                thread_id: thread_id.inner().to_string(),
+                turn_number: None,
+                payload: ThreadEventPayload::MailboxMessageQueued { message },
+            }),
             ThreadEvent::ThreadBoundToJob { job_id, thread_id } => Some(Self {
                 session_id,
                 thread_id: thread_id.inner().to_string(),
@@ -333,6 +340,9 @@ pub enum ThreadEventPayload {
         agent_id: i64,
         agent_display_name: String,
         agent_description: String,
+    },
+    MailboxMessageQueued {
+        message: MailboxMessage,
     },
 }
 
