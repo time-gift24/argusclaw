@@ -6,6 +6,7 @@ use crate::error::DbError;
 use crate::sqlite::ArgusSqlite;
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
