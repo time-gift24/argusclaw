@@ -32,6 +32,7 @@ use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
+use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
 use argus_protocol::{
     knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId,
     LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
@@ -70,6 +71,7 @@ pub struct ArgusWing {
     session_manager: Arc<SessionManager>,
     tool_manager: Arc<ToolManager>,
     job_manager: Arc<JobManager>,
+    mcp_runtime: Arc<McpRuntime>,
     pub account_manager: Arc<AccountManager>,
     knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository>,
 }
@@ -139,6 +141,15 @@ impl ArgusWing {
             llm_repository.clone(),
         ));
 
+        let mcp_runtime = Arc::new(McpRuntime::new(
+            arc_sqlite.clone(),
+            Arc::new(RmcpConnector),
+            McpRuntimeConfig::default(),
+        ));
+        McpRuntime::start(&mcp_runtime);
+        let mcp_tool_resolver: Arc<dyn argus_protocol::McpToolResolver> =
+            Arc::new(McpRuntime::handle(&mcp_runtime));
+
         // Create session manager
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
@@ -146,6 +157,7 @@ impl ArgusWing {
             Arc::clone(&llm_repository) as Arc<dyn LlmProviderRepository>,
             template_manager.clone(),
             provider_resolver,
+            mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
             job_manager.thread_pool(),
@@ -162,6 +174,7 @@ impl ArgusWing {
             session_manager,
             tool_manager,
             job_manager,
+            mcp_runtime,
             account_manager,
             knowledge_repo_repo,
         }))
@@ -202,12 +215,21 @@ impl ArgusWing {
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
             llm_repository.clone(),
         ));
+        let mcp_runtime = Arc::new(McpRuntime::new(
+            arc_sqlite.clone(),
+            Arc::new(RmcpConnector),
+            McpRuntimeConfig::default(),
+        ));
+        McpRuntime::start(&mcp_runtime);
+        let mcp_tool_resolver: Arc<dyn argus_protocol::McpToolResolver> =
+            Arc::new(McpRuntime::handle(&mcp_runtime));
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
             Arc::clone(&llm_repository) as Arc<dyn LlmProviderRepository>,
             template_manager.clone(),
             provider_resolver,
+            mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
             job_manager.thread_pool(),
@@ -223,6 +245,7 @@ impl ArgusWing {
             session_manager,
             tool_manager,
             job_manager,
+            mcp_runtime,
             account_manager,
             knowledge_repo_repo,
         })
@@ -232,6 +255,12 @@ impl ArgusWing {
     #[must_use]
     pub fn tool_manager(&self) -> &Arc<ToolManager> {
         &self.tool_manager
+    }
+
+    /// Get a reference to the MCP runtime supervisor.
+    #[must_use]
+    pub fn mcp_runtime(&self) -> &Arc<McpRuntime> {
+        &self.mcp_runtime
     }
 
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
@@ -716,6 +745,12 @@ mod tests {
         assert!(action_values.contains(&"install"));
         assert!(definition.parameters["properties"].get("text").is_some());
         assert!(wing.tool_manager().get("chrome_install").is_none());
+    }
+
+    #[tokio::test]
+    async fn with_pool_starts_mcp_runtime() {
+        let wing = make_test_wing().await;
+        assert!(wing.mcp_runtime().supervisor_started());
     }
 
     #[tokio::test]
