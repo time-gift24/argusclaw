@@ -184,14 +184,13 @@ impl ChromeTool {
             }
         });
 
-        if interactive {
-            properties
-                .as_object_mut()
-                .expect("properties is always an object")
-                .insert(
-                    "text".to_string(),
-                    json!({"type": "string", "description": "Text to type into element (for type action)"}),
-                );
+        if interactive
+            && let Some(map) = properties.as_object_mut()
+        {
+            map.insert(
+                "text".to_string(),
+                json!({"type": "string", "description": "Text to type into element (for type action)"}),
+            );
         }
 
         json!({

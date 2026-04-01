@@ -252,6 +252,7 @@ fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
         || args.selector.is_some()
         || args.timeout_ms.is_some()
         || args.max_requests.is_some()
+        || args.tab_id.is_some()
     {
         return Err(ChromeToolError::InvalidArguments {
             reason: format!(

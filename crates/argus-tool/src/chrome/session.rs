@@ -181,12 +181,13 @@ impl ChromeSession {
             .is_some_and(|active| active == tab_id);
         drop(tabs);
 
-        if is_active {
-            self.interaction.switch_to_window(&window_handle).await?;
-            self.interaction.close_current_window().await?;
-        } else {
-            self.interaction.switch_to_window(&window_handle).await?;
-            self.interaction.close_current_window().await?;
+        // Close the target tab — WebDriver only closes the currently focused window
+        self.interaction.switch_to_window(&window_handle).await?;
+        self.interaction.close_current_window().await?;
+
+        // After closing, WebDriver shifts focus to a remaining window.
+        // If we closed a background tab, switch back to the previously active one.
+        if !is_active {
             let tabs = self.tabs.lock().await;
             if let Some(active_id) = self.active_tab_id.lock().await.as_ref()
                 && let Some(active_entry) = tabs.get(active_id)
@@ -197,15 +198,23 @@ impl ChromeSession {
             }
         }
 
+        // Update bookkeeping: remove the closed tab and fix up active_tab_id
         {
             let mut tabs = self.tabs.lock().await;
             let mut handle_map = self.handle_to_tab_id.lock().await;
             if let Some(removed) = tabs.remove(tab_id) {
                 handle_map.remove(&removed.window_handle);
             }
-            let mut active = self.active_tab_id.lock().await;
-            if active.as_ref() == Some(&tab_id.to_string()) {
-                *active = tabs.keys().next().cloned();
+            if is_active {
+                // Sync active_tab_id with the window WebDriver actually focused
+                if let Ok(actual_handle) = self.interaction.current_window_handle().await {
+                    let handle_map = self.handle_to_tab_id.lock().await;
+                    let mut active = self.active_tab_id.lock().await;
+                    *active = handle_map.get(&actual_handle).cloned();
+                } else {
+                    let mut active = self.active_tab_id.lock().await;
+                    *active = tabs.keys().next().cloned();
+                }
             }
         }
 
@@ -215,9 +224,9 @@ impl ChromeSession {
     pub async fn list_tabs(&self) -> Result<Vec<super::models::TabInfo>, ChromeToolError> {
         let windows = self.interaction.list_windows().await?;
         let active_id = self.active_tab_id.lock().await;
+        let handle_map = self.handle_to_tab_id.lock().await;
         let mut result = Vec::with_capacity(windows.len());
         for (handle, url, title) in &windows {
-            let handle_map = self.handle_to_tab_id.lock().await;
             let tab_id = handle_map
                 .get(handle)
                 .cloned()
@@ -701,6 +710,7 @@ impl BrowserSession for ManagedWebDriverSession {
 
     async fn create_new_tab(&self, url: &str) -> Result<(String, PageMetadata), ChromeToolError> {
         let driver = self.live_driver().await?;
+        let original_handle = driver.window().await.ok();
         let handle = driver
             .new_tab()
             .await
@@ -714,13 +724,17 @@ impl BrowserSession for ManagedWebDriverSession {
             .map_err(|e| ChromeToolError::TabOperationFailed {
                 reason: format!("failed to switch to new tab: {e}"),
             })?;
-        driver
-            .goto(url)
-            .await
-            .map_err(|e| ChromeToolError::NavigationFailed {
+        if let Err(e) = driver.goto(url).await {
+            // Roll back: close the empty new tab and switch back to original
+            let _ = driver.close_window().await;
+            if let Some(original) = original_handle {
+                let _ = driver.switch_to_window(original).await;
+            }
+            return Err(ChromeToolError::NavigationFailed {
                 url: url.to_string(),
                 reason: e.to_string(),
-            })?;
+            });
+        }
         let final_url = driver
             .current_url()
             .await
