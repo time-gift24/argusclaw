@@ -229,6 +229,7 @@ pub struct McpUnavailableServerSummary {
     pub reason: String,
 }
 
+#[derive(Default)]
 pub struct ResolvedMcpTools {
     pub tools: Vec<Arc<dyn NamedTool>>,
     pub unavailable_servers: Vec<McpUnavailableServerSummary>,
@@ -243,15 +244,6 @@ impl ResolvedMcpTools {
         Self {
             tools,
             unavailable_servers,
-        }
-    }
-}
-
-impl Default for ResolvedMcpTools {
-    fn default() -> Self {
-        Self {
-            tools: Vec::new(),
-            unavailable_servers: Vec::new(),
         }
     }
 }

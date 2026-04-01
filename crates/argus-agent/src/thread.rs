@@ -1191,7 +1191,7 @@ mod tests {
                     tools,
                     unavailable_servers,
                 } => Ok(ResolvedMcpTools::new(
-                    tools.iter().cloned().collect(),
+                    tools.to_vec(),
                     unavailable_servers.clone(),
                 )),
                 FakeMcpResolverPlan::Failure(reason) => Err(argus_protocol::ArgusError::LlmError {
