@@ -132,21 +132,21 @@ mod tests {
             sample_tool(server_id, "post_message", "Send a message"),
             sample_tool(server_id, "list_channels", "List channels"),
         ];
-        McpRepository::replace_mcp_discovered_tools(&sqlite, server_id, &first_snapshot)
+        McpRepository::replace_mcp_server_tools(&sqlite, server_id, &first_snapshot)
             .await
             .expect("first replace should succeed");
 
-        let stored = McpRepository::list_mcp_discovered_tools(&sqlite, server_id)
+        let stored = McpRepository::list_mcp_server_tools(&sqlite, server_id)
             .await
             .expect("list should succeed");
         assert_eq!(stored, first_snapshot);
 
         let second_snapshot = vec![sample_tool(server_id, "fetch_thread", "Fetch a thread")];
-        McpRepository::replace_mcp_discovered_tools(&sqlite, server_id, &second_snapshot)
+        McpRepository::replace_mcp_server_tools(&sqlite, server_id, &second_snapshot)
             .await
             .expect("second replace should succeed");
 
-        let stored = McpRepository::list_mcp_discovered_tools(&sqlite, server_id)
+        let stored = McpRepository::list_mcp_server_tools(&sqlite, server_id)
             .await
             .expect("list after replace should succeed");
         assert_eq!(stored, second_snapshot);
@@ -172,7 +172,7 @@ mod tests {
             .await
             .expect("agent upsert should succeed");
 
-        McpRepository::replace_mcp_discovered_tools(
+        McpRepository::replace_mcp_server_tools(
             &sqlite,
             slack_server_id,
             &[sample_tool(
@@ -201,11 +201,11 @@ mod tests {
             },
         ];
 
-        McpRepository::set_agent_mcp_bindings(&sqlite, 77, &bindings)
+        McpRepository::set_agent_mcp_bindings(&sqlite, AgentId::new(77), &bindings)
             .await
             .expect("binding replace should succeed");
 
-        let stored = McpRepository::list_agent_mcp_bindings(&sqlite, 77)
+        let stored = McpRepository::list_agent_mcp_bindings(&sqlite, AgentId::new(77))
             .await
             .expect("binding list should succeed");
         assert_eq!(stored, bindings);
@@ -382,7 +382,7 @@ impl crate::traits::McpRepository for ArgusSqlite {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn replace_mcp_discovered_tools(
+    async fn replace_mcp_server_tools(
         &self,
         server_id: i64,
         tools: &[argus_protocol::McpDiscoveredToolRecord],
@@ -391,7 +391,7 @@ impl crate::traits::McpRepository for ArgusSqlite {
             reason: e.to_string(),
         })?;
 
-        sqlx::query("DELETE FROM mcp_discovered_tools WHERE server_id = ?")
+        sqlx::query("DELETE FROM mcp_server_tools WHERE server_id = ?")
             .bind(server_id)
             .execute(&mut *tx)
             .await
@@ -408,7 +408,7 @@ impl crate::traits::McpRepository for ArgusSqlite {
                 .transpose()?;
 
             sqlx::query(
-                "INSERT INTO mcp_discovered_tools (
+                "INSERT INTO mcp_server_tools (
                     server_id, tool_name_original, description, schema_json, annotations_json
                  ) VALUES (?, ?, ?, ?, ?)",
             )
@@ -444,13 +444,13 @@ impl crate::traits::McpRepository for ArgusSqlite {
         Ok(())
     }
 
-    async fn list_mcp_discovered_tools(
+    async fn list_mcp_server_tools(
         &self,
         server_id: i64,
     ) -> Result<Vec<argus_protocol::McpDiscoveredToolRecord>, DbError> {
         let rows = sqlx::query(
             "SELECT server_id, tool_name_original, description, schema_json, annotations_json
-             FROM mcp_discovered_tools
+             FROM mcp_server_tools
              WHERE server_id = ?
              ORDER BY rowid",
         )
@@ -466,9 +466,10 @@ impl crate::traits::McpRepository for ArgusSqlite {
 
     async fn set_agent_mcp_bindings(
         &self,
-        agent_id: i64,
+        agent_id: argus_protocol::AgentId,
         bindings: &[argus_protocol::AgentMcpBinding],
     ) -> Result<(), DbError> {
+        let agent_id = agent_id.inner();
         let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
@@ -526,8 +527,9 @@ impl crate::traits::McpRepository for ArgusSqlite {
 
     async fn list_agent_mcp_bindings(
         &self,
-        agent_id: i64,
+        agent_id: argus_protocol::AgentId,
     ) -> Result<Vec<argus_protocol::AgentMcpBinding>, DbError> {
+        let agent_id = agent_id.inner();
         let server_rows = sqlx::query(
             "SELECT server_id
              FROM agent_mcp_servers

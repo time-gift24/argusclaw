@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use argus_protocol::{AgentMcpBinding, McpDiscoveredToolRecord, McpServerRecord};
+use argus_protocol::{AgentId, AgentMcpBinding, McpDiscoveredToolRecord, McpServerRecord};
 
 use crate::error::DbError;
 
@@ -17,23 +17,25 @@ pub trait McpRepository: Send + Sync {
 
     async fn delete_mcp_server(&self, id: i64) -> Result<bool, DbError>;
 
-    async fn replace_mcp_discovered_tools(
+    async fn replace_mcp_server_tools(
         &self,
         server_id: i64,
         tools: &[McpDiscoveredToolRecord],
     ) -> Result<(), DbError>;
 
-    async fn list_mcp_discovered_tools(
+    async fn list_mcp_server_tools(
         &self,
         server_id: i64,
     ) -> Result<Vec<McpDiscoveredToolRecord>, DbError>;
 
     async fn set_agent_mcp_bindings(
         &self,
-        agent_id: i64,
+        agent_id: AgentId,
         bindings: &[AgentMcpBinding],
     ) -> Result<(), DbError>;
 
-    async fn list_agent_mcp_bindings(&self, agent_id: i64)
-    -> Result<Vec<AgentMcpBinding>, DbError>;
+    async fn list_agent_mcp_bindings(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<AgentMcpBinding>, DbError>;
 }

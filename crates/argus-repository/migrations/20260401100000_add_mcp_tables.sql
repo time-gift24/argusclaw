@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
+CREATE TABLE IF NOT EXISTS mcp_server_tools (
     server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
     tool_name_original TEXT NOT NULL,
     description TEXT NOT NULL,
@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
     annotations_json TEXT,
     PRIMARY KEY (server_id, tool_name_original)
 );
+
+CREATE INDEX IF NOT EXISTS idx_mcp_server_tools_server_id
+    ON mcp_server_tools(server_id);
 
 CREATE TABLE IF NOT EXISTS agent_mcp_servers (
     agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
