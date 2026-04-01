@@ -251,6 +251,11 @@ impl McpRuntime {
         }
     }
 
+    #[must_use]
+    pub fn supervisor_started(&self) -> bool {
+        self.supervisor_started.load(Ordering::SeqCst)
+    }
+
     pub fn snapshot(&self) -> McpRuntimeSnapshot {
         let mut servers = self
             .state_guard()

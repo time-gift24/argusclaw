@@ -11,8 +11,8 @@ use crate::turn::{self, TurnCancellation};
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, MessageOverride, QueuedUserMessage, SessionId,
-    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, TokenUsage,
+    AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, QueuedUserMessage, SessionId,
+    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadNoticeLevel, TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -154,6 +154,10 @@ pub struct Thread {
     #[builder(default = "Arc::new(Mutex::new(ThreadMailbox::default()))")]
     mailbox: Arc<Mutex<ThreadMailbox>>,
 
+    /// Optional runtime resolver that injects ready MCP tools for this agent.
+    #[builder(default, setter(strip_option))]
+    mcp_tool_resolver: Option<Arc<dyn McpToolResolver>>,
+
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
@@ -219,6 +223,7 @@ impl ThreadBuilder {
             control_tx,
             control_rx: Some(control_rx),
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
+            mcp_tool_resolver: self.mcp_tool_resolver.flatten(),
             plan_store,
         })
     }
@@ -495,6 +500,11 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
+    /// Replace the runtime MCP tool resolver for subsequent turns.
+    pub fn set_mcp_tool_resolver(&mut self, resolver: Option<Arc<dyn McpToolResolver>>) {
+        self.mcp_tool_resolver = resolver;
+    }
+
     pub fn hydrate_from_turn_log_state(
         &mut self,
         recovered: RecoveredThreadLogState,
@@ -516,6 +526,39 @@ impl Thread {
         self.turns
             .push(TurnRecord::checkpoint(summary_messages, token_usage));
         self.updated_at = Utc::now();
+    }
+
+    fn emit_mcp_notice(&self, message: String) {
+        self.broadcast_to_self(ThreadEvent::Notice {
+            thread_id: self.id.to_string(),
+            level: ThreadNoticeLevel::Warning,
+            message,
+        });
+    }
+
+    async fn resolve_mcp_tools(
+        &self,
+        agent_record: &Arc<AgentRecord>,
+    ) -> Result<Vec<Arc<dyn NamedTool>>, ThreadError> {
+        let Some(resolver) = self.mcp_tool_resolver.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let resolved = resolver
+            .resolve_for_agent(agent_record.id)
+            .await
+            .map_err(|error| ThreadError::McpToolResolutionFailed {
+                reason: error.to_string(),
+            })?;
+
+        for unavailable in &resolved.unavailable_servers {
+            self.emit_mcp_notice(format!(
+                "MCP server '{}' is unavailable for this turn: {}",
+                unavailable.display_name, unavailable.reason
+            ));
+        }
+
+        Ok(resolved.tools)
     }
 
     pub fn trace_base_dir(&self) -> Option<std::path::PathBuf> {
@@ -1055,12 +1098,12 @@ impl Thread {
         }
     }
 
-    fn build_turn_execution_parts(&self, agent_record: Arc<AgentRecord>) -> TurnExecutionParts {
+    fn build_turn_execution_parts(&self, agent_record: Arc<AgentRecord>, mcp_tools: Vec<Arc<dyn NamedTool>>) -> TurnExecutionParts {
         let provider = self.provider.clone();
         (
             self.id.to_string(),
             self.build_turn_context(),
-            Arc::new(self.build_shared_turn_tools(agent_record.as_ref())),
+            Arc::new(self.build_shared_turn_tools(agent_record.as_ref(), mcp_tools)),
             Arc::new(self.build_shared_turn_hooks()),
             provider.clone(),
             self.config.turn_config.clone(),
@@ -1069,7 +1112,7 @@ impl Thread {
         )
     }
 
-    fn build_shared_turn_tools(&self, agent_record: &AgentRecord) -> Vec<Arc<dyn NamedTool>> {
+    fn build_shared_turn_tools(&self, agent_record: &AgentRecord, mcp_tools: Vec<Arc<dyn NamedTool>>) -> Vec<Arc<dyn NamedTool>> {
         let enabled_tool_names = agent_record
             .tool_names
             .iter()
@@ -1084,6 +1127,7 @@ impl Thread {
         let plan_tool: Arc<dyn NamedTool> =
             Arc::new(UpdatePlanTool::new(Arc::new(self.plan_store.clone())));
         tools.push(plan_tool);
+        tools.extend(mcp_tools);
         tools
     }
 
@@ -1123,7 +1167,11 @@ mod tests {
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand};
+    use argus_protocol::{
+        AgentId, AgentType, McpToolResolver, McpUnavailableServerSummary, ProviderId,
+        ResolvedMcpTools, ThreadCommand, ThreadNoticeLevel, ToolDefinition,
+        ToolError, ToolExecutionContext,
+    };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
