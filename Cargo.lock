@@ -271,6 +271,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-mcp"
+version = "0.1.0"
+dependencies = [
+ "argus-protocol",
+ "async-trait",
+]
+
+[[package]]
 name = "argus-protocol"
 version = "0.1.0"
 dependencies = [

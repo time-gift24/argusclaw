@@ -9,6 +9,7 @@ pub mod http_client;
 pub mod ids;
 pub mod knowledge;
 pub mod llm;
+pub mod mcp;
 pub mod message_override;
 pub mod plan;
 pub mod risk_level;
@@ -33,6 +34,11 @@ pub use hooks::{
 };
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
 pub use knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
+pub use mcp::{
+    AgentMcpBinding, AgentMcpServerBinding, AgentMcpToolBinding, McpDiscoveredToolRecord,
+    McpServerRecord, McpToolResolver, McpTransportConfig, McpTransportKind,
+    McpUnavailableServerSummary, ResolvedMcpTools, ThreadNoticeLevel,
+};
 pub use message_override::MessageOverride;
 pub use plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
 pub use risk_level::RiskLevel;
