@@ -18,9 +18,8 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
-    ThreadEvent, ThreadMailbox, TokenUsage, ToolExecutionContext, ToolHookContext, ids::ThreadId,
-    sanitize_tool_output,
+    AgentRecord, HookAction, HookEvent, HookHandler, ThreadEvent, ThreadMailbox, TokenUsage,
+    ToolExecutionContext, ToolHookContext, ids::ThreadId, sanitize_tool_output,
 };
 
 use super::events::TurnLogEvent;
@@ -259,7 +258,7 @@ fn build_trace_response_event(
 ///
 /// 1. **Construction**: Built via `TurnBuilder` with all required fields
 /// 2. **Execution**: Call `.execute()` to run the turn (consumes self)
-/// 3. **Completion**: Returns `TurnOutput` with updated messages and token usage
+/// 3. **Completion**: Returns `TurnOutput` with appended messages and token usage
 ///
 /// # Example
 ///
@@ -306,8 +305,13 @@ pub struct Turn {
     #[builder(default, setter(strip_option))]
     session_id: Option<argus_protocol::SessionId>,
 
-    /// Message history for this turn.
-    messages: Vec<ChatMessage>,
+    /// Shared base message history for this turn.
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    messages: Arc<Vec<ChatMessage>>,
+
+    /// Messages appended during this turn.
+    #[builder(default)]
+    pending_messages: Vec<ChatMessage>,
 
     /// LLM provider for completion requests.
     provider: Arc<dyn LlmProvider>,
@@ -363,6 +367,18 @@ pub struct Turn {
 }
 
 impl TurnBuilder {
+    /// Set the base message history for this turn.
+    pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
+        self.messages = Some(Arc::new(value));
+        self
+    }
+
+    /// Share an existing history buffer with this turn.
+    pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
+        self.messages = Some(value);
+        self
+    }
+
     /// Set turn number.
     pub fn turn_number(mut self, value: u32) -> Self {
         self.turn_number = Some(value);
@@ -398,6 +414,14 @@ impl std::fmt::Debug for Turn {
 }
 
 impl Turn {
+    fn materialize_messages(&self, pending_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let mut messages =
+            Vec::with_capacity(self.messages.len().saturating_add(pending_messages.len()));
+        messages.extend(self.messages.iter().cloned());
+        messages.extend(pending_messages.iter().cloned());
+        messages
+    }
+
     /// Execute the turn and return the output.
     ///
     /// This method:
@@ -675,39 +699,14 @@ impl Turn {
     }
 
     /// Internal method: trigger hooks and return the action.
-    ///
-    /// Directly iterates over `self.hooks` (no HookRegistry needed).
-    async fn fire_hooks(
-        &self,
-        event: HookEvent,
-        ctx: &HookContext,
-    ) -> Result<HookAction, TurnError> {
+    async fn fire_hooks(&self, ctx: &ToolHookContext) -> Result<HookAction, TurnError> {
         for hook in &self.hooks {
-            let action = match event {
-                HookEvent::BeforeCallLLM => {
-                    let HookContext::BeforeCallLLM(ctx_any) = ctx else {
-                        return Err(TurnError::LlmCallBlocked {
-                            reason: "Invalid hook context".to_string(),
-                        });
-                    };
-                    hook.on_before_call_llm(ctx_any).await
-                }
-                HookEvent::BeforeToolCall | HookEvent::AfterToolCall | HookEvent::TurnEnd => {
-                    let HookContext::ToolEvent(ctx_any) = ctx else {
-                        return Err(TurnError::ToolCallBlocked {
-                            reason: "Invalid hook context".to_string(),
-                        });
-                    };
-                    hook.on_tool_event(ctx_any).await
-                }
-            };
+            let action = hook.on_tool_event(ctx).await;
 
-            // Handle blocking actions
             if let HookAction::Block(reason) = action {
                 return Ok(HookAction::Block(reason));
             }
 
-            // For modification actions (only BeforeCallLLM), return them
             if !matches!(action, HookAction::Continue) {
                 return Ok(action);
             }
@@ -723,25 +722,13 @@ impl Turn {
         &mut self,
         trace_writer: Option<TraceWriter>,
     ) -> Result<(TurnOutput, Option<TraceWriter>), (TurnError, Option<TraceWriter>)> {
-        let mut messages = std::mem::take(&mut self.messages);
+        let mut pending_messages = std::mem::take(&mut self.pending_messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
         let mut trace_writer = trace_writer;
 
-        // Add system message about max_tool_calls ONCE before loop (not inside to avoid accumulation)
         let max_tool_calls = self.config.max_tool_calls;
-        if let Some(max) = max_tool_calls
-            && !self.tools.is_empty()
-        {
-            let system_content = format!(
-                "IMPORTANT: You can only call at most {} tool(s) per response. \
-                If you need to call multiple tools, please proceed step by step - \
-                call tools one at a time and wait for the results before calling the next tool.",
-                max
-            );
-            messages.insert(0, ChatMessage::system(system_content));
-        }
 
         for iteration in 0..max_iterations {
             if self.cancellation.is_cancelled() {
@@ -756,7 +743,20 @@ impl Turn {
             for input in pending_inputs {
                 let content = input.into_message_text();
                 tracing::debug!("injecting control input into turn: {}", content);
-                messages.push(ChatMessage::user(&content));
+                pending_messages.push(ChatMessage::user(&content));
+            }
+
+            let mut request_messages = self.materialize_messages(&pending_messages);
+            if let Some(max) = max_tool_calls
+                && !self.tools.is_empty()
+            {
+                let system_content = format!(
+                    "IMPORTANT: You can only call at most {} tool(s) per response. \
+                    If you need to call multiple tools, please proceed step by step - \
+                    call tools one at a time and wait for the results before calling the next tool.",
+                    max
+                );
+                request_messages.insert(0, ChatMessage::system(system_content));
             }
 
             tracing::debug!(
@@ -764,55 +764,16 @@ impl Turn {
                 turn_number = %self.turn_number,
                 iteration = %iteration,
                 max_iterations = %max_iterations,
-                message_count = %messages.len(),
+                message_count = %request_messages.len(),
                 "Turn iteration started"
             );
 
             // Prepare tools from self.tools
             let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
 
-            // Fire BeforeCallLLM hook (can modify messages/tools or block)
-            let ctx = BeforeCallLLMContext {
-                messages: messages.clone(),
-                tools: tools.clone(),
-                iteration,
-            };
-            let before_call_action = match self
-                .fire_hooks(HookEvent::BeforeCallLLM, &HookContext::BeforeCallLLM(ctx))
-                .await
-            {
-                Ok(action) => action,
-                Err(error) => return Err((error, trace_writer)),
-            };
-            match before_call_action {
-                HookAction::Continue => {}
-                HookAction::ModifyMessages(modified_messages) => {
-                    messages = modified_messages;
-                }
-                HookAction::ModifyTools(_modified_tools) => {
-                    // Tools are re-built from definitions, so we can't easily modify them here
-                    // For now, just log a warning
-                    tracing::warn!("Hook attempted to modify tools, but this is not yet supported");
-                }
-                HookAction::Modify {
-                    messages: modified_messages,
-                    tools: _,
-                } => {
-                    messages = modified_messages;
-                }
-                HookAction::Block(reason) => {
-                    return Err((TurnError::LlmCallBlocked { reason }, trace_writer));
-                }
-                HookAction::ContinueWithMessage(message) => {
-                    tracing::warn!(
-                        message = %message,
-                        "Hook returned ContinueWithMessage on BeforeCallLLM (ignored)"
-                    );
-                }
-            }
-
             // Build the request with current messages and tools
-            let mut request = CompletionRequest::new(messages.clone()).with_tools(tools.clone());
+            let mut request =
+                CompletionRequest::new(request_messages.clone()).with_tools(tools.clone());
             if let Some(max_tokens) = self.agent_record.max_tokens {
                 request.max_tokens = Some(max_tokens);
             }
@@ -828,7 +789,7 @@ impl Turn {
             // Write LLM request event to trace
             if let Some(writer) = trace_writer.as_mut() {
                 let llm_req_event = TurnLogEvent::LlmRequest {
-                    messages: messages.clone(),
+                    messages: request_messages.clone(),
                     tools: tools
                         .iter()
                         .map(|t| {
@@ -846,7 +807,7 @@ impl Turn {
                 turn_number = %self.turn_number,
                 iteration = %iteration,
                 tool_count = %tools.len(),
-                message_count = %messages.len(),
+                message_count = %request_messages.len(),
                 "Calling LLM"
             );
             let response = match self.call_llm_streaming(request).await {
@@ -889,8 +850,9 @@ impl Turn {
             };
 
             // Process response
-            let next_action =
-                match self.process_finish_reason(response, &mut messages, &mut token_usage) {
+            let next_action = match self
+                .process_finish_reason(response, &mut pending_messages, &mut token_usage)
+            {
                     Ok(next_action) => next_action,
                     Err(error) => return Err((error, trace_writer)),
                 };
@@ -909,9 +871,7 @@ impl Turn {
                         thread_id: Some(self.thread_id.clone()),
                         turn_number: Some(self.turn_number),
                     };
-                    let turn_end_action = self
-                        .fire_hooks(HookEvent::TurnEnd, &HookContext::ToolEvent(Box::new(ctx)))
-                        .await;
+                    let turn_end_action = self.fire_hooks(&ctx).await;
 
                     // Record LLM response to trace
                     if let Some(writer) = trace_writer.as_mut() {
@@ -933,13 +893,6 @@ impl Turn {
                             );
                             None
                         }
-                        Ok(other) => {
-                            tracing::warn!(
-                                action = ?other,
-                                "TurnEnd hook returned unsupported action (ignored)"
-                            );
-                            None
-                        }
                         Err(error) => {
                             tracing::warn!(
                                 error = %error,
@@ -950,8 +903,8 @@ impl Turn {
                     };
 
                     if let Some(message) = continue_message {
-                        messages = std::mem::take(&mut output.messages);
-                        messages.push(ChatMessage::user(&message));
+                        pending_messages = std::mem::take(&mut output.appended_messages);
+                        pending_messages.push(ChatMessage::user(&message));
 
                         if let Some(writer) = trace_writer.as_mut() {
                             let _ = writer
@@ -1047,7 +1000,7 @@ impl Turn {
                             result_preview = %preview,
                             "Tool result added to history"
                         );
-                        messages.push(ChatMessage::tool_result(
+                        pending_messages.push(ChatMessage::tool_result(
                             result.tool_call_id,
                             result.name,
                             sanitized_content,
@@ -1149,7 +1102,7 @@ impl Turn {
     fn process_finish_reason(
         &self,
         response: CompletionResponse,
-        messages: &mut Vec<ChatMessage>,
+        pending_messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
     ) -> Result<NextAction, TurnError> {
         let CompletionResponse {
@@ -1174,14 +1127,14 @@ impl Turn {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
                 {
-                    messages.push(ChatMessage::assistant_with_reasoning(
+                    pending_messages.push(ChatMessage::assistant_with_reasoning(
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
                 }
 
                 Ok(NextAction::Return(TurnOutput {
-                    messages: std::mem::take(messages),
+                    appended_messages: std::mem::take(pending_messages),
                     token_usage: token_usage.clone(),
                 }))
             }
@@ -1205,7 +1158,7 @@ impl Turn {
                     tool_calls.clone(),
                     reasoning_content,
                 );
-                messages.push(assistant_msg);
+                pending_messages.push(assistant_msg);
 
                 Ok(NextAction::ContinueWithTools {
                     tool_calls,
@@ -1234,7 +1187,7 @@ impl Turn {
                         tool_calls.clone(),
                         reasoning_content,
                     );
-                    messages.push(assistant_msg);
+                    pending_messages.push(assistant_msg);
 
                     Ok(NextAction::ContinueWithTools {
                         tool_calls,
@@ -1245,18 +1198,18 @@ impl Turn {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
                 {
-                    messages.push(ChatMessage::assistant_with_reasoning(
+                    pending_messages.push(ChatMessage::assistant_with_reasoning(
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
 
                     Ok(NextAction::Return(TurnOutput {
-                        messages: std::mem::take(messages),
+                        appended_messages: std::mem::take(pending_messages),
                         token_usage: token_usage.clone(),
                     }))
                 } else {
                     Ok(NextAction::Return(TurnOutput {
-                        messages: std::mem::take(messages),
+                        appended_messages: std::mem::take(pending_messages),
                         token_usage: token_usage.clone(),
                     }))
                 }
@@ -1323,12 +1276,7 @@ impl Turn {
             turn_number: Some(self.turn_number),
         };
 
-        if let Ok(HookAction::Block(ref reason)) = self
-            .fire_hooks(
-                HookEvent::BeforeToolCall,
-                &HookContext::ToolEvent(Box::new(ctx)),
-            )
-            .await
+        if let Ok(HookAction::Block(ref reason)) = self.fire_hooks(&ctx).await
         {
             // Hook blocked the tool call
             let block_start = std::time::Instant::now();
@@ -1364,12 +1312,7 @@ impl Turn {
                 thread_id: Some(self.thread_id.clone()),
                 turn_number: Some(self.turn_number),
             };
-            let _ = self
-                .fire_hooks(
-                    HookEvent::AfterToolCall,
-                    &HookContext::ToolEvent(Box::new(after_ctx)),
-                )
-                .await;
+            let _ = self.fire_hooks(&after_ctx).await;
 
             return ToolExecutionResult {
                 tool_call_id,
@@ -1521,12 +1464,7 @@ impl Turn {
             thread_id: Some(self.thread_id.clone()),
             turn_number: Some(self.turn_number),
         };
-        let _ = self
-            .fire_hooks(
-                HookEvent::AfterToolCall,
-                &HookContext::ToolEvent(Box::new(ctx)),
-            )
-            .await;
+        let _ = self.fire_hooks(&ctx).await;
 
         // Convert result to string content and measure duration
         let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -1754,9 +1692,24 @@ mod tests {
         let turn = make_turn(provider, vec![Arc::new(ContinueOnceTurnEndHook::new())], 5);
         let output = turn.execute().await.expect("turn should succeed");
 
-        assert!(output.messages.iter().any(|m| m.content == "first"));
-        assert!(output.messages.iter().any(|m| m.content == "continue"));
-        assert!(output.messages.iter().any(|m| m.content == "second"));
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|m| m.content == "first")
+        );
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|m| m.content == "continue")
+        );
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|m| m.content == "second")
+        );
     }
 
     #[tokio::test]

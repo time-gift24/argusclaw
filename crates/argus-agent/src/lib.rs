@@ -94,7 +94,4 @@ pub use thread_handle::ThreadHandle;
 pub use types::{ThreadInfo, ThreadState};
 
 // Re-export hook types from argus-protocol for convenience
-pub use argus_protocol::{
-    BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookEvent, HookHandler, HookRegistry,
-    ToolHookContext,
-};
+pub use argus_protocol::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};

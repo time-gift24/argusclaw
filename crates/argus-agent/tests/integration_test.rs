@@ -314,11 +314,9 @@ async fn test_turn_integration_simple() {
 
     let output = turn.execute().await.unwrap();
 
-    // Should have user + assistant messages
-    assert_eq!(output.messages.len(), 2);
-    assert_eq!(output.messages[0].role, Role::User);
-    assert_eq!(output.messages[1].role, Role::Assistant);
-    assert_eq!(output.messages[1].content, "Hello, world!");
+    assert_eq!(output.appended_messages.len(), 1);
+    assert_eq!(output.appended_messages[0].role, Role::Assistant);
+    assert_eq!(output.appended_messages[0].content, "Hello, world!");
 }
 
 struct HangingStreamingProvider;
@@ -490,13 +488,12 @@ async fn test_turn_integration_with_tool_call() {
 
     let output = turn.execute().await.unwrap();
 
-    // Should have messages: user, assistant (with tool call), tool result, assistant (final)
-    assert!(output.messages.len() >= 3);
+    assert!(output.appended_messages.len() >= 3);
     // Should have tracked tokens
     assert!(output.token_usage.total_tokens > 0);
     // First assistant message should have tool calls
     let assistant_msgs: Vec<_> = output
-        .messages
+        .appended_messages
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .collect();

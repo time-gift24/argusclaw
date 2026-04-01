@@ -120,7 +120,6 @@ mod tests {
     use super::*;
     use crate::TurnInputBuilder;
     use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
-    use argus_protocol::{BeforeCallLLMContext, HookAction, HookHandler, HookRegistry};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use std::sync::{Arc, Mutex};
@@ -233,68 +232,13 @@ mod tests {
 
         let output = execute_turn(input, config).await.unwrap();
 
-        // Should have original message + assistant response
-        assert_eq!(output.messages.len(), 2);
-        assert_eq!(output.messages[0].role, Role::User);
-        assert_eq!(output.messages[1].role, Role::Assistant);
-        assert_eq!(output.messages[1].content, "Hello, world!");
+        assert_eq!(output.appended_messages.len(), 1);
+        assert_eq!(output.appended_messages[0].role, Role::Assistant);
+        assert_eq!(output.appended_messages[0].content, "Hello, world!");
 
         // Token usage should be tracked
         assert_eq!(output.token_usage.input_tokens, 10);
         assert_eq!(output.token_usage.output_tokens, 5);
         assert_eq!(output.token_usage.total_tokens, 15);
-    }
-
-    #[tokio::test]
-    async fn test_before_call_llm_can_modify_messages() {
-        struct MessageModifierHandler;
-
-        #[async_trait]
-        impl HookHandler for MessageModifierHandler {
-            async fn on_before_call_llm(&self, ctx: &BeforeCallLLMContext) -> HookAction {
-                let mut messages = ctx.messages.clone();
-                // Add a prefix to track hook execution
-                if let Some(first) = messages.first_mut()
-                    && first.role == Role::User
-                {
-                    first.content = format!("[Modified] {}", first.content);
-                }
-                HookAction::ModifyMessages(messages)
-            }
-        }
-
-        let provider = Arc::new(MockProvider::new(vec![
-            argus_protocol::llm::CompletionResponse {
-                content: Some("Response".to_string()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: argus_protocol::llm::FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ]));
-
-        let hooks = Arc::new(HookRegistry::new());
-        hooks.register(
-            argus_protocol::HookEvent::BeforeCallLLM,
-            Arc::new(MessageModifierHandler),
-        );
-
-        let input = TurnInputBuilder::new()
-            .provider(provider)
-            .messages(vec![ChatMessage::user("Hello")])
-            .hooks(hooks)
-            .build()
-            .unwrap();
-
-        let config = TurnConfig::default();
-        let output = execute_turn(input, config).await.unwrap();
-
-        // Note: Hook functionality is temporarily disabled in Turn API conversion
-        // This test will need to be updated once HookRegistry::all_handlers() is implemented
-        // For now, we just verify the execution completes
-        assert_eq!(output.messages.len(), 2);
     }
 }

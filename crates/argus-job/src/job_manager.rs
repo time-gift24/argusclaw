@@ -347,7 +347,7 @@ impl JobManager {
     /// Summarize turn output into a brief result message.
     #[cfg(test)]
     fn summarize_output(output: &TurnOutput) -> String {
-        for msg in output.messages.iter().rev() {
+        for msg in output.appended_messages.iter().rev() {
             if let ChatMessage {
                 role: Role::Assistant,
                 content,
@@ -358,7 +358,10 @@ impl JobManager {
                 return Self::truncate_summary(content);
             }
         }
-        format!("job completed, {} messages in turn", output.messages.len())
+        format!(
+            "job completed, {} messages in turn",
+            output.appended_messages.len()
+        )
     }
 
     #[cfg(test)]
@@ -724,7 +727,7 @@ mod tests {
 
     fn assistant_output(content: &str) -> TurnOutput {
         TurnOutput {
-            messages: vec![ChatMessage::assistant(content)],
+            appended_messages: vec![ChatMessage::assistant(content)],
             token_usage: TokenUsage::default(),
         }
     }

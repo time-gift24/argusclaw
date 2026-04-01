@@ -261,7 +261,7 @@ async fn test_turn_trace_file_created_on_success() {
     let output = turn.execute().await.unwrap();
 
     // Verify turn executed
-    assert!(output.messages.len() >= 2);
+    assert!(!output.appended_messages.is_empty());
 
     // Verify trace file exists
     let trace_path = temp_dir
@@ -341,7 +341,7 @@ async fn test_turn_trace_contains_tool_execution() {
     let output = turn.execute().await.unwrap();
 
     // Verify turn executed
-    assert!(output.messages.len() >= 3);
+    assert!(output.appended_messages.len() >= 3);
 
     // Verify trace file exists
     let trace_path = temp_dir
@@ -489,7 +489,7 @@ async fn test_full_jsonl_event_sequence() {
         .unwrap();
 
     let output = turn.execute().await.unwrap();
-    assert!(output.messages.len() >= 3);
+    assert!(output.appended_messages.len() >= 3);
 
     // Read JSONL file
     let trace_path = temp_dir

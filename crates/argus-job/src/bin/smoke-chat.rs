@@ -202,7 +202,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let output = output_result?;
 
-    let reply = extract_last_assistant_message(&output.messages)
+    let reply = extract_last_assistant_message(&output.appended_messages)
         .ok_or_else(|| anyhow!("Turn completed without an assistant reply"))?;
 
     if !cli.stream {

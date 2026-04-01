@@ -55,8 +55,8 @@ pub struct Thread {
     updated_at: DateTime<Utc>,
 
     /// Initial message history (for restoring sessions).
-    #[builder(default)]
-    messages: Vec<ChatMessage>,
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    messages: Arc<Vec<ChatMessage>>,
 
     /// LLM provider (required, injected by Session).
     provider: Arc<dyn LlmProvider>,
@@ -136,6 +136,18 @@ impl ThreadBuilder {
         Self::default()
     }
 
+    /// Set the initial message history.
+    pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
+        self.messages = Some(Arc::new(value));
+        self
+    }
+
+    /// Share an existing message history buffer.
+    pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
+        self.messages = Some(value);
+        self
+    }
+
     /// Build the Thread.
     ///
     /// # Errors
@@ -149,12 +161,12 @@ impl ThreadBuilder {
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
 
         // Initialize messages with system prompt if not empty and no existing system message
-        let mut messages = self.messages.unwrap_or_default();
+        let mut messages = self.messages.unwrap_or_else(|| Arc::new(Vec::new()));
         let has_system_message = messages
             .first()
             .is_some_and(|m| m.role == argus_protocol::llm::Role::System);
         if !has_system_message && !agent_record.system_prompt.is_empty() {
-            messages.insert(0, ChatMessage::system(&agent_record.system_prompt));
+            Arc::make_mut(&mut messages).insert(0, ChatMessage::system(&agent_record.system_prompt));
         }
 
         Ok(Thread {
@@ -283,7 +295,7 @@ impl Thread {
 
     /// Get message history (read-only).
     pub fn history(&self) -> &[ChatMessage] {
-        &self.messages
+        self.messages.as_slice()
     }
 
     /// Get current token count.
@@ -318,7 +330,7 @@ impl Thread {
 
     /// Get mutable access to messages (for Compactor).
     pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
-        &mut self.messages
+        Arc::make_mut(&mut self.messages)
     }
 
     /// Set the token count (for Compactor).
@@ -347,18 +359,17 @@ impl Thread {
             messages.insert(0, system_message);
         }
 
-        self.messages = messages;
+        self.messages = Arc::new(messages);
         self.token_count = token_count;
         self.turn_count = turn_count;
         self.updated_at = updated_at;
     }
 
     fn apply_turn_output(&mut self, output: TurnOutput) {
-        self.messages = output.messages;
+        Arc::make_mut(&mut self.messages).extend(output.appended_messages);
         self.token_count = output.token_usage.total_tokens;
         self.updated_at = Utc::now();
     }
-
     /// Send a user message into the pipe for processing.
     ///
     /// This is the entry point for external callers (CLI, Tauri).
@@ -402,11 +413,11 @@ impl Thread {
 
         match self
             .compactor
-            .compact(self.provider.as_ref(), &self.messages, self.token_count)
+            .compact(self.provider.as_ref(), self.messages.as_slice(), self.token_count)
             .await
         {
             Ok(Some(result)) => {
-                self.messages = result.messages;
+                self.messages = Arc::new(result.messages);
                 self.token_count = result.token_count;
                 self.pending_trace_prelude_messages = result.trace_prelude_messages;
                 self.broadcast_to_self(ThreadEvent::Compacted {
@@ -439,7 +450,7 @@ impl Thread {
             self.agent_record.clone()
         };
 
-        self.messages.push(ChatMessage::user(user_input));
+        Arc::make_mut(&mut self.messages).push(ChatMessage::user(user_input));
         match self.build_turn(effective_record, cancellation) {
             Ok(turn) => Ok(turn),
             Err(error) => {
@@ -513,7 +524,7 @@ impl Thread {
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
             .session_id(self.session_id)
-            .messages(self.messages.clone())
+            .shared_messages(Arc::clone(&self.messages))
             .provider(self.provider.clone())
             .tools(tools)
             .hooks(hooks)
