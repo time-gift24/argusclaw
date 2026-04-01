@@ -29,6 +29,10 @@ const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::ListLinks,
     ChromeAction::NetworkRequests,
     ChromeAction::GetDomSummary,
+    ChromeAction::NewTab,
+    ChromeAction::SwitchTab,
+    ChromeAction::CloseTab,
+    ChromeAction::ListTabs,
 ];
 
 const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
@@ -44,6 +48,10 @@ const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Type,
     ChromeAction::GetUrl,
     ChromeAction::GetCookies,
+    ChromeAction::NewTab,
+    ChromeAction::SwitchTab,
+    ChromeAction::CloseTab,
+    ChromeAction::ListTabs,
 ];
 
 pub struct ChromeTool {
@@ -169,6 +177,10 @@ impl ChromeTool {
             "max_requests": {
                 "type": "integer",
                 "description": "Optional maximum number of request records for network requests"
+            },
+            "tab_id": {
+                "type": "string",
+                "description": "Tab identifier for tab operations (switch_tab, close_tab)"
             }
         });
 
@@ -412,6 +424,68 @@ impl NamedTool for ChromeTool {
                     "action": "get_cookies",
                     "session_id": session_id,
                     "cookies": cookies,
+                }))
+            }
+            ChromeAction::NewTab => {
+                let session_id = required_session_id(&args)?;
+                let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
+                    tool_name: "chrome".to_string(),
+                    reason: "missing url for new_tab action".to_string(),
+                })?;
+                let result = self
+                    .manager
+                    .new_tab(&session_id, &url)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "new_tab",
+                    "session_id": session_id,
+                    "tab_id": result.tab_id,
+                    "url": result.url,
+                    "page_title": result.page_title,
+                }))
+            }
+            ChromeAction::SwitchTab => {
+                let session_id = required_session_id(&args)?;
+                let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
+                let metadata = self
+                    .manager
+                    .switch_tab(&session_id, tab_id)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "switch_tab",
+                    "session_id": session_id,
+                    "tab_id": tab_id,
+                    "url": metadata.final_url,
+                    "page_title": metadata.page_title,
+                }))
+            }
+            ChromeAction::CloseTab => {
+                let session_id = required_session_id(&args)?;
+                let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
+                self.manager
+                    .close_tab(&session_id, tab_id)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "close_tab",
+                    "session_id": session_id,
+                    "tab_id": tab_id,
+                    "status": "ok",
+                }))
+            }
+            ChromeAction::ListTabs => {
+                let session_id = required_session_id(&args)?;
+                let tabs = self
+                    .manager
+                    .list_tabs(&session_id)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "list_tabs",
+                    "session_id": session_id,
+                    "tabs": tabs,
                 }))
             }
         }

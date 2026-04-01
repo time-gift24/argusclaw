@@ -66,4 +66,13 @@ pub enum ChromeToolError {
 
     #[error("failed to interact with element: {reason}")]
     InteractionFailed { reason: String },
+
+    #[error("tab not found: {tab_id}")]
+    TabNotFound { tab_id: String },
+
+    #[error("cannot close the last tab in session '{session_id}'")]
+    CannotCloseLastTab { session_id: String },
+
+    #[error("tab operation failed: {reason}")]
+    TabOperationFailed { reason: String },
 }

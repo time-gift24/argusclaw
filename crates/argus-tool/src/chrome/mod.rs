@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_constructor_keeps_only_latest_session_live() {
+    async fn managed_constructor_reuses_session_on_second_open() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -570,9 +570,11 @@ mod tests {
             .await
             .expect("second open should succeed");
 
-        assert_ne!(first_open["session_id"], second_open["session_id"]);
+        // Production mode (limit=1) reuses the session instead of creating a new one
+        assert_eq!(first_open["session_id"], second_open["session_id"]);
 
-        let err = tool
+        // The reused session is still alive and usable
+        let result = tool
             .execute(
                 json!({
                     "action": "extract_text",
@@ -581,13 +583,8 @@ mod tests {
                 make_ctx(),
             )
             .await
-            .expect_err("previous production session should be evicted");
-
-        assert!(matches!(
-            err,
-            ToolError::ExecutionFailed { tool_name, reason }
-                if tool_name == "chrome" && reason.contains("session not found")
-        ));
+            .expect("session should still be alive");
+        assert_eq!(result["action"], "extract_text");
     }
 
     #[test]
@@ -668,6 +665,11 @@ mod tests {
                 network_requests: Vec::new(),
                 url: url.to_string(),
                 cookies: vec![],
+                tabs: StdMutex::new(vec![FakeTab {
+                    handle: "tab-1".to_string(),
+                    url: url.to_string(),
+                    title: self.page_title.clone(),
+                }]),
             });
 
             Ok(BackendOpenResult {
@@ -791,6 +793,14 @@ mod tests {
         network_requests: Vec<NetworkRequestSummary>,
         url: String,
         cookies: Vec<CookieSummary>,
+        tabs: StdMutex<Vec<FakeTab>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeTab {
+        handle: String,
+        url: String,
+        title: String,
     }
 
     #[async_trait::async_trait]
@@ -843,6 +853,61 @@ mod tests {
                 page_title: format!("Navigated to {url}"),
             })
         }
+
+        async fn create_new_tab(
+            &self,
+            url: &str,
+        ) -> Result<(String, PageMetadata), ChromeToolError> {
+            let handle = format!("tab-{}", self.tabs.lock().unwrap().len() + 2);
+            let metadata = PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Tab {url}"),
+            };
+            self.tabs.lock().unwrap().push(FakeTab {
+                handle: handle.clone(),
+                url: metadata.final_url.clone(),
+                title: metadata.page_title.clone(),
+            });
+            Ok((handle, metadata))
+        }
+
+        async fn switch_to_window(
+            &self,
+            window_handle: &str,
+        ) -> Result<PageMetadata, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            let tab = tabs
+                .iter()
+                .find(|t| t.handle == window_handle)
+                .ok_or_else(|| ChromeToolError::TabNotFound {
+                    tab_id: window_handle.to_string(),
+                })?;
+            Ok(PageMetadata {
+                final_url: tab.url.clone(),
+                page_title: tab.title.clone(),
+            })
+        }
+
+        async fn close_current_window(&self) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            Ok(tabs
+                .iter()
+                .map(|t| (t.handle.clone(), t.url.clone(), t.title.clone()))
+                .collect())
+        }
+
+        async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.first().map(|t| t.handle.clone()).ok_or_else(|| {
+                ChromeToolError::TabOperationFailed {
+                    reason: "no tabs".to_string(),
+                }
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -861,6 +926,11 @@ mod tests {
                 network_requests: page.network_requests.clone(),
                 url: page.final_url.clone(),
                 cookies: vec![],
+                tabs: StdMutex::new(vec![FakeTab {
+                    handle: "tab-1".to_string(),
+                    url: page.final_url.clone(),
+                    title: page.page_title.clone(),
+                }]),
             });
 
             Ok(BackendOpenResult {

@@ -19,6 +19,10 @@ impl ExplorePolicy {
             ChromeAction::ListLinks,
             ChromeAction::NetworkRequests,
             ChromeAction::GetDomSummary,
+            ChromeAction::NewTab,
+            ChromeAction::SwitchTab,
+            ChromeAction::CloseTab,
+            ChromeAction::ListTabs,
         ]);
         Self { allowed }
     }
@@ -38,6 +42,10 @@ impl ExplorePolicy {
             ChromeAction::Type,
             ChromeAction::GetUrl,
             ChromeAction::GetCookies,
+            ChromeAction::NewTab,
+            ChromeAction::SwitchTab,
+            ChromeAction::CloseTab,
+            ChromeAction::ListTabs,
         ]);
         Self { allowed }
     }

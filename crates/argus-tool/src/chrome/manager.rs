@@ -18,7 +18,8 @@ use super::installer::{
     ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
 };
 use super::models::{
-    CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, OpenedSession, PageMetadata,
+    CookieSummary, LinkSummary, NetworkRequestSummary, NewTabResult, OpenArgs, OpenedSession,
+    PageMetadata, TabInfo,
 };
 use super::session::{
     BrowserSession, ChromeDriverProcess, ChromeSession, ManagedWebDriverSession,
@@ -276,6 +277,20 @@ impl ChromeManager {
 
     pub async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {
         self.paths.ensure_directories()?;
+
+        // Reuse existing session in single-session mode (production)
+        if self.session_limit == 1 {
+            let existing_id = {
+                let order = self.session_order.read().await;
+                order.back().cloned()
+            };
+            if let Some(existing_id) = existing_id
+                && self.sessions.read().await.contains_key(&existing_id)
+            {
+                return self.navigate(&existing_id, &args.url).await;
+            }
+        }
+
         let opened = self.backend.open(&args.url).await?;
         let session_id = self.next_session_id();
 
@@ -285,6 +300,12 @@ impl ChromeManager {
             opened.metadata.page_title.clone(),
             opened.session,
         );
+
+        // Register initial tab if we can get a window handle
+        if let Ok(handle) = session.interaction().current_window_handle().await {
+            session.register_initial_tab(handle).await;
+        }
+
         self.sessions
             .write()
             .await
@@ -412,6 +433,39 @@ impl ChromeManager {
             .await?
             .get_cookies()
             .await
+    }
+
+    pub async fn new_tab(
+        &self,
+        session_id: &str,
+        url: &str,
+    ) -> Result<NewTabResult, ChromeToolError> {
+        let session = self.session(session_id).await?;
+        session.create_new_tab(url).await
+    }
+
+    pub async fn switch_tab(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+    ) -> Result<PageMetadata, ChromeToolError> {
+        let session = self.session(session_id).await?;
+        let metadata = session.switch_tab(tab_id).await?;
+        let mut sessions = self.sessions.write().await;
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.update_metadata(metadata.clone());
+        }
+        Ok(metadata)
+    }
+
+    pub async fn close_tab(&self, session_id: &str, tab_id: &str) -> Result<(), ChromeToolError> {
+        let session = self.session(session_id).await?;
+        session.close_tab(tab_id).await
+    }
+
+    pub async fn list_tabs(&self, session_id: &str) -> Result<Vec<TabInfo>, ChromeToolError> {
+        let session = self.session(session_id).await?;
+        session.list_tabs().await
     }
 
     fn next_session_id(&self) -> String {
@@ -1031,6 +1085,7 @@ mod tests {
         shutdowns: Arc<StdMutex<Vec<String>>>,
         url: String,
         cookies: Vec<CookieSummary>,
+        tabs: StdMutex<Vec<(String, String, String)>>,
     }
 
     #[async_trait::async_trait]
@@ -1087,6 +1142,58 @@ mod tests {
                 page_title: format!("Navigated to {url}"),
             })
         }
+
+        async fn create_new_tab(
+            &self,
+            url: &str,
+        ) -> Result<(String, PageMetadata), ChromeToolError> {
+            let handle = format!("handle-{}", self.tabs.lock().unwrap().len() + 2);
+            let metadata = PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Tab {url}"),
+            };
+            self.tabs.lock().unwrap().push((
+                handle.clone(),
+                metadata.final_url.clone(),
+                metadata.page_title.clone(),
+            ));
+            Ok((handle, metadata))
+        }
+
+        async fn switch_to_window(
+            &self,
+            window_handle: &str,
+        ) -> Result<PageMetadata, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            tabs.iter()
+                .find(|(h, _, _)| h == window_handle)
+                .map(|(_, url, title)| PageMetadata {
+                    final_url: url.clone(),
+                    page_title: title.clone(),
+                })
+                .ok_or_else(|| ChromeToolError::TabNotFound {
+                    tab_id: window_handle.to_string(),
+                })
+        }
+
+        async fn close_current_window(&self) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
+            Ok(self.tabs.lock().unwrap().clone())
+        }
+
+        async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
+            self.tabs
+                .lock()
+                .unwrap()
+                .first()
+                .map(|(h, _, _)| h.clone())
+                .ok_or_else(|| ChromeToolError::TabOperationFailed {
+                    reason: "no tabs".to_string(),
+                })
+        }
     }
 
     #[async_trait::async_trait]
@@ -1107,6 +1214,11 @@ mod tests {
                 shutdowns: Arc::clone(&self.shutdowns),
                 url: page.final_url.clone(),
                 cookies: vec![],
+                tabs: StdMutex::new(vec![(
+                    "handle-1".to_string(),
+                    page.final_url.clone(),
+                    page.page_title.clone(),
+                )]),
             });
 
             Ok(BackendOpenResult {

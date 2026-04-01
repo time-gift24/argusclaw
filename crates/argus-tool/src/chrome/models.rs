@@ -22,6 +22,10 @@ pub enum ChromeAction {
     Type,
     GetUrl,
     GetCookies,
+    NewTab,
+    SwitchTab,
+    CloseTab,
+    ListTabs,
 }
 
 impl ChromeAction {
@@ -40,6 +44,10 @@ impl ChromeAction {
             Self::Type => "type",
             Self::GetUrl => "get_url",
             Self::GetCookies => "get_cookies",
+            Self::NewTab => "new_tab",
+            Self::SwitchTab => "switch_tab",
+            Self::CloseTab => "close_tab",
+            Self::ListTabs => "list_tabs",
         }
     }
 }
@@ -60,6 +68,8 @@ pub struct ChromeToolArgs {
     pub max_requests: Option<u32>,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub tab_id: Option<String>,
 }
 
 impl ChromeToolArgs {
@@ -73,6 +83,7 @@ impl ChromeToolArgs {
         args.session_id = normalized_optional_string(args.session_id);
         args.selector = normalized_optional_string(args.selector);
         args.text = normalized_optional_string(args.text);
+        args.tab_id = normalized_optional_string(args.tab_id);
 
         match args.action {
             ChromeAction::Install => {
@@ -120,6 +131,22 @@ impl ChromeToolArgs {
                 require_session_id(&args)?;
                 validate_for_get_cookies(&args)?;
             }
+            ChromeAction::NewTab => {
+                require_session_id(&args)?;
+                validate_for_new_tab(&mut args)?;
+            }
+            ChromeAction::SwitchTab => {
+                require_session_id(&args)?;
+                validate_for_switch_tab(&args)?;
+            }
+            ChromeAction::CloseTab => {
+                require_session_id(&args)?;
+                validate_for_close_tab(&args)?;
+            }
+            ChromeAction::ListTabs => {
+                require_session_id(&args)?;
+                validate_for_list_tabs(&args)?;
+            }
         }
 
         Ok(args)
@@ -166,6 +193,21 @@ pub struct NetworkRequestSummary {
     pub request_headers: Value,
     pub response_headers: Value,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TabInfo {
+    pub tab_id: String,
+    pub url: String,
+    pub title: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTabResult {
+    pub tab_id: String,
+    pub url: String,
+    pub page_title: String,
 }
 
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
@@ -377,6 +419,57 @@ fn validate_for_get_cookies(args: &ChromeToolArgs) -> Result<(), ChromeToolError
     )
 }
 
+fn validate_for_new_tab(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| ChromeToolError::MissingRequiredField {
+            action: args.action.as_str().to_string(),
+            field: "url",
+        })?;
+    reject_fields(
+        args,
+        &["selector", "text", "timeout_ms", "max_requests", "tab_id"],
+        "only 'session_id' and 'url' are allowed",
+    )?;
+    let url = validate_url_for_action(args.action.as_str(), url)?;
+    args.url = Some(url);
+    Ok(())
+}
+
+fn validate_for_switch_tab(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_field("tab_id", &args.tab_id, args.action.as_str())?;
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms", "max_requests"],
+        "only 'session_id' and 'tab_id' are allowed",
+    )
+}
+
+fn validate_for_close_tab(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_field("tab_id", &args.tab_id, args.action.as_str())?;
+    reject_fields(
+        args,
+        &["url", "selector", "text", "timeout_ms", "max_requests"],
+        "only 'session_id' and 'tab_id' are allowed",
+    )
+}
+
+fn validate_for_list_tabs(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    reject_fields(
+        args,
+        &[
+            "url",
+            "selector",
+            "text",
+            "timeout_ms",
+            "max_requests",
+            "tab_id",
+        ],
+        "only 'session_id' is allowed",
+    )
+}
+
 fn require_field(
     field: &'static str,
     value: &Option<String>,
@@ -404,6 +497,7 @@ fn reject_fields(
             "text" => args.text.is_some(),
             "timeout_ms" => args.timeout_ms.is_some(),
             "max_requests" => args.max_requests.is_some(),
+            "tab_id" => args.tab_id.is_some(),
             _ => false,
         })
         .copied()
