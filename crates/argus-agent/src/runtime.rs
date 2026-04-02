@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::turn::TurnCancellation;
+use crate::turn_log_store::persist_turn_log_snapshot;
 use argus_protocol::{
     MailboxMessage, MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
     ThreadMailbox, ThreadRuntimeState,
@@ -267,13 +268,25 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
                         ThreadRuntimeState::Idle => None,
                     };
-                    let finish_result = {
+                    let (finish_result, turn_log_snapshot) = {
                         let mut guard = thread.write().await;
-                        guard.finish_turn(result)
+                        let finish_result = guard.finish_turn(result);
+                        let turn_log_snapshot = guard.turn_log_persistence_snapshot();
+                        (finish_result, turn_log_snapshot)
                     };
 
                     if let Err(error) = finish_result {
                         tracing::error!("turn failed: {}", error);
+                    }
+
+                    if let Some(snapshot) = turn_log_snapshot
+                        && let Err(error) = persist_turn_log_snapshot(&snapshot).await
+                    {
+                        tracing::warn!(
+                            turn_number = snapshot.turn.turn_number,
+                            error = %error,
+                            "failed to persist committed turn log snapshot"
+                        );
                     }
 
                     {

@@ -1,14 +1,15 @@
 use argus_protocol::{llm::ChatMessage, TokenUsage};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnState {
     Completed,
     Failed,
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub turn_number: u32,
     pub state: TurnState,
@@ -53,7 +54,7 @@ pub struct InFlightTurn {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionCheckpoint {
     pub summarized_through_turn: u32,
     pub summary_messages: Vec<ChatMessage>,

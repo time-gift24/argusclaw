@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use argus_agent::turn_log_store::read_turn_record;
 use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEvent};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
@@ -1215,6 +1216,21 @@ async fn recover_thread_state_from_trace(
     let mut token_count = 0;
 
     for turn_number in &turn_numbers {
+        if let Some(turn) = read_turn_record(&turns_dir, *turn_number)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: format!(
+                    "failed to recover turn {turn_number} for thread {thread_id}: {error}"
+                ),
+            })?
+        {
+            messages.extend(turn.messages);
+            if let Some(token_usage) = turn.token_usage {
+                token_count = token_usage.total_tokens;
+            }
+            continue;
+        }
+
         let path = turns_dir.join(format!("{turn_number}.jsonl"));
         let events = read_jsonl_events(&path)
             .await
@@ -1356,6 +1372,23 @@ async fn resolve_turn_numbers(
             })?
     {
         let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if let Some(stem) = file_name.strip_suffix(".messages.jsonl") {
+            let turn_number = stem
+                .parse::<u32>()
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: format!(
+                        "failed to parse turn trace filename {}: {error}",
+                        path.display()
+                    ),
+                })?;
+            turn_numbers.push(turn_number);
+            continue;
+        }
+
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
             continue;
         }
@@ -1397,7 +1430,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use argus_agent::turn_log_store::{
+        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
+        write_turn_meta,
+    };
     use argus_agent::{CompactResult, Compactor, ThreadBuilder};
+    use argus_agent::history::TurnState;
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
     };
@@ -1415,6 +1453,7 @@ mod tests {
         CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
     };
     use async_trait::async_trait;
+    use chrono::Utc;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
     use tokio::time::{sleep, timeout};
@@ -1890,6 +1929,56 @@ mod tests {
         assert_eq!(messages[5].role, Role::Assistant);
         assert_eq!(messages[5].content, "总结二");
         assert_eq!(messages[5].reasoning_content.as_deref(), Some("推理二"));
+    }
+
+    #[tokio::test]
+    async fn recover_turns_from_messages_jsonl() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let turn_logs_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
+
+        write_turn_messages(
+            &turn_messages_path(&turn_logs_dir, 1),
+            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        )
+        .await
+        .expect("messages should write");
+        write_turn_meta(
+            &turn_meta_path(&turn_logs_dir, 1),
+            &TurnLogMeta {
+                turn_number: 1,
+                state: TurnState::Completed,
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("meta should write");
+
+        let recovered =
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, Some(1))
+                .await
+                .expect("new-format turn logs should recover");
+
+        assert_eq!(recovered.turn_count, 1);
+        assert_eq!(recovered.token_count, 2);
+        assert_eq!(recovered.messages.len(), 2);
+        assert_eq!(recovered.messages[0].content, "hi");
+        assert_eq!(recovered.messages[1].content, "hello");
     }
 
     #[tokio::test]

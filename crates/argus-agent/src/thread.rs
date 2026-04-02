@@ -26,6 +26,7 @@ use super::history::{
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
+use super::turn_log_store::TurnLogPersistenceSnapshot;
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -502,6 +503,27 @@ impl Thread {
         Ok(())
     }
 
+    pub(crate) fn turn_log_persistence_snapshot(&self) -> Option<TurnLogPersistenceSnapshot> {
+        let trace_config = self
+            .config
+            .turn_config
+            .trace_config
+            .as_ref()
+            .filter(|config| config.enabled)?;
+        let turn = self.turns.last()?.clone();
+        let mut base_dir = trace_config.trace_dir.clone();
+        let session_id = trace_config.session_id.unwrap_or(self.session_id);
+        base_dir = base_dir.join(session_id.to_string());
+        base_dir = base_dir.join(self.id.to_string());
+
+        Some(TurnLogPersistenceSnapshot {
+            base_dir,
+            turn,
+            system_messages: self.system_messages.clone(),
+            checkpoint: self.compaction_checkpoint.clone(),
+        })
+    }
+
     fn starts_with_pending_messages(
         messages: &[ChatMessage],
         pending_messages: &[ChatMessage],
@@ -778,10 +800,16 @@ mod tests {
 
     use super::*;
     use crate::compact::CompactResult;
+    use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
     use crate::history::TurnRecord;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
+    use crate::trace::TraceConfig;
+    use crate::turn_log_store::{
+        persist_turn_log_snapshot, read_turn_messages, read_turn_meta, turn_messages_path,
+        turn_meta_path, turns_dir,
+    };
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
     use async_trait::async_trait;
@@ -1041,33 +1069,6 @@ mod tests {
         })
         .await
         .expect("thread should emit idle");
-    }
-
-    async fn wait_for_turn_settled_events(
-        thread: &Arc<tokio::sync::RwLock<Thread>>,
-        expected_count: usize,
-    ) {
-        let mut rx = {
-            let guard = thread.read().await;
-            guard.subscribe()
-        };
-        let mut settled_count = 0usize;
-        timeout(Duration::from_secs(5), async {
-            loop {
-                match rx.recv().await {
-                    Ok(ThreadEvent::TurnSettled { .. }) => {
-                        settled_count += 1;
-                        if settled_count >= expected_count {
-                            break;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => {}
-                }
-            }
-        })
-        .await
-        .expect("thread should emit turn_settled");
     }
 
     #[test]
@@ -1337,7 +1338,7 @@ mod tests {
                 .expect("message should queue");
         }
 
-        wait_for_turn_settled_events(&thread, 1).await;
+        wait_for_idle_events(&thread, 1).await;
 
         let guard = thread.read().await;
         assert_eq!(guard.turn_count(), 1);
@@ -1825,6 +1826,65 @@ mod tests {
             .expect("turn should settle");
 
         assert_eq!(thread.turn_count(), 6);
+    }
+
+    #[tokio::test]
+    async fn turn_log_persistence_snapshot_writes_messages_and_meta() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let trace_config =
+            TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+        let thread_config = ThreadConfig {
+            turn_config: TurnConfigBuilder::default()
+                .trace_config(trace_config)
+                .build()
+                .expect("turn config should build"),
+        };
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .expect("thread should build");
+
+        let _turn = thread
+            .begin_turn("hi".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build");
+        thread
+            .finish_turn(Ok(TurnOutput {
+                appended_messages: vec![ChatMessage::assistant("hello")],
+                token_usage: argus_protocol::TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                },
+            }))
+            .expect("turn should settle");
+
+        let snapshot = thread
+            .turn_log_persistence_snapshot()
+            .expect("trace-enabled thread should expose persistence snapshot");
+        persist_turn_log_snapshot(&snapshot)
+            .await
+            .expect("snapshot should persist");
+
+        let persisted_turns_dir = turns_dir(&snapshot.base_dir);
+        let messages = read_turn_messages(&turn_messages_path(&persisted_turns_dir, 1))
+            .await
+            .expect("messages should read");
+        let meta = read_turn_meta(&turn_meta_path(&persisted_turns_dir, 1))
+            .await
+            .expect("meta should read");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "hi");
+        assert_eq!(messages[1].content, "hello");
+        assert_eq!(meta.turn_number, 1);
+        assert!(matches!(meta.state, crate::history::TurnState::Completed));
+        assert_eq!(meta.token_usage.as_ref().map(|usage| usage.total_tokens), Some(2));
     }
 
     #[tokio::test]

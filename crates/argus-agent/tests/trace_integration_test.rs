@@ -3,12 +3,18 @@
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
+use tokio::time::{Duration, sleep, timeout};
 
 use argus_agent::trace::{TraceConfig, read_jsonl_events};
-use argus_agent::{TurnBuilder, TurnConfig};
-use argus_protocol::AgentRecord;
-use argus_protocol::ToolExecutionContext;
+use argus_agent::turn_log_store::{
+    read_turn_meta, read_turn_messages, turn_messages_path, turn_meta_path, turns_dir,
+};
+use argus_agent::{
+    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
+    TurnConfig, TurnConfigBuilder,
+};
+use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ToolExecutionContext};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent, ToolCall, ToolCallDelta, ToolDefinition,
@@ -232,6 +238,38 @@ impl LlmProvider for PartialFailureMockProvider {
         ]);
         Ok(Box::pin(stream))
     }
+}
+
+struct NoopCompactor;
+
+#[async_trait]
+impl Compactor for NoopCompactor {
+    async fn compact(
+        &self,
+        _provider: &dyn LlmProvider,
+        _messages: &[ChatMessage],
+        _token_count: u32,
+    ) -> Result<Option<CompactResult>, CompactError> {
+        Ok(None)
+    }
+
+    fn name(&self) -> &'static str {
+        "noop"
+    }
+}
+
+async fn wait_for_turn_settled_event(mut rx: broadcast::Receiver<ThreadEvent>) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(ThreadEvent::TurnSettled { .. }) => break,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("thread should emit turn_settled");
 }
 
 #[tokio::test]
@@ -544,4 +582,77 @@ async fn test_full_jsonl_event_sequence() {
         .expect("tool_result should have duration_ms")
         .as_u64()
         .expect("duration_ms should be a number");
+}
+
+#[tokio::test]
+async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let trace_config =
+        TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .provider(Arc::new(SimpleMockProvider::new("Hello, world!")))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord::default()))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let thread_id = { thread.read().await.id() };
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_runtime_actor(Arc::clone(&thread));
+
+    {
+        let guard = thread.read().await;
+        guard
+            .send_user_message("Hello".to_string(), None)
+            .expect("message should queue");
+    }
+
+    wait_for_turn_settled_event(rx).await;
+
+    let persisted_turns_dir = turns_dir(
+        &temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string()),
+    );
+    let messages_path = turn_messages_path(&persisted_turns_dir, 1);
+    let meta_path = turn_meta_path(&persisted_turns_dir, 1);
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let messages_exists = tokio::fs::try_exists(&messages_path).await.unwrap_or(false);
+            let meta_exists = tokio::fs::try_exists(&meta_path).await.unwrap_or(false);
+            if messages_exists && meta_exists {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("committed turn logs should be persisted");
+
+    assert_eq!(thread.read().await.turn_count(), 1);
+
+    let messages = read_turn_messages(&messages_path)
+        .await
+        .expect("messages should read");
+    let meta = read_turn_meta(&meta_path).await.expect("meta should read");
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content, "Hello");
+    assert_eq!(messages[1].content, "Hello, world!");
+    assert_eq!(meta.turn_number, 1);
+    assert!(matches!(meta.state, argus_agent::history::TurnState::Completed));
+    assert!(meta.token_usage.is_some());
 }

@@ -63,6 +63,7 @@ pub mod plan_tool;
 mod runtime;
 pub mod thread;
 pub mod thread_handle;
+pub mod turn_log_store;
 
 pub mod tool_context;
 pub mod trace;
