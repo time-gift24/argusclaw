@@ -54,14 +54,14 @@ pub mod command;
 pub mod compact;
 pub mod config;
 pub mod error;
-pub mod events;
 pub mod execution;
+pub mod history;
 pub mod plan_hook;
 pub mod plan_store;
 pub mod plan_tool;
-mod runtime;
 pub mod thread;
 pub mod thread_handle;
+pub mod turn_log_store;
 
 pub mod tool_context;
 pub mod trace;
@@ -78,9 +78,8 @@ pub use config::{
     TurnOutputBuilder, TurnStreamEvent,
 };
 pub use error::{TurnError, TurnLogError};
-pub use events::TurnLogEvent;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
-pub use trace::{TraceConfig, TraceWriter, TurnLogState, read_jsonl_events, recover_turn_events};
+pub use trace::TraceConfig;
 pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)
@@ -94,7 +93,4 @@ pub use thread_handle::ThreadHandle;
 pub use types::{ThreadInfo, ThreadState};
 
 // Re-export hook types from argus-protocol for convenience
-pub use argus_protocol::{
-    BeforeCallLLMContext, BeforeCallLLMResult, HookAction, HookEvent, HookHandler, HookRegistry,
-    ToolHookContext,
-};
+pub use argus_protocol::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};

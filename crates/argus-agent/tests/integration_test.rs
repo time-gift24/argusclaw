@@ -3,9 +3,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::broadcast;
+use chrono::Utc;
+use tokio::sync::{Mutex as TokioMutex, broadcast, oneshot};
 
-use argus_agent::turn::TurnCancellation;
+use argus_agent::turn::{TurnCancellation, TurnProgress};
 use argus_agent::{TurnBuilder, TurnConfig};
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
@@ -20,6 +21,10 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_protocol::{AgentId, MessageOverride, ThreadId};
+use argus_protocol::{
+    ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction, HookEvent, HookHandler,
+    RiskLevel, ToolHookContext,
+};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -194,6 +199,71 @@ impl NamedTool for CaptureThreadIdTool {
     }
 }
 
+struct BlockingApprovalHook {
+    gate: Arc<TokioMutex<Option<oneshot::Receiver<()>>>>,
+}
+
+impl BlockingApprovalHook {
+    fn new(gate: oneshot::Receiver<()>) -> Self {
+        Self {
+            gate: Arc::new(TokioMutex::new(Some(gate))),
+        }
+    }
+}
+
+#[async_trait]
+impl HookHandler for BlockingApprovalHook {
+    async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
+        if ctx.event != HookEvent::BeforeToolCall || ctx.tool_name != "echo" {
+            return HookAction::Continue;
+        }
+
+        let request = ApprovalRequest::new(
+            "test-agent".to_string(),
+            ctx.tool_name.clone(),
+            "pause for approval".to_string(),
+            60,
+            RiskLevel::High,
+        );
+
+        if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+            &ctx.thread_event_sender,
+            ctx.thread_id.clone(),
+            ctx.turn_number,
+        ) {
+            let _ = sender.send(ThreadEvent::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request: request.clone(),
+            });
+        }
+
+        if let Some(gate) = self.gate.lock().await.take() {
+            let _ = gate.await;
+        }
+
+        if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+            &ctx.thread_event_sender,
+            ctx.thread_id.clone(),
+            ctx.turn_number,
+        ) {
+            let response = ApprovalResponse {
+                request_id: request.id,
+                decision: ApprovalDecision::Approved,
+                decided_at: Utc::now(),
+                decided_by: Some("test".to_string()),
+            };
+            let _ = sender.send(ThreadEvent::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            });
+        }
+
+        HookAction::Continue
+    }
+}
+
 /// Mock provider that simulates transient failures for testing retry behavior
 struct FlakyProvider {
     stream_failures: Mutex<usize>,
@@ -314,11 +384,9 @@ async fn test_turn_integration_simple() {
 
     let output = turn.execute().await.unwrap();
 
-    // Should have user + assistant messages
-    assert_eq!(output.messages.len(), 2);
-    assert_eq!(output.messages[0].role, Role::User);
-    assert_eq!(output.messages[1].role, Role::Assistant);
-    assert_eq!(output.messages[1].content, "Hello, world!");
+    assert_eq!(output.appended_messages.len(), 1);
+    assert_eq!(output.appended_messages[0].role, Role::Assistant);
+    assert_eq!(output.appended_messages[0].content, "Hello, world!");
 }
 
 struct HangingStreamingProvider;
@@ -395,7 +463,7 @@ async fn turn_cancel_returns_cancelled_instead_of_error() {
 }
 
 #[tokio::test]
-async fn turn_cancel_does_not_emit_turn_failed_event() {
+async fn turn_cancel_does_not_emit_terminal_thread_events() {
     let provider = Arc::new(HangingStreamingProvider);
     let cancellation = TurnCancellation::new();
 
@@ -428,8 +496,8 @@ async fn turn_cancel_does_not_emit_turn_failed_event() {
         .expect("turn task should not panic");
     assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
 
-    let mut saw_idle = false;
     let mut saw_failed = false;
+    let mut saw_idle = false;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_millis(250) {
         match tokio::time::timeout(Duration::from_millis(50), thread_event_rx.recv()).await {
@@ -448,8 +516,14 @@ async fn turn_cancel_does_not_emit_turn_failed_event() {
         }
     }
 
-    assert!(saw_idle, "cancellation should still emit Idle");
-    assert!(!saw_failed, "cancellation must not emit TurnFailed");
+    assert!(
+        !saw_failed,
+        "raw turn execution should not emit terminal runtime lifecycle events"
+    );
+    assert!(
+        !saw_idle,
+        "raw turn execution should not emit Idle directly"
+    );
 }
 
 #[tokio::test]
@@ -490,13 +564,12 @@ async fn test_turn_integration_with_tool_call() {
 
     let output = turn.execute().await.unwrap();
 
-    // Should have messages: user, assistant (with tool call), tool result, assistant (final)
-    assert!(output.messages.len() >= 3);
+    assert!(output.appended_messages.len() >= 3);
     // Should have tracked tokens
     assert!(output.token_usage.total_tokens > 0);
     // First assistant message should have tool calls
     let assistant_msgs: Vec<_> = output
-        .messages
+        .appended_messages
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .collect();
@@ -570,6 +643,7 @@ async fn test_turn_streams_retry_events() {
     // Collect retry events from ThreadEvent::Processing
     let mut retry_count = 0;
     let mut max_retries_seen = 0;
+    let mut saw_completed = false;
 
     // Listen for events with a timeout
     let timeout = Duration::from_secs(5);
@@ -595,7 +669,7 @@ async fn test_turn_streams_retry_events() {
                 );
             }
             Ok(ThreadEvent::TurnCompleted { .. }) => {
-                // Don't break, continue listening for more events
+                saw_completed = true;
             }
             Ok(ThreadEvent::TurnFailed { .. }) => {
                 panic!("turn should not fail with retryable errors");
@@ -615,6 +689,10 @@ async fn test_turn_streams_retry_events() {
     assert_eq!(
         max_retries_seen, 3,
         "should report max_retries=3 from RetryConfig::default()"
+    );
+    assert!(
+        !saw_completed,
+        "raw turn execution should not emit TurnCompleted directly"
     );
 }
 
@@ -922,5 +1000,79 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
         *seen_thread_id.lock().unwrap(),
         Some(originating_thread_id),
         "tool context should preserve the originating thread route",
+    );
+}
+
+#[tokio::test]
+async fn turn_progress_approval_pause_and_resume_emits_progress_and_thread_events() {
+    let provider = Arc::new(MockProvider::with_responses(vec![
+        (
+            "first".to_string(),
+            vec![ToolCall {
+                id: "call-approval".to_string(),
+                name: "echo".to_string(),
+                arguments: serde_json::json!({"message": "approval test"}),
+            }],
+        ),
+        ("done".to_string(), Vec::new()),
+    ]));
+
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let approval_hook = Arc::new(BlockingApprovalHook::new(resume_rx));
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("integration-turn".to_string())
+        .messages(vec![ChatMessage::user("start")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![Arc::new(EchoTool)])
+        .hooks(vec![approval_hook])
+        .config(TurnConfig {
+            max_iterations: Some(5),
+            ..TurnConfig::default()
+        })
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let execution = turn.execute_progress();
+
+    let mut saw_waiting = false;
+    while !saw_waiting {
+        match tokio::time::timeout(Duration::from_secs(1), thread_event_rx.recv())
+            .await
+            .expect("should receive approval event in time")
+        {
+            Ok(ThreadEvent::WaitingForApproval { .. }) => saw_waiting = true,
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+
+    resume_tx
+        .send(())
+        .expect("approval hook should still be waiting");
+
+    let execution = tokio::time::timeout(Duration::from_secs(2), execution.collect())
+        .await
+        .expect("turn should resume and finish");
+
+    assert!(execution.result.is_ok());
+    assert!(
+        execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::WaitingForApproval { .. }))
+    );
+    assert!(
+        execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::ApprovalResolved { .. }))
     );
 }

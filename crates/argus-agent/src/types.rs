@@ -5,7 +5,7 @@
 pub struct ThreadInfo {
     /// Thread ID.
     pub id: String,
-    /// Number of messages in history.
+    /// Number of messages in the current history view.
     pub message_count: usize,
     /// Current token count.
     pub token_count: u32,

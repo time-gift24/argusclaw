@@ -535,12 +535,7 @@ impl ArgusWing {
         model_override: Option<&str>,
     ) -> Result<ThreadId> {
         self.session_manager
-            .create_thread(
-                session_id,
-                template_id,
-                provider_id,
-                model_override,
-            )
+            .create_thread(session_id, template_id, provider_id, model_override)
             .await
     }
 

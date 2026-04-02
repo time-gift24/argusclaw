@@ -241,8 +241,8 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
     let output = turn.execute().await?;
 
     println!("Turn completed!");
-    println!("Messages:");
-    for (i, msg) in output.messages.iter().enumerate() {
+    println!("Appended messages:");
+    for (i, msg) in output.appended_messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",
@@ -323,14 +323,14 @@ Example flow:
     println!(
         "Total tool calls in conversation: {}",
         output
-            .messages
+            .appended_messages
             .iter()
             .filter(|m| m.tool_calls.is_some())
             .count()
     );
 
-    println!("Messages:");
-    for (i, msg) in output.messages.iter().enumerate() {
+    println!("Appended messages:");
+    for (i, msg) in output.appended_messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",

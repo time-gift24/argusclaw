@@ -228,5 +228,4 @@ mod tests {
 
         assert_eq!(record.tool_names, vec!["chrome"]);
     }
-
 }

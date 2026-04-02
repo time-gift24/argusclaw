@@ -1,19 +1,25 @@
-//! Integration tests for trace generation.
+//! Integration tests for committed turn-log persistence.
 
-use std::fs;
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
+use tokio::time::{Duration, sleep, timeout};
 
-use argus_agent::trace::{TraceConfig, read_jsonl_events};
-use argus_agent::{TurnBuilder, TurnConfig};
-use argus_protocol::AgentRecord;
-use argus_protocol::ToolExecutionContext;
+use argus_agent::trace::TraceConfig;
+use argus_agent::turn_log_store::{
+    read_turn_messages, read_turn_meta, turn_messages_path, turn_meta_path, turns_dir,
+};
+use argus_agent::{
+    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
+    TurnConfigBuilder,
+};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
-    LlmProvider, LlmStreamEvent, ToolCall, ToolCallDelta, ToolDefinition,
+    LlmProvider, LlmStreamEvent,
 };
-use argus_protocol::tool::{NamedTool, ToolError};
+use argus_protocol::{AgentRecord, SessionId, ThreadEvent};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -65,139 +71,6 @@ impl LlmProvider for SimpleMockProvider {
     }
 }
 
-/// Echo tool for integration tests
-struct EchoTool;
-
-#[async_trait]
-impl NamedTool for EchoTool {
-    fn name(&self) -> &str {
-        "echo"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "echo".to_string(),
-            description: "Echo back the input message".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to echo back"
-                    }
-                },
-                "required": ["message"]
-            }),
-        }
-    }
-
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-        _ctx: Arc<ToolExecutionContext>,
-    ) -> Result<serde_json::Value, ToolError> {
-        let message = args
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                tool_name: "echo".to_string(),
-                reason: "Missing 'message' parameter".to_string(),
-            })?;
-
-        Ok(serde_json::json!({
-            "echoed": message
-        }))
-    }
-}
-
-/// Provider that returns a tool call response
-struct ToolCallMockProvider {
-    responses: Mutex<Vec<(String, Vec<ToolCall>)>>,
-}
-
-impl ToolCallMockProvider {
-    fn new(responses: Vec<(String, Vec<ToolCall>)>) -> Self {
-        Self {
-            responses: Mutex::new(responses),
-        }
-    }
-
-    fn next_response(&self) -> (String, Vec<ToolCall>) {
-        let mut responses = self.responses.lock().unwrap();
-        if responses.len() > 1 {
-            responses.remove(0)
-        } else if !responses.is_empty() {
-            responses[0].clone()
-        } else {
-            ("No more responses".to_string(), vec![])
-        }
-    }
-}
-
-#[async_trait]
-impl LlmProvider for ToolCallMockProvider {
-    fn model_name(&self) -> &str {
-        "mock"
-    }
-
-    fn cost_per_token(&self) -> (Decimal, Decimal) {
-        (Decimal::ZERO, Decimal::ZERO)
-    }
-
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let (content, tool_calls) = self.next_response();
-        let finish_reason = if tool_calls.is_empty() {
-            FinishReason::Stop
-        } else {
-            FinishReason::ToolUse
-        };
-
-        Ok(CompletionResponse {
-            content: Some(content),
-            reasoning_content: None,
-            tool_calls,
-            input_tokens: 10,
-            output_tokens: 5,
-            finish_reason,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        })
-    }
-
-    async fn stream_complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<LlmEventStream, LlmError> {
-        let (content, tool_calls) = self.next_response();
-        let has_tool_calls = !tool_calls.is_empty();
-
-        // Build events vector first
-        let mut events: Vec<Result<LlmStreamEvent, LlmError>> = Vec::new();
-        if !content.is_empty() {
-            events.push(Ok(LlmStreamEvent::ContentDelta { delta: content }));
-        }
-        for (idx, tool_call) in tool_calls.into_iter().enumerate() {
-            let args_str = serde_json::to_string(&tool_call.arguments).unwrap_or_default();
-            events.push(Ok(LlmStreamEvent::ToolCallDelta(ToolCallDelta {
-                index: idx,
-                id: Some(tool_call.id),
-                name: Some(tool_call.name),
-                arguments_delta: Some(args_str),
-            })));
-        }
-        events.push(Ok(LlmStreamEvent::Finished {
-            finish_reason: if has_tool_calls {
-                FinishReason::ToolUse
-            } else {
-                FinishReason::Stop
-            },
-        }));
-
-        let stream = futures_util::stream::iter(events);
-        Ok(Box::pin(stream))
-    }
-}
-
 struct PartialFailureMockProvider;
 
 #[async_trait]
@@ -234,215 +107,175 @@ impl LlmProvider for PartialFailureMockProvider {
     }
 }
 
-#[tokio::test]
-async fn test_turn_trace_file_created_on_success() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
-
-    let provider = Arc::new(SimpleMockProvider::new("Hello, world!"));
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .trace_config(trace_config)
-        .build()
-        .unwrap();
-
-    let output = turn.execute().await.unwrap();
-
-    // Verify turn executed
-    assert!(output.messages.len() >= 2);
-
-    // Verify trace file exists
-    let trace_path = temp_dir
-        .path()
-        .join("test-thread")
-        .join("turns")
-        .join("1.jsonl");
-    assert!(
-        trace_path.exists(),
-        "Trace file should exist at {:?}",
-        trace_path
-    );
-
-    // Parse and verify JSONL structure
-    let content = fs::read_to_string(&trace_path).unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert!(!lines.is_empty(), "Should have at least one JSONL line");
-
-    // Each line should be a valid JSON with wrapper + data
-    let mut found_user_input = false;
-    let mut found_llm_req = false;
-    let mut found_llm_resp = false;
-    let mut found_turn_end = false;
-    for line in &lines {
-        let json: serde_json::Value = serde_json::from_str(line).unwrap();
-        let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match event_type {
-            "user_input" => found_user_input = true,
-            "llm_req" => found_llm_req = true,
-            "llm_response" => found_llm_resp = true,
-            "turn_end" => found_turn_end = true,
-            _ => {}
-        }
-    }
-    assert!(found_user_input, "Should have user_input event");
-    assert!(found_llm_req, "Should have llm_req event");
-    assert!(found_llm_resp, "Should have llm_response event");
-    assert!(found_turn_end, "Should have turn_end event on success");
+struct SequencedDelayedMockProvider {
+    delay: Duration,
+    responses: Mutex<VecDeque<String>>,
+    captured_user_inputs: Mutex<Vec<String>>,
 }
 
-#[tokio::test]
-async fn test_turn_trace_contains_tool_execution() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
-
-    // Provider returns tool call first, then final response
-    let responses = vec![
-        (
-            "I'll echo that.".to_string(),
-            vec![ToolCall {
-                id: "call-123".to_string(),
-                name: "echo".to_string(),
-                arguments: serde_json::json!({"message": "test message"}),
-            }],
-        ),
-        ("Done! I echoed 'test message'.".to_string(), vec![]),
-    ];
-    let provider = Arc::new(ToolCallMockProvider::new(responses));
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread-tools".to_string())
-        .messages(vec![ChatMessage::user("Echo 'test message'")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![Arc::new(EchoTool)])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .trace_config(trace_config)
-        .build()
-        .unwrap();
-
-    let output = turn.execute().await.unwrap();
-
-    // Verify turn executed
-    assert!(output.messages.len() >= 3);
-
-    // Verify trace file exists
-    let trace_path = temp_dir
-        .path()
-        .join("test-thread-tools")
-        .join("turns")
-        .join("1.jsonl");
-    assert!(
-        trace_path.exists(),
-        "Trace file should exist at {:?}",
-        trace_path
-    );
-
-    // Parse and verify JSONL structure
-    let content = fs::read_to_string(&trace_path).unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert!(!lines.is_empty(), "Should have at least one JSONL line");
-
-    // Verify we have llm_req, tool_result, llm_response, turn_end, and new events
-    let mut found_user_input = false;
-    let mut found_llm_req = false;
-    let mut found_llm_resp = false;
-    let mut found_tool_call_start = false;
-    let mut found_tool_result = false;
-    let mut found_turn_end = false;
-    for line in &lines {
-        let json: serde_json::Value = serde_json::from_str(line).unwrap();
-        let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match event_type {
-            "user_input" => found_user_input = true,
-            "llm_req" => found_llm_req = true,
-            "llm_response" => found_llm_resp = true,
-            "tool_call_start" => found_tool_call_start = true,
-            "tool_result" => found_tool_result = true,
-            "turn_end" => found_turn_end = true,
-            _ => {}
+impl SequencedDelayedMockProvider {
+    fn new(delay: Duration, responses: Vec<&str>) -> Self {
+        Self {
+            delay,
+            responses: Mutex::new(
+                responses
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect::<VecDeque<_>>(),
+            ),
+            captured_user_inputs: Mutex::new(Vec::new()),
         }
     }
-    assert!(found_user_input, "Should have user_input event");
-    assert!(found_llm_req, "Should have llm_req event");
-    assert!(found_llm_resp, "Should have llm_response event");
-    assert!(found_tool_call_start, "Should have tool_call_start event");
-    assert!(found_tool_result, "Should have tool_result event");
-    assert!(found_turn_end, "Should have turn_end event on success");
+
+    fn captured_user_inputs(&self) -> Vec<String> {
+        self.captured_user_inputs.lock().unwrap().clone()
+    }
+
+    fn next_response(&self) -> String {
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| "default response".to_string())
+    }
+
+    fn capture_request(&self, request: &CompletionRequest) {
+        let last_user_input = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == argus_protocol::llm::Role::User)
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        self.captured_user_inputs
+            .lock()
+            .unwrap()
+            .push(last_user_input);
+    }
 }
 
-#[tokio::test]
-async fn test_turn_trace_keeps_partial_llm_response_on_stream_failure() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+#[async_trait]
+impl LlmProvider for SequencedDelayedMockProvider {
+    fn model_name(&self) -> &str {
+        "sequenced-delayed"
+    }
 
-    let provider = Arc::new(PartialFailureMockProvider);
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
 
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .trace_config(trace_config)
-        .build()
-        .unwrap();
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.capture_request(&request);
+        sleep(self.delay).await;
 
-    let error = turn
-        .execute()
-        .await
-        .expect_err("stream failure should fail the turn");
-    assert!(matches!(error, argus_agent::TurnError::LlmFailed(_)));
+        Ok(CompletionResponse {
+            content: Some(self.next_response()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
 
-    let trace_path = temp_dir
-        .path()
-        .join("test-thread")
-        .join("turns")
-        .join("1.jsonl");
-    assert!(trace_path.exists(), "trace file should exist on failure");
+    async fn stream_complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        self.capture_request(&request);
+        let delay = self.delay;
+        let response = self.next_response();
+        let stream = futures_util::stream::once(async move {
+            sleep(delay).await;
+            Ok(LlmStreamEvent::ContentDelta { delta: response })
+        });
+        Ok(Box::pin(stream))
+    }
+}
 
-    let events = read_jsonl_events(&trace_path)
-        .await
-        .expect("trace file should remain readable on failure");
+struct NoopCompactor;
 
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            argus_agent::TurnLogEvent::LlmResponse { content, .. } if content == "partial answer"
-        )),
-        "partial llm response should be preserved in the trace before failure"
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            argus_agent::TurnLogEvent::TurnError { error, .. } if error.contains("stream timeout")
-        )),
-        "failure trace should end with turn_error"
-    );
+#[async_trait]
+impl Compactor for NoopCompactor {
+    async fn compact(
+        &self,
+        _provider: &dyn LlmProvider,
+        _messages: &[ChatMessage],
+        _token_count: u32,
+    ) -> Result<Option<CompactResult>, CompactError> {
+        Ok(None)
+    }
+
+    fn name(&self) -> &'static str {
+        "noop"
+    }
+}
+
+async fn wait_for_turn_settled_event(mut rx: broadcast::Receiver<ThreadEvent>) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(ThreadEvent::TurnSettled { .. }) => break,
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("thread should emit turn_settled");
+}
+
+async fn wait_for_provider_inputs(
+    provider: &Arc<SequencedDelayedMockProvider>,
+    expected_len: usize,
+) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if provider.captured_user_inputs().len() >= expected_len {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("provider should capture user inputs");
+}
+
+async fn collect_terminal_events_until_final_idle(
+    mut rx: broadcast::Receiver<ThreadEvent>,
+    expected_turns: usize,
+) -> Vec<ThreadEvent> {
+    let mut events = Vec::new();
+    let mut settled_count = 0usize;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event @ ThreadEvent::TurnCompleted { .. })
+                | Ok(event @ ThreadEvent::TurnFailed { .. })
+                | Ok(event @ ThreadEvent::TurnSettled { .. })
+                | Ok(event @ ThreadEvent::Idle { .. }) => {
+                    if matches!(event, ThreadEvent::TurnSettled { .. }) {
+                        settled_count += 1;
+                    }
+                    let is_final_idle = matches!(event, ThreadEvent::Idle { .. })
+                        && settled_count >= expected_turns;
+                    events.push(event);
+                    if is_final_idle {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("thread should emit terminal events");
+
+    events
 }
 
 #[tokio::test]
@@ -453,95 +286,286 @@ async fn test_turn_trace_disabled_by_default() {
 }
 
 #[tokio::test]
-async fn test_full_jsonl_event_sequence() {
+async fn test_turn_execute_does_not_write_legacy_event_trace_file() {
     let temp_dir = tempfile::tempdir().unwrap();
     let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
 
-    // Provider returns tool call first, then final response (stop)
-    let responses = vec![
-        (
-            "Let me echo that.".to_string(),
-            vec![ToolCall {
-                id: "call-abc".to_string(),
-                name: "echo".to_string(),
-                arguments: serde_json::json!({"message": "hello"}),
-            }],
-        ),
-        ("Done!".to_string(), vec![]),
-    ];
-    let provider = Arc::new(ToolCallMockProvider::new(responses));
+    let provider = Arc::new(SimpleMockProvider::new("Hello, world!"));
     let (stream_tx, _) = broadcast::channel(256);
     let (thread_event_tx, _) = broadcast::channel(256);
 
     let turn = TurnBuilder::default()
         .turn_number(1)
-        .thread_id("test-thread-seq".to_string())
-        .messages(vec![ChatMessage::user("Say hello")])
+        .thread_id("test-thread-no-legacy-trace".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
         .provider(provider)
         .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![Arc::new(EchoTool)])
+        .tools(vec![])
         .hooks(vec![])
-        .config(TurnConfig::default())
+        .config(
+            TurnConfigBuilder::default()
+                .trace_config(trace_config)
+                .build()
+                .unwrap(),
+        )
         .stream_tx(stream_tx)
         .thread_event_tx(thread_event_tx)
-        .trace_config(trace_config)
         .build()
         .unwrap();
 
-    let output = turn.execute().await.unwrap();
-    assert!(output.messages.len() >= 3);
+    let _output = turn.execute().await.unwrap();
 
-    // Read JSONL file
-    let trace_path = temp_dir
+    let legacy_trace_path = temp_dir
         .path()
-        .join("test-thread-seq")
+        .join("test-thread-no-legacy-trace")
         .join("turns")
         .join("1.jsonl");
-    assert!(trace_path.exists());
-    let content = fs::read_to_string(&trace_path).unwrap();
-    let lines: Vec<&str> = content.lines().collect();
-    assert!(!lines.is_empty());
+    assert!(
+        !legacy_trace_path.exists(),
+        "legacy event trace should not be persisted at {:?}",
+        legacy_trace_path
+    );
+}
 
-    // Collect event types in order
-    let event_types: Vec<String> = lines
-        .iter()
-        .map(|line| {
-            let json: serde_json::Value = serde_json::from_str(line).unwrap();
-            json.get("type")
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_default()
+#[tokio::test]
+async fn test_failed_turn_does_not_write_legacy_partial_trace_file() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+
+    let provider = Arc::new(PartialFailureMockProvider);
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread-no-partial-trace".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(
+            TurnConfigBuilder::default()
+                .trace_config(trace_config)
+                .build()
+                .unwrap(),
+        )
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let error = turn
+        .execute()
+        .await
+        .expect_err("stream failure should fail the turn");
+    assert!(matches!(error, argus_agent::TurnError::LlmFailed(_)));
+
+    let legacy_trace_path = temp_dir
+        .path()
+        .join("test-thread-no-partial-trace")
+        .join("turns")
+        .join("1.jsonl");
+    assert!(
+        !legacy_trace_path.exists(),
+        "failed turn should not leave a legacy partial trace at {:?}",
+        legacy_trace_path
+    );
+}
+
+#[tokio::test]
+async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let trace_config =
+        TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .provider(Arc::new(SimpleMockProvider::new("Hello, world!")))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord::default()))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let thread_id = { thread.read().await.id() };
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_reactor(Arc::clone(&thread));
+
+    {
+        let guard = thread.read().await;
+        guard
+            .send_user_message("Hello".to_string(), None)
+            .expect("message should queue");
+    }
+
+    wait_for_turn_settled_event(rx).await;
+
+    let persisted_turns_dir = turns_dir(
+        &temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string()),
+    );
+    let messages_path = turn_messages_path(&persisted_turns_dir, 1);
+    let meta_path = turn_meta_path(&persisted_turns_dir, 1);
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let messages_exists = tokio::fs::try_exists(&messages_path).await.unwrap_or(false);
+            let meta_exists = tokio::fs::try_exists(&meta_path).await.unwrap_or(false);
+            if messages_exists && meta_exists {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("committed turn logs should be persisted");
+
+    assert_eq!(thread.read().await.turn_count(), 1);
+
+    let messages = read_turn_messages(&messages_path)
+        .await
+        .expect("messages should read");
+    let meta = read_turn_meta(&meta_path).await.expect("meta should read");
+
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content, "Hello");
+    assert_eq!(messages[1].content, "Hello, world!");
+    assert_eq!(meta.turn_number, 1);
+    assert!(matches!(
+        meta.state,
+        argus_agent::history::TurnState::Completed
+    ));
+    assert!(meta.token_usage.is_some());
+}
+
+#[tokio::test]
+async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between_settlements() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let trace_config =
+        TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let provider = Arc::new(SequencedDelayedMockProvider::new(
+        Duration::from_millis(120),
+        vec!["first reply", "second reply"],
+    ));
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .provider(provider.clone())
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord::default()))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let thread_id = { thread.read().await.id() };
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_reactor(Arc::clone(&thread));
+
+    {
+        let guard = thread.read().await;
+        guard
+            .send_user_message("first".to_string(), None)
+            .expect("first message should queue");
+    }
+
+    wait_for_provider_inputs(&provider, 1).await;
+
+    {
+        let guard = thread.read().await;
+        guard
+            .send_user_message("second".to_string(), None)
+            .expect("second message should queue");
+    }
+
+    let terminal_events = collect_terminal_events_until_final_idle(rx, 2).await;
+    let filtered_events = terminal_events
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ThreadEvent::TurnCompleted { .. }
+                    | ThreadEvent::TurnFailed { .. }
+                    | ThreadEvent::TurnSettled { .. }
+                    | ThreadEvent::Idle { .. }
+            )
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    // Verify expected sequence (tools run in parallel, so tool events interleave with post-tools llm_response):
-    // user_input (from turn start), llm_req (iteration 1), tool_call_start, tool_result,
-    // llm_response (iteration 1 completion), llm_req (iteration 2), llm_response (stop), turn_end
-    let expected_sequence = vec![
-        "user_input",
-        "llm_req",
-        "tool_call_start",
-        "tool_result",
-        "llm_response",
-        "llm_req",
-        "llm_response",
-        "turn_end",
-    ];
-    assert_eq!(event_types, expected_sequence, "Event sequence mismatch");
+    assert_eq!(
+        filtered_events.len(),
+        5,
+        "two queued turns should emit completed/settled pairs followed by a single final idle",
+    );
+    assert!(matches!(
+        filtered_events[0],
+        ThreadEvent::TurnCompleted { turn_number: 1, .. }
+    ));
+    assert!(matches!(
+        filtered_events[1],
+        ThreadEvent::TurnSettled { turn_number: 1, .. }
+    ));
+    assert!(matches!(
+        filtered_events[2],
+        ThreadEvent::TurnCompleted { turn_number: 2, .. }
+    ));
+    assert!(matches!(
+        filtered_events[3],
+        ThreadEvent::TurnSettled { turn_number: 2, .. }
+    ));
+    assert!(matches!(filtered_events[4], ThreadEvent::Idle { .. }));
 
-    // Verify duration_ms > 0 in tool_result (fields are flattened into the wrapper)
-    let tool_result_line = lines
-        .iter()
-        .find(|line| {
-            let json: serde_json::Value = serde_json::from_str(line).unwrap();
-            json.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+    assert_eq!(
+        provider.captured_user_inputs(),
+        vec!["first".to_string(), "second".to_string()],
+    );
+
+    for turn_number in [1_u32, 2_u32] {
+        let persisted_turns_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        let messages_path = turn_messages_path(&persisted_turns_dir, turn_number);
+        let meta_path = turn_meta_path(&persisted_turns_dir, turn_number);
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let messages_exists = tokio::fs::try_exists(&messages_path).await.unwrap_or(false);
+                let meta_exists = tokio::fs::try_exists(&meta_path).await.unwrap_or(false);
+                if messages_exists && meta_exists {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
         })
-        .expect("Should have a tool_result event");
-    let json: serde_json::Value = serde_json::from_str(tool_result_line).unwrap();
-    // Verify duration_ms is present and is a valid u64 (may be 0 for fast tool executions)
-    let _duration_ms = json
-        .get("duration_ms")
-        .expect("tool_result should have duration_ms")
-        .as_u64()
-        .expect("duration_ms should be a number");
+        .await
+        .expect("committed turn logs should be persisted");
+
+        let meta = read_turn_meta(&meta_path).await.expect("meta should read");
+        assert_eq!(meta.turn_number, turn_number);
+        assert!(matches!(
+            meta.state,
+            argus_agent::history::TurnState::Completed
+        ));
+    }
 }

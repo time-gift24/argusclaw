@@ -206,12 +206,12 @@ impl TurnInputBuilder {
 
 /// Output from a Turn execution.
 ///
-/// Contains the results of executing a turn, including the updated
-/// message history and token usage statistics.
+/// Contains the results of executing a turn, including the newly appended
+/// messages and token usage statistics.
 #[derive(Debug, Clone, Builder)]
 pub struct TurnOutput {
-    /// Updated message history (includes assistant response + tool results).
-    pub messages: Vec<ChatMessage>,
+    /// Messages produced during this turn, in append order.
+    pub appended_messages: Vec<ChatMessage>,
     /// Token usage statistics.
     #[builder(default)]
     pub token_usage: argus_protocol::TokenUsage,
@@ -290,10 +290,10 @@ mod tests {
     #[test]
     fn test_turn_output_builder() {
         let output = TurnOutputBuilder::default()
-            .messages(Vec::new())
+            .appended_messages(Vec::new())
             .build()
             .unwrap();
-        assert!(output.messages.is_empty());
+        assert!(output.appended_messages.is_empty());
         assert_eq!(output.token_usage.input_tokens, 0);
     }
 
@@ -305,11 +305,10 @@ mod tests {
             total_tokens: 150,
         };
         let output = TurnOutputBuilder::default()
-            .messages(Vec::new())
+            .appended_messages(Vec::new())
             .token_usage(token_usage.clone())
             .build()
             .unwrap();
         assert_eq!(output.token_usage, token_usage);
     }
-
 }

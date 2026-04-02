@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - `Compactor`: Async trait for implementing compaction strategies.
-//! - `CompactResult`: Result type carrying compacted messages and token estimate.
+//! - `CompactResult`: Result type carrying checkpoint summary messages and token estimate.
 //! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
 
 use argus_protocol::llm::{
@@ -36,13 +36,11 @@ Provide a detailed prompt for continuing our conversation above.\n\
 
 /// Result of a successful compaction.
 pub struct CompactResult {
-    /// Compacted message list (replaces the original history).
-    pub messages: Vec<ChatMessage>,
+    /// Summary messages to use in a compaction checkpoint.
+    pub summary_messages: Vec<ChatMessage>,
     /// Estimated token count after compaction.
     /// The authoritative count will come from the next LLM response.
     pub token_count: u32,
-    /// Synthetic history messages that should be traced once with the next visible turn.
-    pub trace_prelude_messages: Vec<ChatMessage>,
 }
 
 /// Compactor trait — responsible for deciding when and how to compact.
@@ -152,8 +150,7 @@ impl Compactor for LlmCompactor {
             return Ok(None);
         }
 
-        let Some((system_messages, compactable_messages)) =
-            Self::split_history_segments(messages)
+        let Some((system_messages, compactable_messages)) = Self::split_history_segments(messages)
         else {
             return Ok(None);
         };
@@ -176,32 +173,20 @@ impl Compactor for LlmCompactor {
             ChatMessageMetadataMode::CompactionPrompt,
             false,
         ));
-        let synthetic_summary =
-            ChatMessage::assistant(&summary).with_metadata(Self::compaction_metadata(
-                ChatMessageMetadataMode::CompactionSummary,
-                true,
-            ));
-        let synthetic_replay = ChatMessage::user("Continue the conversation using the summary above.")
-            .with_metadata(Self::compaction_metadata(
-            ChatMessageMetadataMode::CompactionReplay,
-            false,
-        ));
+        let synthetic_summary = ChatMessage::assistant(&summary).with_metadata(
+            Self::compaction_metadata(ChatMessageMetadataMode::CompactionSummary, true),
+        );
+        let synthetic_replay =
+            ChatMessage::user("Continue the conversation using the summary above.").with_metadata(
+                Self::compaction_metadata(ChatMessageMetadataMode::CompactionReplay, false),
+            );
 
-        let trace_prelude_messages = vec![
-            synthetic_prompt.clone(),
-            synthetic_summary.clone(),
-            synthetic_replay.clone(),
-        ];
-
-        let mut new_messages = system_messages;
-        new_messages.push(synthetic_prompt);
-        new_messages.push(synthetic_summary);
-        new_messages.push(synthetic_replay);
+        let summary_messages = vec![synthetic_prompt, synthetic_summary, synthetic_replay];
 
         // Estimate new token count proportionally.
         let original_len = messages.len();
         let new_token_count = if original_len > 0 {
-            (token_count as usize * new_messages.len() / original_len) as u32
+            (token_count as usize * summary_messages.len() / original_len) as u32
         } else {
             0
         };
@@ -213,9 +198,8 @@ impl Compactor for LlmCompactor {
         );
 
         Ok(Some(CompactResult {
-            messages: new_messages,
+            summary_messages,
             token_count: new_token_count,
-            trace_prelude_messages,
         }))
     }
 
@@ -391,18 +375,19 @@ mod tests {
             .expect("should have compacted");
 
         // prompt + summary + replay = 3
-        assert_eq!(result.messages.len(), 3);
-        assert_eq!(result.messages[0].role, Role::User); // synthetic prompt
-        assert!(result.messages[0]
-            .content
-            .contains("Provide a detailed prompt for continuing our conversation above."));
-        assert_eq!(result.messages[1].content, "历史摘要");
-        assert_eq!(result.messages[2].role, Role::User); // synthetic replay
+        assert_eq!(result.summary_messages.len(), 3);
+        assert_eq!(result.summary_messages[0].role, Role::User); // synthetic prompt
+        assert!(
+            result.summary_messages[0]
+                .content
+                .contains("Provide a detailed prompt for continuing our conversation above.")
+        );
+        assert_eq!(result.summary_messages[1].content, "历史摘要");
+        assert_eq!(result.summary_messages[2].role, Role::User); // synthetic replay
         assert_eq!(
-            result.messages[2].content,
+            result.summary_messages[2].content,
             "Continue the conversation using the summary above."
         );
-        assert!(!result.trace_prelude_messages.is_empty());
     }
 
     #[tokio::test]
@@ -451,7 +436,9 @@ mod tests {
         assert!(request.temperature.is_none());
         let prompt = &prompt_message.content;
 
-        assert!(prompt.contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(
+            prompt.contains("Provide a detailed prompt for continuing our conversation above.")
+        );
         assert!(prompt.contains("Do not call any tools."));
         assert!(prompt.contains("## Goal"));
         assert!(prompt.contains("## Relevant files / directories"));
@@ -489,9 +476,11 @@ mod tests {
         assert_eq!(request.messages[3].content, "recent question");
         assert_eq!(request.messages[4].content, "recent answer");
         assert_eq!(request.messages[5].role, Role::User);
-        assert!(request.messages[5]
-            .content
-            .contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(
+            request.messages[5]
+                .content
+                .contains("Provide a detailed prompt for continuing our conversation above.")
+        );
     }
 
     #[tokio::test]

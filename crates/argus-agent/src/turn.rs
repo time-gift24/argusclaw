@@ -8,25 +8,111 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
-use tokio::sync::{Mutex, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
+use super::history::InFlightTurnShared;
+use super::tool_context::{clear_current_agent_id, set_current_agent_id};
+use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, LlmStreamEvent,
     ToolCall, ToolDefinition,
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, BeforeCallLLMContext, HookAction, HookContext, HookEvent, HookHandler,
-    ThreadEvent, ThreadMailbox, TokenUsage, ToolExecutionContext, ToolHookContext, ids::ThreadId,
-    sanitize_tool_output,
+    AgentRecord, HookAction, HookEvent, HookHandler, ThreadEvent, ThreadMailbox, TokenUsage,
+    ToolExecutionContext, ToolHookContext, ids::ThreadId, sanitize_tool_output,
 };
 
-use super::events::TurnLogEvent;
-use super::tool_context::{clear_current_agent_id, set_current_agent_id};
-use super::trace::{TraceConfig, TraceWriter};
-use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
+/// Progress emitted while a turn is executing.
+#[derive(Debug, Clone)]
+pub enum TurnProgress {
+    /// A streamed LLM event.
+    LlmEvent(LlmStreamEvent),
+    /// A tool call has started.
+    ToolStarted {
+        tool_call_id: String,
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
+    /// A tool call has completed.
+    ToolCompleted {
+        tool_call_id: String,
+        tool_name: String,
+        result: Result<serde_json::Value, String>,
+    },
+    /// The turn paused for approval.
+    WaitingForApproval {
+        thread_id: String,
+        turn_number: u32,
+        request: argus_protocol::ApprovalRequest,
+    },
+    /// The approval decision has resolved and the turn may continue.
+    ApprovalResolved {
+        thread_id: String,
+        turn_number: u32,
+        response: argus_protocol::ApprovalResponse,
+    },
+    /// The turn completed successfully.
+    Completed(TurnOutput),
+    /// The turn failed or was cancelled.
+    Failed { error: String },
+}
+
+/// Handle for observing turn progress as it happens and awaiting the final result.
+#[derive(Debug)]
+pub struct TurnExecution {
+    progress_rx: mpsc::UnboundedReceiver<TurnProgress>,
+    result_rx: oneshot::Receiver<Result<TurnOutput, TurnError>>,
+}
+
+/// Fully collected progress plus the final turn result.
+#[derive(Debug)]
+pub struct CollectedTurnExecution {
+    pub progress: Vec<TurnProgress>,
+    pub result: Result<TurnOutput, TurnError>,
+}
+
+impl TurnExecution {
+    /// Receive the next progress item as the turn runs.
+    pub async fn recv(&mut self) -> Option<TurnProgress> {
+        self.progress_rx.recv().await
+    }
+
+    /// Wait for the terminal turn result.
+    pub async fn finish(self) -> Result<TurnOutput, TurnError> {
+        let TurnExecution {
+            progress_rx,
+            result_rx,
+        } = self;
+        drop(progress_rx);
+
+        match result_rx.await {
+            Ok(result) => result,
+            Err(error) => Err(TurnError::BuildFailed(format!(
+                "turn execution task failed: {error}"
+            ))),
+        }
+    }
+
+    /// Collect every progress item until the turn completes.
+    pub async fn collect(mut self) -> CollectedTurnExecution {
+        let mut progress = Vec::new();
+        while let Some(item) = self.recv().await {
+            progress.push(item);
+        }
+
+        let result = match self.result_rx.await {
+            Ok(result) => result,
+            Err(error) => Err(TurnError::BuildFailed(format!(
+                "turn execution task failed: {error}"
+            ))),
+        };
+
+        CollectedTurnExecution { progress, result }
+    }
+}
 
 /// Cancellation primitive used to stop an active turn.
 ///
@@ -221,32 +307,28 @@ impl StreamingAccumulator {
     }
 }
 
-fn has_traceable_response(response: &CompletionResponse) -> bool {
-    response
-        .content
-        .as_deref()
-        .is_some_and(|content| !content.trim().is_empty())
-        || response
-            .reasoning_content
-            .as_deref()
-            .is_some_and(|reasoning| !reasoning.trim().is_empty())
-        || !response.tool_calls.is_empty()
+#[derive(Clone, Default)]
+pub(crate) struct TurnSharedContext {
+    state: Arc<InFlightTurnShared>,
 }
 
-fn build_trace_response_event(
-    response: &CompletionResponse,
-    finish_reason: String,
-) -> TurnLogEvent {
-    TurnLogEvent::LlmResponse {
-        content: response.content.clone().unwrap_or_default(),
-        reasoning_content: response.reasoning_content.clone(),
-        tool_calls: response
-            .tool_calls
-            .iter()
-            .filter_map(|tc| serde_json::to_value(tc).ok())
-            .collect(),
-        finish_reason,
-        metadata: None,
+impl TurnSharedContext {
+    pub(crate) fn for_thread(state: Arc<InFlightTurnShared>) -> Self {
+        Self { state }
+    }
+
+    fn resolved_tools(&self) -> Vec<Arc<dyn NamedTool>> {
+        self.state.tools.iter().cloned().collect()
+    }
+
+    fn resolved_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
+        self.state.hooks.iter().cloned().collect()
+    }
+
+    fn find_tool(&self, tool_name: &str) -> Option<Arc<dyn NamedTool>> {
+        self.resolved_tools()
+            .into_iter()
+            .find(|tool| tool.name() == tool_name)
     }
 }
 
@@ -259,7 +341,7 @@ fn build_trace_response_event(
 ///
 /// 1. **Construction**: Built via `TurnBuilder` with all required fields
 /// 2. **Execution**: Call `.execute()` to run the turn (consumes self)
-/// 3. **Completion**: Returns `TurnOutput` with updated messages and token usage
+/// 3. **Completion**: Returns `TurnOutput` with appended messages and token usage
 ///
 /// # Example
 ///
@@ -306,19 +388,16 @@ pub struct Turn {
     #[builder(default, setter(strip_option))]
     session_id: Option<argus_protocol::SessionId>,
 
-    /// Message history for this turn.
-    messages: Vec<ChatMessage>,
+    /// Shared thread-owned context consulted during execution.
+    #[builder(setter(custom), default = "Arc::new(TurnSharedContext::default())")]
+    shared: Arc<TurnSharedContext>,
+
+    /// Messages appended during this turn.
+    #[builder(default)]
+    pending_messages: Vec<ChatMessage>,
 
     /// LLM provider for completion requests.
     provider: Arc<dyn LlmProvider>,
-
-    /// Tools available for this turn (direct ownership, no ToolManager needed).
-    #[builder(default)]
-    tools: Vec<Arc<dyn NamedTool>>,
-
-    /// Hooks for lifecycle events (direct ownership, no HookRegistry needed).
-    #[builder(default)]
-    hooks: Vec<Arc<dyn HookHandler>>,
 
     /// Turn execution configuration.
     #[builder(default)]
@@ -348,21 +427,74 @@ pub struct Turn {
     /// Cancellation primitive used to stop this turn.
     #[builder(default)]
     cancellation: TurnCancellation,
-
-    /// Event forwarder task handle (cleaned up on drop).
-    #[builder(default)]
-    _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
-
-    /// Trace configuration.
-    #[builder(default, setter(strip_option))]
-    trace_config: Option<TraceConfig>,
-
-    /// Synthetic history messages that should be logged once before the visible turn starts.
-    #[builder(default)]
-    trace_prelude_messages: Vec<ChatMessage>,
 }
 
 impl TurnBuilder {
+    fn update_shared(mut self, update: impl FnOnce(&mut TurnSharedContext)) -> Self {
+        let mut shared = self
+            .shared
+            .take()
+            .map(|shared| (*shared).clone())
+            .unwrap_or_default();
+        update(&mut shared);
+        self.shared = Some(Arc::new(shared));
+        self
+    }
+
+    /// Set the base message history for this turn.
+    pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
+        self = self.update_shared(|shared| {
+            Arc::make_mut(&mut shared.state).history = Arc::new(value);
+        });
+        self
+    }
+
+    /// Share an existing history buffer with this turn.
+    pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
+        self = self.update_shared(|shared| {
+            Arc::make_mut(&mut shared.state).history = value;
+        });
+        self
+    }
+
+    /// Set the tool list for this turn.
+    pub fn tools(mut self, value: Vec<Arc<dyn NamedTool>>) -> Self {
+        self = self.update_shared(|shared| {
+            Arc::make_mut(&mut shared.state).tools = Arc::new(value);
+        });
+        self
+    }
+
+    /// Share an existing tool list with this turn.
+    pub fn shared_tools(mut self, value: Arc<Vec<Arc<dyn NamedTool>>>) -> Self {
+        self = self.update_shared(|shared| {
+            Arc::make_mut(&mut shared.state).tools = value;
+        });
+        self
+    }
+
+    /// Set the hook list for this turn.
+    pub fn hooks(mut self, value: Vec<Arc<dyn HookHandler>>) -> Self {
+        self = self.update_shared(|shared| {
+            Arc::make_mut(&mut shared.state).hooks = Arc::new(value);
+        });
+        self
+    }
+
+    /// Share an existing hook list with this turn.
+    pub fn shared_hooks(mut self, value: Arc<Vec<Arc<dyn HookHandler>>>) -> Self {
+        self = self.update_shared(|shared| {
+            Arc::make_mut(&mut shared.state).hooks = value;
+        });
+        self
+    }
+
+    /// Share a prebuilt thread-owned execution context with this turn.
+    pub(crate) fn shared(mut self, value: Arc<TurnSharedContext>) -> Self {
+        self.shared = Some(value);
+        self
+    }
+
     /// Set turn number.
     pub fn turn_number(mut self, value: u32) -> Self {
         self.turn_number = Some(value);
@@ -388,118 +520,85 @@ impl std::fmt::Debug for Turn {
             .field("id", &self.id)
             .field("turn_number", &self.turn_number)
             .field("thread_id", &self.thread_id)
-            .field("messages", &self.messages.len())
+            .field("messages", &self.shared.state.history.len())
             .field("provider", &self.provider.model_name())
-            .field("tools", &self.tools.len())
-            .field("hooks", &self.hooks.len())
+            .field("tools", &self.shared.resolved_tools().len())
+            .field("hooks", &self.shared.resolved_hooks().len())
             .field("config", &self.config)
             .finish()
     }
 }
 
 impl Turn {
-    /// Execute the turn and return the output.
-    ///
-    /// This method:
-    /// 1. Spawns the event forwarder task
-    /// 2. Executes the main LLM -> Tool -> LLM loop
-    /// 3. Sends TurnCompleted/TurnFailed event
-    /// 4. Sends Idle event
-    /// 5. Returns TurnOutput with updated messages and token usage
-    ///
-    /// # Errors
-    ///
-    /// Returns `TurnError` for:
-    /// - LLM failures
-    /// - Tool execution failures
-    /// - Hook blocks
-    /// - Max iterations exceeded
-    pub async fn execute(mut self) -> Result<TurnOutput, TurnError> {
-        // Spawn event forwarder — clone stream_tx so it lives in the forwarder task.
-        // This prevents the channel from closing when the Turn is dropped.
-        self._forwarder_handle = Some(Self::spawn_event_forwarder(
-            self.stream_tx.clone(),
-            self.thread_event_tx.clone(),
-            self.thread_id.clone(),
-            self.turn_number,
-        ));
+    #[cfg(test)]
+    pub(crate) fn shared_snapshot_ptr(&self) -> *const InFlightTurnShared {
+        Arc::as_ptr(&self.shared.state)
+    }
 
-        // Create trace writer if configured
-        let mut trace_writer = match self.trace_config.as_ref() {
-            Some(config) if config.enabled => {
-                let mut base_dir = config.trace_dir.clone();
-                if let Some(session_id) = &config.session_id {
-                    base_dir = base_dir.join(session_id.to_string());
-                }
-                base_dir = base_dir.join(&self.thread_id);
-                match TraceWriter::new(&base_dir, self.turn_number, config).await {
-                    Ok(writer) => Some(writer),
-                    Err(e) => {
-                        tracing::warn!(
-                            thread_id = %self.thread_id,
-                            error = %e,
-                            "Failed to create trace writer, continuing without tracing"
-                        );
-                        None
+    fn emit_progress(
+        progress_tx: &Option<mpsc::UnboundedSender<TurnProgress>>,
+        progress: TurnProgress,
+    ) {
+        if let Some(progress_tx) = progress_tx {
+            let _ = progress_tx.send(progress);
+        }
+    }
+
+    fn map_approval_progress(event: ThreadEvent) -> Option<TurnProgress> {
+        match event {
+            ThreadEvent::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request,
+            } => Some(TurnProgress::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request,
+            }),
+            ThreadEvent::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            } => Some(TurnProgress::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            }),
+            _ => None,
+        }
+    }
+
+    fn drain_approval_progress(
+        approval_rx: &mut broadcast::Receiver<ThreadEvent>,
+        progress_tx: &mpsc::UnboundedSender<TurnProgress>,
+    ) {
+        loop {
+            match approval_rx.try_recv() {
+                Ok(event) => {
+                    if let Some(progress) = Self::map_approval_progress(event) {
+                        let _ = progress_tx.send(progress);
                     }
                 }
-            }
-            _ => None,
-        };
-
-        // Write TurnStart event if tracing is enabled
-        if let Some(config) = self.trace_config.as_ref()
-            && config.enabled
-            && let Some(writer) = trace_writer.as_mut()
-        {
-            if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
-                let _ = writer
-                    .write_event(&TurnLogEvent::TurnStart {
-                        system_prompt: sp.clone(),
-                        model: model.clone(),
-                    })
-                    .await;
-            }
-            if !self.trace_prelude_messages.is_empty() {
-                let _ = writer
-                    .write_event(&TurnLogEvent::HistoryPrelude {
-                        messages: self.trace_prelude_messages.clone(),
-                    })
-                    .await;
-            }
-            for msg in self.messages.iter() {
-                if let ChatMessage {
-                    role: argus_protocol::llm::Role::User,
-                    content,
-                    metadata,
-                    ..
-                } = msg
-                {
-                    let _ = writer
-                        .write_event(&TurnLogEvent::UserInput {
-                            content: content.clone(),
-                            role: "user".to_string(),
-                            metadata: metadata.clone(),
-                        })
-                        .await;
-                }
+                Err(broadcast::error::TryRecvError::Empty)
+                | Err(broadcast::error::TryRecvError::Closed) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
             }
         }
+    }
 
+    async fn execute_internal(
+        mut self,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
+    ) -> Result<TurnOutput, TurnError> {
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
-            tool_count = %self.tools.len(),
-            hook_count = %self.hooks.len(),
+            tool_count = %self.shared.resolved_tools().len(),
+            hook_count = %self.shared.resolved_hooks().len(),
             "Turn execution started"
         );
 
-        // Execute main loop (takes ownership of trace_writer)
-        let loop_result = self.execute_loop(trace_writer).await;
-        let (result, trace_writer) = match loop_result {
-            Ok((output, tw)) => (Ok(output), tw),
-            Err((error, tw)) => (Err(error), tw),
-        };
+        let result = self.execute_loop(progress_tx).await;
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -518,196 +617,89 @@ impl Turn {
             callback(*session_id, self.turn_number);
         }
 
-        // Finalize trace - handles both success and failure cases
-        if let Some(writer) = trace_writer {
-            match &result {
-                Ok(output) => {
-                    if let Err(e) = writer.finish_success(&output.token_usage).await {
-                        tracing::warn!(
-                            thread_id = %self.thread_id,
-                            error = %e,
-                            "Failed to finalize trace on success"
-                        );
-                    }
-                }
-                Err(error) => {
-                    if let Err(e) = writer.finish_failure(&error.to_string()).await {
-                        tracing::warn!(
-                            thread_id = %self.thread_id,
-                            error = %e,
-                            "Failed to finalize trace on failure"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Send completion event
-        match &result {
-            Ok(output) => {
-                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnCompleted {
-                    thread_id: self.thread_id.clone(),
-                    turn_number: self.turn_number,
-                    token_usage: output.token_usage.clone(),
-                }) {
-                    tracing::warn!(
-                        thread_id = %self.thread_id,
-                        error = %e,
-                        "Failed to send TurnCompleted event"
-                    );
-                }
-            }
-            Err(TurnError::Cancelled) => {
-                // Cancellation is an expected control-path outcome. Do not emit TurnFailed;
-                // callers will still observe ThreadEvent::Idle.
-            }
-            Err(error) => {
-                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnFailed {
-                    thread_id: self.thread_id.clone(),
-                    turn_number: self.turn_number,
-                    error: error.to_string(),
-                }) {
-                    tracing::warn!(
-                        thread_id = %self.thread_id,
-                        error = %e,
-                        "Failed to send TurnFailed event"
-                    );
-                }
-            }
-        }
-
-        // Send Idle event
-        if let Err(e) = self.thread_event_tx.send(ThreadEvent::Idle {
-            thread_id: self.thread_id.clone(),
-        }) {
-            tracing::warn!(
-                thread_id = %self.thread_id,
-                error = %e,
-                "Failed to send Idle event"
-            );
-        }
-
         result
     }
 
-    /// Internal method: spawn event forwarder task.
-    ///
-    /// Forwards TurnStreamEvent to ThreadEvent for external subscribers.
-    /// Returns the JoinHandle so the caller can store it.
-    fn spawn_event_forwarder(
-        stream_tx: broadcast::Sender<TurnStreamEvent>,
-        thread_event_tx: broadcast::Sender<ThreadEvent>,
-        thread_id: String,
-        turn_number: u32,
-    ) -> tokio::task::JoinHandle<()> {
-        let mut stream_rx = stream_tx.subscribe();
-
-        tokio::spawn(async move {
-            tracing::debug!(
-                thread_id = %thread_id,
-                turn_number = %turn_number,
-                "Event forwarder started"
-            );
-            while let Ok(event) = stream_rx.recv().await {
-                match event {
-                    TurnStreamEvent::LlmEvent(llm_event) => {
-                        if let Err(e) = thread_event_tx.send(ThreadEvent::Processing {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                            event: llm_event,
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %turn_number,
-                                error = %e,
-                                "Failed to forward LlmEvent to thread_event_tx"
-                            );
-                        }
-                    }
-                    TurnStreamEvent::ToolStarted {
-                        tool_call_id,
-                        tool_name,
-                        arguments,
-                    } => {
-                        if let Err(e) = thread_event_tx.send(ThreadEvent::ToolStarted {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                            tool_call_id,
-                            tool_name,
-                            arguments,
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %turn_number,
-                                error = %e,
-                                "Failed to forward ToolStarted to thread_event_tx"
-                            );
-                        }
-                    }
-                    TurnStreamEvent::ToolCompleted {
-                        tool_call_id,
-                        tool_name,
-                        result,
-                    } => {
-                        if let Err(e) = thread_event_tx.send(ThreadEvent::ToolCompleted {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                            tool_call_id,
-                            tool_name,
-                            result,
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %turn_number,
-                                error = %e,
-                                "Failed to forward ToolCompleted to thread_event_tx"
-                            );
-                        }
-                    }
-                }
-            }
-            tracing::warn!(
-                thread_id = %thread_id,
-                turn_number = %turn_number,
-                "Event forwarder stopped (stream channel closed)"
-            );
-        })
+    fn materialize_messages(&self, pending_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let mut messages = Vec::with_capacity(
+            self.shared
+                .state
+                .history
+                .len()
+                .saturating_add(pending_messages.len()),
+        );
+        messages.extend(self.shared.state.history.iter().cloned());
+        messages.extend(pending_messages.iter().cloned());
+        messages
     }
 
-    /// Internal method: trigger hooks and return the action.
-    ///
-    /// Directly iterates over `self.hooks` (no HookRegistry needed).
-    async fn fire_hooks(
-        &self,
-        event: HookEvent,
-        ctx: &HookContext,
-    ) -> Result<HookAction, TurnError> {
-        for hook in &self.hooks {
-            let action = match event {
-                HookEvent::BeforeCallLLM => {
-                    let HookContext::BeforeCallLLM(ctx_any) = ctx else {
-                        return Err(TurnError::LlmCallBlocked {
-                            reason: "Invalid hook context".to_string(),
-                        });
-                    };
-                    hook.on_before_call_llm(ctx_any).await
-                }
-                HookEvent::BeforeToolCall | HookEvent::AfterToolCall | HookEvent::TurnEnd => {
-                    let HookContext::ToolEvent(ctx_any) = ctx else {
-                        return Err(TurnError::ToolCallBlocked {
-                            reason: "Invalid hook context".to_string(),
-                        });
-                    };
-                    hook.on_tool_event(ctx_any).await
+    /// Execute the turn and return a handle for observing incremental progress.
+    pub fn execute_progress(self) -> TurnExecution {
+        let mut approval_rx = self.thread_event_tx.subscribe();
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut approval_closed = false;
+            let turn_fut = self.execute_internal(Some(progress_tx.clone()));
+            tokio::pin!(turn_fut);
+
+            let result = loop {
+                tokio::select! {
+                    result = &mut turn_fut => break result,
+                    approval_event = approval_rx.recv(), if !approval_closed => {
+                        match approval_event {
+                            Ok(event) => {
+                                if let Some(progress) = Self::map_approval_progress(event) {
+                                    let _ = progress_tx.send(progress);
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => {
+                                approval_closed = true;
+                            }
+                        }
+                    }
                 }
             };
 
-            // Handle blocking actions
+            Self::drain_approval_progress(&mut approval_rx, &progress_tx);
+
+            match &result {
+                Ok(output) => {
+                    let _ = progress_tx.send(TurnProgress::Completed(output.clone()));
+                }
+                Err(error) => {
+                    let _ = progress_tx.send(TurnProgress::Failed {
+                        error: error.to_string(),
+                    });
+                }
+            }
+
+            let _ = result_tx.send(result);
+            drop(progress_tx);
+        });
+
+        TurnExecution {
+            progress_rx,
+            result_rx,
+        }
+    }
+
+    /// Execute the turn and return the final output.
+    pub async fn execute(self) -> Result<TurnOutput, TurnError> {
+        self.execute_progress().finish().await
+    }
+
+    /// Internal method: trigger hooks and return the action.
+    async fn fire_hooks(&self, ctx: &ToolHookContext) -> Result<HookAction, TurnError> {
+        for hook in self.shared.resolved_hooks() {
+            let action = hook.on_tool_event(ctx).await;
+
             if let HookAction::Block(reason) = action {
                 return Ok(HookAction::Block(reason));
             }
 
-            // For modification actions (only BeforeCallLLM), return them
             if !matches!(action, HookAction::Continue) {
                 return Ok(action);
             }
@@ -721,31 +713,18 @@ impl Turn {
     /// This is where the core execution logic lives.
     async fn execute_loop(
         &mut self,
-        trace_writer: Option<TraceWriter>,
-    ) -> Result<(TurnOutput, Option<TraceWriter>), (TurnError, Option<TraceWriter>)> {
-        let mut messages = std::mem::take(&mut self.messages);
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
+    ) -> Result<TurnOutput, TurnError> {
+        let mut pending_messages = std::mem::take(&mut self.pending_messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
-        let mut trace_writer = trace_writer;
 
-        // Add system message about max_tool_calls ONCE before loop (not inside to avoid accumulation)
         let max_tool_calls = self.config.max_tool_calls;
-        if let Some(max) = max_tool_calls
-            && !self.tools.is_empty()
-        {
-            let system_content = format!(
-                "IMPORTANT: You can only call at most {} tool(s) per response. \
-                If you need to call multiple tools, please proceed step by step - \
-                call tools one at a time and wait for the results before calling the next tool.",
-                max
-            );
-            messages.insert(0, ChatMessage::system(system_content));
-        }
 
         for iteration in 0..max_iterations {
             if self.cancellation.is_cancelled() {
-                return Err((TurnError::Cancelled, trace_writer));
+                return Err(TurnError::Cancelled);
             }
 
             let pending_inputs = {
@@ -756,7 +735,21 @@ impl Turn {
             for input in pending_inputs {
                 let content = input.into_message_text();
                 tracing::debug!("injecting control input into turn: {}", content);
-                messages.push(ChatMessage::user(&content));
+                pending_messages.push(ChatMessage::user(&content));
+            }
+
+            let available_tools = self.shared.resolved_tools();
+            let mut request_messages = self.materialize_messages(&pending_messages);
+            if let Some(max) = max_tool_calls
+                && !available_tools.is_empty()
+            {
+                let system_content = format!(
+                    "IMPORTANT: You can only call at most {} tool(s) per response. \
+                    If you need to call multiple tools, please proceed step by step - \
+                    call tools one at a time and wait for the results before calling the next tool.",
+                    max
+                );
+                request_messages.insert(0, ChatMessage::system(system_content));
             }
 
             tracing::debug!(
@@ -764,55 +757,17 @@ impl Turn {
                 turn_number = %self.turn_number,
                 iteration = %iteration,
                 max_iterations = %max_iterations,
-                message_count = %messages.len(),
+                message_count = %request_messages.len(),
                 "Turn iteration started"
             );
 
-            // Prepare tools from self.tools
-            let tools: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
-
-            // Fire BeforeCallLLM hook (can modify messages/tools or block)
-            let ctx = BeforeCallLLMContext {
-                messages: messages.clone(),
-                tools: tools.clone(),
-                iteration,
-            };
-            let before_call_action = match self
-                .fire_hooks(HookEvent::BeforeCallLLM, &HookContext::BeforeCallLLM(ctx))
-                .await
-            {
-                Ok(action) => action,
-                Err(error) => return Err((error, trace_writer)),
-            };
-            match before_call_action {
-                HookAction::Continue => {}
-                HookAction::ModifyMessages(modified_messages) => {
-                    messages = modified_messages;
-                }
-                HookAction::ModifyTools(_modified_tools) => {
-                    // Tools are re-built from definitions, so we can't easily modify them here
-                    // For now, just log a warning
-                    tracing::warn!("Hook attempted to modify tools, but this is not yet supported");
-                }
-                HookAction::Modify {
-                    messages: modified_messages,
-                    tools: _,
-                } => {
-                    messages = modified_messages;
-                }
-                HookAction::Block(reason) => {
-                    return Err((TurnError::LlmCallBlocked { reason }, trace_writer));
-                }
-                HookAction::ContinueWithMessage(message) => {
-                    tracing::warn!(
-                        message = %message,
-                        "Hook returned ContinueWithMessage on BeforeCallLLM (ignored)"
-                    );
-                }
-            }
+            // Prepare tools from the shared thread-owned context.
+            let tools: Vec<ToolDefinition> =
+                available_tools.iter().map(|t| t.definition()).collect();
 
             // Build the request with current messages and tools
-            let mut request = CompletionRequest::new(messages.clone()).with_tools(tools.clone());
+            let mut request =
+                CompletionRequest::new(request_messages.clone()).with_tools(tools.clone());
             if let Some(max_tokens) = self.agent_record.max_tokens {
                 request.max_tokens = Some(max_tokens);
             }
@@ -823,51 +778,24 @@ impl Turn {
                 request.thinking = Some(thinking_config.clone());
             }
 
-            // Call the LLM (streaming mode is always enabled in Turn)
-
-            // Write LLM request event to trace
-            if let Some(writer) = trace_writer.as_mut() {
-                let llm_req_event = TurnLogEvent::LlmRequest {
-                    messages: messages.clone(),
-                    tools: tools
-                        .iter()
-                        .map(|t| {
-                            serde_json::to_value(t)
-                                .ok()
-                                .unwrap_or(serde_json::Value::Null)
-                        })
-                        .collect(),
-                };
-                let _ = writer.write_event(&llm_req_event).await;
-            }
-
             tracing::debug!(
                 thread_id = %self.thread_id,
                 turn_number = %self.turn_number,
                 iteration = %iteration,
                 tool_count = %tools.len(),
-                message_count = %messages.len(),
+                message_count = %request_messages.len(),
                 "Calling LLM"
             );
-            let response = match self.call_llm_streaming(request).await {
+            let response = match self.call_llm_streaming(request, progress_tx.clone()).await {
                 Ok(StreamingCallOutcome::Completed(response)) => response,
                 Ok(StreamingCallOutcome::Failed {
                     partial_response,
                     error,
                 }) => {
-                    if let Some(writer) = trace_writer.as_mut()
-                        && has_traceable_response(&partial_response)
-                    {
-                        let _ = writer
-                            .write_event(&build_trace_response_event(
-                                &partial_response,
-                                "error".to_string(),
-                            ))
-                            .await;
-                    }
-                    return Err((TurnError::LlmFailed(error), trace_writer));
+                    let _ = partial_response;
+                    return Err(TurnError::LlmFailed(error));
                 }
-                Err(error) => return Err((error, trace_writer)),
+                Err(error) => return Err(error),
             };
             tracing::debug!(
                 thread_id = %self.thread_id,
@@ -876,23 +804,12 @@ impl Turn {
                 "LLM call completed"
             );
 
-            // Clone for tracing before processing consumes it
-            let trace_response = argus_protocol::llm::CompletionResponse {
-                content: response.content.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                tool_calls: response.tool_calls.clone(),
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-                finish_reason: response.finish_reason,
-                cache_read_input_tokens: response.cache_read_input_tokens,
-                cache_creation_input_tokens: response.cache_creation_input_tokens,
-            };
-
             // Process response
             let next_action =
-                match self.process_finish_reason(response, &mut messages, &mut token_usage) {
+                match self.process_finish_reason(response, &mut pending_messages, &mut token_usage)
+                {
                     Ok(next_action) => next_action,
-                    Err(error) => return Err((error, trace_writer)),
+                    Err(error) => return Err(error),
                 };
             match next_action {
                 NextAction::Return(output) => {
@@ -909,18 +826,7 @@ impl Turn {
                         thread_id: Some(self.thread_id.clone()),
                         turn_number: Some(self.turn_number),
                     };
-                    let turn_end_action = self
-                        .fire_hooks(HookEvent::TurnEnd, &HookContext::ToolEvent(Box::new(ctx)))
-                        .await;
-
-                    // Record LLM response to trace
-                    if let Some(writer) = trace_writer.as_mut() {
-                        let llm_resp_event = build_trace_response_event(
-                            &trace_response,
-                            format!("{:?}", trace_response.finish_reason),
-                        );
-                        let _ = writer.write_event(&llm_resp_event).await;
-                    }
+                    let turn_end_action = self.fire_hooks(&ctx).await;
 
                     let mut output = output;
                     let continue_message = match turn_end_action {
@@ -930,13 +836,6 @@ impl Turn {
                             tracing::warn!(
                                 reason = %reason,
                                 "TurnEnd hook returned Block (ignored)"
-                            );
-                            None
-                        }
-                        Ok(other) => {
-                            tracing::warn!(
-                                action = ?other,
-                                "TurnEnd hook returned unsupported action (ignored)"
                             );
                             None
                         }
@@ -950,18 +849,8 @@ impl Turn {
                     };
 
                     if let Some(message) = continue_message {
-                        messages = std::mem::take(&mut output.messages);
-                        messages.push(ChatMessage::user(&message));
-
-                        if let Some(writer) = trace_writer.as_mut() {
-                            let _ = writer
-                                .write_event(&TurnLogEvent::UserInput {
-                                    content: message.clone(),
-                                    role: "user".to_string(),
-                                    metadata: None,
-                                })
-                                .await;
-                        }
+                        pending_messages = std::mem::take(&mut output.appended_messages);
+                        pending_messages.push(ChatMessage::user(&message));
 
                         tracing::debug!(
                             thread_id = %self.thread_id,
@@ -972,7 +861,7 @@ impl Turn {
                         continue;
                     }
 
-                    return Ok((output, trace_writer));
+                    return Ok(output);
                 }
                 NextAction::ContinueWithTools {
                     tool_calls,
@@ -988,27 +877,12 @@ impl Turn {
                     );
 
                     // Execute tools in parallel
-                    let trace_writer_arc = Arc::new(Mutex::new(trace_writer.take()));
                     let tool_results = tokio::select! {
                         _ = self.cancellation.cancelled() => {
-                            let mut guard = trace_writer_arc.lock().await;
-                            return Err((TurnError::Cancelled, guard.take()));
+                            return Err(TurnError::Cancelled);
                         }
-                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs, trace_writer_arc.clone()) => tool_results,
+                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs, progress_tx.clone()) => tool_results,
                     };
-                    // Restore trace_writer from Arc after all writes complete
-                    if let Ok(mutex) = Arc::try_unwrap(trace_writer_arc) {
-                        trace_writer = mutex.into_inner();
-                    }
-
-                    // Record LLM response to trace (tool results are written in execute_single_tool)
-                    if let Some(writer) = trace_writer.as_mut() {
-                        let llm_resp_event = build_trace_response_event(
-                            &trace_response,
-                            format!("{:?}", trace_response.finish_reason),
-                        );
-                        let _ = writer.write_event(&llm_resp_event).await;
-                    }
 
                     tracing::debug!(
                         thread_id = %self.thread_id,
@@ -1047,7 +921,7 @@ impl Turn {
                             result_preview = %preview,
                             "Tool result added to history"
                         );
-                        messages.push(ChatMessage::tool_result(
+                        pending_messages.push(ChatMessage::tool_result(
                             result.tool_call_id,
                             result.name,
                             sanitized_content,
@@ -1057,21 +931,15 @@ impl Turn {
                     // Continue the loop with updated messages
                 }
                 NextAction::LengthExceeded => {
-                    return Err((
-                        TurnError::ContextLengthExceeded(
-                            (token_usage.input_tokens + token_usage.output_tokens) as usize,
-                        ),
-                        trace_writer,
+                    return Err(TurnError::ContextLengthExceeded(
+                        (token_usage.input_tokens + token_usage.output_tokens) as usize,
                     ));
                 }
             }
         }
 
         // Max iterations reached
-        Err((
-            TurnError::MaxIterationsReached(max_iterations),
-            trace_writer,
-        ))
+        Err(TurnError::MaxIterationsReached(max_iterations))
     }
 
     /// Calls the LLM in streaming mode, accumulating the response.
@@ -1080,6 +948,7 @@ impl Turn {
     async fn call_llm_streaming(
         &self,
         request: CompletionRequest,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> Result<StreamingCallOutcome, TurnError> {
         if self.cancellation.is_cancelled() {
             return Err(TurnError::Cancelled);
@@ -1115,6 +984,22 @@ impl Turn {
                                     });
                                 }
                             };
+                            Self::emit_progress(
+                                &progress_tx,
+                                TurnProgress::LlmEvent(event.clone()),
+                            );
+                            if let Err(error) = self.thread_event_tx.send(ThreadEvent::Processing {
+                                thread_id: self.thread_id.clone(),
+                                turn_number: self.turn_number,
+                                event: event.clone(),
+                            }) {
+                                tracing::warn!(
+                                    thread_id = %self.thread_id,
+                                    turn_number = %self.turn_number,
+                                    error = %error,
+                                    "Failed to send Processing event"
+                                );
+                            }
                             // Forward to stream_tx
                             let _ = self
                                 .stream_tx
@@ -1149,7 +1034,7 @@ impl Turn {
     fn process_finish_reason(
         &self,
         response: CompletionResponse,
-        messages: &mut Vec<ChatMessage>,
+        pending_messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
     ) -> Result<NextAction, TurnError> {
         let CompletionResponse {
@@ -1174,14 +1059,14 @@ impl Turn {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
                 {
-                    messages.push(ChatMessage::assistant_with_reasoning(
+                    pending_messages.push(ChatMessage::assistant_with_reasoning(
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
                 }
 
                 Ok(NextAction::Return(TurnOutput {
-                    messages: std::mem::take(messages),
+                    appended_messages: std::mem::take(pending_messages),
                     token_usage: token_usage.clone(),
                 }))
             }
@@ -1205,7 +1090,7 @@ impl Turn {
                     tool_calls.clone(),
                     reasoning_content,
                 );
-                messages.push(assistant_msg);
+                pending_messages.push(assistant_msg);
 
                 Ok(NextAction::ContinueWithTools {
                     tool_calls,
@@ -1234,7 +1119,7 @@ impl Turn {
                         tool_calls.clone(),
                         reasoning_content,
                     );
-                    messages.push(assistant_msg);
+                    pending_messages.push(assistant_msg);
 
                     Ok(NextAction::ContinueWithTools {
                         tool_calls,
@@ -1245,18 +1130,18 @@ impl Turn {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
                 {
-                    messages.push(ChatMessage::assistant_with_reasoning(
+                    pending_messages.push(ChatMessage::assistant_with_reasoning(
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
 
                     Ok(NextAction::Return(TurnOutput {
-                        messages: std::mem::take(messages),
+                        appended_messages: std::mem::take(pending_messages),
                         token_usage: token_usage.clone(),
                     }))
                 } else {
                     Ok(NextAction::Return(TurnOutput {
-                        messages: std::mem::take(messages),
+                        appended_messages: std::mem::take(pending_messages),
                         token_usage: token_usage.clone(),
                     }))
                 }
@@ -1269,12 +1154,12 @@ impl Turn {
         &self,
         tool_calls: Vec<ToolCall>,
         tool_timeout_secs: u64,
-        trace_writer: Arc<Mutex<Option<TraceWriter>>>,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> Vec<ToolExecutionResult> {
         let futures: Vec<_> = tool_calls
             .into_iter()
             .map(|tool_call| {
-                self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone())
+                self.execute_single_tool(tool_call, tool_timeout_secs, progress_tx.clone())
             })
             .collect();
 
@@ -1286,28 +1171,14 @@ impl Turn {
         &self,
         tool_call: ToolCall,
         tool_timeout_secs: u64,
-        trace_writer: Arc<Mutex<Option<TraceWriter>>>,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> ToolExecutionResult {
         let tool_call_id = tool_call.id.clone();
         let tool_name = tool_call.name.clone();
         let tool_input = tool_call.arguments.clone();
 
-        // Write ToolCallStart event
-        {
-            let mut guard = trace_writer.lock().await;
-            if let Some(writer) = guard.as_mut() {
-                let _ = writer
-                    .write_event(&TurnLogEvent::ToolCallStart {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        arguments: tool_input.clone(),
-                    })
-                    .await;
-            }
-        }
-
-        // Find the tool in self.tools
-        let tool = self.tools.iter().find(|t| t.name() == tool_name).cloned();
+        // Find the tool in the shared thread-owned context.
+        let tool = self.shared.find_tool(&tool_name);
 
         // Fire BeforeToolCall hook
         let ctx = ToolHookContext {
@@ -1323,33 +1194,9 @@ impl Turn {
             turn_number: Some(self.turn_number),
         };
 
-        if let Ok(HookAction::Block(ref reason)) = self
-            .fire_hooks(
-                HookEvent::BeforeToolCall,
-                &HookContext::ToolEvent(Box::new(ctx)),
-            )
-            .await
-        {
+        if let Ok(HookAction::Block(ref reason)) = self.fire_hooks(&ctx).await {
             // Hook blocked the tool call
-            let block_start = std::time::Instant::now();
             let content = format!("Tool call blocked: {}", reason);
-            let duration_ms = block_start.elapsed().as_millis() as u64;
-
-            // Write blocked tool result to trace
-            {
-                let mut guard = trace_writer.lock().await;
-                if let Some(writer) = guard.as_mut() {
-                    let _ = writer
-                        .write_event(&TurnLogEvent::ToolResult {
-                            id: tool_call_id.clone(),
-                            name: tool_name.clone(),
-                            result: content.clone(),
-                            duration_ms,
-                            error: Some(reason.clone()),
-                        })
-                        .await;
-                }
-            }
 
             // Fire AfterToolCall hook with error
             let after_ctx = ToolHookContext {
@@ -1364,12 +1211,7 @@ impl Turn {
                 thread_id: Some(self.thread_id.clone()),
                 turn_number: Some(self.turn_number),
             };
-            let _ = self
-                .fire_hooks(
-                    HookEvent::AfterToolCall,
-                    &HookContext::ToolEvent(Box::new(after_ctx)),
-                )
-                .await;
+            let _ = self.fire_hooks(&after_ctx).await;
 
             return ToolExecutionResult {
                 tool_call_id,
@@ -1394,6 +1236,14 @@ impl Turn {
                 "Failed to send ToolStarted event"
             );
         }
+        Self::emit_progress(
+            &progress_tx,
+            TurnProgress::ToolStarted {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                arguments: tool_input.clone(),
+            },
+        );
         let _ = self.stream_tx.send(TurnStreamEvent::ToolStarted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -1427,7 +1277,7 @@ impl Turn {
                         turn_number = %self.turn_number,
                         tool_call_id = %tool_call_id,
                         tool_name = %tool_name,
-                        available_tools = ?self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+                        available_tools = ?self.shared.resolved_tools().iter().map(|t| t.name()).collect::<Vec<_>>(),
                         "Tool not found in registry"
                     );
                     Err(argus_protocol::tool::ToolError::NotFound {
@@ -1498,6 +1348,14 @@ impl Turn {
                 "Failed to send ToolCompleted event"
             );
         }
+        Self::emit_progress(
+            &progress_tx,
+            TurnProgress::ToolCompleted {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                result: result.clone(),
+            },
+        );
         let _ = self.stream_tx.send(TurnStreamEvent::ToolCompleted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -1521,41 +1379,16 @@ impl Turn {
             thread_id: Some(self.thread_id.clone()),
             turn_number: Some(self.turn_number),
         };
-        let _ = self
-            .fire_hooks(
-                HookEvent::AfterToolCall,
-                &HookContext::ToolEvent(Box::new(ctx)),
-            )
-            .await;
+        let _ = self.fire_hooks(&ctx).await;
 
-        // Convert result to string content and measure duration
-        let duration_ms = start_time.elapsed().as_millis() as u64;
+        // Convert result to string content.
+        let _duration_ms = start_time.elapsed().as_millis() as u64;
         let content = match &result {
             Ok(value) => serde_json::to_string(value).unwrap_or_else(|e| {
                 format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
             }),
             Err(e) => format!("{{\"error\": \"{}\"}}", e),
         };
-
-        // Write ToolResult to trace
-        {
-            let mut guard = trace_writer.lock().await;
-            if let Some(writer) = guard.as_mut() {
-                let error_str = match &result {
-                    Ok(_) => None,
-                    Err(e) => Some(e.clone()),
-                };
-                let _ = writer
-                    .write_event(&TurnLogEvent::ToolResult {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        result: content.clone(),
-                        duration_ms,
-                        error: error_str,
-                    })
-                    .await;
-            }
-        }
 
         ToolExecutionResult {
             tool_call_id,
@@ -1568,13 +1401,22 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::sync::{Arc, Mutex};
 
+    use crate::compact::{CompactResult, Compactor};
+    use crate::error::CompactError;
+    use crate::thread::ThreadBuilder;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId};
+    use argus_protocol::tool::{NamedTool, ToolError};
+    use argus_protocol::{
+        AgentId, AgentType, ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction,
+        HookEvent, HookHandler, HookRegistry, ProviderId, RiskLevel, SessionId, ThreadEvent,
+        TokenUsage, ToolExecutionContext, ToolHookContext,
+    };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
-    use tokio::sync::broadcast;
+    use tokio::sync::{Mutex as TokioMutex, Notify, broadcast, oneshot};
 
     #[test]
     fn test_generate_turn_id() {
@@ -1643,6 +1485,173 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct BlockingFirstResponseProvider {
+        responses: Mutex<Vec<CompletionResponse>>,
+        first_call_started: Mutex<Option<oneshot::Sender<()>>>,
+        release_first_call: Arc<Notify>,
+        gate_first_call: Mutex<bool>,
+    }
+
+    impl BlockingFirstResponseProvider {
+        fn new(
+            responses: Vec<CompletionResponse>,
+            first_call_started: oneshot::Sender<()>,
+            release_first_call: Arc<Notify>,
+        ) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                first_call_started: Mutex::new(Some(first_call_started)),
+                release_first_call,
+                gate_first_call: Mutex::new(true),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingFirstResponseProvider {
+        fn model_name(&self) -> &str {
+            "blocking-first"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let should_gate = {
+                let mut gate_first_call = self.gate_first_call.lock().unwrap();
+                let should_gate = *gate_first_call;
+                *gate_first_call = false;
+                should_gate
+            };
+
+            if should_gate {
+                if let Some(sender) = self.first_call_started.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                self.release_first_call.notified().await;
+            }
+
+            let mut responses = self.responses.lock().unwrap();
+            Ok(responses.remove(0))
+        }
+    }
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl NamedTool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn definition(&self) -> argus_protocol::llm::ToolDefinition {
+            argus_protocol::llm::ToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo back the input message".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                        }
+                    },
+                    "required": ["message"]
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            let message = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    tool_name: "echo".to_string(),
+                    reason: "Missing 'message' parameter".to_string(),
+                })?;
+
+            Ok(serde_json::json!({ "echoed": message }))
+        }
+    }
+
+    struct VersionedTool {
+        version: &'static str,
+    }
+
+    #[async_trait]
+    impl NamedTool for VersionedTool {
+        fn name(&self) -> &str {
+            "late_echo"
+        }
+
+        fn definition(&self) -> argus_protocol::llm::ToolDefinition {
+            argus_protocol::llm::ToolDefinition {
+                name: "late_echo".to_string(),
+                description: format!("Return the current tool version {}", self.version),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({ "version": self.version }))
+        }
+    }
+
+    struct HangingStreamingProvider;
+
+    #[async_trait]
+    impl LlmProvider for HangingStreamingProvider {
+        fn model_name(&self) -> &str {
+            "hanging"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "hanging".to_string(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            let stream = futures_util::stream::unfold(0usize, |state| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Some((
+                    Ok(argus_protocol::llm::LlmStreamEvent::ContentDelta {
+                        delta: format!("tick-{}", state),
+                    }),
+                    state.saturating_add(1),
+                ))
+            });
+
+            Ok(Box::pin(stream))
+        }
+    }
+
     struct ContinueOnceTurnEndHook {
         used: Mutex<bool>,
     }
@@ -1681,6 +1690,89 @@ mod tests {
         }
     }
 
+    struct NoopCompactor;
+
+    #[async_trait]
+    impl Compactor for NoopCompactor {
+        async fn compact(
+            &self,
+            _provider: &dyn LlmProvider,
+            _messages: &[ChatMessage],
+            _token_count: u32,
+        ) -> Result<Option<CompactResult>, CompactError> {
+            Ok(None)
+        }
+
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+    }
+
+    struct BlockingApprovalHook {
+        gate: Arc<TokioMutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl BlockingApprovalHook {
+        fn new(gate: oneshot::Receiver<()>) -> Self {
+            Self {
+                gate: Arc::new(TokioMutex::new(Some(gate))),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HookHandler for BlockingApprovalHook {
+        async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
+            if ctx.event != HookEvent::BeforeToolCall || ctx.tool_name != "echo" {
+                return HookAction::Continue;
+            }
+
+            let request = ApprovalRequest::new(
+                "test-agent".to_string(),
+                ctx.tool_name.clone(),
+                "pause for approval".to_string(),
+                60,
+                RiskLevel::High,
+            );
+
+            if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+                &ctx.thread_event_sender,
+                ctx.thread_id.clone(),
+                ctx.turn_number,
+            ) {
+                let _ = sender.send(ThreadEvent::WaitingForApproval {
+                    thread_id,
+                    turn_number,
+                    request: request.clone(),
+                });
+            }
+
+            if let Some(gate) = self.gate.lock().await.take() {
+                let _ = gate.await;
+            }
+
+            if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+                &ctx.thread_event_sender,
+                ctx.thread_id.clone(),
+                ctx.turn_number,
+            ) {
+                let response = ApprovalResponse {
+                    request_id: request.id,
+                    decision: ApprovalDecision::Approved,
+                    decided_at: Utc::now(),
+                    decided_by: Some("test".to_string()),
+                };
+                let _ = sender.send(ThreadEvent::ApprovalResolved {
+                    thread_id,
+                    turn_number,
+                    response,
+                });
+            }
+
+            HookAction::Continue
+        }
+    }
+
     fn make_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
             id: AgentId::new(1),
@@ -1696,6 +1788,13 @@ mod tests {
             thinking_config: None,
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+        })
+    }
+
+    fn make_agent_record_with_tools(tool_names: Vec<&str>) -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
+            tool_names: tool_names.into_iter().map(str::to_string).collect(),
+            ..(*make_agent_record()).clone()
         })
     }
 
@@ -1726,6 +1825,255 @@ mod tests {
             .expect("turn should build")
     }
 
+    fn versioned_tool_description(turn: &Turn) -> Option<String> {
+        turn.shared
+            .resolved_tools()
+            .into_iter()
+            .find(|tool| tool.name() == "late_echo")
+            .map(|tool| tool.definition().description)
+    }
+
+    fn resolved_hook_count(turn: &Turn) -> usize {
+        turn.shared.resolved_hooks().len()
+    }
+
+    fn build_thread_with_live_sources(
+        provider: Arc<dyn LlmProvider>,
+        agent_record: Arc<AgentRecord>,
+        tool_manager: Arc<argus_tool::ToolManager>,
+        hooks: Arc<HookRegistry>,
+    ) -> crate::thread::Thread {
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        ThreadBuilder::new()
+            .provider(provider)
+            .compactor(compactor)
+            .agent_record(agent_record)
+            .session_id(SessionId::new())
+            .tool_manager(tool_manager)
+            .hooks(hooks)
+            .build()
+            .expect("thread should build")
+    }
+
+    #[tokio::test]
+    async fn shared_history_turn_reuses_thread_owned_tool_and_hook_state() {
+        let provider = Arc::new(SequencedProvider::new(vec![]));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        tool_manager.register(Arc::new(VersionedTool { version: "v1" }));
+        let hooks = Arc::new(HookRegistry::new());
+        let mut thread = build_thread_with_live_sources(
+            provider,
+            make_agent_record_with_tools(vec!["late_echo"]),
+            Arc::clone(&tool_manager),
+            Arc::clone(&hooks),
+        );
+
+        let first_turn = thread
+            .begin_turn("first".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("first turn should build");
+        let first_tool_description =
+            versioned_tool_description(&first_turn).expect("first turn should resolve tool");
+        let first_hook_count = resolved_hook_count(&first_turn);
+
+        thread
+            .finish_turn(Ok(TurnOutput {
+                appended_messages: vec![ChatMessage::assistant("done")],
+                token_usage: TokenUsage::default(),
+            }))
+            .expect("first turn should settle");
+
+        tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
+        hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
+
+        let second_turn = thread
+            .begin_turn("second".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("second turn should build");
+
+        let second_tool_description =
+            versioned_tool_description(&second_turn).expect("second turn should resolve tool");
+        let second_hook_count = resolved_hook_count(&second_turn);
+
+        assert!(first_tool_description.contains("v1"));
+        assert!(second_tool_description.contains("v2"));
+        assert!(second_hook_count > first_hook_count);
+    }
+
+    #[tokio::test]
+    async fn shared_history_turn_sees_late_tool_overwrite_after_thread_creation() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("tool call".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-late-tool".to_string(),
+                    name: "late_echo".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        tool_manager.register(Arc::new(VersionedTool { version: "v1" }));
+        let hooks = Arc::new(HookRegistry::new());
+        let mut thread = build_thread_with_live_sources(
+            provider,
+            make_agent_record_with_tools(vec!["late_echo"]),
+            Arc::clone(&tool_manager),
+            hooks,
+        );
+
+        tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
+
+        let output = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build")
+            .execute()
+            .await
+            .expect("turn should execute");
+
+        let tool_results = output
+            .appended_messages
+            .iter()
+            .filter(|message| message.role == argus_protocol::llm::Role::Tool)
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_results, vec![r#"{"version":"v2"}"#.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn shared_history_turn_sees_late_hook_registration_after_thread_creation() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("second".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        let hooks = Arc::new(HookRegistry::new());
+        let mut thread = build_thread_with_live_sources(
+            provider,
+            make_agent_record(),
+            tool_manager,
+            Arc::clone(&hooks),
+        );
+
+        hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
+
+        let output = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build")
+            .execute()
+            .await
+            .expect("turn should execute");
+
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|message| message.content == "second")
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_history_active_turn_does_not_see_late_hook_registration() {
+        let (first_call_started_tx, first_call_started_rx) = oneshot::channel();
+        let release_first_call = Arc::new(Notify::new());
+        let provider = Arc::new(BlockingFirstResponseProvider::new(
+            vec![
+                CompletionResponse {
+                    content: Some("first".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                CompletionResponse {
+                    content: Some("second".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+            ],
+            first_call_started_tx,
+            Arc::clone(&release_first_call),
+        ));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        let hooks = Arc::new(HookRegistry::new());
+        let mut thread = build_thread_with_live_sources(
+            provider,
+            make_agent_record(),
+            tool_manager,
+            Arc::clone(&hooks),
+        );
+
+        let turn = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build");
+        let execution = tokio::spawn(async move { turn.execute().await });
+
+        first_call_started_rx
+            .await
+            .expect("turn should start the first provider call");
+
+        hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
+        release_first_call.notify_waiters();
+
+        let output = execution
+            .await
+            .expect("turn task should complete")
+            .expect("turn should execute");
+
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .all(|message| message.content != "second")
+        );
+    }
+
     #[tokio::test]
     async fn turn_end_continue_with_message_triggers_next_iteration() {
         let provider = Arc::new(SequencedProvider::new(vec![
@@ -1754,9 +2102,24 @@ mod tests {
         let turn = make_turn(provider, vec![Arc::new(ContinueOnceTurnEndHook::new())], 5);
         let output = turn.execute().await.expect("turn should succeed");
 
-        assert!(output.messages.iter().any(|m| m.content == "first"));
-        assert!(output.messages.iter().any(|m| m.content == "continue"));
-        assert!(output.messages.iter().any(|m| m.content == "second"));
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|m| m.content == "first")
+        );
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|m| m.content == "continue")
+        );
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|m| m.content == "second")
+        );
     }
 
     #[tokio::test]
@@ -1776,5 +2139,238 @@ mod tests {
         let result = turn.execute().await;
 
         assert!(matches!(result, Err(TurnError::MaxIterationsReached(2))));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_normal_completion_emits_terminal_completed_progress() {
+        let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
+            content: Some("Hello, progress!".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }]));
+        let turn = make_turn(provider, vec![], 5);
+
+        let execution = turn.execute_progress().collect().await;
+        let output = execution.result.expect("turn should succeed");
+
+        assert_eq!(output.appended_messages.len(), 1);
+        assert_eq!(output.appended_messages[0].content, "Hello, progress!");
+        assert!(matches!(
+            execution.progress.last(),
+            Some(TurnProgress::Completed(final_output))
+                if final_output.appended_messages.len() == 1
+                    && final_output.appended_messages[0].content == "Hello, progress!"
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_tool_progress_emission_includes_tool_started_and_completed() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-123".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "test message"}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let (stream_tx, _) = broadcast::channel(256);
+        let (thread_event_tx, _) = broadcast::channel(256);
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user("start")])
+            .provider(provider)
+            .tools(vec![Arc::new(EchoTool)])
+            .hooks(vec![])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .build()
+            .expect("turn should build");
+
+        let execution = turn.execute_progress().collect().await;
+        assert!(execution.result.is_ok());
+        assert!(execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::ToolStarted { tool_name, .. } if tool_name == "echo")));
+        assert!(execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::ToolCompleted { tool_name, .. } if tool_name == "echo")));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_cancellation_returns_failed_progress() {
+        let provider = Arc::new(HangingStreamingProvider);
+        let cancellation = TurnCancellation::new();
+
+        let (stream_tx, _) = broadcast::channel(256);
+        let (thread_event_tx, _) = broadcast::channel(256);
+
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("test-thread".to_string())
+            .messages(vec![ChatMessage::user("Hello")])
+            .provider(provider)
+            .agent_record(Arc::new(AgentRecord::default()))
+            .tools(vec![])
+            .hooks(vec![])
+            .config(TurnConfig::default())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .cancellation(cancellation.clone())
+            .build()
+            .expect("turn should build");
+
+        let mut execution = turn.execute_progress();
+        let first_progress =
+            tokio::time::timeout(std::time::Duration::from_millis(200), execution.recv())
+                .await
+                .expect("progress should arrive before turn completion")
+                .expect("turn should emit an initial progress item");
+        assert!(matches!(
+            first_progress,
+            TurnProgress::LlmEvent(LlmStreamEvent::ContentDelta { .. })
+        ));
+
+        cancellation.cancel();
+        let mut saw_failed_progress = false;
+        loop {
+            let progress =
+                tokio::time::timeout(std::time::Duration::from_millis(500), execution.recv())
+                    .await
+                    .expect("turn should terminate quickly after cancellation");
+            let Some(progress) = progress else {
+                break;
+            };
+            if matches!(&progress, TurnProgress::Failed { error } if error.contains("cancelled")) {
+                saw_failed_progress = true;
+            }
+        }
+
+        let result = execution.finish().await;
+        assert!(matches!(result, Err(TurnError::Cancelled)));
+        assert!(saw_failed_progress);
+    }
+
+    #[tokio::test]
+    async fn turn_progress_approval_pause_and_resume_emits_waiting_and_resolved_progress() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-approval".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "approval test"}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let approval_hook = Arc::new(BlockingApprovalHook::new(resume_rx));
+        let (stream_tx, _) = broadcast::channel(256);
+        let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
+
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user("start")])
+            .provider(provider)
+            .tools(vec![Arc::new(EchoTool)])
+            .hooks(vec![approval_hook])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .build()
+            .expect("turn should build");
+
+        let execution = turn.execute_progress();
+
+        let mut saw_waiting = false;
+        while !saw_waiting {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), thread_event_rx.recv())
+                .await
+                .expect("should receive approval event in time")
+            {
+                Ok(ThreadEvent::WaitingForApproval { .. }) => {
+                    saw_waiting = true;
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+
+        resume_tx
+            .send(())
+            .expect("approval hook should still be waiting");
+
+        let execution =
+            tokio::time::timeout(std::time::Duration::from_secs(2), execution.collect())
+                .await
+                .expect("turn should resume and finish");
+
+        assert!(execution.result.is_ok());
+        assert!(
+            execution
+                .progress
+                .iter()
+                .any(|item| matches!(item, TurnProgress::WaitingForApproval { .. }))
+        );
+        assert!(
+            execution
+                .progress
+                .iter()
+                .any(|item| matches!(item, TurnProgress::ApprovalResolved { .. }))
+        );
     }
 }
