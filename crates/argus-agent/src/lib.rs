@@ -54,7 +54,6 @@ pub mod command;
 pub mod compact;
 pub mod config;
 pub mod error;
-pub mod events;
 pub mod execution;
 pub mod history;
 pub mod plan_hook;
@@ -80,9 +79,8 @@ pub use config::{
     TurnOutputBuilder, TurnStreamEvent,
 };
 pub use error::{TurnError, TurnLogError};
-pub use events::TurnLogEvent;
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
-pub use trace::{TraceConfig, TraceWriter, TurnLogState, read_jsonl_events, recover_turn_events};
+pub use trace::TraceConfig;
 pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)

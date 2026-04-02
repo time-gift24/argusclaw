@@ -9,7 +9,7 @@ use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::turn_log_store::read_turn_record;
 use argus_agent::{
     Compactor, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
-    TurnConfig, TurnLogEvent, read_jsonl_events,
+    TurnConfig,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
@@ -1622,10 +1622,7 @@ impl ThreadPool {
 
         let trace_cfg = TraceConfig::new(true, self.chat_runtime_config.trace_dir.clone())
             .with_session_id(session_id)
-            .with_turn_start(
-                Some(agent_record.system_prompt.clone()),
-                Some(provider.model_name().to_string()),
-            );
+            .with_model(Some(provider.model_name().to_string()));
         let mut turn_config = TurnConfig::new();
         turn_config.trace_config = Some(trace_cfg);
         turn_config.on_turn_complete = Some(Self::build_on_turn_complete(
@@ -1741,10 +1738,7 @@ impl ThreadPool {
         .map_err(|err| JobError::ExecutionFailed(format!("failed to resolve provider: {err}")))?;
 
         let trace_cfg = TraceConfig::new(true, self.chat_runtime_config.trace_dir.clone())
-            .with_turn_start(
-                Some(agent_record.system_prompt.clone()),
-                Some(provider.model_name().to_string()),
-            );
+            .with_model(Some(provider.model_name().to_string()));
         let mut turn_config = TurnConfig::new();
         turn_config.trace_config = Some(trace_cfg);
         let config = ThreadConfigBuilder::default()
@@ -2172,57 +2166,11 @@ impl ThreadPool {
                 && let Ok(number) = stem.parse::<u32>()
             {
                 turn_numbers.push(number);
-                continue;
-            }
-
-            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-                continue;
-            }
-            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
-                && let Ok(number) = stem.parse::<u32>()
-            {
-                turn_numbers.push(number);
             }
         }
         turn_numbers.sort_unstable();
         turn_numbers.dedup();
         Ok(turn_numbers)
-    }
-
-    fn extend_recovered_state(
-        messages: &mut Vec<ChatMessage>,
-        token_count: &mut u32,
-        events: Vec<TurnLogEvent>,
-    ) {
-        for event in events {
-            match event {
-                TurnLogEvent::UserInput { content, .. } => {
-                    if !content.trim().is_empty() {
-                        messages.push(ChatMessage::user(content));
-                    }
-                }
-                TurnLogEvent::LlmResponse {
-                    content,
-                    reasoning_content,
-                    tool_calls,
-                    ..
-                } => {
-                    if tool_calls.is_empty()
-                        && (!content.trim().is_empty()
-                            || !reasoning_content.as_deref().unwrap_or("").trim().is_empty())
-                    {
-                        messages.push(ChatMessage::assistant_with_reasoning(
-                            content,
-                            reasoning_content,
-                        ));
-                    }
-                }
-                TurnLogEvent::TurnEnd { token_usage, .. } => {
-                    *token_count = token_usage.total_tokens;
-                }
-                _ => {}
-            }
-        }
     }
 
     async fn recover_thread_state_from_trace(
@@ -2241,7 +2189,6 @@ impl ThreadPool {
         let mut token_count = 0;
         let mut max_turn_number = 0;
         for turn_number in &turn_numbers {
-            let mut recovered_from_committed_log = false;
             match read_turn_record(&turns_dir, *turn_number).await {
                 Ok(Some(turn)) => {
                     max_turn_number = max_turn_number.max(*turn_number);
@@ -2249,39 +2196,17 @@ impl ThreadPool {
                     if let Some(turn_token_usage) = turn.token_usage {
                         token_count = turn_token_usage.total_tokens;
                     }
-                    recovered_from_committed_log = true;
                 }
-                Ok(None) => {}
+                Ok(None) => continue,
                 Err(error) => {
                     tracing::warn!(
                         turn_number,
                         error = %error,
-                        "Failed to read committed turn log during recovery; falling back to legacy trace"
-                    );
-                }
-            }
-            if recovered_from_committed_log {
-                continue;
-            }
-
-            let path = turns_dir.join(format!("{turn_number}.jsonl"));
-            let events = match read_jsonl_events(&path).await {
-                Ok(events) if !events.is_empty() => events,
-                Ok(_) => {
-                    tracing::warn!(path = %path.display(), "Skipping empty turn trace during recovery");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %error,
-                        "Skipping unreadable turn trace during recovery"
+                        "Skipping unreadable committed turn log during recovery"
                     );
                     continue;
                 }
-            };
-            max_turn_number = max_turn_number.max(*turn_number);
-            Self::extend_recovered_state(&mut messages, &mut token_count, events);
+            }
         }
 
         Ok(RecoveredThreadState {
@@ -2303,7 +2228,6 @@ impl ThreadPool {
         let mut token_count = 0;
         let mut max_turn_number = 0;
         for turn_number in &turn_numbers {
-            let mut recovered_from_committed_log = false;
             match read_turn_record(&turns_dir, *turn_number).await {
                 Ok(Some(turn)) => {
                     max_turn_number = max_turn_number.max(*turn_number);
@@ -2311,39 +2235,17 @@ impl ThreadPool {
                     if let Some(turn_token_usage) = turn.token_usage {
                         token_count = turn_token_usage.total_tokens;
                     }
-                    recovered_from_committed_log = true;
                 }
-                Ok(None) => {}
+                Ok(None) => continue,
                 Err(error) => {
                     tracing::warn!(
                         turn_number,
                         error = %error,
-                        "Failed to read committed turn log during recovery; falling back to legacy trace"
-                    );
-                }
-            }
-            if recovered_from_committed_log {
-                continue;
-            }
-
-            let path = turns_dir.join(format!("{turn_number}.jsonl"));
-            let events = match read_jsonl_events(&path).await {
-                Ok(events) if !events.is_empty() => events,
-                Ok(_) => {
-                    tracing::warn!(path = %path.display(), "Skipping empty turn trace during recovery");
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %error,
-                        "Skipping unreadable turn trace during recovery"
+                        "Skipping unreadable committed turn log during recovery"
                     );
                     continue;
                 }
-            };
-            max_turn_number = max_turn_number.max(*turn_number);
-            Self::extend_recovered_state(&mut messages, &mut token_count, events);
+            }
         }
 
         Ok(RecoveredThreadState {
@@ -2465,7 +2367,7 @@ mod tests {
         TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
         write_turn_meta,
     };
-    use argus_agent::{TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
+    use argus_agent::TurnCancellation;
     use chrono::Utc;
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
@@ -2835,48 +2737,6 @@ mod tests {
         let path = std::env::temp_dir().join(format!("{prefix}-{}", ThreadId::new()));
         std::fs::create_dir_all(&path).expect("trace dir should exist");
         path
-    }
-
-    async fn write_trace_turn(
-        base_dir: &Path,
-        turn_number: u32,
-        user_content: &str,
-        assistant_content: &str,
-        total_tokens: u32,
-    ) {
-        let mut writer = TraceWriter::new(
-            base_dir,
-            turn_number,
-            &TraceConfig::new(true, base_dir.to_path_buf()),
-        )
-        .await
-        .expect("trace writer should open");
-        writer
-            .write_event(&TurnLogEvent::UserInput {
-                content: user_content.to_string(),
-                role: "user".to_string(),
-                metadata: None,
-            })
-            .await
-            .expect("user input should persist");
-        writer
-            .write_event(&TurnLogEvent::LlmResponse {
-                content: assistant_content.to_string(),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                finish_reason: "stop".to_string(),
-                metadata: None,
-            })
-            .await
-            .expect("assistant response should persist");
-        writer
-            .finish_success(&TokenUsage {
-                input_tokens: total_tokens / 2,
-                output_tokens: total_tokens.saturating_sub(total_tokens / 2),
-                total_tokens,
-            })
-            .await
-            .expect("turn should finalize");
     }
 
     async fn write_committed_turn(
@@ -4130,8 +3990,8 @@ mod tests {
             .join(session_id.to_string())
             .join(thread_id.to_string());
 
-        write_trace_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
-        write_trace_turn(&base_dir, 3, "third prompt", "third reply", 33).await;
+        write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        write_committed_turn(&base_dir, 3, "third prompt", "third reply", 33).await;
 
         let recovered = ThreadPool::recover_thread_state_from_trace(
             &trace_dir,
@@ -4167,8 +4027,8 @@ mod tests {
             .join(session_id.to_string())
             .join(thread_id.to_string());
 
-        write_trace_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
-        write_trace_turn(&base_dir, 2, "second prompt", "partial second reply", 22).await;
+        write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        write_committed_turn(&base_dir, 2, "second prompt", "second reply", 22).await;
 
         let recovered = ThreadPool::recover_thread_state_from_trace(
             &trace_dir,
@@ -4184,7 +4044,7 @@ mod tests {
             recovered
                 .messages
                 .iter()
-                .any(|message| message.content == "partial second reply")
+                .any(|message| message.content == "second reply")
         );
         assert_eq!(recovered.token_count, 22);
     }
@@ -4223,9 +4083,15 @@ mod tests {
         let thread_id = ThreadId::new();
         let base_dir = trace_dir.join(thread_id.to_string());
 
-        write_trace_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
-        std::fs::write(base_dir.join("turns").join("2.jsonl"), "{invalid-json")
-            .expect("invalid turn file should persist");
+        write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        let turn_dir = turns_dir(&base_dir);
+        std::fs::write(
+            turn_messages_path(&turn_dir, 2),
+            "{\"role\":\"user\",\"content\":\"broken\"}\n",
+        )
+        .expect("invalid turn messages should persist");
+        std::fs::write(turn_meta_path(&turn_dir, 2), "{invalid-json")
+            .expect("invalid turn meta should persist");
 
         let recovered =
             ThreadPool::recover_job_thread_state_from_trace(&trace_dir, &thread_id, Some(2))

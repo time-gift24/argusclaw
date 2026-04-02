@@ -41,8 +41,6 @@ pub struct CompactResult {
     /// Estimated token count after compaction.
     /// The authoritative count will come from the next LLM response.
     pub token_count: u32,
-    /// Synthetic history messages that should be traced once with the next visible turn.
-    pub trace_prelude_messages: Vec<ChatMessage>,
 }
 
 /// Compactor trait — responsible for deciding when and how to compact.
@@ -187,12 +185,6 @@ impl Compactor for LlmCompactor {
             false,
         ));
 
-        let trace_prelude_messages = vec![
-            synthetic_prompt.clone(),
-            synthetic_summary.clone(),
-            synthetic_replay.clone(),
-        ];
-
         let summary_messages = vec![
             synthetic_prompt,
             synthetic_summary,
@@ -216,7 +208,6 @@ impl Compactor for LlmCompactor {
         Ok(Some(CompactResult {
             summary_messages,
             token_count: new_token_count,
-            trace_prelude_messages,
         }))
     }
 
@@ -403,7 +394,6 @@ mod tests {
             result.summary_messages[2].content,
             "Continue the conversation using the summary above."
         );
-        assert!(!result.trace_prelude_messages.is_empty());
     }
 
     #[tokio::test]

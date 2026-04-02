@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::turn_log_store::read_turn_record;
-use argus_agent::{read_jsonl_events, tool_context::current_agent_id, TurnLogEvent};
+use argus_agent::tool_context::current_agent_id;
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, ToolCall},
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
@@ -1237,111 +1237,20 @@ async fn recover_thread_state_from_trace(
     let mut token_count = 0;
 
     for turn_number in &turn_numbers {
-        if let Some(turn) = read_turn_record(&turns_dir, *turn_number)
+        let turn = read_turn_record(&turns_dir, *turn_number)
             .await
             .map_err(|error| ArgusError::DatabaseError {
                 reason: format!(
                     "failed to recover turn {turn_number} for thread {thread_id}: {error}"
                 ),
             })?
-        {
-            messages.extend(turn.messages);
-            if let Some(token_usage) = turn.token_usage {
-                token_count = token_usage.total_tokens;
-            }
-            continue;
-        }
-
-        let path = turns_dir.join(format!("{turn_number}.jsonl"));
-        let events = read_jsonl_events(&path)
-            .await
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: format!(
-                    "failed to recover turn {turn_number} for thread {thread_id}: {error}"
-                ),
+            .ok_or_else(|| ArgusError::DatabaseError {
+                reason: format!("missing turn trace file {turn_number}"),
             })?;
 
-        for event in events {
-            match event {
-                TurnLogEvent::HistoryPrelude {
-                    messages: mut prelude_messages,
-                } => {
-                    messages.append(&mut prelude_messages);
-                }
-                TurnLogEvent::UserInput {
-                    content, metadata, ..
-                } => {
-                    if !content.trim().is_empty() {
-                        let message = if let Some(metadata) = metadata {
-                            ChatMessage::user(content).with_metadata(metadata)
-                        } else {
-                            ChatMessage::user(content)
-                        };
-                        messages.push(message);
-                    }
-                }
-                TurnLogEvent::LlmResponse {
-                    content,
-                    reasoning_content,
-                    tool_calls,
-                    metadata,
-                    ..
-                } => {
-                    if tool_calls.is_empty() {
-                        if !content.trim().is_empty()
-                            || !reasoning_content.as_deref().unwrap_or("").trim().is_empty()
-                        {
-                            let message =
-                                ChatMessage::assistant_with_reasoning(content, reasoning_content);
-                            messages.push(if let Some(metadata) = metadata {
-                                message.with_metadata(metadata)
-                            } else {
-                                message
-                            });
-                        }
-                    } else {
-                        let parsed_tool_calls = tool_calls
-                            .into_iter()
-                            .map(|value| {
-                                serde_json::from_value::<ToolCall>(value).map_err(|error| ArgusError::DatabaseError {
-                                    reason: format!(
-                                        "failed to recover turn {turn_number} for thread {thread_id}: invalid tool call payload: {error}"
-                                    ),
-                                })
-                            })
-                            .collect::<Result<Vec<_>>>()?;
-
-                        let message = ChatMessage::assistant_with_tool_calls_and_reasoning(
-                            if content.trim().is_empty() {
-                                None
-                            } else {
-                                Some(content)
-                            },
-                            parsed_tool_calls,
-                            reasoning_content,
-                        );
-                        messages.push(if let Some(metadata) = metadata {
-                            message.with_metadata(metadata)
-                        } else {
-                            message
-                        });
-                    }
-                }
-                TurnLogEvent::ToolResult {
-                    id,
-                    name,
-                    result,
-                    error,
-                    ..
-                } => {
-                    let content = error.unwrap_or(result);
-                    messages.push(ChatMessage::tool_result(id, name, content));
-                }
-                TurnLogEvent::TurnEnd { token_usage, .. } => {
-                    token_count = token_usage.total_tokens;
-                }
-                _ => {}
-            }
+        messages.extend(turn.messages);
+        if let Some(token_usage) = turn.token_usage {
+            token_count = token_usage.total_tokens;
         }
     }
 
@@ -1407,25 +1316,7 @@ async fn resolve_turn_numbers(
                     ),
                 })?;
             turn_numbers.push(turn_number);
-            continue;
         }
-
-        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-            continue;
-        }
-
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
-        let turn_number = stem
-            .parse::<u32>()
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: format!(
-                    "failed to parse turn trace filename {}: {error}",
-                    path.display()
-                ),
-            })?;
-        turn_numbers.push(turn_number);
     }
 
     turn_numbers.sort_unstable();
@@ -1878,81 +1769,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_messages_from_trace_restores_full_turn_history() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turns_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
-
-        let turn_one = [
-            format!(
-                r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"用户问题一","role":"user"}}"#,
-                thread_id
-            ),
-            format!(
-                r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"让我查一下","reasoning_content":"先分析再调用工具","tool_calls":[{{"id":"call_1","name":"bash","arguments":{{"cmd":"pwd"}}}}],"finish_reason":"tool_calls"}}"#,
-                thread_id
-            ),
-            format!(
-                r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:02Z","type":"tool_result","id":"call_1","name":"bash","result":"'/tmp'","duration_ms":12,"error":null}}"#,
-                thread_id
-            ),
-            format!(
-                r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:03Z","type":"llm_response","content":"总结一","reasoning_content":"推理一","tool_calls":[],"finish_reason":"stop"}}"#,
-                thread_id
-            ),
-        ]
-        .join("\n")
-            + "\n";
-        let turn_two = [
-            format!(
-                r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:00Z","type":"user_input","content":"用户问题二","role":"user"}}"#,
-                thread_id
-            ),
-            format!(
-                r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:01Z","type":"llm_response","content":"总结二","reasoning_content":"推理二","tool_calls":[],"finish_reason":"stop"}}"#,
-                thread_id
-            ),
-        ]
-        .join("\n")
-            + "\n";
-
-        fs::write(turns_dir.join("1.jsonl"), turn_one).expect("turn one should write");
-        fs::write(turns_dir.join("2.jsonl"), turn_two).expect("turn two should write");
-
-        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
-            .await
-            .expect("trace recovery should succeed");
-
-        assert_eq!(messages.len(), 6);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[0].content, "用户问题一");
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert_eq!(messages[1].content, "让我查一下");
-        assert_eq!(
-            messages[1].reasoning_content.as_deref(),
-            Some("先分析再调用工具")
-        );
-        assert_eq!(messages[1].tool_calls.as_ref().map(Vec::len), Some(1));
-        assert_eq!(messages[2].role, Role::Tool);
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(messages[2].name.as_deref(), Some("bash"));
-        assert_eq!(messages[3].role, Role::Assistant);
-        assert_eq!(messages[3].content, "总结一");
-        assert_eq!(messages[3].reasoning_content.as_deref(), Some("推理一"));
-        assert_eq!(messages[4].role, Role::User);
-        assert_eq!(messages[4].content, "用户问题二");
-        assert_eq!(messages[5].role, Role::Assistant);
-        assert_eq!(messages[5].content, "总结二");
-        assert_eq!(messages[5].reasoning_content.as_deref(), Some("推理二"));
-    }
-
-    #[tokio::test]
     async fn recover_turns_from_messages_jsonl() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
@@ -2087,33 +1903,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recover_messages_from_trace_restores_full_turn_history() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let turn_logs_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
+
+        write_turn_messages(
+            &turn_messages_path(&turn_logs_dir, 1),
+            &[
+                ChatMessage::user("用户问题一"),
+                ChatMessage::assistant("总结一"),
+                ChatMessage::tool_result("call_1", "bash", "'/tmp'"),
+            ],
+        )
+        .await
+        .expect("turn one messages should write");
+        write_turn_meta(
+            &turn_meta_path(&turn_logs_dir, 1),
+            &TurnLogMeta {
+                turn_number: 1,
+                state: TurnState::Completed,
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("turn one meta should write");
+        write_turn_messages(
+            &turn_messages_path(&turn_logs_dir, 2),
+            &[ChatMessage::user("用户问题二"), ChatMessage::assistant("总结二")],
+        )
+        .await
+        .expect("turn two messages should write");
+        write_turn_meta(
+            &turn_meta_path(&turn_logs_dir, 2),
+            &TurnLogMeta {
+                turn_number: 2,
+                state: TurnState::Completed,
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 8,
+                    total_tokens: 28,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("turn two meta should write");
+
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
+            .await
+            .expect("committed log recovery should succeed");
+
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].content, "用户问题一");
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert_eq!(messages[1].content, "总结一");
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(messages[2].name.as_deref(), Some("bash"));
+        assert_eq!(messages[3].role, Role::User);
+        assert_eq!(messages[3].content, "用户问题二");
+        assert_eq!(messages[4].role, Role::Assistant);
+        assert_eq!(messages[4].content, "总结二");
+    }
+
+    #[tokio::test]
     async fn recover_messages_from_trace_fails_when_turn_file_is_missing() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turns_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+        let turn_logs_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        fs::write(
-            turns_dir.join("1.jsonl"),
-            [
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"hi","role":"user"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"hello","reasoning_content":null,"tool_calls":[],"finish_reason":"stop"}}"#,
-                    thread_id
-                ),
-            ]
-            .join("\n")
-                + "\n",
+        write_turn_messages(
+            &turn_messages_path(&turn_logs_dir, 1),
+            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
         )
-        .expect("turn one should write");
+        .await
+        .expect("turn one messages should write");
+        write_turn_meta(
+            &turn_meta_path(&turn_logs_dir, 1),
+            &TurnLogMeta {
+                turn_number: 1,
+                state: TurnState::Completed,
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("turn one meta should write");
 
         let error = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
             .await
@@ -2123,108 +2032,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_messages_from_trace_restores_partial_failed_turn_response() {
+    async fn recover_messages_from_trace_uses_turns_beyond_persisted_count_hint() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turns_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+        let turn_logs_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        fs::write(
-            turns_dir.join("1.jsonl"),
-            [
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"用户问题一","role":"user"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"部分回答","reasoning_content":null,"tool_calls":[],"finish_reason":"error"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:02Z","type":"turn_error","error":"stream timeout","at_iteration":0}}"#,
-                    thread_id
-                ),
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .expect("failed turn trace should write");
+        for (turn_number, user, assistant, total_tokens) in [
+            (1, "用户问题一", "回答一", 15),
+            (2, "用户问题二", "回答二", 28),
+        ] {
+            write_turn_messages(
+                &turn_messages_path(&turn_logs_dir, turn_number),
+                &[ChatMessage::user(user), ChatMessage::assistant(assistant)],
+            )
+            .await
+            .expect("turn messages should write");
+            write_turn_meta(
+                &turn_meta_path(&turn_logs_dir, turn_number),
+                &TurnLogMeta {
+                    turn_number,
+                    state: TurnState::Completed,
+                    token_usage: Some(argus_protocol::TokenUsage {
+                        input_tokens: total_tokens / 2,
+                        output_tokens: total_tokens - (total_tokens / 2),
+                        total_tokens,
+                    }),
+                    started_at: Utc::now(),
+                    finished_at: Some(Utc::now()),
+                    model: Some("test-model".to_string()),
+                    error: None,
+                },
+            )
+            .await
+            .expect("turn meta should write");
+        }
 
         let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
             .await
-            .expect("failed turn trace should still recover messages");
-
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[0].content, "用户问题一");
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert_eq!(messages[1].content, "部分回答");
-    }
-
-    #[tokio::test]
-    async fn recover_messages_from_trace_uses_trace_turns_beyond_persisted_count_hint() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turns_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
-
-        fs::write(
-            turns_dir.join("1.jsonl"),
-            [
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"用户问题一","role":"user"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"回答一","reasoning_content":null,"tool_calls":[],"finish_reason":"stop"}}"#,
-                    thread_id
-                ),
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .expect("turn one should write");
-
-        fs::write(
-            turns_dir.join("2.jsonl"),
-            [
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:00Z","type":"user_input","content":"用户问题二","role":"user"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:01Z","type":"llm_response","content":"失败前的部分回答","reasoning_content":null,"tool_calls":[],"finish_reason":"error"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:02Z","type":"turn_error","error":"stream timeout","at_iteration":0}}"#,
-                    thread_id
-                ),
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .expect("turn two should write");
-
-        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
-            .await
-            .expect("trace recovery should use newer trace files than the persisted count hint");
+            .expect("recovery should discover committed turns beyond the persisted count hint");
 
         assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].content, "用户问题一");
         assert_eq!(messages[1].content, "回答一");
         assert_eq!(messages[2].content, "用户问题二");
-        assert_eq!(messages[3].content, "失败前的部分回答");
+        assert_eq!(messages[3].content, "回答二");
     }
 
     #[tokio::test]
@@ -2232,58 +2090,48 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turns_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
+        let turn_logs_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        fs::write(
-            turns_dir.join("1.jsonl"),
-            [
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:00Z","type":"user_input","content":"hi","role":"user"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:01Z","type":"llm_response","content":"hello","reasoning_content":null,"tool_calls":[],"finish_reason":"stop"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":1,"ts":"2026-03-25T10:00:02Z","type":"turn_end","token_usage":{{"input_tokens":10,"output_tokens":5,"total_tokens":15}},"finish_reason":"stop"}}"#,
-                    thread_id
-                ),
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .expect("turn one should write");
-        fs::write(
-            turns_dir.join("2.jsonl"),
-            [
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:00Z","type":"user_input","content":"again","role":"user"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:01Z","type":"llm_response","content":"welcome back","reasoning_content":null,"tool_calls":[],"finish_reason":"stop"}}"#,
-                    thread_id
-                ),
-                format!(
-                    r#"{{"v":"1","thread_id":"{}","turn":2,"ts":"2026-03-25T10:01:02Z","type":"turn_end","token_usage":{{"input_tokens":20,"output_tokens":8,"total_tokens":28}},"finish_reason":"stop"}}"#,
-                    thread_id
-                ),
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .expect("turn two should write");
+        for (turn_number, user, assistant, total_tokens) in [
+            (1, "hi", "hello", 15),
+            (2, "again", "welcome back", 28),
+        ] {
+            write_turn_messages(
+                &turn_messages_path(&turn_logs_dir, turn_number),
+                &[ChatMessage::user(user), ChatMessage::assistant(assistant)],
+            )
+            .await
+            .expect("turn messages should write");
+            write_turn_meta(
+                &turn_meta_path(&turn_logs_dir, turn_number),
+                &TurnLogMeta {
+                    turn_number,
+                    state: TurnState::Completed,
+                    token_usage: Some(argus_protocol::TokenUsage {
+                        input_tokens: total_tokens / 2,
+                        output_tokens: total_tokens - (total_tokens / 2),
+                        total_tokens,
+                    }),
+                    started_at: Utc::now(),
+                    finished_at: Some(Utc::now()),
+                    model: Some("test-model".to_string()),
+                    error: None,
+                },
+            )
+            .await
+            .expect("turn meta should write");
+        }
 
         let recovered =
             recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
                 .await
-                .expect("trace recovery should succeed");
+                .expect("committed log recovery should succeed");
 
         assert_eq!(recovered.turn_count, 2);
         assert_eq!(recovered.token_count, 28);
@@ -2306,92 +2154,6 @@ mod tests {
         assert_eq!(recovered.turn_count, 0);
         assert_eq!(recovered.token_count, 0);
         assert!(recovered.messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn recover_thread_state_from_trace_rehydrates_compaction_prelude_messages() {
-        use argus_agent::TurnLogEvent;
-        use argus_protocol::llm::{ChatMessageMetadata, ChatMessageMetadataMode};
-
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turns_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&turns_dir).expect("turns dir should exist");
-
-        let prelude_messages = vec![
-            ChatMessage::user("请总结较早历史").with_metadata(ChatMessageMetadata {
-                summary: false,
-                mode: Some(ChatMessageMetadataMode::CompactionPrompt),
-                synthetic: true,
-                collapsed_by_default: true,
-            }),
-            ChatMessage::assistant("这里是压缩摘要").with_metadata(ChatMessageMetadata {
-                summary: true,
-                mode: Some(ChatMessageMetadataMode::CompactionSummary),
-                synthetic: true,
-                collapsed_by_default: true,
-            }),
-            ChatMessage::user("请基于摘要继续").with_metadata(ChatMessageMetadata {
-                summary: false,
-                mode: Some(ChatMessageMetadataMode::CompactionReplay),
-                synthetic: true,
-                collapsed_by_default: true,
-            }),
-        ];
-
-        let lines = [
-            serde_json::to_string(&TurnLogEvent::HistoryPrelude {
-                messages: prelude_messages,
-            })
-            .expect("prelude should serialize"),
-            serde_json::to_string(&TurnLogEvent::UserInput {
-                content: "真正的新问题".to_string(),
-                role: "user".to_string(),
-                metadata: None,
-            })
-            .expect("user input should serialize"),
-            serde_json::to_string(&TurnLogEvent::LlmResponse {
-                content: "回答".to_string(),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                finish_reason: "stop".to_string(),
-                metadata: None,
-            })
-            .expect("response should serialize"),
-            serde_json::to_string(&TurnLogEvent::TurnEnd {
-                token_usage: argus_protocol::TokenUsage {
-                    input_tokens: 21,
-                    output_tokens: 9,
-                    total_tokens: 30,
-                },
-                finish_reason: "stop".to_string(),
-            })
-            .expect("turn end should serialize"),
-        ]
-        .join("\n")
-            + "\n";
-        fs::write(turns_dir.join("1.jsonl"), lines).expect("trace should write");
-
-        let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, Some(1))
-                .await
-                .expect("trace recovery should succeed");
-
-        assert_eq!(recovered.turn_count, 1);
-        assert_eq!(recovered.token_count, 30);
-        assert_eq!(recovered.messages.len(), 5);
-        assert_eq!(recovered.messages[0].content, "请总结较早历史");
-        assert_eq!(
-            recovered.messages[1].metadata.as_ref().and_then(|m| m.mode),
-            Some(ChatMessageMetadataMode::CompactionSummary)
-        );
-        assert_eq!(recovered.messages[3].content, "真正的新问题");
-        assert_eq!(recovered.messages[4].content, "回答");
     }
 
     #[tokio::test]

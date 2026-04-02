@@ -22,9 +22,7 @@ use argus_protocol::{
     ToolExecutionContext, ToolHookContext, ids::ThreadId, sanitize_tool_output,
 };
 
-use super::events::TurnLogEvent;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
-use super::trace::{TraceConfig, TraceWriter};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
 /// Cancellation primitive used to stop an active turn.
@@ -220,35 +218,6 @@ impl StreamingAccumulator {
     }
 }
 
-fn has_traceable_response(response: &CompletionResponse) -> bool {
-    response
-        .content
-        .as_deref()
-        .is_some_and(|content| !content.trim().is_empty())
-        || response
-            .reasoning_content
-            .as_deref()
-            .is_some_and(|reasoning| !reasoning.trim().is_empty())
-        || !response.tool_calls.is_empty()
-}
-
-fn build_trace_response_event(
-    response: &CompletionResponse,
-    finish_reason: String,
-) -> TurnLogEvent {
-    TurnLogEvent::LlmResponse {
-        content: response.content.clone().unwrap_or_default(),
-        reasoning_content: response.reasoning_content.clone(),
-        tool_calls: response
-            .tool_calls
-            .iter()
-            .filter_map(|tc| serde_json::to_value(tc).ok())
-            .collect(),
-        finish_reason,
-        metadata: None,
-    }
-}
-
 /// A Turn represents a single execution cycle in a conversation.
 ///
 /// The Turn owns its resources (tools and hooks) directly and is responsible
@@ -357,13 +326,6 @@ pub struct Turn {
     #[builder(default)]
     _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
 
-    /// Trace configuration.
-    #[builder(default, setter(strip_option))]
-    trace_config: Option<TraceConfig>,
-
-    /// Synthetic history messages that should be logged once before the visible turn starts.
-    #[builder(default)]
-    trace_prelude_messages: Vec<ChatMessage>,
 }
 
 impl TurnBuilder {
@@ -448,68 +410,6 @@ impl Turn {
             self.turn_number,
         ));
 
-        // Create trace writer if configured
-        let mut trace_writer = match self.trace_config.as_ref() {
-            Some(config) if config.enabled => {
-                let mut base_dir = config.trace_dir.clone();
-                if let Some(session_id) = &config.session_id {
-                    base_dir = base_dir.join(session_id.to_string());
-                }
-                base_dir = base_dir.join(&self.thread_id);
-                match TraceWriter::new(&base_dir, self.turn_number, config).await {
-                    Ok(writer) => Some(writer),
-                    Err(e) => {
-                        tracing::warn!(
-                            thread_id = %self.thread_id,
-                            error = %e,
-                            "Failed to create trace writer, continuing without tracing"
-                        );
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
-
-        // Write TurnStart event if tracing is enabled
-        if let Some(config) = self.trace_config.as_ref()
-            && config.enabled
-            && let Some(writer) = trace_writer.as_mut()
-        {
-            if let (Some(sp), Some(model)) = (&config.system_prompt, &config.model) {
-                let _ = writer
-                    .write_event(&TurnLogEvent::TurnStart {
-                        system_prompt: sp.clone(),
-                        model: model.clone(),
-                    })
-                    .await;
-            }
-            if !self.trace_prelude_messages.is_empty() {
-                let _ = writer
-                    .write_event(&TurnLogEvent::HistoryPrelude {
-                        messages: self.trace_prelude_messages.clone(),
-                    })
-                    .await;
-            }
-            for msg in self.messages.iter() {
-                if let ChatMessage {
-                    role: argus_protocol::llm::Role::User,
-                    content,
-                    metadata,
-                    ..
-                } = msg
-                {
-                    let _ = writer
-                        .write_event(&TurnLogEvent::UserInput {
-                            content: content.clone(),
-                            role: "user".to_string(),
-                            metadata: metadata.clone(),
-                        })
-                        .await;
-                }
-            }
-        }
-
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
@@ -518,12 +418,7 @@ impl Turn {
             "Turn execution started"
         );
 
-        // Execute main loop (takes ownership of trace_writer)
-        let loop_result = self.execute_loop(trace_writer).await;
-        let (result, trace_writer) = match loop_result {
-            Ok((output, tw)) => (Ok(output), tw),
-            Err((error, tw)) => (Err(error), tw),
-        };
+        let result = self.execute_loop().await;
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -540,30 +435,6 @@ impl Turn {
                 (&self.config.on_turn_complete, &self.session_id)
         {
             callback(*session_id, self.turn_number);
-        }
-
-        // Finalize trace - handles both success and failure cases
-        if let Some(writer) = trace_writer {
-            match &result {
-                Ok(output) => {
-                    if let Err(e) = writer.finish_success(&output.token_usage).await {
-                        tracing::warn!(
-                            thread_id = %self.thread_id,
-                            error = %e,
-                            "Failed to finalize trace on success"
-                        );
-                    }
-                }
-                Err(error) => {
-                    if let Err(e) = writer.finish_failure(&error.to_string()).await {
-                        tracing::warn!(
-                            thread_id = %self.thread_id,
-                            error = %e,
-                            "Failed to finalize trace on failure"
-                        );
-                    }
-                }
-            }
         }
 
         // Send completion event
@@ -720,19 +591,17 @@ impl Turn {
     /// This is where the core execution logic lives.
     async fn execute_loop(
         &mut self,
-        trace_writer: Option<TraceWriter>,
-    ) -> Result<(TurnOutput, Option<TraceWriter>), (TurnError, Option<TraceWriter>)> {
+    ) -> Result<TurnOutput, TurnError> {
         let mut pending_messages = std::mem::take(&mut self.pending_messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
-        let mut trace_writer = trace_writer;
 
         let max_tool_calls = self.config.max_tool_calls;
 
         for iteration in 0..max_iterations {
             if self.cancellation.is_cancelled() {
-                return Err((TurnError::Cancelled, trace_writer));
+                return Err(TurnError::Cancelled);
             }
 
             let pending_inputs = {
@@ -784,24 +653,6 @@ impl Turn {
                 request.thinking = Some(thinking_config.clone());
             }
 
-            // Call the LLM (streaming mode is always enabled in Turn)
-
-            // Write LLM request event to trace
-            if let Some(writer) = trace_writer.as_mut() {
-                let llm_req_event = TurnLogEvent::LlmRequest {
-                    messages: request_messages.clone(),
-                    tools: tools
-                        .iter()
-                        .map(|t| {
-                            serde_json::to_value(t)
-                                .ok()
-                                .unwrap_or(serde_json::Value::Null)
-                        })
-                        .collect(),
-                };
-                let _ = writer.write_event(&llm_req_event).await;
-            }
-
             tracing::debug!(
                 thread_id = %self.thread_id,
                 turn_number = %self.turn_number,
@@ -816,19 +667,10 @@ impl Turn {
                     partial_response,
                     error,
                 }) => {
-                    if let Some(writer) = trace_writer.as_mut()
-                        && has_traceable_response(&partial_response)
-                    {
-                        let _ = writer
-                            .write_event(&build_trace_response_event(
-                                &partial_response,
-                                "error".to_string(),
-                            ))
-                            .await;
-                    }
-                    return Err((TurnError::LlmFailed(error), trace_writer));
+                    let _ = partial_response;
+                    return Err(TurnError::LlmFailed(error));
                 }
-                Err(error) => return Err((error, trace_writer)),
+                Err(error) => return Err(error),
             };
             tracing::debug!(
                 thread_id = %self.thread_id,
@@ -837,25 +679,13 @@ impl Turn {
                 "LLM call completed"
             );
 
-            // Clone for tracing before processing consumes it
-            let trace_response = argus_protocol::llm::CompletionResponse {
-                content: response.content.clone(),
-                reasoning_content: response.reasoning_content.clone(),
-                tool_calls: response.tool_calls.clone(),
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-                finish_reason: response.finish_reason,
-                cache_read_input_tokens: response.cache_read_input_tokens,
-                cache_creation_input_tokens: response.cache_creation_input_tokens,
-            };
-
             // Process response
             let next_action = match self
                 .process_finish_reason(response, &mut pending_messages, &mut token_usage)
             {
-                    Ok(next_action) => next_action,
-                    Err(error) => return Err((error, trace_writer)),
-                };
+                Ok(next_action) => next_action,
+                Err(error) => return Err(error),
+            };
             match next_action {
                 NextAction::Return(output) => {
                     // Fire TurnEnd hook
@@ -872,15 +702,6 @@ impl Turn {
                         turn_number: Some(self.turn_number),
                     };
                     let turn_end_action = self.fire_hooks(&ctx).await;
-
-                    // Record LLM response to trace
-                    if let Some(writer) = trace_writer.as_mut() {
-                        let llm_resp_event = build_trace_response_event(
-                            &trace_response,
-                            format!("{:?}", trace_response.finish_reason),
-                        );
-                        let _ = writer.write_event(&llm_resp_event).await;
-                    }
 
                     let mut output = output;
                     let continue_message = match turn_end_action {
@@ -906,16 +727,6 @@ impl Turn {
                         pending_messages = std::mem::take(&mut output.appended_messages);
                         pending_messages.push(ChatMessage::user(&message));
 
-                        if let Some(writer) = trace_writer.as_mut() {
-                            let _ = writer
-                                .write_event(&TurnLogEvent::UserInput {
-                                    content: message.clone(),
-                                    role: "user".to_string(),
-                                    metadata: None,
-                                })
-                                .await;
-                        }
-
                         tracing::debug!(
                             thread_id = %self.thread_id,
                             turn_number = %self.turn_number,
@@ -925,7 +736,7 @@ impl Turn {
                         continue;
                     }
 
-                    return Ok((output, trace_writer));
+                    return Ok(output);
                 }
                 NextAction::ContinueWithTools {
                     tool_calls,
@@ -941,27 +752,12 @@ impl Turn {
                     );
 
                     // Execute tools in parallel
-                    let trace_writer_arc = Arc::new(Mutex::new(trace_writer.take()));
                     let tool_results = tokio::select! {
                         _ = self.cancellation.cancelled() => {
-                            let mut guard = trace_writer_arc.lock().await;
-                            return Err((TurnError::Cancelled, guard.take()));
+                            return Err(TurnError::Cancelled);
                         }
-                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs, trace_writer_arc.clone()) => tool_results,
+                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs) => tool_results,
                     };
-                    // Restore trace_writer from Arc after all writes complete
-                    if let Ok(mutex) = Arc::try_unwrap(trace_writer_arc) {
-                        trace_writer = mutex.into_inner();
-                    }
-
-                    // Record LLM response to trace (tool results are written in execute_single_tool)
-                    if let Some(writer) = trace_writer.as_mut() {
-                        let llm_resp_event = build_trace_response_event(
-                            &trace_response,
-                            format!("{:?}", trace_response.finish_reason),
-                        );
-                        let _ = writer.write_event(&llm_resp_event).await;
-                    }
 
                     tracing::debug!(
                         thread_id = %self.thread_id,
@@ -1010,21 +806,15 @@ impl Turn {
                     // Continue the loop with updated messages
                 }
                 NextAction::LengthExceeded => {
-                    return Err((
-                        TurnError::ContextLengthExceeded(
-                            (token_usage.input_tokens + token_usage.output_tokens) as usize,
-                        ),
-                        trace_writer,
+                    return Err(TurnError::ContextLengthExceeded(
+                        (token_usage.input_tokens + token_usage.output_tokens) as usize,
                     ));
                 }
             }
         }
 
         // Max iterations reached
-        Err((
-            TurnError::MaxIterationsReached(max_iterations),
-            trace_writer,
-        ))
+        Err(TurnError::MaxIterationsReached(max_iterations))
     }
 
     /// Calls the LLM in streaming mode, accumulating the response.
@@ -1222,13 +1012,10 @@ impl Turn {
         &self,
         tool_calls: Vec<ToolCall>,
         tool_timeout_secs: u64,
-        trace_writer: Arc<Mutex<Option<TraceWriter>>>,
     ) -> Vec<ToolExecutionResult> {
         let futures: Vec<_> = tool_calls
             .into_iter()
-            .map(|tool_call| {
-                self.execute_single_tool(tool_call, tool_timeout_secs, trace_writer.clone())
-            })
+            .map(|tool_call| self.execute_single_tool(tool_call, tool_timeout_secs))
             .collect();
 
         join_all(futures).await
@@ -1239,25 +1026,10 @@ impl Turn {
         &self,
         tool_call: ToolCall,
         tool_timeout_secs: u64,
-        trace_writer: Arc<Mutex<Option<TraceWriter>>>,
     ) -> ToolExecutionResult {
         let tool_call_id = tool_call.id.clone();
         let tool_name = tool_call.name.clone();
         let tool_input = tool_call.arguments.clone();
-
-        // Write ToolCallStart event
-        {
-            let mut guard = trace_writer.lock().await;
-            if let Some(writer) = guard.as_mut() {
-                let _ = writer
-                    .write_event(&TurnLogEvent::ToolCallStart {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        arguments: tool_input.clone(),
-                    })
-                    .await;
-            }
-        }
 
         // Find the tool in self.tools
         let tool = self.tools.iter().find(|t| t.name() == tool_name).cloned();
@@ -1279,25 +1051,7 @@ impl Turn {
         if let Ok(HookAction::Block(ref reason)) = self.fire_hooks(&ctx).await
         {
             // Hook blocked the tool call
-            let block_start = std::time::Instant::now();
             let content = format!("Tool call blocked: {}", reason);
-            let duration_ms = block_start.elapsed().as_millis() as u64;
-
-            // Write blocked tool result to trace
-            {
-                let mut guard = trace_writer.lock().await;
-                if let Some(writer) = guard.as_mut() {
-                    let _ = writer
-                        .write_event(&TurnLogEvent::ToolResult {
-                            id: tool_call_id.clone(),
-                            name: tool_name.clone(),
-                            result: content.clone(),
-                            duration_ms,
-                            error: Some(reason.clone()),
-                        })
-                        .await;
-                }
-            }
 
             // Fire AfterToolCall hook with error
             let after_ctx = ToolHookContext {
@@ -1466,34 +1220,14 @@ impl Turn {
         };
         let _ = self.fire_hooks(&ctx).await;
 
-        // Convert result to string content and measure duration
-        let duration_ms = start_time.elapsed().as_millis() as u64;
+        // Convert result to string content.
+        let _duration_ms = start_time.elapsed().as_millis() as u64;
         let content = match &result {
             Ok(value) => serde_json::to_string(value).unwrap_or_else(|e| {
                 format!("{{\"error\": \"Failed to serialize result: {}\"}}", e)
             }),
             Err(e) => format!("{{\"error\": \"{}\"}}", e),
         };
-
-        // Write ToolResult to trace
-        {
-            let mut guard = trace_writer.lock().await;
-            if let Some(writer) = guard.as_mut() {
-                let error_str = match &result {
-                    Ok(_) => None,
-                    Err(e) => Some(e.clone()),
-                };
-                let _ = writer
-                    .write_event(&TurnLogEvent::ToolResult {
-                        id: tool_call_id.clone(),
-                        name: tool_name.clone(),
-                        result: content.clone(),
-                        duration_ms,
-                        error: error_str,
-                    })
-                    .await;
-            }
-        }
 
         ToolExecutionResult {
             tool_call_id,

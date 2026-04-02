@@ -137,9 +137,6 @@ pub struct Thread {
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
 
-    /// Synthetic history messages that should be traced once with the next visible turn.
-    #[builder(default)]
-    pending_trace_prelude_messages: Vec<ChatMessage>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -250,7 +247,6 @@ impl ThreadBuilder {
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
             turn_running: false,
             plan_store: self.plan_store.unwrap_or_default(),
-            pending_trace_prelude_messages: self.pending_trace_prelude_messages.unwrap_or_default(),
         })
     }
 }
@@ -601,7 +597,6 @@ impl Thread {
                     created_at: Utc::now(),
                 });
                 self.token_count = result.token_count;
-                self.pending_trace_prelude_messages = result.trace_prelude_messages;
                 self.broadcast_to_self(ThreadEvent::Compacted {
                     thread_id: self.id.to_string(),
                     new_token_count: self.token_count,
@@ -717,13 +712,11 @@ impl Thread {
         hooks.push(Arc::new(PlanContinuationHook::new(Arc::new(
             self.plan_store.clone(),
         ))));
-        let trace_prelude_messages = std::mem::take(&mut self.pending_trace_prelude_messages);
-
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
         // Build Turn using TurnBuilder
-        let mut turn_builder = TurnBuilder::default()
+        let turn_builder = TurnBuilder::default()
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
@@ -738,12 +731,7 @@ impl Thread {
             .stream_tx(stream_tx)
             .thread_event_tx(self.pipe_tx.clone())
             .control_tx(self.control_tx.clone())
-            .mailbox(Arc::clone(&self.mailbox))
-            .trace_prelude_messages(trace_prelude_messages);
-
-        if let Some(ref tc) = self.config.turn_config.trace_config {
-            turn_builder = turn_builder.trace_config(tc.clone());
-        }
+            .mailbox(Arc::clone(&self.mailbox));
 
         turn_builder
             .cancellation(cancellation)
@@ -1510,7 +1498,6 @@ mod tests {
             Ok(Some(CompactResult {
                 summary_messages: vec![ChatMessage::user("compacted")],
                 token_count: 10,
-                trace_prelude_messages: vec![],
             }))
         }
 
