@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::turn::TurnCancellation;
 use crate::{TurnBuilder, TurnOutput};
-use argus_protocol::llm::{ChatMessage, LlmProvider};
+use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, MessageOverride, SessionId, ThreadControlEvent,
@@ -356,6 +356,13 @@ impl Thread {
         self.cached_committed_messages
             .as_ref()
             .map_or_else(|| self.messages.as_slice(), |messages| messages.as_slice())
+    }
+
+    /// Returns true when committed history contains visible transcript beyond system prompts.
+    pub fn has_non_system_history(&self) -> bool {
+        self.history()
+            .iter()
+            .any(|message| message.role != Role::System)
     }
 
     fn build_turn_context(&self) -> Arc<Vec<ChatMessage>> {

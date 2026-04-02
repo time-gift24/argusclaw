@@ -1045,9 +1045,20 @@ impl SessionManager {
         self.load(session_id).await?;
         if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
-            if !thread.history().is_empty() || thread.turn_count() == 0 {
+            if thread.has_non_system_history() || thread.turn_count() > 0 {
                 return Ok(thread.history().to_vec());
             }
+            let recovered = recover_messages_from_trace(
+                &self.trace_dir,
+                &session_id,
+                thread_id,
+                thread.turn_count(),
+            )
+            .await?;
+            if !recovered.is_empty() {
+                return Ok(recovered);
+            }
+            return Ok(thread.history().to_vec());
         }
         let thread_record = self
             .thread_repo
@@ -1075,23 +1086,33 @@ impl SessionManager {
         self.load(session_id).await?;
         if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
-            let messages = if !thread.history().is_empty() {
-                thread.history().to_vec()
+            let (messages, turn_count, token_count) = if thread.has_non_system_history()
+                || thread.turn_count() > 0
+            {
+                (
+                    thread.history().to_vec(),
+                    thread.turn_count(),
+                    thread.token_count(),
+                )
             } else {
-                recover_messages_from_trace(
+                let recovered = recover_thread_state_from_trace(
                     &self.trace_dir,
                     &session_id,
                     thread_id,
-                    thread.turn_count(),
+                    Some(thread.turn_count()),
                 )
-                .await?
+                .await?;
+                (
+                    if recovered.messages.is_empty() {
+                        thread.history().to_vec()
+                    } else {
+                        recovered.messages
+                    },
+                    thread.turn_count().max(recovered.turn_count),
+                    thread.token_count().max(recovered.token_count),
+                )
             };
-            return Ok((
-                messages,
-                thread.turn_count(),
-                thread.token_count(),
-                thread.plan().len() as u32,
-            ));
+            return Ok((messages, turn_count, token_count, thread.plan().len() as u32));
         }
 
         let thread_record = self
@@ -1979,6 +2000,90 @@ mod tests {
         assert_eq!(recovered.messages.len(), 2);
         assert_eq!(recovered.messages[0].content, "hi");
         assert_eq!(recovered.messages[1].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn get_thread_snapshot_flattens_turns_for_existing_callers() {
+        let manager = test_session_manager().await;
+        let session_id = manager
+            .create("snapshot compatibility".to_string())
+            .await
+            .expect("session should create");
+        let thread_id = manager
+            .create_thread(session_id, AgentId::new(7), None, None)
+            .await
+            .expect("thread should create");
+        let trace_turns_dir = turns_dir(
+            &manager
+                .trace_dir
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        fs::create_dir_all(&trace_turns_dir).expect("turns dir should exist");
+
+        write_turn_messages(
+            &turn_messages_path(&trace_turns_dir, 1),
+            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        )
+        .await
+        .expect("first turn messages should write");
+        write_turn_meta(
+            &turn_meta_path(&trace_turns_dir, 1),
+            &TurnLogMeta {
+                turn_number: 1,
+                state: TurnState::Completed,
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("first turn meta should write");
+        write_turn_messages(
+            &turn_messages_path(&trace_turns_dir, 2),
+            &[ChatMessage::user("again"), ChatMessage::assistant("done")],
+        )
+        .await
+        .expect("second turn messages should write");
+        write_turn_meta(
+            &turn_meta_path(&trace_turns_dir, 2),
+            &TurnLogMeta {
+                turn_number: 2,
+                state: TurnState::Completed,
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 4,
+                    total_tokens: 6,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("second turn meta should write");
+
+        manager
+            .unload(session_id)
+            .await
+            .expect("session should unload");
+
+        let (messages, turn_count, token_count, _) = manager
+            .get_thread_snapshot(session_id, &thread_id)
+            .await
+            .expect("snapshot should recover");
+
+        assert_eq!(turn_count, 2);
+        assert_eq!(token_count, 6);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.last().map(|message| message.content.as_str()), Some("done"));
     }
 
     #[tokio::test]

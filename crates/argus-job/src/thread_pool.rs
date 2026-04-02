@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::config::ThreadConfigBuilder;
+use argus_agent::turn_log_store::read_turn_record;
 use argus_agent::{
     Compactor, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
     TurnConfig, TurnLogEvent, read_jsonl_events,
@@ -2163,6 +2164,17 @@ impl ThreadPool {
         let mut entries = tokio::fs::read_dir(turns_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if let Some(stem) = file_name.strip_suffix(".messages.jsonl")
+                && let Ok(number) = stem.parse::<u32>()
+            {
+                turn_numbers.push(number);
+                continue;
+            }
+
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
             }
@@ -2229,6 +2241,29 @@ impl ThreadPool {
         let mut token_count = 0;
         let mut max_turn_number = 0;
         for turn_number in &turn_numbers {
+            let mut recovered_from_committed_log = false;
+            match read_turn_record(&turns_dir, *turn_number).await {
+                Ok(Some(turn)) => {
+                    max_turn_number = max_turn_number.max(*turn_number);
+                    messages.extend(turn.messages);
+                    if let Some(turn_token_usage) = turn.token_usage {
+                        token_count = turn_token_usage.total_tokens;
+                    }
+                    recovered_from_committed_log = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        turn_number,
+                        error = %error,
+                        "Failed to read committed turn log during recovery; falling back to legacy trace"
+                    );
+                }
+            }
+            if recovered_from_committed_log {
+                continue;
+            }
+
             let path = turns_dir.join(format!("{turn_number}.jsonl"));
             let events = match read_jsonl_events(&path).await {
                 Ok(events) if !events.is_empty() => events,
@@ -2268,6 +2303,29 @@ impl ThreadPool {
         let mut token_count = 0;
         let mut max_turn_number = 0;
         for turn_number in &turn_numbers {
+            let mut recovered_from_committed_log = false;
+            match read_turn_record(&turns_dir, *turn_number).await {
+                Ok(Some(turn)) => {
+                    max_turn_number = max_turn_number.max(*turn_number);
+                    messages.extend(turn.messages);
+                    if let Some(turn_token_usage) = turn.token_usage {
+                        token_count = turn_token_usage.total_tokens;
+                    }
+                    recovered_from_committed_log = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        turn_number,
+                        error = %error,
+                        "Failed to read committed turn log during recovery; falling back to legacy trace"
+                    );
+                }
+            }
+            if recovered_from_committed_log {
+                continue;
+            }
+
             let path = turns_dir.join(format!("{turn_number}.jsonl"));
             let events = match read_jsonl_events(&path).await {
                 Ok(events) if !events.is_empty() => events,
@@ -2402,9 +2460,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use argus_agent::history::TurnState;
+    use argus_agent::turn_log_store::{
+        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
+        write_turn_meta,
+    };
     use argus_agent::{TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
+    use chrono::Utc;
     use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
         LlmProviderRepository,
     };
     use argus_protocol::{
@@ -2813,6 +2877,43 @@ mod tests {
             })
             .await
             .expect("turn should finalize");
+    }
+
+    async fn write_committed_turn(
+        base_dir: &Path,
+        turn_number: u32,
+        user_content: &str,
+        assistant_content: &str,
+        total_tokens: u32,
+    ) {
+        let turn_dir = turns_dir(base_dir);
+        write_turn_messages(
+            &turn_messages_path(&turn_dir, turn_number),
+            &[
+                ChatMessage::user(user_content),
+                ChatMessage::assistant(assistant_content),
+            ],
+        )
+        .await
+        .expect("messages should write");
+        write_turn_meta(
+            &turn_meta_path(&turn_dir, turn_number),
+            &TurnLogMeta {
+                turn_number,
+                state: TurnState::Completed,
+                token_usage: Some(TokenUsage {
+                    input_tokens: total_tokens / 2,
+                    output_tokens: total_tokens.saturating_sub(total_tokens / 2),
+                    total_tokens,
+                }),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            },
+        )
+        .await
+        .expect("meta should write");
     }
 
     async fn wait_for_thread_drop<T>(weak: &std::sync::Weak<T>) {
@@ -4086,6 +4187,34 @@ mod tests {
                 .any(|message| message.content == "partial second reply")
         );
         assert_eq!(recovered.token_count, 22);
+    }
+
+    #[tokio::test]
+    async fn recover_thread_state_from_messages_jsonl() {
+        let trace_dir = unique_trace_dir("argus-thread-pool-messages-jsonl");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let base_dir = trace_dir
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+
+        write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        write_committed_turn(&base_dir, 2, "second prompt", "second reply", 22).await;
+
+        let recovered = ThreadPool::recover_thread_state_from_trace(
+            &trace_dir,
+            &session_id,
+            &thread_id,
+            Some(1),
+        )
+        .await
+        .expect("committed turn logs should recover");
+
+        assert_eq!(recovered.turn_count, 2);
+        assert_eq!(recovered.token_count, 22);
+        assert_eq!(recovered.messages.len(), 4);
+        assert_eq!(recovered.messages[0].content, "first prompt");
+        assert_eq!(recovered.messages[3].content, "second reply");
     }
 
     #[tokio::test]
