@@ -8,9 +8,11 @@ import {
   Globe,
   Loader2,
   Network,
+  Plus,
   Save,
   Server,
   TerminalSquare,
+  Trash2,
 } from "lucide-react"
 
 import {
@@ -33,6 +35,14 @@ import { cn } from "@/lib/utils"
 interface McpEditorProps {
   serverId?: number
 }
+
+interface KeyValueRow {
+  id: string
+  key: string
+  value: string
+}
+
+let keyValueRowCounter = 0
 
 function createDefaultFormData(): McpServerRecord {
   return {
@@ -65,24 +75,33 @@ function parseList(text: string): string[] {
     .filter(Boolean)
 }
 
+function createKeyValueRow(key = "", value = ""): KeyValueRow {
+  keyValueRowCounter += 1
+  return {
+    id: `key-value-row-${keyValueRowCounter}`,
+    key,
+    value,
+  }
+}
+
 function formatKeyValueLines(values: Record<string, string>): string {
   return Object.entries(values)
     .map(([key, value]) => `${key}=${value}`)
     .join("\n")
 }
 
-function parseKeyValueLines(text: string): Record<string, string> {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .reduce<Record<string, string>>((acc, line) => {
-      const [rawKey, ...rawValue] = line.split("=")
-      const key = rawKey?.trim()
-      if (!key) return acc
-      acc[key] = rawValue.join("=").trim()
-      return acc
-    }, {})
+function recordToRows(values: Record<string, string>): KeyValueRow[] {
+  const rows = Object.entries(values).map(([key, value]) => createKeyValueRow(key, value))
+  return rows.length > 0 ? rows : [createKeyValueRow()]
+}
+
+function rowsToRecord(rows: KeyValueRow[]): Record<string, string> {
+  return rows.reduce<Record<string, string>>((acc, row) => {
+    const key = row.key.trim()
+    if (!key) return acc
+    acc[key] = row.value.trim()
+    return acc
+  }, {})
 }
 
 function getStatusTone(status: McpServerRecord["status"]) {
@@ -109,7 +128,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
   const [formData, setFormData] = React.useState<McpServerRecord>(createDefaultFormData)
   const [argsText, setArgsText] = React.useState("--stdio")
   const [envText, setEnvText] = React.useState("")
-  const [headersText, setHeadersText] = React.useState("")
+  const [headerRows, setHeaderRows] = React.useState<KeyValueRow[]>([createKeyValueRow()])
   const [testResult, setTestResult] = React.useState<McpConnectionTestResult | null>(null)
   const [discoveredTools, setDiscoveredTools] = React.useState<McpDiscoveredToolRecord[]>([])
   const [testDialogOpen, setTestDialogOpen] = React.useState(false)
@@ -119,11 +138,11 @@ export function McpEditor({ serverId }: McpEditorProps) {
     if (record.transport.kind === "stdio") {
       setArgsText(formatList(record.transport.args))
       setEnvText(formatKeyValueLines(record.transport.env))
-      setHeadersText("")
+      setHeaderRows([createKeyValueRow()])
     } else {
       setArgsText("")
       setEnvText("")
-      setHeadersText(formatKeyValueLines(record.transport.headers))
+      setHeaderRows(recordToRows(record.transport.headers))
     }
   }, [])
 
@@ -179,7 +198,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
       transport = {
         kind: formData.transport.kind,
         url: formData.transport.url,
-        headers: parseKeyValueLines(headersText),
+        headers: rowsToRecord(headerRows),
       }
     }
 
@@ -187,7 +206,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
       ...baseRecord,
       transport,
     }
-  }, [argsText, envText, formData, headersText])
+  }, [argsText, envText, formData, headerRows])
 
   const handleTransportKindChange = (kind: McpTransportConfig["kind"]) => {
     if (kind === formData.transport.kind) return
@@ -204,7 +223,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
       }))
       setArgsText("--stdio")
       setEnvText("")
-      setHeadersText("")
+      setHeaderRows([createKeyValueRow()])
       return
     }
 
@@ -218,8 +237,29 @@ export function McpEditor({ serverId }: McpEditorProps) {
     }))
     setArgsText("")
     setEnvText("")
-    setHeadersText("")
+    setHeaderRows([createKeyValueRow()])
   }
+
+  const updateHeaderRow = React.useCallback((rowId: string, field: "key" | "value", value: string) => {
+    setHeaderRows((prev) =>
+      prev.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)),
+    )
+  }, [])
+
+  const addHeaderRow = React.useCallback(() => {
+    setHeaderRows((prev) => [...prev, createKeyValueRow()])
+  }, [])
+
+  const removeHeaderRow = React.useCallback((rowId: string) => {
+    setHeaderRows((prev) => {
+      if (prev.length === 1) {
+        return [createKeyValueRow()]
+      }
+
+      const next = prev.filter((row) => row.id !== rowId)
+      return next.length > 0 ? next : [createKeyValueRow()]
+    })
+  }, [])
 
   const handleSave = async () => {
     if (!canSave) return
@@ -439,13 +479,49 @@ export function McpEditor({ serverId }: McpEditorProps) {
                     </div>
 
                     <div className="space-y-2">
-                      <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Headers (KEY=VALUE)</Label>
-                      <Textarea
-                        value={headersText}
-                        onChange={(event) => setHeadersText(event.target.value)}
-                        placeholder="Authorization=Bearer ..."
-                        className="min-h-[260px] bg-background border-muted/60 text-sm font-mono"
-                      />
+                      <div className="flex items-center justify-between gap-3">
+                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Headers</Label>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="outline"
+                          className="h-8 w-8 shrink-0"
+                          onClick={addHeaderRow}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </Button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {headerRows.map((row, index) => (
+                          <div
+                            key={row.id}
+                            className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 items-center"
+                          >
+                            <Input
+                              value={row.key}
+                              onChange={(event) => updateHeaderRow(row.id, "key", event.target.value)}
+                              placeholder={index === 0 ? "Header 名称" : "例如 Authorization"}
+                              className="h-10 bg-background border-muted/60 text-sm font-mono"
+                            />
+                            <Input
+                              value={row.value}
+                              onChange={(event) => updateHeaderRow(row.id, "value", event.target.value)}
+                              placeholder={index === 0 ? "Header 值" : "例如 Bearer ..."}
+                              className="h-10 bg-background border-muted/60 text-sm font-mono"
+                            />
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-9 w-9 shrink-0 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeHeaderRow(row.id)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </>
                 )}
