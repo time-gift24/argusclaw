@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use argus_protocol::HookHandler;
+use argus_protocol::tool::NamedTool;
 use argus_protocol::{TokenUsage, llm::ChatMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,23 @@ pub enum InFlightTurnPhase {
     WaitingApproval,
 }
 
+#[derive(Clone, Default)]
+pub struct InFlightTurnShared {
+    pub history: Arc<Vec<ChatMessage>>,
+    pub tools: Arc<Vec<Arc<dyn NamedTool>>>,
+    pub hooks: Arc<Vec<Arc<dyn HookHandler>>>,
+}
+
+impl std::fmt::Debug for InFlightTurnShared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InFlightTurnShared")
+            .field("history_len", &self.history.len())
+            .field("tool_count", &self.tools.len())
+            .field("hook_count", &self.hooks.len())
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InFlightTurn {
     pub turn_number: u32,
@@ -54,6 +73,7 @@ pub struct InFlightTurn {
     pub token_usage: TokenUsage,
     pub started_at: DateTime<Utc>,
     pub model: Option<String>,
+    pub shared: Arc<InFlightTurnShared>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

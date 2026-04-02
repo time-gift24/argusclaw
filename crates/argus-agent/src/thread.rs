@@ -10,10 +10,11 @@ use crate::command::ThreadRuntimeSnapshot;
 use crate::turn::{TurnCancellation, TurnSharedContext};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
+use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookRegistry, MailboxMessage, MessageOverride, QueuedUserMessage, SessionId,
-    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadRuntimeState,
-    TokenUsage,
+    AgentRecord, HookHandler, HookRegistry, MailboxMessage, MessageOverride, QueuedUserMessage,
+    SessionId, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox,
+    ThreadRuntimeState, TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -21,10 +22,12 @@ use super::compact::Compactor;
 use super::config::ThreadConfig;
 use super::error::ThreadError;
 use super::history::{
-    CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, TurnRecord, TurnState,
-    flatten_turn_messages, shared_history,
+    CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, InFlightTurnShared, TurnRecord,
+    TurnState, flatten_turn_messages, shared_history,
 };
+use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
+use super::plan_tool::UpdatePlanTool;
 use super::turn_log_store::TurnLogPersistenceSnapshot;
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
@@ -659,7 +662,12 @@ impl Thread {
         self.updated_at = updated_at;
     }
 
-    fn start_current_turn(&mut self, turn_number: u32, user_input: String) {
+    fn start_current_turn(
+        &mut self,
+        turn_number: u32,
+        user_input: String,
+        shared: Arc<InFlightTurnShared>,
+    ) {
         self.current_turn = Some(InFlightTurn {
             turn_number,
             state: InFlightTurnPhase::CallingLlm,
@@ -667,6 +675,7 @@ impl Thread {
             token_usage: TokenUsage::default(),
             started_at: Utc::now(),
             model: Some(self.provider.model_name().to_string()),
+            shared,
         });
     }
 
@@ -830,17 +839,22 @@ impl Thread {
             self.agent_record.clone()
         };
 
+        let shared = Arc::new(InFlightTurnShared {
+            history: self.build_turn_context(),
+            tools: Arc::new(self.build_shared_turn_tools(effective_record.as_ref())),
+            hooks: Arc::new(self.build_shared_turn_hooks()),
+        });
         let turn_number = self.next_turn_number;
         self.next_turn_number = self.next_turn_number.saturating_add(1);
         self.turn_count = turn_number;
-        self.start_current_turn(turn_number, user_input);
+        self.start_current_turn(turn_number, user_input, Arc::clone(&shared));
         self.set_active_turn_cancellation(Some(cancellation.clone()));
         self.sync_runtime_snapshot(ThreadRuntimeSnapshot {
             state: ThreadRuntimeState::Running { turn_number },
             queue_depth: self.runtime_snapshot.queue_depth,
         });
 
-        match self.build_turn(turn_number, effective_record, cancellation) {
+        match self.build_turn(turn_number, effective_record, cancellation, shared) {
             Ok(turn) => Ok(turn),
             Err(error) => {
                 self.current_turn = None;
@@ -889,19 +903,14 @@ impl Thread {
         turn_number: u32,
         agent_record: Arc<AgentRecord>,
         cancellation: TurnCancellation,
+        shared_state: Arc<InFlightTurnShared>,
     ) -> Result<crate::Turn, ThreadError> {
         let thread_id = self.id.to_string();
         let pending_messages = self
             .current_turn
             .as_ref()
             .map_or_else(Vec::new, |turn| turn.pending_messages.clone());
-        let shared = Arc::new(TurnSharedContext::for_thread(
-            self.build_turn_context(),
-            Arc::clone(&self.tool_manager),
-            self.hooks.clone(),
-            self.plan_store.clone(),
-            agent_record.as_ref(),
-        ));
+        let shared = Arc::new(TurnSharedContext::for_thread(shared_state));
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
@@ -925,6 +934,35 @@ impl Thread {
             .cancellation(cancellation)
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))
+    }
+
+    fn build_shared_turn_tools(&self, agent_record: &AgentRecord) -> Vec<Arc<dyn NamedTool>> {
+        let enabled_tool_names = agent_record
+            .tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let mut tools = self
+            .tool_manager
+            .list_ids()
+            .iter()
+            .filter(|name| enabled_tool_names.contains(name))
+            .filter_map(|name| self.tool_manager.get(name))
+            .collect::<Vec<_>>();
+        let plan_tool: Arc<dyn NamedTool> =
+            Arc::new(UpdatePlanTool::new(Arc::new(self.plan_store.clone())));
+        tools.push(plan_tool);
+        tools
+    }
+
+    fn build_shared_turn_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
+        let mut hooks = self
+            .hooks
+            .as_ref()
+            .map_or_else(Vec::new, |registry| registry.all_handlers());
+        let plan_hook: Arc<dyn HookHandler> =
+            Arc::new(PlanContinuationHook::new(Arc::new(self.plan_store.clone())));
+        hooks.push(plan_hook);
+        hooks
     }
 
     fn collect_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
@@ -1386,6 +1424,26 @@ mod tests {
         assert_eq!(context[0].role, argus_protocol::llm::Role::System);
         assert_eq!(context[1].content, "hi");
         assert_eq!(context[2].content, "hello");
+    }
+
+    #[tokio::test]
+    async fn shared_history_turn_reuses_thread_owned_inflight_snapshot() {
+        let mut thread = build_test_thread();
+
+        let turn = thread
+            .begin_turn("hello".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build");
+
+        let current_turn = thread
+            .current_turn
+            .as_ref()
+            .expect("thread should keep an in-flight turn");
+
+        assert_eq!(
+            Arc::as_ptr(&current_turn.shared),
+            turn.shared_snapshot_ptr()
+        );
     }
 
     #[test]
