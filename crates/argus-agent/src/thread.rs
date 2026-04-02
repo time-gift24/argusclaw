@@ -1067,13 +1067,9 @@ mod tests {
     }
 
     async fn collect_runtime_terminal_events(
-        thread: &Arc<tokio::sync::RwLock<Thread>>,
+        rx: &mut broadcast::Receiver<ThreadEvent>,
         expected_count: usize,
     ) -> Vec<ThreadEvent> {
-        let mut rx = {
-            let guard = thread.read().await;
-            guard.subscribe()
-        };
         let mut events = Vec::with_capacity(expected_count);
         timeout(Duration::from_secs(5), async {
             loop {
@@ -1356,6 +1352,10 @@ mod tests {
         let thread = build_test_thread_with_provider(provider);
 
         Thread::spawn_runtime_actor(Arc::clone(&thread));
+        let mut rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
 
         {
             let guard = thread.read().await;
@@ -1364,7 +1364,7 @@ mod tests {
                 .expect("message should queue");
         }
 
-        let events = collect_runtime_terminal_events(&thread, 3).await;
+        let events = collect_runtime_terminal_events(&mut rx, 3).await;
         assert!(matches!(events[0], ThreadEvent::TurnCompleted { .. }));
         assert!(matches!(events[1], ThreadEvent::TurnSettled { .. }));
         assert!(matches!(events[2], ThreadEvent::Idle { .. }));
@@ -1379,6 +1379,10 @@ mod tests {
         let thread = build_test_thread_with_provider(Arc::new(DummyProvider));
 
         Thread::spawn_runtime_actor(Arc::clone(&thread));
+        let mut rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
 
         {
             let guard = thread.read().await;
@@ -1387,7 +1391,7 @@ mod tests {
                 .expect("message should queue");
         }
 
-        let events = collect_runtime_terminal_events(&thread, 3).await;
+        let events = collect_runtime_terminal_events(&mut rx, 3).await;
         assert!(matches!(events[0], ThreadEvent::TurnFailed { .. }));
         assert!(matches!(events[1], ThreadEvent::TurnSettled { .. }));
         assert!(matches!(events[2], ThreadEvent::Idle { .. }));
