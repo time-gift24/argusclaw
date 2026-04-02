@@ -126,6 +126,35 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
                         ThreadRuntimeState::Idle => None,
                     };
+                    let thread_id = {
+                        let guard = thread.read().await;
+                        guard.id().inner().to_string()
+                    };
+
+                    {
+                        let guard = thread.read().await;
+                        match &result {
+                            Ok(output) => {
+                                guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnCompleted {
+                                    thread_id: thread_id.clone(),
+                                    turn_number: settled_turn_number.unwrap_or_default(),
+                                    token_usage: output.token_usage.clone(),
+                                });
+                            }
+                            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
+                            Err(error) => {
+                                guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnFailed {
+                                    thread_id: thread_id.clone(),
+                                    turn_number: settled_turn_number.unwrap_or_default(),
+                                    error: error.to_string(),
+                                });
+                            }
+                        }
+                        guard.broadcast_to_self(argus_protocol::ThreadEvent::Idle {
+                            thread_id: thread_id.clone(),
+                        });
+                    }
+
                     let (finish_result, turn_log_snapshot) = {
                         let mut guard = thread.write().await;
                         guard.set_active_turn_cancellation(None);
@@ -153,13 +182,9 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         guard.clear_interrupts_for_idle_handoff();
                     }
                     if let Some(turn_number) = settled_turn_number {
-                        let thread_id = {
-                            let guard = thread.read().await;
-                            guard.id().inner().to_string()
-                        };
                         let guard = thread.read().await;
                         guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
-                            thread_id,
+                            thread_id: thread_id.clone(),
                             turn_number,
                         });
                     }

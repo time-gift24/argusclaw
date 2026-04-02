@@ -463,7 +463,7 @@ async fn turn_cancel_returns_cancelled_instead_of_error() {
 }
 
 #[tokio::test]
-async fn turn_cancel_does_not_emit_turn_failed_event() {
+async fn turn_cancel_does_not_emit_terminal_thread_events() {
     let provider = Arc::new(HangingStreamingProvider);
     let cancellation = TurnCancellation::new();
 
@@ -496,15 +496,10 @@ async fn turn_cancel_does_not_emit_turn_failed_event() {
         .expect("turn task should not panic");
     assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
 
-    let mut saw_idle = false;
     let mut saw_failed = false;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_millis(250) {
         match tokio::time::timeout(Duration::from_millis(50), thread_event_rx.recv()).await {
-            Ok(Ok(ThreadEvent::Idle { .. })) => {
-                saw_idle = true;
-                break;
-            }
             Ok(Ok(ThreadEvent::TurnFailed { .. })) => {
                 saw_failed = true;
                 break;
@@ -516,8 +511,10 @@ async fn turn_cancel_does_not_emit_turn_failed_event() {
         }
     }
 
-    assert!(saw_idle, "cancellation should still emit Idle");
-    assert!(!saw_failed, "cancellation must not emit TurnFailed");
+    assert!(
+        !saw_failed,
+        "raw turn execution should not emit terminal runtime lifecycle events"
+    );
 }
 
 #[tokio::test]
@@ -1028,7 +1025,7 @@ async fn turn_progress_approval_pause_and_resume_emits_progress_and_thread_event
         .build()
         .unwrap();
 
-    let handle = tokio::spawn(async move { turn.execute_progress().await });
+    let execution = turn.execute_progress();
 
     let mut saw_waiting = false;
     while !saw_waiting {
@@ -1047,10 +1044,9 @@ async fn turn_progress_approval_pause_and_resume_emits_progress_and_thread_event
         .send(())
         .expect("approval hook should still be waiting");
 
-    let execution = tokio::time::timeout(Duration::from_secs(2), handle)
+    let execution = tokio::time::timeout(Duration::from_secs(2), execution.collect())
         .await
-        .expect("turn should resume and finish")
-        .expect("turn task should not panic");
+        .expect("turn should resume and finish");
 
     assert!(execution.result.is_ok());
     assert!(

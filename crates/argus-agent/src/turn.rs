@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
-use tokio::sync::{Mutex, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
@@ -60,11 +60,52 @@ pub enum TurnProgress {
     Failed { error: String },
 }
 
-/// Full execution result plus progress captured during the turn.
+/// Handle for observing turn progress as it happens and awaiting the final result.
 #[derive(Debug)]
 pub struct TurnExecution {
+    progress_rx: mpsc::UnboundedReceiver<TurnProgress>,
+    result_rx: oneshot::Receiver<Result<TurnOutput, TurnError>>,
+}
+
+/// Fully collected progress plus the final turn result.
+#[derive(Debug)]
+pub struct CollectedTurnExecution {
     pub progress: Vec<TurnProgress>,
     pub result: Result<TurnOutput, TurnError>,
+}
+
+impl TurnExecution {
+    /// Receive the next progress item as the turn runs.
+    pub async fn recv(&mut self) -> Option<TurnProgress> {
+        self.progress_rx.recv().await
+    }
+
+    /// Wait for the terminal turn result.
+    pub async fn finish(self) -> Result<TurnOutput, TurnError> {
+        match self.result_rx.await {
+            Ok(result) => result,
+            Err(error) => Err(TurnError::BuildFailed(format!(
+                "turn execution task failed: {error}"
+            ))),
+        }
+    }
+
+    /// Collect every progress item until the turn completes.
+    pub async fn collect(mut self) -> CollectedTurnExecution {
+        let mut progress = Vec::new();
+        while let Some(item) = self.recv().await {
+            progress.push(item);
+        }
+
+        let result = match self.result_rx.await {
+            Ok(result) => result,
+            Err(error) => Err(TurnError::BuildFailed(format!(
+                "turn execution task failed: {error}"
+            ))),
+        };
+
+        CollectedTurnExecution { progress, result }
+    }
 }
 
 /// Cancellation primitive used to stop an active turn.
@@ -417,76 +458,61 @@ impl std::fmt::Debug for Turn {
 }
 
 impl Turn {
-    fn drain_thread_progress(
-        event_rx: &mut broadcast::Receiver<ThreadEvent>,
-        progress: &mut Vec<TurnProgress>,
+    fn emit_progress(
+        progress_tx: &Option<mpsc::UnboundedSender<TurnProgress>>,
+        progress: TurnProgress,
+    ) {
+        if let Some(progress_tx) = progress_tx {
+            let _ = progress_tx.send(progress);
+        }
+    }
+
+    fn map_approval_progress(event: ThreadEvent) -> Option<TurnProgress> {
+        match event {
+            ThreadEvent::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request,
+            } => Some(TurnProgress::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request,
+            }),
+            ThreadEvent::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            } => Some(TurnProgress::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            }),
+            _ => None,
+        }
+    }
+
+    fn drain_approval_progress(
+        approval_rx: &mut broadcast::Receiver<ThreadEvent>,
+        progress_tx: &mpsc::UnboundedSender<TurnProgress>,
     ) {
         loop {
-            match event_rx.try_recv() {
-                Ok(ThreadEvent::Processing { event, .. }) => {
-                    progress.push(TurnProgress::LlmEvent(event));
+            match approval_rx.try_recv() {
+                Ok(event) => {
+                    if let Some(progress) = Self::map_approval_progress(event) {
+                        let _ = progress_tx.send(progress);
+                    }
                 }
-                Ok(ThreadEvent::ToolStarted {
-                    tool_call_id,
-                    tool_name,
-                    arguments,
-                    ..
-                }) => {
-                    progress.push(TurnProgress::ToolStarted {
-                        tool_call_id,
-                        tool_name,
-                        arguments,
-                    });
-                }
-                Ok(ThreadEvent::ToolCompleted {
-                    tool_call_id,
-                    tool_name,
-                    result,
-                    ..
-                }) => {
-                    progress.push(TurnProgress::ToolCompleted {
-                        tool_call_id,
-                        tool_name,
-                        result,
-                    });
-                }
-                Ok(ThreadEvent::WaitingForApproval {
-                    thread_id,
-                    turn_number,
-                    request,
-                }) => {
-                    progress.push(TurnProgress::WaitingForApproval {
-                        thread_id,
-                        turn_number,
-                        request,
-                    });
-                }
-                Ok(ThreadEvent::ApprovalResolved {
-                    thread_id,
-                    turn_number,
-                    response,
-                }) => {
-                    progress.push(TurnProgress::ApprovalResolved {
-                        thread_id,
-                        turn_number,
-                        response,
-                    });
-                }
-                Ok(ThreadEvent::TurnCompleted { .. })
-                | Ok(ThreadEvent::TurnFailed { .. })
-                | Ok(ThreadEvent::Idle { .. })
-                | Ok(ThreadEvent::Compacted { .. }) => {
-                    // Terminal thread events are reflected in TurnProgress::Completed/Failed.
-                }
-                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Empty)
+                | Err(broadcast::error::TryRecvError::Closed) => break,
                 Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(broadcast::error::TryRecvError::Closed) => break,
-                _ => {}
             }
         }
     }
 
-    async fn execute_internal(mut self) -> Result<TurnOutput, TurnError> {
+    async fn execute_internal(
+        mut self,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
+    ) -> Result<TurnOutput, TurnError> {
         // Spawn event forwarder — clone stream_tx so it lives in the forwarder task.
         // This prevents the channel from closing when the Turn is dropped.
         self._forwarder_handle = Some(Self::spawn_event_forwarder(
@@ -504,7 +530,7 @@ impl Turn {
             "Turn execution started"
         );
 
-        let result = self.execute_loop().await;
+        let result = self.execute_loop(progress_tx).await;
 
         tracing::info!(
             thread_id = %self.thread_id,
@@ -523,51 +549,6 @@ impl Turn {
             callback(*session_id, self.turn_number);
         }
 
-        // Send completion event
-        match &result {
-            Ok(output) => {
-                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnCompleted {
-                    thread_id: self.thread_id.clone(),
-                    turn_number: self.turn_number,
-                    token_usage: output.token_usage.clone(),
-                }) {
-                    tracing::warn!(
-                        thread_id = %self.thread_id,
-                        error = %e,
-                        "Failed to send TurnCompleted event"
-                    );
-                }
-            }
-            Err(TurnError::Cancelled) => {
-                // Cancellation is an expected control-path outcome. Do not emit TurnFailed;
-                // callers will still observe ThreadEvent::Idle.
-            }
-            Err(error) => {
-                if let Err(e) = self.thread_event_tx.send(ThreadEvent::TurnFailed {
-                    thread_id: self.thread_id.clone(),
-                    turn_number: self.turn_number,
-                    error: error.to_string(),
-                }) {
-                    tracing::warn!(
-                        thread_id = %self.thread_id,
-                        error = %e,
-                        "Failed to send TurnFailed event"
-                    );
-                }
-            }
-        }
-
-        // Send Idle event
-        if let Err(e) = self.thread_event_tx.send(ThreadEvent::Idle {
-            thread_id: self.thread_id.clone(),
-        }) {
-            tracing::warn!(
-                thread_id = %self.thread_id,
-                error = %e,
-                "Failed to send Idle event"
-            );
-        }
-
         result
     }
 
@@ -579,46 +560,62 @@ impl Turn {
         messages
     }
 
-    /// Execute the turn and return captured progress plus the final output.
-    ///
-    /// This method executes the turn on a background task, collects the emitted
-    /// thread events as progress, and returns both the progress sequence and the
-    /// terminal result.
-    pub async fn execute_progress(self) -> TurnExecution {
-        let mut progress = Vec::new();
-        let mut event_rx = self.thread_event_tx.subscribe();
-        let handle = tokio::spawn(async move { self.execute_internal().await });
+    /// Execute the turn and return a handle for observing incremental progress.
+    pub fn execute_progress(self) -> TurnExecution {
+        let mut approval_rx = self.thread_event_tx.subscribe();
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let (result_tx, result_rx) = oneshot::channel();
 
-        let result = match handle.await {
-            Ok(result) => result,
-            Err(join_error) => {
-                let error =
-                    TurnError::BuildFailed(format!("turn execution task failed: {join_error}"));
-                progress.push(TurnProgress::Failed {
-                    error: error.to_string(),
-                });
-                return TurnExecution {
-                    progress,
-                    result: Err(error),
-                };
+        tokio::spawn(async move {
+            let mut approval_closed = false;
+            let turn_fut = self.execute_internal(Some(progress_tx.clone()));
+            tokio::pin!(turn_fut);
+
+            let result = loop {
+                tokio::select! {
+                    result = &mut turn_fut => break result,
+                    approval_event = approval_rx.recv(), if !approval_closed => {
+                        match approval_event {
+                            Ok(event) => {
+                                if let Some(progress) = Self::map_approval_progress(event) {
+                                    let _ = progress_tx.send(progress);
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => {
+                                approval_closed = true;
+                            }
+                        }
+                    }
+                }
+            };
+
+            Self::drain_approval_progress(&mut approval_rx, &progress_tx);
+
+            match &result {
+                Ok(output) => {
+                    let _ = progress_tx.send(TurnProgress::Completed(output.clone()));
+                }
+                Err(error) => {
+                    let _ = progress_tx.send(TurnProgress::Failed {
+                        error: error.to_string(),
+                    });
+                }
             }
-        };
 
-        Self::drain_thread_progress(&mut event_rx, &mut progress);
+            let _ = result_tx.send(result);
+            drop(progress_tx);
+        });
 
-        match &result {
-            Ok(output) => progress.push(TurnProgress::Completed(output.clone())),
-            Err(error) => progress.push(TurnProgress::Failed {
-                error: error.to_string(),
-            }),
+        TurnExecution {
+            progress_rx,
+            result_rx,
         }
-
-        TurnExecution { progress, result }
     }
 
     /// Execute the turn and return the final output.
     pub async fn execute(self) -> Result<TurnOutput, TurnError> {
-        self.execute_progress().await.result
+        self.execute_progress().finish().await
     }
 
     /// Internal method: spawn event forwarder task.
@@ -725,7 +722,10 @@ impl Turn {
     /// Internal method: execute the main LLM -> Tool -> LLM loop.
     ///
     /// This is where the core execution logic lives.
-    async fn execute_loop(&mut self) -> Result<TurnOutput, TurnError> {
+    async fn execute_loop(
+        &mut self,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
+    ) -> Result<TurnOutput, TurnError> {
         let mut pending_messages = std::mem::take(&mut self.pending_messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
@@ -795,7 +795,7 @@ impl Turn {
                 message_count = %request_messages.len(),
                 "Calling LLM"
             );
-            let response = match self.call_llm_streaming(request).await {
+            let response = match self.call_llm_streaming(request, progress_tx.clone()).await {
                 Ok(StreamingCallOutcome::Completed(response)) => response,
                 Ok(StreamingCallOutcome::Failed {
                     partial_response,
@@ -890,7 +890,7 @@ impl Turn {
                         _ = self.cancellation.cancelled() => {
                             return Err(TurnError::Cancelled);
                         }
-                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs) => tool_results,
+                        tool_results = self.execute_tools_parallel(tool_calls, tool_timeout_secs, progress_tx.clone()) => tool_results,
                     };
 
                     tracing::debug!(
@@ -957,6 +957,7 @@ impl Turn {
     async fn call_llm_streaming(
         &self,
         request: CompletionRequest,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> Result<StreamingCallOutcome, TurnError> {
         if self.cancellation.is_cancelled() {
             return Err(TurnError::Cancelled);
@@ -992,6 +993,10 @@ impl Turn {
                                     });
                                 }
                             };
+                            Self::emit_progress(
+                                &progress_tx,
+                                TurnProgress::LlmEvent(event.clone()),
+                            );
                             // Forward to stream_tx
                             let _ = self
                                 .stream_tx
@@ -1146,10 +1151,13 @@ impl Turn {
         &self,
         tool_calls: Vec<ToolCall>,
         tool_timeout_secs: u64,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> Vec<ToolExecutionResult> {
         let futures: Vec<_> = tool_calls
             .into_iter()
-            .map(|tool_call| self.execute_single_tool(tool_call, tool_timeout_secs))
+            .map(|tool_call| {
+                self.execute_single_tool(tool_call, tool_timeout_secs, progress_tx.clone())
+            })
             .collect();
 
         join_all(futures).await
@@ -1160,6 +1168,7 @@ impl Turn {
         &self,
         tool_call: ToolCall,
         tool_timeout_secs: u64,
+        progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> ToolExecutionResult {
         let tool_call_id = tool_call.id.clone();
         let tool_name = tool_call.name.clone();
@@ -1224,6 +1233,14 @@ impl Turn {
                 "Failed to send ToolStarted event"
             );
         }
+        Self::emit_progress(
+            &progress_tx,
+            TurnProgress::ToolStarted {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                arguments: tool_input.clone(),
+            },
+        );
         let _ = self.stream_tx.send(TurnStreamEvent::ToolStarted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -1328,6 +1345,14 @@ impl Turn {
                 "Failed to send ToolCompleted event"
             );
         }
+        Self::emit_progress(
+            &progress_tx,
+            TurnProgress::ToolCompleted {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                result: result.clone(),
+            },
+        );
         let _ = self.stream_tx.send(TurnStreamEvent::ToolCompleted {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.clone(),
@@ -1764,7 +1789,7 @@ mod tests {
         }]));
         let turn = make_turn(provider, vec![], 5);
 
-        let execution = turn.execute_progress().await;
+        let execution = turn.execute_progress().collect().await;
         let output = execution.result.expect("turn should succeed");
 
         assert_eq!(output.appended_messages.len(), 1);
@@ -1825,7 +1850,7 @@ mod tests {
             .build()
             .expect("turn should build");
 
-        let execution = turn.execute_progress().await;
+        let execution = turn.execute_progress().collect().await;
         assert!(execution.result.is_ok());
         assert!(execution
             .progress
@@ -1860,19 +1885,34 @@ mod tests {
             .build()
             .expect("turn should build");
 
-        let handle = tokio::spawn(async move { turn.execute_progress().await });
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        cancellation.cancel();
-
-        let execution = tokio::time::timeout(std::time::Duration::from_millis(500), handle)
-            .await
-            .expect("turn should terminate quickly after cancellation")
-            .expect("turn task should not panic");
-
-        assert!(matches!(execution.result, Err(TurnError::Cancelled)));
-        assert!(execution.progress.iter().any(
-            |item| matches!(item, TurnProgress::Failed { error } if error.contains("cancelled"))
+        let mut execution = turn.execute_progress();
+        let first_progress =
+            tokio::time::timeout(std::time::Duration::from_millis(200), execution.recv())
+                .await
+                .expect("progress should arrive before turn completion")
+                .expect("turn should emit an initial progress item");
+        assert!(matches!(
+            first_progress,
+            TurnProgress::LlmEvent(LlmStreamEvent::ContentDelta { .. })
         ));
+
+        cancellation.cancel();
+        let mut saw_failed_progress = false;
+        loop {
+            let progress = tokio::time::timeout(std::time::Duration::from_millis(500), execution.recv())
+                .await
+                .expect("turn should terminate quickly after cancellation");
+            let Some(progress) = progress else {
+                break;
+            };
+            if matches!(&progress, TurnProgress::Failed { error } if error.contains("cancelled")) {
+                saw_failed_progress = true;
+            }
+        }
+
+        let result = execution.finish().await;
+        assert!(matches!(result, Err(TurnError::Cancelled)));
+        assert!(saw_failed_progress);
     }
 
     #[tokio::test]
@@ -1926,7 +1966,7 @@ mod tests {
             .build()
             .expect("turn should build");
 
-        let handle = tokio::spawn(async move { turn.execute_progress().await });
+        let execution = turn.execute_progress();
 
         let mut saw_waiting = false;
         while !saw_waiting {
@@ -1947,10 +1987,12 @@ mod tests {
             .send(())
             .expect("approval hook should still be waiting");
 
-        let execution = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
-            .await
-            .expect("turn should resume and finish")
-            .expect("turn task should not panic");
+        let execution = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            execution.collect(),
+        )
+        .await
+        .expect("turn should resume and finish");
 
         assert!(execution.result.is_ok());
         assert!(
