@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::command::ThreadRuntimeSnapshot;
-use crate::turn::{TurnCancellation, TurnSharedContext};
+use crate::turn::{TurnCancellation, TurnExecution, TurnProgress, TurnSharedContext};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
@@ -28,7 +28,7 @@ use super::history::{
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
-use super::turn_log_store::TurnLogPersistenceSnapshot;
+use super::turn_log_store::{TurnLogPersistenceSnapshot, persist_turn_log_snapshot};
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -780,9 +780,399 @@ impl Thread {
         Ok(())
     }
 
-    /// Spawn the thread runtime actor that coordinates queued control events.
-    pub fn spawn_runtime_actor(thread: Arc<tokio::sync::RwLock<Self>>) {
-        crate::runtime::spawn_runtime_actor(thread);
+    /// Spawn the thread-owned reactor loop that coordinates queued control events.
+    pub fn spawn_reactor(thread: Arc<RwLock<Self>>) {
+        tokio::spawn(async move {
+            Self::run_reactor_loop(thread).await;
+        });
+    }
+
+    async fn run_reactor_loop(thread: Arc<RwLock<Self>>) {
+        let (mut control_rx, mailbox, next_turn_number) = {
+            let mut guard = thread.write().await;
+            let control_rx = match guard.take_control_rx() {
+                Some(rx) => rx,
+                None => {
+                    tracing::warn!("thread control receiver already taken");
+                    return;
+                }
+            };
+            (
+                control_rx,
+                guard.mailbox(),
+                guard.next_turn_number_for_runtime(),
+            )
+        };
+
+        let mut runtime = ThreadReactor::seeded_from_next_turn_number(next_turn_number);
+        let mut active_turn: Option<TurnExecution> = None;
+        Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+        let mut shutdown_requested = false;
+
+        loop {
+            tokio::select! {
+                Some(control_event) = control_rx.recv() => {
+                    if shutdown_requested {
+                        if let ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } = control_event {
+                            let _ = reply_tx.send(None);
+                        }
+                        continue;
+                    }
+
+                    let runtime_action = match control_event {
+                        ThreadControlEvent::UserMessage { content, msg_override } => {
+                            let mut mailbox = mailbox.lock().await;
+                            let action = runtime.apply_command(
+                                ThreadCommand::EnqueueUserMessage {
+                                    content,
+                                    msg_override,
+                                },
+                                &mut mailbox,
+                            );
+                            drop(mailbox);
+                            Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+                            action
+                        }
+                        ThreadControlEvent::DeliverMailboxMessage(message) => {
+                            let mut mailbox = mailbox.lock().await;
+                            let action = runtime.apply_command(
+                                ThreadCommand::EnqueueMailboxMessage(message),
+                                &mut mailbox,
+                            );
+                            drop(mailbox);
+                            Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+                            action
+                        }
+                        ThreadControlEvent::UserInterrupt { content } => {
+                            let _ = content;
+                            let mut mailbox = mailbox.lock().await;
+                            let action =
+                                runtime.apply_command(ThreadCommand::CancelActiveTurn, &mut mailbox);
+                            drop(mailbox);
+                            Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+                            action
+                        }
+                        ThreadControlEvent::ClaimQueuedJobResult { job_id, reply_tx } => {
+                            let claimed = {
+                                let mut mailbox = mailbox.lock().await;
+                                runtime.claim_queued_job_result(&mut mailbox, &job_id)
+                            };
+                            Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+                            let _ = reply_tx.send(claimed);
+                            ThreadReactorAction::Noop
+                        }
+                        ThreadControlEvent::ShutdownRuntime => {
+                            shutdown_requested = true;
+                            match runtime.state() {
+                                ThreadRuntimeState::Idle => break,
+                                _ => {
+                                    let mut mailbox = mailbox.lock().await;
+                                    let action = runtime.apply_command(
+                                        ThreadCommand::CancelActiveTurn,
+                                        &mut mailbox,
+                                    );
+                                    drop(mailbox);
+                                    Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+                                    action
+                                }
+                            }
+                        }
+                    };
+
+                    Self::process_reactor_action(
+                        Arc::clone(&thread),
+                        &mut runtime,
+                        runtime_action,
+                        &mut active_turn,
+                    )
+                    .await;
+                }
+                progress = async {
+                    match active_turn.as_mut() {
+                        Some(execution) => execution.recv().await,
+                        None => None,
+                    }
+                }, if active_turn.is_some() => {
+                    match progress {
+                        Some(progress) => {
+                            Self::handle_turn_progress(&thread, &mut runtime, &progress).await;
+                        }
+                        None => {
+                            let result = active_turn
+                                .take()
+                                .expect("active turn should exist while receiving progress")
+                                .finish()
+                                .await
+                                .map_err(ThreadError::TurnFailed);
+
+                            Self::settle_active_turn(
+                                &thread,
+                                &mut runtime,
+                                result,
+                                &mut active_turn,
+                                shutdown_requested,
+                            )
+                            .await;
+
+                            if shutdown_requested && active_turn.is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                else => break,
+            }
+        }
+    }
+
+    async fn process_reactor_action(
+        thread: Arc<RwLock<Self>>,
+        runtime: &mut ThreadReactor,
+        action: ThreadReactorAction,
+        active_turn: &mut Option<TurnExecution>,
+    ) {
+        let mut next_action = action;
+        loop {
+            match next_action {
+                ThreadReactorAction::StartTurn {
+                    turn_number,
+                    content,
+                    msg_override,
+                } => match Self::start_turn_execution(Arc::clone(&thread), content, msg_override)
+                    .await
+                {
+                    Ok(execution) => {
+                        *active_turn = Some(execution);
+                    }
+                    Err(error) => {
+                        let thread_id = {
+                            let guard = thread.read().await;
+                            guard.id().inner().to_string()
+                        };
+                        {
+                            let guard = thread.read().await;
+                            guard.broadcast_to_self(ThreadEvent::TurnFailed {
+                                thread_id: thread_id.clone(),
+                                turn_number,
+                                error: error.to_string(),
+                            });
+                        }
+                        tracing::error!(
+                            turn_number,
+                            queue_depth = runtime.snapshot().queue_depth,
+                            "failed to start queued turn: {}",
+                            error
+                        );
+                        next_action = Self::finish_failed_start_turn(
+                            &thread,
+                            runtime,
+                            turn_number,
+                            &thread_id,
+                        )
+                        .await;
+                        continue;
+                    }
+                },
+                ThreadReactorAction::StopTurn { turn_number } => {
+                    let cancellation = {
+                        let guard = thread.read().await;
+                        guard.active_turn_cancellation()
+                    };
+                    if let Some(cancellation) = cancellation {
+                        tracing::info!(turn_number, "cancelling active turn");
+                        cancellation.cancel();
+                    } else {
+                        tracing::warn!(
+                            turn_number,
+                            "stop-turn requested but no active turn handle"
+                        );
+                    }
+                }
+                ThreadReactorAction::Noop => {}
+            }
+            break;
+        }
+    }
+
+    async fn start_turn_execution(
+        thread: Arc<RwLock<Self>>,
+        content: String,
+        msg_override: Option<MessageOverride>,
+    ) -> Result<TurnExecution, ThreadError> {
+        let cancellation = TurnCancellation::new();
+        let turn = {
+            let mut guard = thread.write().await;
+            guard
+                .begin_turn(content, msg_override, cancellation.clone())
+                .await?
+        };
+
+        Ok(turn.execute_progress())
+    }
+
+    async fn finish_failed_start_turn(
+        thread: &Arc<RwLock<Self>>,
+        runtime: &mut ThreadReactor,
+        turn_number: u32,
+        thread_id: &str,
+    ) -> ThreadReactorAction {
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+        let mut mailbox = mailbox.lock().await;
+        let next_action = runtime.finish_active_turn(&mut mailbox);
+        drop(mailbox);
+        Self::sync_runtime_snapshot_async(thread, runtime).await;
+
+        {
+            let guard = thread.read().await;
+            guard.broadcast_to_self(ThreadEvent::TurnSettled {
+                thread_id: thread_id.to_string(),
+                turn_number,
+            });
+        }
+        if matches!(next_action, ThreadReactorAction::Noop) {
+            let guard = thread.read().await;
+            guard.broadcast_to_self(ThreadEvent::Idle {
+                thread_id: thread_id.to_string(),
+            });
+        }
+
+        next_action
+    }
+
+    async fn handle_turn_progress(
+        thread: &Arc<RwLock<Self>>,
+        runtime: &mut ThreadReactor,
+        progress: &TurnProgress,
+    ) {
+        match progress {
+            TurnProgress::WaitingForApproval { turn_number, .. } => {
+                runtime.mark_waiting_for_approval(*turn_number);
+                Self::sync_runtime_snapshot_async(thread, runtime).await;
+            }
+            TurnProgress::ApprovalResolved { turn_number, .. } => {
+                runtime.mark_running_after_approval(*turn_number);
+                Self::sync_runtime_snapshot_async(thread, runtime).await;
+            }
+            TurnProgress::LlmEvent(_)
+            | TurnProgress::ToolStarted { .. }
+            | TurnProgress::ToolCompleted { .. }
+            | TurnProgress::Completed(_)
+            | TurnProgress::Failed { .. } => {}
+        }
+    }
+
+    async fn settle_active_turn(
+        thread: &Arc<RwLock<Self>>,
+        runtime: &mut ThreadReactor,
+        result: Result<TurnOutput, ThreadError>,
+        active_turn: &mut Option<TurnExecution>,
+        shutdown_requested: bool,
+    ) {
+        let settled_turn_number = match runtime.state() {
+            ThreadRuntimeState::Running { turn_number }
+            | ThreadRuntimeState::WaitingForApproval { turn_number }
+            | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
+            ThreadRuntimeState::Idle => None,
+        };
+        let thread_id = {
+            let guard = thread.read().await;
+            guard.id().inner().to_string()
+        };
+
+        {
+            let guard = thread.read().await;
+            match &result {
+                Ok(output) => {
+                    guard.broadcast_to_self(ThreadEvent::TurnCompleted {
+                        thread_id: thread_id.clone(),
+                        turn_number: settled_turn_number.unwrap_or_default(),
+                        token_usage: output.token_usage.clone(),
+                    });
+                }
+                Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
+                Err(error) => {
+                    guard.broadcast_to_self(ThreadEvent::TurnFailed {
+                        thread_id: thread_id.clone(),
+                        turn_number: settled_turn_number.unwrap_or_default(),
+                        error: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        let (finish_result, turn_log_snapshot) = {
+            let mut guard = thread.write().await;
+            guard.set_active_turn_cancellation(None);
+            let finish_result = guard.finish_turn(result);
+            let turn_log_snapshot = guard.turn_log_persistence_snapshot();
+            (finish_result, turn_log_snapshot)
+        };
+
+        if let Err(error) = finish_result {
+            tracing::error!("turn failed: {}", error);
+        }
+
+        if let Some(snapshot) = turn_log_snapshot
+            && let Err(error) = persist_turn_log_snapshot(&snapshot).await
+        {
+            tracing::warn!(
+                turn_number = snapshot.turn.turn_number,
+                error = %error,
+                "failed to persist committed turn log snapshot"
+            );
+        }
+
+        {
+            let mailbox = {
+                let guard = thread.read().await;
+                guard.mailbox()
+            };
+            let mut guard = mailbox.lock().await;
+            guard.clear_interrupts_for_idle_handoff();
+        }
+
+        if let Some(turn_number) = settled_turn_number {
+            let guard = thread.read().await;
+            guard.broadcast_to_self(ThreadEvent::TurnSettled {
+                thread_id: thread_id.clone(),
+                turn_number,
+            });
+        }
+
+        if shutdown_requested {
+            return;
+        }
+
+        let runtime_action = {
+            let mailbox = {
+                let guard = thread.read().await;
+                guard.mailbox()
+            };
+            let mut guard = mailbox.lock().await;
+            runtime.finish_active_turn(&mut guard)
+        };
+        Self::sync_runtime_snapshot_async(thread, runtime).await;
+        Self::process_reactor_action(
+            Arc::clone(thread),
+            runtime,
+            runtime_action.clone(),
+            active_turn,
+        )
+        .await;
+
+        if matches!(runtime_action, ThreadReactorAction::Noop) && active_turn.is_none() {
+            let guard = thread.read().await;
+            guard.broadcast_to_self(ThreadEvent::Idle { thread_id });
+        }
+    }
+
+    async fn sync_runtime_snapshot_async(thread: &Arc<RwLock<Self>>, runtime: &ThreadReactor) {
+        let snapshot = runtime.snapshot();
+        let mut guard = thread.write().await;
+        guard.sync_runtime_snapshot(snapshot);
     }
 
     /// Begin building a turn without holding the caller's lock for the whole execution.
@@ -1024,7 +1414,6 @@ mod tests {
     use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
     use crate::history::TurnRecord;
-    use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::{
@@ -1036,6 +1425,7 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use serde_json::json;
+    use tokio::sync::{Notify, oneshot};
     use tokio::time::{sleep, timeout};
 
     struct DummyProvider;
@@ -1206,6 +1596,87 @@ mod tests {
                 .push(last_user_input);
 
             sleep(self.delay).await;
+
+            let next_plan = self
+                .plans
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| ResponsePlan::Ok("default response".to_string()));
+            let ResponsePlan::Ok(content) = next_plan;
+            Ok(CompletionResponse {
+                content: Some(content),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 10,
+                output_tokens: 5,
+                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct BlockingSecondCallProvider {
+        plans: Arc<Mutex<VecDeque<ResponsePlan>>>,
+        captured_user_inputs: Arc<Mutex<Vec<String>>>,
+        second_call_started_tx: Mutex<Option<oneshot::Sender<()>>>,
+        release_second_call: Arc<Notify>,
+    }
+
+    impl BlockingSecondCallProvider {
+        fn new(
+            plans: Vec<ResponsePlan>,
+            second_call_started_tx: oneshot::Sender<()>,
+            release_second_call: Arc<Notify>,
+        ) -> Self {
+            Self {
+                plans: Arc::new(Mutex::new(VecDeque::from(plans))),
+                captured_user_inputs: Arc::new(Mutex::new(Vec::new())),
+                second_call_started_tx: Mutex::new(Some(second_call_started_tx)),
+                release_second_call,
+            }
+        }
+
+        fn captured_user_inputs(&self) -> Vec<String> {
+            self.captured_user_inputs.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingSecondCallProvider {
+        fn model_name(&self) -> &str {
+            "blocking-second-call"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let last_user_input = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == argus_protocol::Role::User)
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            let call_index = {
+                let mut captured = self.captured_user_inputs.lock().unwrap();
+                captured.push(last_user_input);
+                captured.len()
+            };
+
+            if call_index == 2 {
+                if let Some(sender) = self.second_call_started_tx.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                self.release_second_call.notified().await;
+            }
 
             let next_plan = self
                 .plans
@@ -1552,14 +2023,14 @@ mod tests {
         });
         assert!(matches!(
             first,
-            ThreadRuntimeAction::StartTurn { turn_number: 1, .. }
+            ThreadReactorAction::StartTurn { turn_number: 1, .. }
         ));
 
         let second = handle.dispatch(ThreadCommand::EnqueueUserMessage {
             content: "second".to_string(),
             msg_override: None,
         });
-        assert!(matches!(second, ThreadRuntimeAction::Noop));
+        assert!(matches!(second, ThreadReactorAction::Noop));
 
         let snapshot = handle.snapshot();
         assert_eq!(
@@ -1606,7 +2077,7 @@ mod tests {
         ));
         let thread = build_test_thread_with_provider(provider.clone());
 
-        Thread::spawn_runtime_actor(Arc::clone(&thread));
+        Thread::spawn_reactor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -1631,7 +2102,7 @@ mod tests {
         }
         assert_eq!(provider.captured_user_inputs().len(), 1);
 
-        wait_for_idle_events(&thread, 2).await;
+        wait_for_idle_events(&thread, 1).await;
 
         let captured = provider.captured_user_inputs();
         assert_eq!(captured.len(), 2);
@@ -1640,14 +2111,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_actor_emits_turn_settled_before_idle_after_completed_turn() {
+    async fn reactor_emits_turn_settled_before_idle_after_completed_turn() {
         let provider = Arc::new(SequencedProvider::new(
             Duration::from_millis(20),
             vec![ResponsePlan::Ok("settled reply".to_string())],
         ));
         let thread = build_test_thread_with_provider(provider);
 
-        Thread::spawn_runtime_actor(Arc::clone(&thread));
+        Thread::spawn_reactor(Arc::clone(&thread));
         let mut rx = {
             let guard = thread.read().await;
             guard.subscribe()
@@ -1671,10 +2142,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_actor_emits_turn_settled_before_idle_after_failed_turn() {
+    async fn reactor_emits_turn_settled_before_idle_after_failed_turn() {
         let thread = build_test_thread_with_provider(Arc::new(DummyProvider));
 
-        Thread::spawn_runtime_actor(Arc::clone(&thread));
+        Thread::spawn_reactor(Arc::clone(&thread));
         let mut rx = {
             let guard = thread.read().await;
             guard.subscribe()
@@ -1694,17 +2165,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_actor_does_not_start_follow_up_turn_before_prior_settlement() {
-        let provider = Arc::new(SequencedProvider::new(
-            Duration::from_millis(120),
+    async fn reactor_does_not_start_follow_up_turn_before_prior_settlement() {
+        let (second_call_started_tx, mut second_call_started_rx) = oneshot::channel();
+        let release_second_call = Arc::new(Notify::new());
+        let provider = Arc::new(BlockingSecondCallProvider::new(
             vec![
                 ResponsePlan::Ok("first turn reply".to_string()),
                 ResponsePlan::Ok("second turn reply".to_string()),
             ],
+            second_call_started_tx,
+            Arc::clone(&release_second_call),
         ));
         let thread = build_test_thread_with_provider(provider.clone());
 
-        Thread::spawn_runtime_actor(Arc::clone(&thread));
+        Thread::spawn_reactor(Arc::clone(&thread));
 
         let mut rx = {
             let guard = thread.read().await;
@@ -1729,22 +2203,24 @@ mod tests {
 
         let first_terminal_turn = timeout(Duration::from_secs(5), async {
             loop {
-                match rx.recv().await {
-                    Ok(ThreadEvent::TurnCompleted { turn_number, .. })
-                    | Ok(ThreadEvent::TurnFailed { turn_number, .. }) => break turn_number,
-                    Ok(_) => {}
-                    Err(_) => {}
+                tokio::select! {
+                    event = rx.recv() => {
+                        match event {
+                            Ok(ThreadEvent::TurnCompleted { turn_number, .. })
+                            | Ok(ThreadEvent::TurnFailed { turn_number, .. }) => break turn_number,
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                    started = &mut second_call_started_rx => {
+                        started.expect("second call start signal should stay open");
+                        panic!("queued follow-up work must not start before the first turn settles");
+                    }
                 }
             }
         })
         .await
         .expect("thread should emit a terminal turn event");
-
-        assert_eq!(
-            provider.captured_user_inputs().len(),
-            1,
-            "queued follow-up work must not start before the first turn settles",
-        );
 
         timeout(Duration::from_secs(5), async {
             loop {
@@ -1762,7 +2238,8 @@ mod tests {
         .await
         .expect("first turn should settle");
 
-        wait_for_idle_events(&thread, 2).await;
+        release_second_call.notify_one();
+        wait_for_idle_events(&thread, 1).await;
 
         let captured = provider.captured_user_inputs();
         assert_eq!(captured.len(), 2);
@@ -1781,7 +2258,7 @@ mod tests {
         ));
         let thread = build_test_thread_with_provider(provider.clone());
 
-        Thread::spawn_runtime_actor(Arc::clone(&thread));
+        Thread::spawn_reactor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -1810,7 +2287,7 @@ mod tests {
                 .expect("interrupt should request stop");
         }
 
-        wait_for_idle_events(&thread, 2).await;
+        wait_for_idle_events(&thread, 1).await;
 
         let captured = provider.captured_user_inputs();
         assert_eq!(captured.len(), 2);
@@ -1871,7 +2348,7 @@ mod tests {
         ));
         let thread = build_test_thread_with_provider(provider.clone());
 
-        Thread::spawn_runtime_actor(Arc::clone(&thread));
+        Thread::spawn_reactor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;

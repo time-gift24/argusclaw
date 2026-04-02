@@ -398,7 +398,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     let thread_id = { thread.read().await.id() };
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_runtime_actor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread));
 
     {
         let guard = thread.read().await;
@@ -478,7 +478,7 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
     let thread_id = { thread.read().await.id() };
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_runtime_actor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread));
 
     {
         let guard = thread.read().await;

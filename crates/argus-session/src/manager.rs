@@ -2173,7 +2173,7 @@ mod tests {
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
         session.add_thread(Arc::clone(&thread));
 
         {
@@ -2202,7 +2202,7 @@ mod tests {
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -2248,7 +2248,7 @@ mod tests {
         let thread = build_test_thread(session_id, Arc::clone(&provider));
         let thread_id = thread.read().await.id();
 
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
 
         {
             let guard = thread.read().await;
@@ -2283,7 +2283,7 @@ mod tests {
                 .expect("job result should queue");
         }
 
-        wait_for_idle(&thread, 2).await;
+        wait_for_idle(&thread, 1).await;
 
         let captured = provider.captured_user_inputs();
         assert_eq!(captured.len(), 2);

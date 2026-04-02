@@ -627,7 +627,7 @@ impl ThreadPool {
         };
         self.attach_chat_runtime(thread_id, session_id, Arc::clone(&thread), runtime_rx)
             .await?;
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
         Ok(thread)
     }
 
@@ -1315,7 +1315,7 @@ impl ThreadPool {
             );
             return Err(error);
         }
-        argus_agent::Thread::spawn_runtime_actor(Arc::clone(&thread));
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
         Ok(thread)
     }
 
