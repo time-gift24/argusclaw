@@ -10,7 +10,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Response, Url};
-use rmcp::model::{CallToolRequestParams, Tool as RmcpTool};
+use rmcp::model::{CallToolRequestParams, ClientInfo, ProtocolVersion, Tool as RmcpTool};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
@@ -162,6 +162,18 @@ const LEGACY_SSE_CLIENT_NAME: &str = "argusclaw";
 type PendingLegacySseResponse = Result<serde_json::Value, McpRuntimeError>;
 type PendingLegacySseSender = tokio::sync::oneshot::Sender<PendingLegacySseResponse>;
 type PendingLegacySseMap = HashMap<u64, PendingLegacySseSender>;
+
+fn streamable_http_protocol_versions() -> [ProtocolVersion; 3] {
+    [
+        ProtocolVersion::V_2025_06_18,
+        ProtocolVersion::V_2025_03_26,
+        ProtocolVersion::V_2024_11_05,
+    ]
+}
+
+fn build_client_info(protocol_version: ProtocolVersion) -> ClientInfo {
+    ClientInfo::default().with_protocol_version(protocol_version)
+}
 
 impl McpRuntimeHandle {
     #[must_use]
@@ -806,7 +818,7 @@ impl McpConnector for RmcpConnector {
                 })?;
                 timeout_operation(
                     server.timeout_ms,
-                    serve_client((), transport),
+                    serve_client(build_client_info(ProtocolVersion::V_2025_06_18), transport),
                     || McpRuntimeError::ConnectFailed {
                         server_id,
                         reason: format!("connection timed out after {}ms", server.timeout_ms),
@@ -819,22 +831,7 @@ impl McpConnector for RmcpConnector {
                 .await?
             }
             McpTransportConfig::Http { url, headers } => {
-                let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
-                    .custom_headers(parse_headers(headers, server_id)?);
-                let transport = StreamableHttpClientTransport::from_config(config);
-                timeout_operation(
-                    server.timeout_ms,
-                    serve_client((), transport),
-                    || McpRuntimeError::ConnectFailed {
-                        server_id,
-                        reason: format!("connection timed out after {}ms", server.timeout_ms),
-                    },
-                    |error| McpRuntimeError::ConnectFailed {
-                        server_id,
-                        reason: error.to_string(),
-                    },
-                )
-                .await?
+                connect_streamable_http_client(server_id, url, headers, server.timeout_ms).await?
             }
             McpTransportConfig::Sse { url, headers } => {
                 return Ok(Arc::new(
@@ -1135,6 +1132,52 @@ impl Drop for LegacySseSession {
     }
 }
 
+async fn connect_streamable_http_client(
+    server_id: i64,
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    timeout_ms: u64,
+) -> Result<RunningService<RoleClient, ClientInfo>, McpRuntimeError> {
+    let parsed_headers = parse_headers(headers, server_id)?;
+    let mut failures = Vec::new();
+
+    for protocol_version in streamable_http_protocol_versions() {
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(url.to_string())
+                .custom_headers(parsed_headers.clone()),
+        );
+        let client_info = build_client_info(protocol_version.clone());
+        match timeout_operation(
+            timeout_ms,
+            serve_client(client_info, transport),
+            || McpRuntimeError::ConnectFailed {
+                server_id,
+                reason: format!(
+                    "connection timed out after {}ms while negotiating protocol {}",
+                    timeout_ms, protocol_version
+                ),
+            },
+            |error| McpRuntimeError::ConnectFailed {
+                server_id,
+                reason: error.to_string(),
+            },
+        )
+        .await
+        {
+            Ok(client) => return Ok(client),
+            Err(error) => failures.push(format!("{protocol_version}: {error}")),
+        }
+    }
+
+    Err(McpRuntimeError::ConnectFailed {
+        server_id,
+        reason: format!(
+            "streamable HTTP handshake failed across protocol versions: {}",
+            failures.join(" | ")
+        ),
+    })
+}
+
 async fn run_legacy_sse_stream(
     server_id: i64,
     sse_url: Url,
@@ -1427,11 +1470,11 @@ fn resolve_legacy_sse_message_url(
 
 struct RmcpSession {
     server_id: i64,
-    client: tokio::sync::Mutex<RunningService<RoleClient, ()>>,
+    client: tokio::sync::Mutex<RunningService<RoleClient, ClientInfo>>,
 }
 
 impl RmcpSession {
-    fn new(server_id: i64, client: RunningService<RoleClient, ()>) -> Self {
+    fn new(server_id: i64, client: RunningService<RoleClient, ClientInfo>) -> Self {
         Self {
             server_id,
             client: tokio::sync::Mutex::new(client),
@@ -2202,6 +2245,251 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct StreamableHttpTestState {
+        initialize_versions: Mutex<Vec<String>>,
+    }
+
+    impl StreamableHttpTestState {
+        async fn push_initialize_version(&self, version: String) {
+            self.initialize_versions.lock().await.push(version);
+        }
+
+        async fn initialize_versions(&self) -> Vec<String> {
+            self.initialize_versions.lock().await.clone()
+        }
+    }
+
+    struct StreamableHttpTestServer {
+        join_handle: tokio::task::JoinHandle<()>,
+        url: String,
+        state: Arc<StreamableHttpTestState>,
+    }
+
+    impl StreamableHttpTestServer {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test HTTP server should bind");
+            let address = listener
+                .local_addr()
+                .expect("listener should expose address");
+            let state = Arc::new(StreamableHttpTestState::default());
+            let join_handle = tokio::spawn(run_streamable_http_test_server(
+                listener,
+                Arc::clone(&state),
+            ));
+            Self {
+                join_handle,
+                url: format!("http://{address}/mcp"),
+                state,
+            }
+        }
+
+        async fn initialize_versions(&self) -> Vec<String> {
+            self.state.initialize_versions().await
+        }
+    }
+
+    impl Drop for StreamableHttpTestServer {
+        fn drop(&mut self) {
+            self.join_handle.abort();
+        }
+    }
+
+    async fn run_streamable_http_test_server(
+        listener: TcpListener,
+        state: Arc<StreamableHttpTestState>,
+    ) {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let _ = handle_streamable_http_test_connection(stream, state).await;
+            });
+        }
+    }
+
+    async fn handle_streamable_http_test_connection(
+        stream: TcpStream,
+        state: Arc<StreamableHttpTestState>,
+    ) -> std::io::Result<()> {
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).await? == 0 {
+            return Ok(());
+        }
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header_line = String::new();
+            if reader.read_line(&mut header_line).await? == 0 {
+                return Ok(());
+            }
+            if header_line == "\r\n" || header_line == "\n" {
+                break;
+            }
+
+            if let Some((name, value)) = header_line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse::<usize>().unwrap_or_default();
+                }
+            }
+        }
+
+        let mut body = vec![0; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut body).await?;
+        }
+
+        let mut stream = reader.into_inner();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap_or_default();
+        let path = request_parts.next().unwrap_or_default();
+
+        match (method, path) {
+            ("POST", "/mcp") => {
+                handle_streamable_http_test_message(&mut stream, state, &body).await
+            }
+            ("GET", "/mcp") => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await?;
+                Ok(())
+            }
+            _ => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found",
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_streamable_http_test_message(
+        stream: &mut TcpStream,
+        state: Arc<StreamableHttpTestState>,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        let request: serde_json::Value =
+            serde_json::from_slice(body).expect("test message body should be valid JSON");
+        let method = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+
+        match method {
+            "initialize" => {
+                let version = request
+                    .get("params")
+                    .and_then(|value| value.get("protocolVersion"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                state.push_initialize_version(version.clone()).await;
+
+                let payload = if version == "2024-11-05" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {
+                                "tools": {
+                                    "listChanged": true
+                                }
+                            },
+                            "serverInfo": {
+                                "name": "streamable-http-test",
+                                "version": "1.0.0"
+                            }
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                        "error": {
+                            "code": -32602,
+                            "message": format!("unsupported protocol version: {version}")
+                        }
+                    })
+                };
+                let body = payload.to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
+                Ok(())
+            }
+            "notifications/initialized" => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 202 Accepted\r\nContent-Length: 8\r\nConnection: close\r\n\r\nAccepted",
+                    )
+                    .await?;
+                Ok(())
+            }
+            "tools/list" => {
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "echo",
+                                "title": "Echo Tool",
+                                "description": "Echoes back the input string",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "message": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": ["message"],
+                                    "additionalProperties": false
+                                }
+                            }
+                        ]
+                    }
+                })
+                .to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await?;
+                Ok(())
+            }
+            _ => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found",
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
     #[tokio::test]
     async fn initial_load_of_enabled_servers() {
         let repo = Arc::new(FakeRepo::new(vec![server(1, "Slack", true)]));
@@ -2552,6 +2840,44 @@ mod tests {
                     }
                 ]
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn rmcp_connector_falls_back_to_legacy_http_protocol_version() {
+        let server = StreamableHttpTestServer::start().await;
+        let connector = RmcpConnector;
+        let session = connector
+            .connect(&McpServerRecord {
+                id: Some(13),
+                display_name: "Legacy HTTP".to_string(),
+                enabled: true,
+                transport: McpTransportConfig::Http {
+                    url: server.url.clone(),
+                    headers: Default::default(),
+                },
+                timeout_ms: 3_000,
+                status: McpServerStatus::Failed,
+                last_checked_at: None,
+                last_success_at: None,
+                last_error: None,
+                discovered_tool_count: 0,
+            })
+            .await
+            .expect("http connector should fall back to an older protocol version");
+
+        let tools = session
+            .list_tools()
+            .await
+            .expect("legacy http session should discover tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            server.initialize_versions().await,
+            vec![
+                "2025-06-18".to_string(),
+                "2025-03-26".to_string(),
+                "2024-11-05".to_string()
+            ]
         );
     }
 }
