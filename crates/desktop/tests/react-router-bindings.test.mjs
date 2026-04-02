@@ -37,9 +37,9 @@ test("settings routes use react-router redirects and query param hooks", () => {
 
   assert.match(settingsPageSource, /Navigate/);
   assert.match(settingsPageSource, /to="\/settings\/providers"/);
-  assert.match(newAgentPageSource, /useSearchParams/);
-  assert.match(editAgentPageSource, /useSearchParams/);
-  assert.match(editProviderPageSource, /useSearchParams/);
+  assert.match(newAgentPageSource, /const \[searchParams\] = useSearchParams\(\)/);
+  assert.match(editAgentPageSource, /const \[searchParams\] = useSearchParams\(\)/);
+  assert.match(editProviderPageSource, /const \[searchParams\] = useSearchParams\(\)/);
   assert.doesNotMatch(newAgentPageSource, /next\/navigation/);
   assert.doesNotMatch(editAgentPageSource, /next\/navigation/);
   assert.doesNotMatch(editProviderPageSource, /next\/navigation/);
