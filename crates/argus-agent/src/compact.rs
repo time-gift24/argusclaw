@@ -69,10 +69,9 @@ pub trait Compactor: Send + Sync {
 ///
 /// When token usage exceeds the threshold ratio of the context window, older messages
 /// are sent to the current provider for summarization. The result replaces the old history
-/// with synthetic prompt/summary/replay messages plus the preserved recent tail.
+/// with synthetic prompt/summary/replay messages.
 pub struct LlmCompactor {
     threshold_ratio: f32,
-    tail_count: usize,
 }
 
 impl LlmCompactor {
@@ -80,7 +79,6 @@ impl LlmCompactor {
     pub fn new() -> Self {
         Self {
             threshold_ratio: 0.8,
-            tail_count: 50,
         }
     }
 
@@ -88,13 +86,6 @@ impl LlmCompactor {
     #[must_use]
     pub fn with_threshold_ratio(mut self, ratio: f32) -> Self {
         self.threshold_ratio = ratio.clamp(0.1, 0.95);
-        self
-    }
-
-    /// Set a custom tail count (minimum 1).
-    #[must_use]
-    pub fn with_tail_count(mut self, count: usize) -> Self {
-        self.tail_count = count.max(1);
         self
     }
 
@@ -109,22 +100,18 @@ impl LlmCompactor {
     fn build_compaction_request_messages(
         system_messages: &[ChatMessage],
         compactable_messages: &[ChatMessage],
-        preserved_tail: &[ChatMessage],
     ) -> Vec<ChatMessage> {
-        let mut request_messages = Vec::with_capacity(
-            system_messages.len() + compactable_messages.len() + preserved_tail.len() + 1,
-        );
+        let mut request_messages =
+            Vec::with_capacity(system_messages.len() + compactable_messages.len() + 1);
         request_messages.extend(system_messages.iter().cloned());
         request_messages.extend(compactable_messages.iter().cloned());
-        request_messages.extend(preserved_tail.iter().cloned());
         request_messages.push(ChatMessage::user(Self::compaction_prompt()));
         request_messages
     }
 
     fn split_history_segments(
         messages: &[ChatMessage],
-        tail_count: usize,
-    ) -> Option<(Vec<ChatMessage>, Vec<ChatMessage>, Vec<ChatMessage>)> {
+    ) -> Option<(Vec<ChatMessage>, Vec<ChatMessage>)> {
         let system_messages: Vec<_> = messages
             .iter()
             .filter(|m| m.role == Role::System)
@@ -136,14 +123,11 @@ impl LlmCompactor {
             .cloned()
             .collect();
 
-        let compactable_count = non_system.len().saturating_sub(tail_count);
-        if compactable_count == 0 {
+        if non_system.is_empty() {
             return None;
         }
 
-        let compactable = non_system[..compactable_count].to_vec();
-        let preserved_tail = non_system[compactable_count..].to_vec();
-        Some((system_messages, compactable, preserved_tail))
+        Some((system_messages, non_system))
     }
 
     fn compaction_metadata(mode: ChatMessageMetadataMode, summary: bool) -> ChatMessageMetadata {
@@ -168,18 +152,15 @@ impl Compactor for LlmCompactor {
             return Ok(None);
         }
 
-        let Some((system_messages, compactable_messages, preserved_tail)) =
-            Self::split_history_segments(messages, self.tail_count)
+        let Some((system_messages, compactable_messages)) =
+            Self::split_history_segments(messages)
         else {
             return Ok(None);
         };
 
         let prompt = Self::compaction_prompt();
-        let request_messages = Self::build_compaction_request_messages(
-            &system_messages,
-            &compactable_messages,
-            &preserved_tail,
-        );
+        let request_messages =
+            Self::build_compaction_request_messages(&system_messages, &compactable_messages);
 
         let request = CompletionRequest::new(request_messages);
 
@@ -200,10 +181,8 @@ impl Compactor for LlmCompactor {
                 ChatMessageMetadataMode::CompactionSummary,
                 true,
             ));
-        let synthetic_replay = ChatMessage::user(
-            "Continue the conversation using the summary above and the preserved recent tail below.",
-        )
-        .with_metadata(Self::compaction_metadata(
+        let synthetic_replay = ChatMessage::user("Continue the conversation using the summary above.")
+            .with_metadata(Self::compaction_metadata(
             ChatMessageMetadataMode::CompactionReplay,
             false,
         ));
@@ -218,7 +197,6 @@ impl Compactor for LlmCompactor {
         new_messages.push(synthetic_prompt);
         new_messages.push(synthetic_summary);
         new_messages.push(synthetic_replay);
-        new_messages.extend(preserved_tail);
 
         // Estimate new token count proportionally.
         let original_len = messages.len();
@@ -381,13 +359,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_none_when_no_compactable_segment() {
+    async fn returns_none_when_only_system_messages() {
         let provider = Arc::new(SummaryProvider {
             summary: String::new(),
             context_window: 100,
         });
-        let compactor = LlmCompactor::new().with_tail_count(50);
-        let messages = vec![ChatMessage::user("a"), ChatMessage::assistant("b")];
+        let compactor = LlmCompactor::new();
+        let messages = vec![ChatMessage::system("system only")];
         let result = compactor.compact(provider.as_ref(), &messages, 90).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -399,7 +377,7 @@ mod tests {
             summary: "历史摘要".to_string(),
             context_window: 100,
         });
-        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(1);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::user("old question"),
@@ -412,22 +390,25 @@ mod tests {
             .expect("compact should succeed")
             .expect("should have compacted");
 
-        // prompt + summary + replay + tail = 4
-        assert_eq!(result.messages.len(), 4);
+        // prompt + summary + replay = 3
+        assert_eq!(result.messages.len(), 3);
         assert_eq!(result.messages[0].role, Role::User); // synthetic prompt
         assert!(result.messages[0]
             .content
             .contains("Provide a detailed prompt for continuing our conversation above."));
         assert_eq!(result.messages[1].content, "历史摘要");
         assert_eq!(result.messages[2].role, Role::User); // synthetic replay
-        assert_eq!(result.messages[3].content, "recent tail");
+        assert_eq!(
+            result.messages[2].content,
+            "Continue the conversation using the summary above."
+        );
         assert!(!result.trace_prelude_messages.is_empty());
     }
 
     #[tokio::test]
     async fn failure_returns_error() {
         let provider = Arc::new(FailingSummaryProvider);
-        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(1);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::user("old"),
@@ -446,7 +427,7 @@ mod tests {
             context_window: 100,
             captured_requests: Arc::clone(&captured),
         });
-        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(1);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::user("完成了 provider 绑定"),
@@ -484,7 +465,7 @@ mod tests {
             context_window: 100,
             captured_requests: Arc::clone(&captured),
         });
-        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(2);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::system("system guardrails"),
@@ -515,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn uses_current_provider_context_window() {
-        let compactor = LlmCompactor::new().with_threshold_ratio(0.8).with_tail_count(1);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.8);
         let messages = vec![
             ChatMessage::user("old question"),
             ChatMessage::assistant("old answer"),

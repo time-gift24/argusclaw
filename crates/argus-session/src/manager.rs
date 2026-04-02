@@ -2142,7 +2142,7 @@ mod tests {
                 synthetic: true,
                 collapsed_by_default: true,
             }),
-            ChatMessage::user("请基于摘要和保留尾部继续").with_metadata(ChatMessageMetadata {
+            ChatMessage::user("请基于摘要继续").with_metadata(ChatMessageMetadata {
                 summary: false,
                 mode: Some(ChatMessageMetadataMode::CompactionReplay),
                 synthetic: true,
