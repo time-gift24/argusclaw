@@ -1,13 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use reqwest::header::{HeaderName, HeaderValue};
+use futures_util::StreamExt;
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::{Client, Response, Url};
 use rmcp::model::{CallToolRequestParams, Tool as RmcpTool};
 use rmcp::service::RunningService;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -153,6 +155,13 @@ pub struct McpRuntime {
 pub struct McpRuntimeHandle {
     inner: Arc<McpRuntime>,
 }
+
+const LEGACY_SSE_PROTOCOL_VERSION: &str = "2024-11-05";
+const LEGACY_SSE_CLIENT_NAME: &str = "argusclaw";
+
+type PendingLegacySseResponse = Result<serde_json::Value, McpRuntimeError>;
+type PendingLegacySseSender = tokio::sync::oneshot::Sender<PendingLegacySseResponse>;
+type PendingLegacySseMap = HashMap<u64, PendingLegacySseSender>;
 
 impl McpRuntimeHandle {
     #[must_use]
@@ -809,8 +818,7 @@ impl McpConnector for RmcpConnector {
                 )
                 .await?
             }
-            McpTransportConfig::Http { url, headers }
-            | McpTransportConfig::Sse { url, headers } => {
+            McpTransportConfig::Http { url, headers } => {
                 let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
                     .custom_headers(parse_headers(headers, server_id)?);
                 let transport = StreamableHttpClientTransport::from_config(config);
@@ -828,10 +836,593 @@ impl McpConnector for RmcpConnector {
                 )
                 .await?
             }
+            McpTransportConfig::Sse { url, headers } => {
+                return Ok(Arc::new(
+                    LegacySseSession::connect(server_id, url, headers).await?,
+                ));
+            }
         };
 
         Ok(Arc::new(RmcpSession::new(server_id, client)))
     }
+}
+
+struct LegacySseSession {
+    server_id: i64,
+    state: Arc<LegacySseSessionState>,
+    stream_task: tokio::task::JoinHandle<()>,
+}
+
+struct LegacySseSessionState {
+    client: Client,
+    message_url: tokio::sync::Mutex<Option<Url>>,
+    pending: tokio::sync::Mutex<PendingLegacySseMap>,
+    closed_reason: tokio::sync::Mutex<Option<String>>,
+    state_changed: tokio::sync::Notify,
+    next_request_id: AtomicU64,
+}
+
+impl LegacySseSessionState {
+    fn new(client: Client) -> Self {
+        Self {
+            client,
+            message_url: tokio::sync::Mutex::new(None),
+            pending: tokio::sync::Mutex::new(HashMap::new()),
+            closed_reason: tokio::sync::Mutex::new(None),
+            state_changed: tokio::sync::Notify::new(),
+            next_request_id: AtomicU64::new(1),
+        }
+    }
+
+    async fn wait_for_message_url(&self, server_id: i64) -> Result<Url, McpRuntimeError> {
+        loop {
+            let notified = self.state_changed.notified();
+            if let Some(url) = self.message_url.lock().await.clone() {
+                return Ok(url);
+            }
+            if let Some(reason) = self.closed_reason.lock().await.clone() {
+                return Err(McpRuntimeError::ConnectFailed { server_id, reason });
+            }
+            notified.await;
+        }
+    }
+
+    async fn set_message_url(&self, message_url: Url) {
+        let mut stored_url = self.message_url.lock().await;
+        if stored_url.is_none() {
+            *stored_url = Some(message_url);
+            self.state_changed.notify_waiters();
+        }
+    }
+
+    async fn closed_reason(&self) -> Option<String> {
+        self.closed_reason.lock().await.clone()
+    }
+
+    async fn fail_pending(&self, error: McpRuntimeError) {
+        let pending = {
+            let mut pending = self.pending.lock().await;
+            std::mem::take(&mut *pending)
+        };
+
+        for sender in pending.into_values() {
+            let send_error = match &error {
+                McpRuntimeError::Repository { reason } => McpRuntimeError::Repository {
+                    reason: reason.clone(),
+                },
+                McpRuntimeError::ServerNotFound { server_id } => McpRuntimeError::ServerNotFound {
+                    server_id: *server_id,
+                },
+                McpRuntimeError::ServerNotReady { server_id } => McpRuntimeError::ServerNotReady {
+                    server_id: *server_id,
+                },
+                McpRuntimeError::ConnectFailed { server_id, reason } => {
+                    McpRuntimeError::ConnectFailed {
+                        server_id: *server_id,
+                        reason: reason.clone(),
+                    }
+                }
+                McpRuntimeError::ToolCallFailed {
+                    server_id,
+                    tool_name,
+                    reason,
+                } => McpRuntimeError::ToolCallFailed {
+                    server_id: *server_id,
+                    tool_name: tool_name.clone(),
+                    reason: reason.clone(),
+                },
+                McpRuntimeError::InvalidConfiguration {
+                    display_name,
+                    reason,
+                } => McpRuntimeError::InvalidConfiguration {
+                    display_name: display_name.clone(),
+                    reason: reason.clone(),
+                },
+                McpRuntimeError::Serialization { reason } => McpRuntimeError::Serialization {
+                    reason: reason.clone(),
+                },
+            };
+            let _ = sender.send(Err(send_error));
+        }
+    }
+
+    async fn mark_closed(&self, server_id: i64, reason: String) {
+        let mut closed_reason = self.closed_reason.lock().await;
+        if closed_reason.is_some() {
+            return;
+        }
+
+        *closed_reason = Some(reason.clone());
+        drop(closed_reason);
+        self.fail_pending(McpRuntimeError::ConnectFailed { server_id, reason })
+            .await;
+        self.state_changed.notify_waiters();
+    }
+
+    async fn register_pending(
+        &self,
+        server_id: i64,
+        request_id: u64,
+    ) -> Result<tokio::sync::oneshot::Receiver<PendingLegacySseResponse>, McpRuntimeError> {
+        if let Some(reason) = self.closed_reason().await {
+            return Err(McpRuntimeError::ConnectFailed { server_id, reason });
+        }
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.pending.lock().await.insert(request_id, sender);
+        Ok(receiver)
+    }
+
+    async fn remove_pending(&self, request_id: u64) {
+        self.pending.lock().await.remove(&request_id);
+    }
+
+    async fn deliver_response(&self, message: serde_json::Value) {
+        let Some(request_id) = message.get("id").and_then(serde_json::Value::as_u64) else {
+            return;
+        };
+
+        let sender = self.pending.lock().await.remove(&request_id);
+        if let Some(sender) = sender {
+            let _ = sender.send(Ok(message));
+        }
+    }
+}
+
+impl LegacySseSession {
+    async fn connect(
+        server_id: i64,
+        sse_url: &str,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, McpRuntimeError> {
+        let client = build_reqwest_client(headers, server_id)?;
+        let sse_url = Url::parse(sse_url).map_err(|error| McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: format!("invalid SSE URL '{sse_url}': {error}"),
+        })?;
+        let response = client
+            .get(sse_url.clone())
+            .header(ACCEPT, "text/event-stream")
+            .send()
+            .await
+            .map_err(|error| McpRuntimeError::ConnectFailed {
+                server_id,
+                reason: error.to_string(),
+            })?;
+
+        ensure_legacy_sse_response(&response, server_id)?;
+
+        let state = Arc::new(LegacySseSessionState::new(client));
+        let stream_task = tokio::spawn(run_legacy_sse_stream(
+            server_id,
+            sse_url,
+            response,
+            Arc::clone(&state),
+        ));
+        let session = Self {
+            server_id,
+            state,
+            stream_task,
+        };
+
+        session.state.wait_for_message_url(server_id).await?;
+        session
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": LEGACY_SSE_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": LEGACY_SSE_CLIENT_NAME,
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }
+                }),
+            )
+            .await?;
+        session
+            .notify("notifications/initialized", serde_json::json!({}))
+            .await?;
+
+        Ok(session)
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpRuntimeError> {
+        let request_id = self.state.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let response_receiver = self
+            .state
+            .register_pending(self.server_id, request_id)
+            .await
+            .map_err(|error| match error {
+                McpRuntimeError::ConnectFailed { reason, .. } => McpRuntimeError::ConnectFailed {
+                    server_id: self.server_id,
+                    reason,
+                },
+                other => other,
+            })?;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        });
+
+        if let Err(error) = self.post_message(request).await {
+            self.state.remove_pending(request_id).await;
+            return Err(error);
+        }
+
+        match response_receiver.await {
+            Ok(Ok(response)) => extract_json_rpc_result(self.server_id, response),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(McpRuntimeError::ConnectFailed {
+                server_id: self.server_id,
+                reason: format!("legacy SSE response channel closed while waiting for '{method}'"),
+            }),
+        }
+    }
+
+    async fn notify(&self, method: &str, params: serde_json::Value) -> Result<(), McpRuntimeError> {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        self.post_message(notification).await
+    }
+
+    async fn post_message(&self, message: serde_json::Value) -> Result<(), McpRuntimeError> {
+        if let Some(reason) = self.state.closed_reason().await {
+            return Err(McpRuntimeError::ConnectFailed {
+                server_id: self.server_id,
+                reason,
+            });
+        }
+
+        let message_url = self.state.wait_for_message_url(self.server_id).await?;
+        let response = self
+            .state
+            .client
+            .post(message_url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&message)
+            .send()
+            .await
+            .map_err(|error| McpRuntimeError::ConnectFailed {
+                server_id: self.server_id,
+                reason: error.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(McpRuntimeError::ConnectFailed {
+                server_id: self.server_id,
+                reason: format!("unexpected server response: HTTP {status}: {body}"),
+            });
+        }
+
+        handle_inline_legacy_sse_response(&self.state, response, self.server_id).await
+    }
+}
+
+impl Drop for LegacySseSession {
+    fn drop(&mut self) {
+        self.stream_task.abort();
+    }
+}
+
+async fn run_legacy_sse_stream(
+    server_id: i64,
+    sse_url: Url,
+    response: Response,
+    state: Arc<LegacySseSessionState>,
+) {
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let stream_result = 'stream: loop {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(event) = take_sse_event(&mut buffer) {
+                    if let Err(reason) =
+                        handle_legacy_sse_event(server_id, &sse_url, &state, &event).await
+                    {
+                        break 'stream Err(reason);
+                    }
+                }
+            }
+            Some(Err(error)) => break 'stream Err(error.to_string()),
+            None => break 'stream Err("legacy SSE stream closed".to_string()),
+        }
+    };
+
+    let reason = match stream_result {
+        Ok(()) => "legacy SSE stream closed".to_string(),
+        Err(reason) => reason,
+    };
+    state.mark_closed(server_id, reason).await;
+}
+
+async fn handle_legacy_sse_event(
+    server_id: i64,
+    sse_url: &Url,
+    state: &Arc<LegacySseSessionState>,
+    event: &str,
+) -> Result<(), String> {
+    let parsed = parse_sse_event(event);
+    if parsed.data.trim().is_empty() {
+        return Ok(());
+    }
+
+    match parsed.event_type.as_deref().unwrap_or("message") {
+        "endpoint" => {
+            let message_url =
+                resolve_legacy_sse_message_url(sse_url, parsed.data.trim(), server_id)
+                    .map_err(|error| error.to_string())?;
+            state.set_message_url(message_url).await;
+            Ok(())
+        }
+        "message" => {
+            let message = serde_json::from_str::<serde_json::Value>(&parsed.data)
+                .map_err(|error| format!("failed to parse legacy SSE message payload: {error}"))?;
+            state.deliver_response(message).await;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[async_trait]
+impl McpSession for LegacySseSession {
+    async fn list_tools(&self) -> Result<Vec<McpDiscoveredToolRecord>, McpRuntimeError> {
+        let result = self.request("tools/list", serde_json::json!({})).await?;
+        let tools = result
+            .get("tools")
+            .cloned()
+            .ok_or(McpRuntimeError::ConnectFailed {
+                server_id: self.server_id,
+                reason: "legacy SSE tools/list response missing tools".to_string(),
+            })?;
+        let parsed_tools = serde_json::from_value::<Vec<RmcpTool>>(tools).map_err(|error| {
+            McpRuntimeError::Serialization {
+                reason: error.to_string(),
+            }
+        })?;
+
+        parsed_tools
+            .into_iter()
+            .map(|tool| rmcp_tool_to_record(self.server_id, tool))
+            .collect()
+    }
+
+    async fn call_tool(
+        &self,
+        tool_name_original: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, McpRuntimeError> {
+        let arguments = match input {
+            serde_json::Value::Object(arguments) => arguments,
+            serde_json::Value::Null => serde_json::Map::new(),
+            other => {
+                return Err(McpRuntimeError::ToolCallFailed {
+                    server_id: self.server_id,
+                    tool_name: tool_name_original.to_string(),
+                    reason: format!("tool arguments must be a JSON object, got {other}"),
+                });
+            }
+        };
+        let result = self
+            .request(
+                "tools/call",
+                serde_json::json!({
+                    "name": tool_name_original,
+                    "arguments": arguments,
+                }),
+            )
+            .await?;
+        let call_tool_result = serde_json::from_value::<rmcp::model::CallToolResult>(result)
+            .map_err(|error| McpRuntimeError::Serialization {
+                reason: error.to_string(),
+            })?;
+
+        call_tool_result_to_json(self.server_id, tool_name_original, call_tool_result)
+    }
+}
+
+fn build_reqwest_client(
+    headers: &std::collections::BTreeMap<String, String>,
+    server_id: i64,
+) -> Result<Client, McpRuntimeError> {
+    let parsed_headers = parse_headers(headers, server_id)?;
+    let mut default_headers = HeaderMap::new();
+    for (header_name, header_value) in parsed_headers {
+        default_headers.insert(header_name, header_value);
+    }
+
+    Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .map_err(|error| McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: error.to_string(),
+        })
+}
+
+fn ensure_legacy_sse_response(response: &Response, server_id: i64) -> Result<(), McpRuntimeError> {
+    if !response.status().is_success() {
+        return Err(McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: format!("unexpected SSE response status: {}", response.status()),
+        });
+    }
+
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if !matches!(content_type, Some(value) if value.contains("text/event-stream")) {
+        return Err(McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: format!(
+                "unexpected SSE content type: {}",
+                content_type.unwrap_or("<missing>")
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+async fn handle_inline_legacy_sse_response(
+    state: &Arc<LegacySseSessionState>,
+    response: Response,
+    server_id: i64,
+) -> Result<(), McpRuntimeError> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: error.to_string(),
+        })?;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    if let Ok(message) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        state.deliver_response(message).await;
+    }
+
+    Ok(())
+}
+
+fn extract_json_rpc_result(
+    server_id: i64,
+    response: serde_json::Value,
+) -> Result<serde_json::Value, McpRuntimeError> {
+    if let Some(error) = response.get("error") {
+        return Err(McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: format_json_rpc_error(error),
+        });
+    }
+
+    response
+        .get("result")
+        .cloned()
+        .ok_or(McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: "legacy SSE response missing result".to_string(),
+        })
+}
+
+fn format_json_rpc_error(error: &serde_json::Value) -> String {
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown JSON-RPC error");
+    let code = error
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .map(|code| format!("code {code}"))
+        .unwrap_or_else(|| "unknown code".to_string());
+    let data = error
+        .get("data")
+        .map(serde_json::Value::to_string)
+        .filter(|value| value != "null")
+        .unwrap_or_default();
+
+    if data.is_empty() {
+        format!("{message} ({code})")
+    } else {
+        format!("{message} ({code}): {data}")
+    }
+}
+
+fn take_sse_event(buffer: &mut String) -> Option<String> {
+    let separator = match (buffer.find("\r\n\r\n"), buffer.find("\n\n")) {
+        (Some(crlf_index), Some(lf_index)) if crlf_index <= lf_index => Some((crlf_index, 4)),
+        (Some(crlf_index), _) => Some((crlf_index, 4)),
+        (_, Some(lf_index)) => Some((lf_index, 2)),
+        (None, None) => None,
+    }?;
+
+    let (index, separator_len) = separator;
+    let event = buffer[..index].to_string();
+    buffer.drain(..index + separator_len);
+    Some(event)
+}
+
+struct ParsedSseEvent {
+    event_type: Option<String>,
+    data: String,
+}
+
+fn parse_sse_event(event: &str) -> ParsedSseEvent {
+    let normalized = event.replace("\r\n", "\n");
+    let mut event_type = None;
+    let mut data_lines = Vec::new();
+
+    for line in normalized.lines() {
+        if let Some(value) = line.strip_prefix("event:") {
+            event_type = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim_start().to_string());
+        }
+    }
+
+    ParsedSseEvent {
+        event_type,
+        data: data_lines.join("\n"),
+    }
+}
+
+fn resolve_legacy_sse_message_url(
+    sse_url: &Url,
+    endpoint: &str,
+    server_id: i64,
+) -> Result<Url, McpRuntimeError> {
+    if endpoint.is_empty() {
+        return Err(McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: "legacy SSE endpoint event did not include a message URL".to_string(),
+        });
+    }
+
+    if let Ok(absolute_url) = Url::parse(endpoint) {
+        return Ok(absolute_url);
+    }
+
+    sse_url
+        .join(endpoint)
+        .map_err(|error| McpRuntimeError::ConnectFailed {
+            server_id,
+            reason: format!("invalid legacy SSE message endpoint '{endpoint}': {error}"),
+        })
 }
 
 struct RmcpSession {
@@ -1023,7 +1614,10 @@ where
 mod tests {
     use std::collections::VecDeque;
 
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Mutex;
+    use tokio::sync::mpsc;
 
     use argus_protocol::{AgentMcpServerBinding, McpTransportConfig};
 
@@ -1397,6 +1991,217 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct LegacySseTestState {
+        event_sender: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    }
+
+    impl LegacySseTestState {
+        async fn register_stream(&self) -> mpsc::UnboundedReceiver<String> {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            *self.event_sender.lock().await = Some(sender);
+            receiver
+        }
+
+        async fn send_message(&self, body: serde_json::Value) {
+            let sender = self.event_sender.lock().await.clone();
+            if let Some(sender) = sender {
+                let _ = sender.send(format!("event: message\ndata: {body}\n\n"));
+            }
+        }
+    }
+
+    struct LegacySseTestServer {
+        join_handle: tokio::task::JoinHandle<()>,
+        sse_url: String,
+    }
+
+    impl LegacySseTestServer {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test SSE server should bind");
+            let address = listener
+                .local_addr()
+                .expect("listener should expose address");
+            let state = Arc::new(LegacySseTestState::default());
+            let join_handle = tokio::spawn(run_legacy_sse_test_server(listener, state));
+            Self {
+                join_handle,
+                sse_url: format!("http://{address}/sse"),
+            }
+        }
+    }
+
+    impl Drop for LegacySseTestServer {
+        fn drop(&mut self) {
+            self.join_handle.abort();
+        }
+    }
+
+    async fn run_legacy_sse_test_server(listener: TcpListener, state: Arc<LegacySseTestState>) {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let _ = handle_legacy_sse_test_connection(stream, state).await;
+            });
+        }
+    }
+
+    async fn handle_legacy_sse_test_connection(
+        stream: TcpStream,
+        state: Arc<LegacySseTestState>,
+    ) -> std::io::Result<()> {
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).await? == 0 {
+            return Ok(());
+        }
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header_line = String::new();
+            if reader.read_line(&mut header_line).await? == 0 {
+                return Ok(());
+            }
+            if header_line == "\r\n" || header_line == "\n" {
+                break;
+            }
+
+            if let Some((name, value)) = header_line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse::<usize>().unwrap_or_default();
+                }
+            }
+        }
+
+        let mut body = vec![0; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut body).await?;
+        }
+
+        let mut stream = reader.into_inner();
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts.next().unwrap_or_default();
+        let path = request_parts.next().unwrap_or_default();
+
+        match (method, path) {
+            ("GET", "/sse") => handle_legacy_sse_stream(&mut stream, state).await,
+            ("POST", "/message?sessionId=test-session") => {
+                handle_legacy_sse_message(&mut stream, state, &body).await
+            }
+            _ => {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found",
+                    )
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn handle_legacy_sse_stream(
+        stream: &mut TcpStream,
+        state: Arc<LegacySseTestState>,
+    ) -> std::io::Result<()> {
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\nevent: endpoint\ndata: /message?sessionId=test-session\n\n",
+            )
+            .await?;
+        stream.flush().await?;
+
+        let mut events = state.register_stream().await;
+        while let Some(event) = events.recv().await {
+            stream.write_all(event.as_bytes()).await?;
+            stream.flush().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_legacy_sse_message(
+        stream: &mut TcpStream,
+        state: Arc<LegacySseTestState>,
+        body: &[u8],
+    ) -> std::io::Result<()> {
+        let request: serde_json::Value =
+            serde_json::from_slice(body).expect("test message body should be valid JSON");
+        if let Some(response) = legacy_sse_response(&request) {
+            state.send_message(response).await;
+        }
+
+        stream
+            .write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 8\r\nConnection: close\r\n\r\nAccepted",
+            )
+            .await?;
+        Ok(())
+    }
+
+    fn legacy_sse_response(request: &serde_json::Value) -> Option<serde_json::Value> {
+        let method = request.get("method")?.as_str()?;
+        match method {
+            "initialize" => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": true
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "legacy-sse-test",
+                        "version": "1.0.0"
+                    }
+                }
+            })),
+            "tools/list" => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "result": {
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "title": "Echo Tool",
+                            "description": "Echoes back the input string",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "message": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["message"],
+                                "additionalProperties": false
+                            }
+                        }
+                    ]
+                }
+            })),
+            "tools/call" => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "pong"
+                        }
+                    ]
+                }
+            })),
+            "notifications/initialized" => None,
+            _ => None,
+        }
+    }
+
     #[tokio::test]
     async fn initial_load_of_enabled_servers() {
         let repo = Arc::new(FakeRepo::new(vec![server(1, "Slack", true)]));
@@ -1677,5 +2482,76 @@ mod tests {
             .server_snapshot(10)
             .expect("server snapshot should exist");
         assert_eq!(snapshot.status, McpServerStatus::Retrying);
+    }
+
+    #[tokio::test]
+    async fn rmcp_connector_supports_legacy_sse_tool_discovery() {
+        let server = LegacySseTestServer::start().await;
+        let connector = RmcpConnector;
+        let session = connector
+            .connect(&McpServerRecord {
+                id: Some(11),
+                display_name: "Legacy SSE".to_string(),
+                enabled: true,
+                transport: McpTransportConfig::Sse {
+                    url: server.sse_url.clone(),
+                    headers: Default::default(),
+                },
+                timeout_ms: 3_000,
+                status: McpServerStatus::Failed,
+                last_checked_at: None,
+                last_success_at: None,
+                last_error: None,
+                discovered_tool_count: 0,
+            })
+            .await
+            .expect("legacy sse connector should establish a session");
+
+        let tools = session
+            .list_tools()
+            .await
+            .expect("legacy sse session should discover tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].tool_name_original, "echo");
+    }
+
+    #[tokio::test]
+    async fn legacy_sse_session_supports_tool_calls() {
+        let server = LegacySseTestServer::start().await;
+        let connector = RmcpConnector;
+        let session = connector
+            .connect(&McpServerRecord {
+                id: Some(12),
+                display_name: "Legacy SSE".to_string(),
+                enabled: true,
+                transport: McpTransportConfig::Sse {
+                    url: server.sse_url.clone(),
+                    headers: Default::default(),
+                },
+                timeout_ms: 3_000,
+                status: McpServerStatus::Failed,
+                last_checked_at: None,
+                last_success_at: None,
+                last_error: None,
+                discovered_tool_count: 0,
+            })
+            .await
+            .expect("legacy sse connector should establish a session");
+
+        let result = session
+            .call_tool("echo", serde_json::json!({ "message": "ping" }))
+            .await
+            .expect("legacy sse session should execute tools");
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "pong"
+                    }
+                ]
+            })
+        );
     }
 }
