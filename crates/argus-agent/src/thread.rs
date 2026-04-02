@@ -900,6 +900,7 @@ impl Thread {
             Arc::clone(&self.tool_manager),
             self.hooks.clone(),
             self.plan_store.clone(),
+            agent_record.as_ref(),
         ));
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
