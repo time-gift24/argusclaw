@@ -278,6 +278,7 @@ dependencies = [
  "argus-repository",
  "async-trait",
  "chrono",
+ "futures-util",
  "reqwest 0.12.28",
  "rmcp",
  "serde",
