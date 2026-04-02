@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::turn::TurnCancellation;
+use crate::turn::{TurnCancellation, TurnExecution, TurnProgress};
 use crate::turn_log_store::persist_turn_log_snapshot;
 use argus_protocol::{MessageOverride, ThreadCommand, ThreadControlEvent, ThreadRuntimeState};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 use crate::error::ThreadError;
 use crate::thread::Thread;
@@ -32,8 +32,8 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
             )
         };
 
-        let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
         let mut runtime = ThreadRuntime::seeded_from_next_turn_number(next_turn_number);
+        let mut active_turn: Option<TurnExecution> = None;
         sync_runtime_snapshot(&thread, &runtime).await;
         let mut shutdown_requested = false;
 
@@ -115,96 +115,42 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         Arc::clone(&thread),
                         &mut runtime,
                         runtime_action,
-                        &turn_done_tx,
+                        &mut active_turn,
                     )
                     .await;
                 }
-                Some(result) = turn_done_rx.recv() => {
-                    let settled_turn_number = match runtime.state() {
-                        ThreadRuntimeState::Running { turn_number }
-                        | ThreadRuntimeState::WaitingForApproval { turn_number }
-                        | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
-                        ThreadRuntimeState::Idle => None,
-                    };
-                    let thread_id = {
-                        let guard = thread.read().await;
-                        guard.id().inner().to_string()
-                    };
+                progress = async {
+                    match active_turn.as_mut() {
+                        Some(execution) => execution.recv().await,
+                        None => None,
+                    }
+                }, if active_turn.is_some() => {
+                    match progress {
+                        Some(progress) => {
+                            handle_turn_progress(&thread, &mut runtime, &progress).await;
+                        }
+                        None => {
+                            let result = active_turn
+                                .take()
+                                .expect("active turn should exist while receiving progress")
+                                .finish()
+                                .await
+                                .map_err(ThreadError::TurnFailed);
 
-                    {
-                        let guard = thread.read().await;
-                        match &result {
-                            Ok(output) => {
-                                guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnCompleted {
-                                    thread_id: thread_id.clone(),
-                                    turn_number: settled_turn_number.unwrap_or_default(),
-                                    token_usage: output.token_usage.clone(),
-                                });
-                            }
-                            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
-                            Err(error) => {
-                                guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnFailed {
-                                    thread_id: thread_id.clone(),
-                                    turn_number: settled_turn_number.unwrap_or_default(),
-                                    error: error.to_string(),
-                                });
+                            settle_active_turn(
+                                &thread,
+                                &mut runtime,
+                                result,
+                                &mut active_turn,
+                                shutdown_requested,
+                            )
+                            .await;
+
+                            if shutdown_requested && active_turn.is_none() {
+                                break;
                             }
                         }
-                        guard.broadcast_to_self(argus_protocol::ThreadEvent::Idle {
-                            thread_id: thread_id.clone(),
-                        });
                     }
-
-                    let (finish_result, turn_log_snapshot) = {
-                        let mut guard = thread.write().await;
-                        guard.set_active_turn_cancellation(None);
-                        let finish_result = guard.finish_turn(result);
-                        let turn_log_snapshot = guard.turn_log_persistence_snapshot();
-                        (finish_result, turn_log_snapshot)
-                    };
-
-                    if let Err(error) = finish_result {
-                        tracing::error!("turn failed: {}", error);
-                    }
-
-                    if let Some(snapshot) = turn_log_snapshot
-                        && let Err(error) = persist_turn_log_snapshot(&snapshot).await
-                    {
-                        tracing::warn!(
-                            turn_number = snapshot.turn.turn_number,
-                            error = %error,
-                            "failed to persist committed turn log snapshot"
-                        );
-                    }
-
-                    {
-                        let mut guard = mailbox.lock().await;
-                        guard.clear_interrupts_for_idle_handoff();
-                    }
-                    if let Some(turn_number) = settled_turn_number {
-                        let guard = thread.read().await;
-                        guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                        });
-                    }
-
-                    if shutdown_requested {
-                        break;
-                    }
-
-                    let runtime_action = {
-                        let mut mailbox = mailbox.lock().await;
-                        runtime.finish_active_turn(&mut mailbox)
-                    };
-                    sync_runtime_snapshot(&thread, &runtime).await;
-                    process_runtime_action(
-                        Arc::clone(&thread),
-                        &mut runtime,
-                        runtime_action,
-                        &turn_done_tx,
-                    )
-                    .await;
                 }
                 else => break,
             }
@@ -613,7 +559,7 @@ async fn process_runtime_action(
     thread: Arc<RwLock<Thread>>,
     runtime: &mut ThreadRuntime,
     action: ThreadRuntimeAction,
-    turn_done_tx: &mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
+    active_turn: &mut Option<TurnExecution>,
 ) {
     let mut next_action = action;
     loop {
@@ -623,15 +569,10 @@ async fn process_runtime_action(
                 content,
                 msg_override,
             } => {
-                match start_turn_task(
-                    Arc::clone(&thread),
-                    content,
-                    msg_override,
-                    turn_done_tx.clone(),
-                )
-                .await
-                {
-                    Ok(()) => {}
+                match start_turn_task(Arc::clone(&thread), content, msg_override).await {
+                    Ok(execution) => {
+                        *active_turn = Some(execution);
+                    }
                     Err(error) => {
                         let thread_id = {
                             let guard = thread.read().await;
@@ -682,8 +623,7 @@ async fn start_turn_task(
     thread: Arc<RwLock<Thread>>,
     content: String,
     msg_override: Option<MessageOverride>,
-    turn_done_tx: mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
-) -> std::result::Result<(), ThreadError> {
+) -> std::result::Result<TurnExecution, ThreadError> {
     let cancellation = TurnCancellation::new();
     let turn = {
         let mut guard = thread.write().await;
@@ -692,16 +632,7 @@ async fn start_turn_task(
             .await?
     };
 
-    tokio::spawn(async move {
-        let result = turn
-            .execute_progress()
-            .finish()
-            .await
-            .map_err(ThreadError::TurnFailed);
-        let _ = turn_done_tx.send(result);
-    });
-
-    Ok(())
+    Ok(turn.execute_progress())
 }
 
 async fn finish_failed_start_turn(
@@ -734,6 +665,133 @@ async fn finish_failed_start_turn(
     }
 
     next_action
+}
+
+async fn handle_turn_progress(
+    thread: &Arc<RwLock<Thread>>,
+    runtime: &mut ThreadRuntime,
+    progress: &TurnProgress,
+) {
+    match progress {
+        TurnProgress::WaitingForApproval { turn_number, .. } => {
+            runtime.mark_waiting_for_approval(*turn_number);
+            sync_runtime_snapshot(thread, runtime).await;
+        }
+        TurnProgress::ApprovalResolved { turn_number, .. } => {
+            runtime.mark_running_after_approval(*turn_number);
+            sync_runtime_snapshot(thread, runtime).await;
+        }
+        TurnProgress::LlmEvent(_)
+        | TurnProgress::ToolStarted { .. }
+        | TurnProgress::ToolCompleted { .. }
+        | TurnProgress::Completed(_)
+        | TurnProgress::Failed { .. } => {}
+    }
+}
+
+async fn settle_active_turn(
+    thread: &Arc<RwLock<Thread>>,
+    runtime: &mut ThreadRuntime,
+    result: Result<crate::TurnOutput, ThreadError>,
+    active_turn: &mut Option<TurnExecution>,
+    shutdown_requested: bool,
+) {
+    let settled_turn_number = match runtime.state() {
+        ThreadRuntimeState::Running { turn_number }
+        | ThreadRuntimeState::WaitingForApproval { turn_number }
+        | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
+        ThreadRuntimeState::Idle => None,
+    };
+    let thread_id = {
+        let guard = thread.read().await;
+        guard.id().inner().to_string()
+    };
+
+    {
+        let guard = thread.read().await;
+        match &result {
+            Ok(output) => {
+                guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnCompleted {
+                    thread_id: thread_id.clone(),
+                    turn_number: settled_turn_number.unwrap_or_default(),
+                    token_usage: output.token_usage.clone(),
+                });
+            }
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
+            Err(error) => {
+                guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnFailed {
+                    thread_id: thread_id.clone(),
+                    turn_number: settled_turn_number.unwrap_or_default(),
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    let (finish_result, turn_log_snapshot) = {
+        let mut guard = thread.write().await;
+        guard.set_active_turn_cancellation(None);
+        let finish_result = guard.finish_turn(result);
+        let turn_log_snapshot = guard.turn_log_persistence_snapshot();
+        (finish_result, turn_log_snapshot)
+    };
+
+    if let Err(error) = finish_result {
+        tracing::error!("turn failed: {}", error);
+    }
+
+    if let Some(snapshot) = turn_log_snapshot
+        && let Err(error) = persist_turn_log_snapshot(&snapshot).await
+    {
+        tracing::warn!(
+            turn_number = snapshot.turn.turn_number,
+            error = %error,
+            "failed to persist committed turn log snapshot"
+        );
+    }
+
+    {
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+        let mut guard = mailbox.lock().await;
+        guard.clear_interrupts_for_idle_handoff();
+    }
+
+    if let Some(turn_number) = settled_turn_number {
+        let guard = thread.read().await;
+        guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
+            thread_id: thread_id.clone(),
+            turn_number,
+        });
+    }
+
+    if shutdown_requested {
+        return;
+    }
+
+    let runtime_action = {
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+        let mut guard = mailbox.lock().await;
+        runtime.finish_active_turn(&mut guard)
+    };
+    sync_runtime_snapshot(thread, runtime).await;
+    process_runtime_action(
+        Arc::clone(thread),
+        runtime,
+        runtime_action.clone(),
+        active_turn,
+    )
+    .await;
+
+    if matches!(runtime_action, ThreadRuntimeAction::Noop) && active_turn.is_none() {
+        let guard = thread.read().await;
+        guard.broadcast_to_self(argus_protocol::ThreadEvent::Idle { thread_id });
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

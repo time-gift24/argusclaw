@@ -150,6 +150,20 @@ impl ThreadReactor {
         claimed
     }
 
+    pub(crate) fn mark_waiting_for_approval(&mut self, turn_number: u32) {
+        if matches!(self.state, ThreadRuntimeState::Running { turn_number: active } if active == turn_number)
+        {
+            self.state = ThreadRuntimeState::WaitingForApproval { turn_number };
+        }
+    }
+
+    pub(crate) fn mark_running_after_approval(&mut self, turn_number: u32) {
+        if matches!(self.state, ThreadRuntimeState::WaitingForApproval { turn_number: active } if active == turn_number)
+        {
+            self.state = ThreadRuntimeState::Running { turn_number };
+        }
+    }
+
     fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadReactorAction {
         if !matches!(self.state, ThreadRuntimeState::Idle) {
             return ThreadReactorAction::Noop;

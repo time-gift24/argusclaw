@@ -1,6 +1,8 @@
 //! Integration tests for committed turn-log persistence.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, sleep, timeout};
@@ -105,6 +107,94 @@ impl LlmProvider for PartialFailureMockProvider {
     }
 }
 
+struct SequencedDelayedMockProvider {
+    delay: Duration,
+    responses: Mutex<VecDeque<String>>,
+    captured_user_inputs: Mutex<Vec<String>>,
+}
+
+impl SequencedDelayedMockProvider {
+    fn new(delay: Duration, responses: Vec<&str>) -> Self {
+        Self {
+            delay,
+            responses: Mutex::new(
+                responses
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect::<VecDeque<_>>(),
+            ),
+            captured_user_inputs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn captured_user_inputs(&self) -> Vec<String> {
+        self.captured_user_inputs.lock().unwrap().clone()
+    }
+
+    fn next_response(&self) -> String {
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| "default response".to_string())
+    }
+
+    fn capture_request(&self, request: &CompletionRequest) {
+        let last_user_input = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == argus_protocol::llm::Role::User)
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        self.captured_user_inputs
+            .lock()
+            .unwrap()
+            .push(last_user_input);
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SequencedDelayedMockProvider {
+    fn model_name(&self) -> &str {
+        "sequenced-delayed"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.capture_request(&request);
+        sleep(self.delay).await;
+
+        Ok(CompletionResponse {
+            content: Some(self.next_response()),
+            reasoning_content: None,
+            tool_calls: vec![],
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn stream_complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        self.capture_request(&request);
+        let delay = self.delay;
+        let response = self.next_response();
+        let stream = futures_util::stream::once(async move {
+            sleep(delay).await;
+            Ok(LlmStreamEvent::ContentDelta { delta: response })
+        });
+        Ok(Box::pin(stream))
+    }
+}
+
 struct NoopCompactor;
 
 #[async_trait]
@@ -135,6 +225,57 @@ async fn wait_for_turn_settled_event(mut rx: broadcast::Receiver<ThreadEvent>) {
     })
     .await
     .expect("thread should emit turn_settled");
+}
+
+async fn wait_for_provider_inputs(
+    provider: &Arc<SequencedDelayedMockProvider>,
+    expected_len: usize,
+) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if provider.captured_user_inputs().len() >= expected_len {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("provider should capture user inputs");
+}
+
+async fn collect_terminal_events_until_final_idle(
+    mut rx: broadcast::Receiver<ThreadEvent>,
+    expected_turns: usize,
+) -> Vec<ThreadEvent> {
+    let mut events = Vec::new();
+    let mut settled_count = 0usize;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(event @ ThreadEvent::TurnCompleted { .. })
+                | Ok(event @ ThreadEvent::TurnFailed { .. })
+                | Ok(event @ ThreadEvent::TurnSettled { .. })
+                | Ok(event @ ThreadEvent::Idle { .. }) => {
+                    if matches!(event, ThreadEvent::TurnSettled { .. }) {
+                        settled_count += 1;
+                    }
+                    let is_final_idle = matches!(event, ThreadEvent::Idle { .. })
+                        && settled_count >= expected_turns;
+                    events.push(event);
+                    if is_final_idle {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("thread should emit terminal events");
+
+    events
 }
 
 #[tokio::test]
@@ -306,4 +447,125 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
         argus_agent::history::TurnState::Completed
     ));
     assert!(meta.token_usage.is_some());
+}
+
+#[tokio::test]
+async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between_settlements() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let trace_config =
+        TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let provider = Arc::new(SequencedDelayedMockProvider::new(
+        Duration::from_millis(120),
+        vec!["first reply", "second reply"],
+    ));
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .provider(provider.clone())
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord::default()))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let thread_id = { thread.read().await.id() };
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_runtime_actor(Arc::clone(&thread));
+
+    {
+        let guard = thread.read().await;
+        guard
+            .send_user_message("first".to_string(), None)
+            .expect("first message should queue");
+    }
+
+    wait_for_provider_inputs(&provider, 1).await;
+
+    {
+        let guard = thread.read().await;
+        guard
+            .send_user_message("second".to_string(), None)
+            .expect("second message should queue");
+    }
+
+    let terminal_events = collect_terminal_events_until_final_idle(rx, 2).await;
+    let filtered_events = terminal_events
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ThreadEvent::TurnCompleted { .. }
+                    | ThreadEvent::TurnFailed { .. }
+                    | ThreadEvent::TurnSettled { .. }
+                    | ThreadEvent::Idle { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        filtered_events.len(),
+        5,
+        "two queued turns should emit completed/settled pairs followed by a single final idle",
+    );
+    assert!(matches!(
+        filtered_events[0],
+        ThreadEvent::TurnCompleted { turn_number: 1, .. }
+    ));
+    assert!(matches!(
+        filtered_events[1],
+        ThreadEvent::TurnSettled { turn_number: 1, .. }
+    ));
+    assert!(matches!(
+        filtered_events[2],
+        ThreadEvent::TurnCompleted { turn_number: 2, .. }
+    ));
+    assert!(matches!(
+        filtered_events[3],
+        ThreadEvent::TurnSettled { turn_number: 2, .. }
+    ));
+    assert!(matches!(filtered_events[4], ThreadEvent::Idle { .. }));
+
+    assert_eq!(
+        provider.captured_user_inputs(),
+        vec!["first".to_string(), "second".to_string()],
+    );
+
+    for turn_number in [1_u32, 2_u32] {
+        let persisted_turns_dir = turns_dir(
+            &temp_dir
+                .path()
+                .join(session_id.to_string())
+                .join(thread_id.to_string()),
+        );
+        let messages_path = turn_messages_path(&persisted_turns_dir, turn_number);
+        let meta_path = turn_meta_path(&persisted_turns_dir, turn_number);
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let messages_exists = tokio::fs::try_exists(&messages_path).await.unwrap_or(false);
+                let meta_exists = tokio::fs::try_exists(&meta_path).await.unwrap_or(false);
+                if messages_exists && meta_exists {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("committed turn logs should be persisted");
+
+        let meta = read_turn_meta(&meta_path).await.expect("meta should read");
+        assert_eq!(meta.turn_number, turn_number);
+        assert!(matches!(
+            meta.state,
+            argus_agent::history::TurnState::Completed
+        ));
+    }
 }
