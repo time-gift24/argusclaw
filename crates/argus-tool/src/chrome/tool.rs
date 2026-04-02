@@ -24,6 +24,8 @@ const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Install,
     ChromeAction::Open,
     ChromeAction::Navigate,
+    ChromeAction::Close,
+    ChromeAction::Restart,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
@@ -39,6 +41,8 @@ const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Install,
     ChromeAction::Open,
     ChromeAction::Navigate,
+    ChromeAction::Close,
+    ChromeAction::Restart,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
     ChromeAction::ListLinks,
@@ -160,11 +164,11 @@ impl ChromeTool {
             },
             "url": {
                 "type": "string",
-                "description": "Target URL for open"
+                "description": "Target URL for open, navigate, new_tab, or restart"
             },
             "session_id": {
                 "type": "string",
-                "description": "Session ID returned by open"
+                "description": "Session ID returned by open or restart; production open reuses the shared browser session"
             },
             "selector": {
                 "type": "string",
@@ -222,10 +226,10 @@ impl NamedTool for ChromeTool {
 
     fn definition(&self) -> ToolDefinition {
         let description = if self.interactive {
-            "Chrome browser tool with interactive capabilities for explicit driver install, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
+            "Chrome browser tool with interactive capabilities for explicit driver install, a shared browser session that open reuses, close for shutting down the current session, restart for forcing a clean browser restart, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
                 .to_string()
         } else {
-            "Chrome explore tool for explicit driver install, opening pages, and inspecting page state."
+            "Chrome explore tool for explicit driver install, a shared browser session that open reuses, close for shutting down the current session, restart for forcing a clean browser restart, and inspecting page state."
                 .to_string()
         };
         ToolDefinition {
@@ -300,6 +304,37 @@ impl NamedTool for ChromeTool {
                     "session_id": opened.session_id,
                     "final_url": opened.final_url,
                     "page_title": opened.page_title,
+                }))
+            }
+            ChromeAction::Close => {
+                let session_id = required_session_id(&args)?;
+                self.manager
+                    .close_session(&session_id)
+                    .await
+                    .map_err(Self::map_error)?;
+                Ok(json!({
+                    "action": "close",
+                    "session_id": session_id,
+                    "status": "ok",
+                }))
+            }
+            ChromeAction::Restart => {
+                let session_id = required_session_id(&args)?;
+                let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
+                    tool_name: "chrome".to_string(),
+                    reason: "missing url for restart action".to_string(),
+                })?;
+                let reopened = self
+                    .manager
+                    .restart(&session_id, &url)
+                    .await
+                    .map_err(Self::map_error)?;
+
+                Ok(json!({
+                    "action": "restart",
+                    "session_id": reopened.session_id,
+                    "final_url": reopened.final_url,
+                    "page_title": reopened.page_title,
                 }))
             }
             ChromeAction::Wait => {

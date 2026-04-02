@@ -334,6 +334,20 @@ impl ChromeManager {
         session.interaction().shutdown().await
     }
 
+    pub async fn restart(
+        &self,
+        session_id: &str,
+        url: &str,
+    ) -> Result<OpenedSession, ChromeToolError> {
+        self.session(session_id).await?;
+        self.close_all_sessions().await?;
+        self.reset_shared_host().await?;
+        self.open(OpenArgs {
+            url: url.to_string(),
+        })
+        .await
+    }
+
     pub async fn session(&self, session_id: &str) -> Result<ChromeSession, ChromeToolError> {
         self.sessions
             .read()
@@ -507,6 +521,25 @@ impl ChromeManager {
             .get(session_id)
             .map(ChromeSession::interaction)
             .ok_or_else(|| Self::session_not_found(session_id))
+    }
+
+    async fn close_all_sessions(&self) -> Result<(), ChromeToolError> {
+        let session_ids: Vec<String> = self.sessions.read().await.keys().cloned().collect();
+        for session_id in session_ids {
+            self.close_session(&session_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn reset_shared_host(&self) -> Result<(), ChromeToolError> {
+        if let Some(shared_host) = self
+            .managed_support
+            .as_ref()
+            .and_then(|support| support.shared_host.clone())
+        {
+            shared_host.shutdown().await?;
+        }
+        Ok(())
     }
 
     async fn evict_excess_sessions(&self) -> Result<(), ChromeToolError> {
@@ -1607,6 +1640,113 @@ mod tests {
         assert_eq!(session.session_id, opened.session_id);
         assert_eq!(session.current_url, "https://example.com");
         assert_eq!(session.page_title, "Example");
+    }
+
+    #[tokio::test]
+    async fn manager_close_session_removes_session_and_shuts_it_down() {
+        let shutdowns = Arc::new(StdMutex::new(Vec::new()));
+        let manager = ChromeManager::new_for_test(Arc::new(
+            FakeBrowserBackend::default()
+                .with_shutdowns(Arc::clone(&shutdowns))
+                .with_page(
+                    "https://example.com",
+                    "https://example.com",
+                    "Example",
+                    Vec::new(),
+                    "Example text",
+                ),
+        ));
+
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        manager.close_session(&opened.session_id).await.unwrap();
+
+        let err = manager.session(&opened.session_id).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SessionNotFound { .. }));
+        assert_eq!(
+            shutdowns.lock().unwrap().as_slice(),
+            &["https://example.com".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn manager_restart_returns_fresh_session_and_removes_previous_one() {
+        let manager = ChromeManager::new_for_test(sample_backend());
+
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let restarted = manager
+            .restart(&opened.session_id, "https://example.org")
+            .await
+            .unwrap();
+
+        assert_ne!(opened.session_id, restarted.session_id);
+        assert_eq!(restarted.final_url, "https://example.org/home");
+        let err = manager.session(&opened.session_id).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SessionNotFound { .. }));
+        let new_session = manager.session(&restarted.session_id).await.unwrap();
+        assert_eq!(new_session.current_url, "https://example.org/home");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manager_restart_shuts_down_shared_driver_process() {
+        let host = Arc::new(SystemChromeHost::default());
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let shared_process = Arc::new(ChromeDriverProcess::new(
+            child,
+            9515,
+            Path::new("/tmp/chromedriver-v1").to_path_buf(),
+        ));
+        *host.driver_process.write().await = Some(Arc::clone(&shared_process));
+
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        let installer = Arc::new(ChromeInstaller::new(
+            paths.clone(),
+            Arc::new(PanicDownloader),
+        ));
+        let host_trait: Arc<dyn ChromeHost> = host.clone();
+        let manager = ChromeManager::new_with_session_limit(
+            sample_backend(),
+            Some(ManagedChromeSupport {
+                host: host_trait,
+                installer,
+                shared_host: Some(host.clone()),
+            }),
+            paths,
+            ChromeManager::PRODUCTION_SESSION_LIMIT,
+        );
+
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .unwrap();
+
+        let restarted = manager
+            .restart(&opened.session_id, "https://example.org")
+            .await
+            .unwrap();
+
+        assert!(!shared_process.is_alive().await);
+        assert_eq!(restarted.final_url, "https://example.org/home");
     }
 
     #[tokio::test]

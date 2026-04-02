@@ -13,6 +13,8 @@ pub enum ChromeAction {
     Install,
     Open,
     Navigate,
+    Close,
+    Restart,
     Wait,
     ExtractText,
     ListLinks,
@@ -35,6 +37,8 @@ impl ChromeAction {
             Self::Install => "install",
             Self::Open => "open",
             Self::Navigate => "navigate",
+            Self::Close => "close",
+            Self::Restart => "restart",
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
             Self::ListLinks => "list_links",
@@ -97,6 +101,14 @@ impl ChromeToolArgs {
             }
             ChromeAction::Navigate => {
                 validate_for_navigate(&mut args)?;
+            }
+            ChromeAction::Close => {
+                require_session_id(&args)?;
+                validate_for_close(&args)?;
+            }
+            ChromeAction::Restart => {
+                require_session_id(&args)?;
+                validate_for_restart(&mut args)?;
             }
             ChromeAction::Wait => {
                 require_session_id(&args)?;
@@ -235,6 +247,10 @@ fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     allow_only_fields(args, &["session_id", "timeout_ms"])
 }
 
+fn validate_for_close(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    allow_only_fields(args, &["session_id"])
+}
+
 fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
     let url = args
         .url
@@ -244,6 +260,21 @@ fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
             field: "url",
         })?;
     allow_only_fields(args, &["url"])?;
+    let url = validate_url_for_action(args.action.as_str(), url)?;
+    args.url = Some(url);
+    Ok(())
+}
+
+fn validate_for_restart(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
+    require_session_id(args)?;
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| ChromeToolError::MissingRequiredField {
+            action: args.action.as_str().to_string(),
+            field: "url",
+        })?;
+    allow_only_fields(args, &["session_id", "url"])?;
     let url = validate_url_for_action(args.action.as_str(), url)?;
     args.url = Some(url);
     Ok(())

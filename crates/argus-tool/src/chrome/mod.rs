@@ -214,6 +214,44 @@ mod tests {
     }
 
     #[test]
+    fn close_requires_session_id() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "close",
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::MissingRequiredField { action, field }
+            if action == "close" && field == "session_id"
+        ));
+    }
+
+    #[test]
+    fn restart_requires_session_id_and_url() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "restart",
+            "url": "https://example.com",
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::MissingRequiredField { action, field }
+            if action == "restart" && field == "session_id"
+        ));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "restart",
+            "session_id": "session-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::MissingRequiredField { action, field }
+            if action == "restart" && field == "url"
+        ));
+    }
+
+    #[test]
     fn click_is_rejected_by_policy() {
         let err = ExplorePolicy::readonly()
             .validate_action(ChromeAction::Click)
@@ -244,6 +282,7 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("explicit driver install"));
+        assert!(def.description.contains("shared browser session"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
             .as_array()
@@ -259,6 +298,8 @@ mod tests {
         assert!(action_values.contains(&"get_dom_summary"));
         assert!(action_values.contains(&"network_requests"));
         assert!(action_values.contains(&"install"));
+        assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"restart"));
         assert!(!action_values.contains(&"click"));
 
         assert!(def.parameters["properties"].get("session_id").is_some());
@@ -273,6 +314,7 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("interactive"));
+        assert!(def.description.contains("shared browser session"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
             .as_array()
@@ -286,6 +328,8 @@ mod tests {
         assert!(action_values.contains(&"get_url"));
         assert!(action_values.contains(&"get_cookies"));
         assert!(action_values.contains(&"install"));
+        assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"restart"));
         assert!(def.parameters["properties"].get("text").is_some());
     }
 
@@ -397,6 +441,134 @@ mod tests {
             .await
             .expect("network_requests should succeed");
         assert!(network["requests"].is_array());
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_close_shuts_down_session() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default().with_page(
+            "https://example.com",
+            "https://example.com/landing",
+            "Example Title",
+            vec![],
+            "Visible page text",
+        )));
+
+        let open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("open should succeed");
+        let session_id = open["session_id"].as_str().unwrap().to_string();
+
+        let close = tool
+            .execute(
+                json!({
+                    "action": "close",
+                    "session_id": session_id,
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("close should succeed");
+        assert_eq!(close["status"], "ok");
+
+        let err = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                    "session_id": open["session_id"].as_str().unwrap(),
+                }),
+                make_ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("session not found")
+        ));
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_restart_returns_fresh_session() {
+        let tool = ChromeTool::new_for_test(Arc::new(
+            FakeChromeBackend::default()
+                .with_page(
+                    "https://example.com/one",
+                    "https://example.com/one",
+                    "One",
+                    vec![],
+                    "One text",
+                )
+                .with_page(
+                    "https://example.com/two",
+                    "https://example.com/two",
+                    "Two",
+                    vec![],
+                    "Two text",
+                ),
+        ));
+
+        let open = tool
+            .execute(
+                json!({
+                    "action": "open",
+                    "url": "https://example.com/one"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("open should succeed");
+        let first_session_id = open["session_id"].as_str().unwrap().to_string();
+
+        let restarted = tool
+            .execute(
+                json!({
+                    "action": "restart",
+                    "session_id": first_session_id,
+                    "url": "https://example.com/two",
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("restart should succeed");
+
+        let second_session_id = restarted["session_id"].as_str().unwrap();
+        assert_ne!(open["session_id"], restarted["session_id"]);
+        assert_eq!(restarted["final_url"], "https://example.com/two");
+
+        let err = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                    "session_id": open["session_id"].as_str().unwrap(),
+                }),
+                make_ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("session not found")
+        ));
+
+        let extract = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                    "session_id": second_session_id,
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("new session should stay alive");
+        assert_eq!(extract["content"], "Two text");
     }
 
     #[tokio::test]
