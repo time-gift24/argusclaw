@@ -7,7 +7,7 @@ use derive_builder::Builder;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::command::ThreadRuntimeSnapshot;
-use crate::turn::TurnCancellation;
+use crate::turn::{TurnCancellation, TurnSharedContext};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
@@ -262,8 +262,9 @@ pub struct Thread {
     /// LLM provider (required, injected by Session).
     provider: Arc<dyn LlmProvider>,
 
-    /// Tool manager.
+    /// Tool manager retained as thread-owned configuration.
     #[builder(default = "Arc::new(ToolManager::new())")]
+    #[allow(dead_code)]
     tool_manager: Arc<ToolManager>,
 
     /// Compactor for managing context size.
@@ -271,6 +272,7 @@ pub struct Thread {
 
     /// Hook registry for lifecycle events (optional).
     #[builder(default, setter(strip_option))]
+    #[allow(dead_code)]
     hooks: Option<Arc<HookRegistry>>,
 
     /// Thread configuration.
@@ -316,6 +318,12 @@ pub struct Thread {
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
+
+    /// Shared tool set reused by all turns in this thread.
+    shared_turn_tools: Arc<Vec<Arc<dyn NamedTool>>>,
+
+    /// Shared hook set reused by all turns in this thread.
+    shared_turn_hooks: Arc<Vec<Arc<dyn HookHandler>>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -374,6 +382,11 @@ impl ThreadBuilder {
 
         let agent_record = self.agent_record.ok_or(ThreadError::AgentRecordNotSet)?;
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
+        let tool_manager = self
+            .tool_manager
+            .unwrap_or_else(|| Arc::new(ToolManager::new()));
+        let hooks = self.hooks.flatten();
+        let plan_store = self.plan_store.unwrap_or_default();
         let turns = self.turns.unwrap_or_default();
         let current_turn = self.current_turn.flatten();
 
@@ -402,6 +415,9 @@ impl ThreadBuilder {
         if let Some(committed_messages) = cached_committed_messages.as_ref() {
             messages = Arc::clone(committed_messages);
         }
+        let shared_turn_tools =
+            Thread::build_shared_turn_tools(agent_record.as_ref(), &tool_manager, &plan_store);
+        let shared_turn_hooks = Thread::build_shared_turn_hooks(hooks.as_ref(), &plan_store);
 
         Ok(Thread {
             id: self.id.unwrap_or_default(),
@@ -417,11 +433,11 @@ impl ThreadBuilder {
             cached_committed_messages,
             compaction_checkpoint: self.compaction_checkpoint.flatten(),
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
-            tool_manager: self
-                .tool_manager
-                .unwrap_or_else(|| Arc::new(ToolManager::new())),
+            shared_turn_tools,
+            shared_turn_hooks,
+            tool_manager,
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
-            hooks: self.hooks.flatten(),
+            hooks,
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
@@ -432,7 +448,7 @@ impl ThreadBuilder {
             control_tx,
             control_rx: Some(control_rx),
             mailbox: Arc::new(Mutex::new(ThreadMailbox::default())),
-            plan_store: self.plan_store.unwrap_or_default(),
+            plan_store,
         })
     }
 }
@@ -896,37 +912,11 @@ impl Thread {
             .current_turn
             .as_ref()
             .map_or_else(Vec::new, |turn| turn.pending_messages.clone());
-        let shared_messages = self.build_turn_context();
-
-        // Thread is responsible for building: collect tools and hooks
-        // Filter tools by agent_record.tool_names; empty means no tools
-        let enabled_tool_names = agent_record
-            .tool_names
-            .iter()
-            .collect::<std::collections::HashSet<_>>();
-        let mut tools: Vec<Arc<dyn NamedTool>> = self
-            .tool_manager
-            .list_ids()
-            .iter()
-            .filter(|name| enabled_tool_names.contains(name))
-            .filter_map(|name| self.tool_manager.get(name))
-            .collect();
-
-        // Append UpdatePlanTool with the thread's plan store
-        tools.push(Arc::new(UpdatePlanTool::new(Arc::new(
-            self.plan_store.clone(),
-        ))));
-
-        let mut hooks: Vec<Arc<dyn HookHandler>> = self
-            .hooks
-            .as_ref()
-            .map(|registry| registry.all_handlers())
-            .unwrap_or_default();
-        hooks.push(Arc::new(PlanContinuationHook::new(Arc::new(
-            self.plan_store.clone(),
-        ))));
-        let tools = Arc::new(tools);
-        let hooks = Arc::new(hooks);
+        let shared = Arc::new(TurnSharedContext::new(
+            self.build_turn_context(),
+            Arc::clone(&self.shared_turn_tools),
+            Arc::clone(&self.shared_turn_hooks),
+        ));
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
@@ -936,11 +926,9 @@ impl Thread {
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
             .session_id(self.session_id)
-            .shared_messages(shared_messages)
+            .shared(shared)
             .pending_messages(pending_messages)
             .provider(self.provider.clone())
-            .shared_tools(tools)
-            .shared_hooks(hooks)
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
@@ -960,6 +948,40 @@ impl Thread {
             .take_while(|message| message.role == argus_protocol::llm::Role::System)
             .cloned()
             .collect()
+    }
+
+    fn build_shared_turn_tools(
+        agent_record: &AgentRecord,
+        tool_manager: &Arc<ToolManager>,
+        plan_store: &FilePlanStore,
+    ) -> Arc<Vec<Arc<dyn NamedTool>>> {
+        let enabled_tool_names = agent_record
+            .tool_names
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let mut tools: Vec<Arc<dyn NamedTool>> = Vec::new();
+        let plan_tool: Arc<dyn NamedTool> =
+            Arc::new(UpdatePlanTool::new(Arc::new(plan_store.clone())));
+        tools.extend(
+            tool_manager
+                .list_ids()
+                .iter()
+                .filter(|name| enabled_tool_names.contains(name))
+                .filter_map(|name| tool_manager.get(name)),
+        );
+        tools.push(plan_tool);
+        Arc::new(tools)
+    }
+
+    fn build_shared_turn_hooks(
+        hooks: Option<&Arc<HookRegistry>>,
+        plan_store: &FilePlanStore,
+    ) -> Arc<Vec<Arc<dyn HookHandler>>> {
+        let mut shared_hooks = hooks.map(|registry| registry.all_handlers()).unwrap_or_default();
+        let continuation_hook: Arc<dyn HookHandler> =
+            Arc::new(PlanContinuationHook::new(Arc::new(plan_store.clone())));
+        shared_hooks.push(continuation_hook);
+        Arc::new(shared_hooks)
     }
 
     fn sync_cached_history_from_flat_messages(&mut self) {
