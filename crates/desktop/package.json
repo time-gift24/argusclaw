@@ -5,12 +5,12 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "node --test tests/*.mjs && tsx --test tests/router-smoke.test.tsx",
     "test:router": "tsx --test tests/router-smoke.test.tsx",
-    "tauri": "node ./scripts/tauri.mjs"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.12.17",
