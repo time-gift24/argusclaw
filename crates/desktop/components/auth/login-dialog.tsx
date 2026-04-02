@@ -1,14 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useNavigate } from 'react-router-dom';
 import { User, Lock, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -36,7 +35,7 @@ const getLoginErrorMessage = (message?: string): string => {
 };
 
 export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const { checkHasUser, setupAccount, login } = useAuthStore();
   const { showToast } = useLoginToastStore();
   const [username, setUsername] = useState('');
@@ -73,7 +72,7 @@ export function LoginDialog({ open, onOpenChange }: LoginDialogProps) {
         setUsername('');
         setPassword('');
         showToast('登录成功', 'success');
-        router.push('/settings/providers/edit?id=1');
+        navigate('/settings/providers/edit?id=1');
       } else {
         setError(getLoginErrorMessage(result.error));
       }

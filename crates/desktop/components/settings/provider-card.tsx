@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Cloud, Pencil, Trash2, Check, Activity, Globe, Cpu } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -40,7 +40,7 @@ export function ProviderCard({
   testResult,
   isTesting = false,
 }: ProviderCardProps) {
-  const router = useRouter();
+  const navigate = useNavigate();
   const isSuccess = testResult?.status === "success";
   const isFailure = !!testResult && failureStatuses.has(testResult.status);
   const requiresReentry = provider.secret_status === "requires_reentry";
@@ -155,7 +155,7 @@ export function ProviderCard({
               variant="ghost"
               size="icon"
               className="h-8 w-8 rounded-lg hover:bg-muted/80 transition-colors"
-              onClick={() => router.push(`/settings/providers/edit?id=${provider.id}`)}
+              onClick={() => navigate(`/settings/providers/edit?id=${provider.id}`)}
             >
               <Pencil className="h-3.5 w-3.5" />
               <span className="sr-only">编辑</span>

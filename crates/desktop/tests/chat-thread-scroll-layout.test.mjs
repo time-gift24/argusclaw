@@ -36,8 +36,10 @@ test("thread keeps the scroll-to-bottom control inside the assistant-ui viewport
 });
 
 test("desktop layout constrains the chat surface to the Tauri window", () => {
-  assert.match(layoutSource, /className=\"h-full antialiased font-sans\"/);
-  assert.match(layoutSource, /<body className=\"flex h-dvh min-h-dvh flex-col overflow-hidden\">/);
+  assert.match(
+    layoutSource,
+    /className="flex h-dvh min-h-dvh flex-col overflow-hidden font-sans antialiased"/,
+  );
   assert.match(layoutSource, /<DashboardShell navigationItems=\{navigationItems\}>/);
   assert.match(
     dashboardShellSource,

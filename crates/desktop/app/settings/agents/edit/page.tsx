@@ -1,10 +1,10 @@
 'use client'
 
-import { Suspense, useMemo } from "react"
-import { useSearchParams } from "next/navigation"
+import { useMemo } from "react"
+import { useSearchParams } from "react-router-dom"
 import { AgentEditor } from "@/components/settings"
 
-function EditAgentContent() {
+export default function EditAgentPage() {
   const searchParams = useSearchParams()
   const agentId = useMemo(() => {
     const id = searchParams.get("id")
@@ -12,18 +12,4 @@ function EditAgentContent() {
   }, [searchParams])
 
   return <AgentEditor agentId={agentId} />
-}
-
-export default function EditAgentPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center h-64">
-          <div className="text-muted-foreground">加载中...</div>
-        </div>
-      }
-    >
-      <EditAgentContent />
-    </Suspense>
-  )
 }

@@ -83,7 +83,7 @@ function displaySessionName(session: SessionSummary): string {
 }
 
 function displayThreadName(thread: ThreadSummary): string {
-  return thread.title && thread.title.trim() ? thread.title : thread.thread_id;
+  return thread.title?.trim() ? thread.title : thread.thread_id;
 }
 
 function getContextMenuPosition(x: number, y: number) {
@@ -457,7 +457,7 @@ export function SessionHistoryButton() {
                               kind: "thread",
                               sessionId: selectedSessionId,
                               threadId: thread.thread_id,
-                              currentValue: thread.title ?? "",
+                              currentValue: displayThreadName(thread),
                               x: position.x,
                               y: position.y,
                             });
@@ -477,9 +477,7 @@ export function SessionHistoryButton() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-2">
                                 <span className="truncate text-sm font-semibold">
-                                  {thread.title && thread.title.trim()
-                                    ? thread.title
-                                    : thread.thread_id}
+                                  {displayThreadName(thread)}
                                 </span>
                                 {isActiveThread ? (
                                   <Check className="size-3.5 shrink-0 text-primary" />

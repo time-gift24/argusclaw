@@ -1,6 +1,5 @@
 "use client"
 
-import type { ReactNode } from "react"
 import { Bot, Pencil, Trash2 } from "lucide-react"
 import type { LlmProviderSummary } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"

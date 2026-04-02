@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CircleAlert, CircleCheckBig, Loader2, Activity, Globe, Cpu, Clock, MessageSquare, Terminal } from "lucide-react";
+import { CircleAlert, CircleCheckBig, Loader2, Activity, Cpu, Clock, MessageSquare, Terminal } from "lucide-react";
 import type { LlmProviderSummary, ProviderTestResult } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,8 +14,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
-  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
@@ -68,8 +66,6 @@ export function ProviderTestDialog({
     : isSuccess
       ? "连接成功"
       : "连接失败";
-
-  const displayModel = selectedModel ?? provider?.default_model ?? result?.model ?? "-";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
