@@ -1066,6 +1066,37 @@ mod tests {
         .expect("thread should emit idle");
     }
 
+    async fn collect_runtime_terminal_events(
+        thread: &Arc<tokio::sync::RwLock<Thread>>,
+        expected_count: usize,
+    ) -> Vec<ThreadEvent> {
+        let mut rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+        let mut events = Vec::with_capacity(expected_count);
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(event @ ThreadEvent::TurnCompleted { .. })
+                    | Ok(event @ ThreadEvent::TurnFailed { .. })
+                    | Ok(event @ ThreadEvent::TurnSettled { .. })
+                    | Ok(event @ ThreadEvent::Idle { .. }) => {
+                        events.push(event);
+                        if events.len() >= expected_count {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("thread should emit terminal events");
+        events
+    }
+
     #[test]
     fn thread_builder_requires_provider() {
         let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
@@ -1317,7 +1348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_actor_emits_turn_settled_after_completed_turn() {
+    async fn runtime_actor_emits_turn_settled_before_idle_after_completed_turn() {
         let provider = Arc::new(SequencedProvider::new(
             Duration::from_millis(20),
             vec![ResponsePlan::Ok("settled reply".to_string())],
@@ -1333,11 +1364,110 @@ mod tests {
                 .expect("message should queue");
         }
 
-        wait_for_idle_events(&thread, 1).await;
+        let events = collect_runtime_terminal_events(&thread, 3).await;
+        assert!(matches!(events[0], ThreadEvent::TurnCompleted { .. }));
+        assert!(matches!(events[1], ThreadEvent::TurnSettled { .. }));
+        assert!(matches!(events[2], ThreadEvent::Idle { .. }));
 
         let guard = thread.read().await;
         assert_eq!(guard.turn_count(), 1);
         assert!(guard.token_count() > 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_emits_turn_settled_before_idle_after_failed_turn() {
+        let thread = build_test_thread_with_provider(Arc::new(DummyProvider));
+
+        Thread::spawn_runtime_actor(Arc::clone(&thread));
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("fail this turn".to_string(), None)
+                .expect("message should queue");
+        }
+
+        let events = collect_runtime_terminal_events(&thread, 3).await;
+        assert!(matches!(events[0], ThreadEvent::TurnFailed { .. }));
+        assert!(matches!(events[1], ThreadEvent::TurnSettled { .. }));
+        assert!(matches!(events[2], ThreadEvent::Idle { .. }));
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_does_not_start_follow_up_turn_before_prior_settlement() {
+        let provider = Arc::new(SequencedProvider::new(
+            Duration::from_millis(120),
+            vec![
+                ResponsePlan::Ok("first turn reply".to_string()),
+                ResponsePlan::Ok("second turn reply".to_string()),
+            ],
+        ));
+        let thread = build_test_thread_with_provider(provider.clone());
+
+        Thread::spawn_runtime_actor(Arc::clone(&thread));
+
+        let mut rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("first queued".to_string(), None)
+                .expect("first message should queue");
+        }
+
+        sleep(Duration::from_millis(20)).await;
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("second queued".to_string(), None)
+                .expect("second message should queue");
+        }
+
+        let first_terminal_turn = timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ThreadEvent::TurnCompleted { turn_number, .. })
+                    | Ok(ThreadEvent::TurnFailed { turn_number, .. }) => break turn_number,
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("thread should emit a terminal turn event");
+
+        assert_eq!(
+            provider.captured_user_inputs().len(),
+            1,
+            "queued follow-up work must not start before the first turn settles",
+        );
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ThreadEvent::TurnSettled { turn_number, .. })
+                        if turn_number == first_terminal_turn =>
+                    {
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        })
+        .await
+        .expect("first turn should settle");
+
+        wait_for_idle_events(&thread, 2).await;
+
+        let captured = provider.captured_user_inputs();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0], "first queued");
+        assert_eq!(captured[1], "second queued");
     }
 
     #[tokio::test]
