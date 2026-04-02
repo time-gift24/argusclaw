@@ -7,17 +7,17 @@ use tokio::time::{Duration, sleep, timeout};
 
 use argus_agent::trace::TraceConfig;
 use argus_agent::turn_log_store::{
-    read_turn_meta, read_turn_messages, turn_messages_path, turn_meta_path, turns_dir,
+    read_turn_messages, read_turn_meta, turn_messages_path, turn_meta_path, turns_dir,
 };
 use argus_agent::{
     CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
     TurnConfigBuilder,
 };
-use argus_protocol::{AgentRecord, SessionId, ThreadEvent};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent,
 };
+use argus_protocol::{AgentRecord, SessionId, ThreadEvent};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -301,6 +301,9 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     assert_eq!(messages[0].content, "Hello");
     assert_eq!(messages[1].content, "Hello, world!");
     assert_eq!(meta.turn_number, 1);
-    assert!(matches!(meta.state, argus_agent::history::TurnState::Completed));
+    assert!(matches!(
+        meta.state,
+        argus_agent::history::TurnState::Completed
+    ));
     assert!(meta.token_usage.is_some());
 }

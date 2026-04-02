@@ -22,8 +22,8 @@ use super::compact::Compactor;
 use super::config::ThreadConfig;
 use super::error::ThreadError;
 use super::history::{
-    flatten_turn_messages, CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, TurnRecord,
-    TurnState,
+    CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, TurnRecord, TurnState,
+    flatten_turn_messages,
 };
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
@@ -302,7 +302,6 @@ pub struct Thread {
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
-
 }
 
 impl std::fmt::Debug for Thread {
@@ -315,7 +314,10 @@ impl std::fmt::Debug for Thread {
             .field("messages", &self.messages.len())
             .field(
                 "cached_committed_messages",
-                &self.cached_committed_messages.as_ref().map_or(0, |messages| messages.len()),
+                &self
+                    .cached_committed_messages
+                    .as_ref()
+                    .map_or(0, |messages| messages.len()),
             )
             .field("turns", &self.turns.len())
             .field("token_count", &self.token_count)
@@ -367,7 +369,8 @@ impl ThreadBuilder {
             .first()
             .is_some_and(|m| m.role == argus_protocol::llm::Role::System);
         if !has_system_message && !agent_record.system_prompt.is_empty() {
-            Arc::make_mut(&mut messages).insert(0, ChatMessage::system(&agent_record.system_prompt));
+            Arc::make_mut(&mut messages)
+                .insert(0, ChatMessage::system(&agent_record.system_prompt));
         }
 
         let system_messages = Thread::collect_system_messages(messages.as_slice());
@@ -530,10 +533,7 @@ impl Thread {
         self.active_turn_cancellation.clone()
     }
 
-    pub(crate) fn set_active_turn_cancellation(
-        &mut self,
-        cancellation: Option<TurnCancellation>,
-    ) {
+    pub(crate) fn set_active_turn_cancellation(&mut self, cancellation: Option<TurnCancellation>) {
         self.active_turn_cancellation = cancellation;
     }
 
@@ -726,7 +726,8 @@ impl Thread {
                 .iter()
                 .zip(pending_messages.iter())
                 .all(|(message, pending_message)| {
-                    message.role == pending_message.role && message.content == pending_message.content
+                    message.role == pending_message.role
+                        && message.content == pending_message.content
                 })
     }
     /// Send a user message into the pipe for processing.
@@ -1925,12 +1926,7 @@ mod tests {
             ChatMessage::assistant("history reply"),
             ChatMessage::user(repeated),
         ];
-        thread.hydrate_from_persisted_state(
-            persisted_messages,
-            90,
-            0,
-            Utc::now(),
-        );
+        thread.hydrate_from_persisted_state(persisted_messages, 90, 0, Utc::now());
         let before = thread.history().to_vec();
 
         let _turn = thread
@@ -1962,12 +1958,7 @@ mod tests {
             ChatMessage::user("old question"),
             ChatMessage::assistant("old answer"),
         ];
-        thread.hydrate_from_persisted_state(
-            persisted_messages,
-            90,
-            0,
-            Utc::now(),
-        );
+        thread.hydrate_from_persisted_state(persisted_messages, 90, 0, Utc::now());
 
         let _turn = thread
             .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
@@ -2141,7 +2132,10 @@ mod tests {
 
         assert_eq!(thread.token_count(), authoritative_token_count);
         assert_eq!(thread.turns.len(), 1);
-        assert!(matches!(thread.turns[0].state, crate::history::TurnState::Cancelled));
+        assert!(matches!(
+            thread.turns[0].state,
+            crate::history::TurnState::Cancelled
+        ));
         assert_eq!(thread.turns[0].messages.len(), 1);
         assert_eq!(thread.turns[0].messages[0].content, next_message);
     }
@@ -2164,10 +2158,7 @@ mod tests {
             .expect("turn should build");
         thread
             .finish_turn(Ok(TurnOutput {
-                appended_messages: vec![
-                    ChatMessage::user("next"),
-                    ChatMessage::assistant("done"),
-                ],
+                appended_messages: vec![ChatMessage::user("next"), ChatMessage::assistant("done")],
                 token_usage: argus_protocol::TokenUsage {
                     input_tokens: 1,
                     output_tokens: 1,
@@ -2235,7 +2226,10 @@ mod tests {
         assert_eq!(messages[1].content, "hello");
         assert_eq!(meta.turn_number, 1);
         assert!(matches!(meta.state, crate::history::TurnState::Completed));
-        assert_eq!(meta.token_usage.as_ref().map(|usage| usage.total_tokens), Some(2));
+        assert_eq!(
+            meta.token_usage.as_ref().map(|usage| usage.total_tokens),
+            Some(2)
+        );
     }
 
     #[tokio::test]
@@ -2255,10 +2249,12 @@ mod tests {
 
         assert!(matches!(result, Err(ThreadError::TurnFailed(_))));
         assert_eq!(thread.turns.len(), 1);
-        assert!(matches!(thread.turns[0].state, crate::history::TurnState::Failed));
+        assert!(matches!(
+            thread.turns[0].state,
+            crate::history::TurnState::Failed
+        ));
         assert_eq!(thread.turns[0].messages.len(), 1);
         assert_eq!(thread.turns[0].messages[0].content, "hi");
         assert_eq!(thread.token_count(), 0);
     }
-
 }

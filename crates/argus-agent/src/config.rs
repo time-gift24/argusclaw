@@ -311,5 +311,4 @@ mod tests {
             .unwrap();
         assert_eq!(output.token_usage, token_usage);
     }
-
 }

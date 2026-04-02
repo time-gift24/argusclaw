@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::turn::TurnCancellation;
 use crate::turn_log_store::persist_turn_log_snapshot;
 use argus_protocol::{MessageOverride, ThreadCommand, ThreadControlEvent, ThreadRuntimeState};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::error::ThreadError;
 use crate::thread::Thread;
@@ -203,8 +203,8 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use std::sync::Arc;
-    use tokio::sync::{oneshot, RwLock};
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::sync::{RwLock, oneshot};
+    use tokio::time::{Duration, sleep, timeout};
 
     struct DummyProvider;
 

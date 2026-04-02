@@ -1,4 +1,4 @@
-use argus_protocol::{llm::ChatMessage, TokenUsage};
+use argus_protocol::{TokenUsage, llm::ChatMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +72,7 @@ pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {
 mod tests {
     use argus_protocol::llm::ChatMessage;
 
-    use super::{flatten_turn_messages, TurnRecord};
+    use super::{TurnRecord, flatten_turn_messages};
 
     #[test]
     fn flatten_committed_messages_skips_inflight_turn() {

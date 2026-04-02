@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use argus_protocol::{llm::ChatMessage, TokenUsage};
+use argus_protocol::{TokenUsage, llm::ChatMessage};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;

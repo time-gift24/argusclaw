@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::turn_log_store::read_turn_record;
 use argus_agent::tool_context::current_agent_id;
+use argus_agent::turn_log_store::read_turn_record;
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
@@ -1086,33 +1086,37 @@ impl SessionManager {
         self.load(session_id).await?;
         if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
-            let (messages, turn_count, token_count) = if thread.has_non_system_history()
-                || thread.turn_count() > 0
-            {
-                (
-                    thread.history().to_vec(),
-                    thread.turn_count(),
-                    thread.token_count(),
-                )
-            } else {
-                let recovered = recover_thread_state_from_trace(
-                    &self.trace_dir,
-                    &session_id,
-                    thread_id,
-                    Some(thread.turn_count()),
-                )
-                .await?;
-                (
-                    if recovered.messages.is_empty() {
-                        thread.history().to_vec()
-                    } else {
-                        recovered.messages
-                    },
-                    thread.turn_count().max(recovered.turn_count),
-                    thread.token_count().max(recovered.token_count),
-                )
-            };
-            return Ok((messages, turn_count, token_count, thread.plan().len() as u32));
+            let (messages, turn_count, token_count) =
+                if thread.has_non_system_history() || thread.turn_count() > 0 {
+                    (
+                        thread.history().to_vec(),
+                        thread.turn_count(),
+                        thread.token_count(),
+                    )
+                } else {
+                    let recovered = recover_thread_state_from_trace(
+                        &self.trace_dir,
+                        &session_id,
+                        thread_id,
+                        Some(thread.turn_count()),
+                    )
+                    .await?;
+                    (
+                        if recovered.messages.is_empty() {
+                            thread.history().to_vec()
+                        } else {
+                            recovered.messages
+                        },
+                        thread.turn_count().max(recovered.turn_count),
+                        thread.token_count().max(recovered.token_count),
+                    )
+                };
+            return Ok((
+                messages,
+                turn_count,
+                token_count,
+                thread.plan().len() as u32,
+            ));
         }
 
         let thread_record = self
@@ -1342,12 +1346,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use argus_agent::history::TurnState;
     use argus_agent::turn_log_store::{
-        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
-        write_turn_meta,
+        turn_messages_path, turn_meta_path, turns_dir, write_turn_messages, write_turn_meta,
+        TurnLogMeta,
     };
     use argus_agent::{CompactResult, Compactor, ThreadBuilder};
-    use argus_agent::history::TurnState;
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
     };
@@ -1899,7 +1903,10 @@ mod tests {
         assert_eq!(turn_count, 2);
         assert_eq!(token_count, 6);
         assert_eq!(messages.len(), 4);
-        assert_eq!(messages.last().map(|message| message.content.as_str()), Some("done"));
+        assert_eq!(
+            messages.last().map(|message| message.content.as_str()),
+            Some("done")
+        );
     }
 
     #[tokio::test]
@@ -1945,7 +1952,10 @@ mod tests {
         .expect("turn one meta should write");
         write_turn_messages(
             &turn_messages_path(&turn_logs_dir, 2),
-            &[ChatMessage::user("用户问题二"), ChatMessage::assistant("总结二")],
+            &[
+                ChatMessage::user("用户问题二"),
+                ChatMessage::assistant("总结二"),
+            ],
         )
         .await
         .expect("turn two messages should write");
@@ -2098,10 +2108,9 @@ mod tests {
         );
         fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        for (turn_number, user, assistant, total_tokens) in [
-            (1, "hi", "hello", 15),
-            (2, "again", "welcome back", 28),
-        ] {
+        for (turn_number, user, assistant, total_tokens) in
+            [(1, "hi", "hello", 15), (2, "again", "welcome back", 28)]
+        {
             write_turn_messages(
                 &turn_messages_path(&turn_logs_dir, turn_number),
                 &[ChatMessage::user(user), ChatMessage::assistant(assistant)],

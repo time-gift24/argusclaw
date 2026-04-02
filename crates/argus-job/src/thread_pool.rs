@@ -2317,7 +2317,8 @@ pub(crate) fn noop_compactor() -> Arc<dyn Compactor> {
             _provider: &dyn argus_protocol::LlmProvider,
             _messages: &[argus_protocol::llm::ChatMessage],
             _token_count: u32,
-        ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError> {
+        ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError>
+        {
             Ok(None)
         }
 
@@ -2363,13 +2364,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use argus_agent::TurnCancellation;
     use argus_agent::history::TurnState;
     use argus_agent::turn_log_store::{
         TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
         write_turn_meta,
     };
-    use argus_agent::TurnCancellation;
-    use chrono::Utc;
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
         LlmProviderRepository,
@@ -2391,6 +2391,7 @@ mod tests {
     use argus_template::TemplateManager;
     use argus_tool::ToolManager;
     use async_trait::async_trait;
+    use chrono::Utc;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
     use tokio::sync::{RwLock, Semaphore, broadcast, mpsc};

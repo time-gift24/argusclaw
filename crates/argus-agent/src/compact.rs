@@ -150,8 +150,7 @@ impl Compactor for LlmCompactor {
             return Ok(None);
         }
 
-        let Some((system_messages, compactable_messages)) =
-            Self::split_history_segments(messages)
+        let Some((system_messages, compactable_messages)) = Self::split_history_segments(messages)
         else {
             return Ok(None);
         };
@@ -174,22 +173,15 @@ impl Compactor for LlmCompactor {
             ChatMessageMetadataMode::CompactionPrompt,
             false,
         ));
-        let synthetic_summary =
-            ChatMessage::assistant(&summary).with_metadata(Self::compaction_metadata(
-                ChatMessageMetadataMode::CompactionSummary,
-                true,
-            ));
-        let synthetic_replay = ChatMessage::user("Continue the conversation using the summary above.")
-            .with_metadata(Self::compaction_metadata(
-            ChatMessageMetadataMode::CompactionReplay,
-            false,
-        ));
+        let synthetic_summary = ChatMessage::assistant(&summary).with_metadata(
+            Self::compaction_metadata(ChatMessageMetadataMode::CompactionSummary, true),
+        );
+        let synthetic_replay =
+            ChatMessage::user("Continue the conversation using the summary above.").with_metadata(
+                Self::compaction_metadata(ChatMessageMetadataMode::CompactionReplay, false),
+            );
 
-        let summary_messages = vec![
-            synthetic_prompt,
-            synthetic_summary,
-            synthetic_replay,
-        ];
+        let summary_messages = vec![synthetic_prompt, synthetic_summary, synthetic_replay];
 
         // Estimate new token count proportionally.
         let original_len = messages.len();
@@ -385,9 +377,11 @@ mod tests {
         // prompt + summary + replay = 3
         assert_eq!(result.summary_messages.len(), 3);
         assert_eq!(result.summary_messages[0].role, Role::User); // synthetic prompt
-        assert!(result.summary_messages[0]
-            .content
-            .contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(
+            result.summary_messages[0]
+                .content
+                .contains("Provide a detailed prompt for continuing our conversation above.")
+        );
         assert_eq!(result.summary_messages[1].content, "历史摘要");
         assert_eq!(result.summary_messages[2].role, Role::User); // synthetic replay
         assert_eq!(
@@ -442,7 +436,9 @@ mod tests {
         assert!(request.temperature.is_none());
         let prompt = &prompt_message.content;
 
-        assert!(prompt.contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(
+            prompt.contains("Provide a detailed prompt for continuing our conversation above.")
+        );
         assert!(prompt.contains("Do not call any tools."));
         assert!(prompt.contains("## Goal"));
         assert!(prompt.contains("## Relevant files / directories"));
@@ -480,9 +476,11 @@ mod tests {
         assert_eq!(request.messages[3].content, "recent question");
         assert_eq!(request.messages[4].content, "recent answer");
         assert_eq!(request.messages[5].role, Role::User);
-        assert!(request.messages[5]
-            .content
-            .contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(
+            request.messages[5]
+                .content
+                .contains("Provide a detailed prompt for continuing our conversation above.")
+        );
     }
 
     #[tokio::test]
