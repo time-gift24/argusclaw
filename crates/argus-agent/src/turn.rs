@@ -25,6 +25,48 @@ use argus_protocol::{
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
+/// Progress emitted while a turn is executing.
+#[derive(Debug, Clone)]
+pub enum TurnProgress {
+    /// A streamed LLM event.
+    LlmEvent(LlmStreamEvent),
+    /// A tool call has started.
+    ToolStarted {
+        tool_call_id: String,
+        tool_name: String,
+        arguments: serde_json::Value,
+    },
+    /// A tool call has completed.
+    ToolCompleted {
+        tool_call_id: String,
+        tool_name: String,
+        result: Result<serde_json::Value, String>,
+    },
+    /// The turn paused for approval.
+    WaitingForApproval {
+        thread_id: String,
+        turn_number: u32,
+        request: argus_protocol::ApprovalRequest,
+    },
+    /// The approval decision has resolved and the turn may continue.
+    ApprovalResolved {
+        thread_id: String,
+        turn_number: u32,
+        response: argus_protocol::ApprovalResponse,
+    },
+    /// The turn completed successfully.
+    Completed(TurnOutput),
+    /// The turn failed or was cancelled.
+    Failed { error: String },
+}
+
+/// Full execution result plus progress captured during the turn.
+#[derive(Debug)]
+pub struct TurnExecution {
+    pub progress: Vec<TurnProgress>,
+    pub result: Result<TurnOutput, TurnError>,
+}
+
 /// Cancellation primitive used to stop an active turn.
 ///
 /// This token is cloneable so the runtime can hold a handle to cancel the active
@@ -325,7 +367,6 @@ pub struct Turn {
     /// Event forwarder task handle (cleaned up on drop).
     #[builder(default)]
     _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
-
 }
 
 impl TurnBuilder {
@@ -376,31 +417,76 @@ impl std::fmt::Debug for Turn {
 }
 
 impl Turn {
-    fn materialize_messages(&self, pending_messages: &[ChatMessage]) -> Vec<ChatMessage> {
-        let mut messages =
-            Vec::with_capacity(self.messages.len().saturating_add(pending_messages.len()));
-        messages.extend(self.messages.iter().cloned());
-        messages.extend(pending_messages.iter().cloned());
-        messages
+    fn drain_thread_progress(
+        event_rx: &mut broadcast::Receiver<ThreadEvent>,
+        progress: &mut Vec<TurnProgress>,
+    ) {
+        loop {
+            match event_rx.try_recv() {
+                Ok(ThreadEvent::Processing { event, .. }) => {
+                    progress.push(TurnProgress::LlmEvent(event));
+                }
+                Ok(ThreadEvent::ToolStarted {
+                    tool_call_id,
+                    tool_name,
+                    arguments,
+                    ..
+                }) => {
+                    progress.push(TurnProgress::ToolStarted {
+                        tool_call_id,
+                        tool_name,
+                        arguments,
+                    });
+                }
+                Ok(ThreadEvent::ToolCompleted {
+                    tool_call_id,
+                    tool_name,
+                    result,
+                    ..
+                }) => {
+                    progress.push(TurnProgress::ToolCompleted {
+                        tool_call_id,
+                        tool_name,
+                        result,
+                    });
+                }
+                Ok(ThreadEvent::WaitingForApproval {
+                    thread_id,
+                    turn_number,
+                    request,
+                }) => {
+                    progress.push(TurnProgress::WaitingForApproval {
+                        thread_id,
+                        turn_number,
+                        request,
+                    });
+                }
+                Ok(ThreadEvent::ApprovalResolved {
+                    thread_id,
+                    turn_number,
+                    response,
+                }) => {
+                    progress.push(TurnProgress::ApprovalResolved {
+                        thread_id,
+                        turn_number,
+                        response,
+                    });
+                }
+                Ok(ThreadEvent::TurnCompleted { .. })
+                | Ok(ThreadEvent::TurnFailed { .. })
+                | Ok(ThreadEvent::Idle { .. })
+                | Ok(ThreadEvent::Compacted { .. }) => {
+                    // Terminal thread events are reflected in TurnProgress::Completed/Failed.
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => break,
+                _ => {}
+            }
+        }
     }
 
-    /// Execute the turn and return the output.
-    ///
-    /// This method:
-    /// 1. Spawns the event forwarder task
-    /// 2. Executes the main LLM -> Tool -> LLM loop
-    /// 3. Sends TurnCompleted/TurnFailed event
-    /// 4. Sends Idle event
-    /// 5. Returns TurnOutput with updated messages and token usage
-    ///
-    /// # Errors
-    ///
-    /// Returns `TurnError` for:
-    /// - LLM failures
-    /// - Tool execution failures
-    /// - Hook blocks
-    /// - Max iterations exceeded
-    pub async fn execute(mut self) -> Result<TurnOutput, TurnError> {
+    async fn execute_internal(mut self) -> Result<TurnOutput, TurnError> {
         // Spawn event forwarder — clone stream_tx so it lives in the forwarder task.
         // This prevents the channel from closing when the Turn is dropped.
         self._forwarder_handle = Some(Self::spawn_event_forwarder(
@@ -483,6 +569,56 @@ impl Turn {
         }
 
         result
+    }
+
+    fn materialize_messages(&self, pending_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let mut messages =
+            Vec::with_capacity(self.messages.len().saturating_add(pending_messages.len()));
+        messages.extend(self.messages.iter().cloned());
+        messages.extend(pending_messages.iter().cloned());
+        messages
+    }
+
+    /// Execute the turn and return captured progress plus the final output.
+    ///
+    /// This method executes the turn on a background task, collects the emitted
+    /// thread events as progress, and returns both the progress sequence and the
+    /// terminal result.
+    pub async fn execute_progress(self) -> TurnExecution {
+        let mut progress = Vec::new();
+        let mut event_rx = self.thread_event_tx.subscribe();
+        let handle = tokio::spawn(async move { self.execute_internal().await });
+
+        let result = match handle.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                let error =
+                    TurnError::BuildFailed(format!("turn execution task failed: {join_error}"));
+                progress.push(TurnProgress::Failed {
+                    error: error.to_string(),
+                });
+                return TurnExecution {
+                    progress,
+                    result: Err(error),
+                };
+            }
+        };
+
+        Self::drain_thread_progress(&mut event_rx, &mut progress);
+
+        match &result {
+            Ok(output) => progress.push(TurnProgress::Completed(output.clone())),
+            Err(error) => progress.push(TurnProgress::Failed {
+                error: error.to_string(),
+            }),
+        }
+
+        TurnExecution { progress, result }
+    }
+
+    /// Execute the turn and return the final output.
+    pub async fn execute(self) -> Result<TurnOutput, TurnError> {
+        self.execute_progress().await.result
     }
 
     /// Internal method: spawn event forwarder task.
@@ -589,9 +725,7 @@ impl Turn {
     /// Internal method: execute the main LLM -> Tool -> LLM loop.
     ///
     /// This is where the core execution logic lives.
-    async fn execute_loop(
-        &mut self,
-    ) -> Result<TurnOutput, TurnError> {
+    async fn execute_loop(&mut self) -> Result<TurnOutput, TurnError> {
         let mut pending_messages = std::mem::take(&mut self.pending_messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
@@ -680,12 +814,12 @@ impl Turn {
             );
 
             // Process response
-            let next_action = match self
-                .process_finish_reason(response, &mut pending_messages, &mut token_usage)
-            {
-                Ok(next_action) => next_action,
-                Err(error) => return Err(error),
-            };
+            let next_action =
+                match self.process_finish_reason(response, &mut pending_messages, &mut token_usage)
+                {
+                    Ok(next_action) => next_action,
+                    Err(error) => return Err(error),
+                };
             match next_action {
                 NextAction::Return(output) => {
                     // Fire TurnEnd hook
@@ -1048,8 +1182,7 @@ impl Turn {
             turn_number: Some(self.turn_number),
         };
 
-        if let Ok(HookAction::Block(ref reason)) = self.fire_hooks(&ctx).await
-        {
+        if let Ok(HookAction::Block(ref reason)) = self.fire_hooks(&ctx).await {
             // Hook blocked the tool call
             let content = format!("Tool call blocked: {}", reason);
 
@@ -1240,13 +1373,19 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::sync::{Arc, Mutex};
 
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId};
+    use argus_protocol::tool::{NamedTool, ToolError};
+    use argus_protocol::{
+        AgentId, AgentType, ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction,
+        HookEvent, HookHandler, ProviderId, RiskLevel, ThreadEvent, ToolExecutionContext,
+        ToolHookContext,
+    };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
-    use tokio::sync::broadcast;
+    use tokio::sync::{Mutex as TokioMutex, broadcast, oneshot};
 
     #[test]
     fn test_generate_turn_id() {
@@ -1315,6 +1454,87 @@ mod tests {
         }
     }
 
+    struct EchoTool;
+
+    #[async_trait]
+    impl NamedTool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn definition(&self) -> argus_protocol::llm::ToolDefinition {
+            argus_protocol::llm::ToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo back the input message".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                        }
+                    },
+                    "required": ["message"]
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            let message = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    tool_name: "echo".to_string(),
+                    reason: "Missing 'message' parameter".to_string(),
+                })?;
+
+            Ok(serde_json::json!({ "echoed": message }))
+        }
+    }
+
+    struct HangingStreamingProvider;
+
+    #[async_trait]
+    impl LlmProvider for HangingStreamingProvider {
+        fn model_name(&self) -> &str {
+            "hanging"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "hanging".to_string(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            let stream = futures_util::stream::unfold(0usize, |state| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Some((
+                    Ok(argus_protocol::llm::LlmStreamEvent::ContentDelta {
+                        delta: format!("tick-{}", state),
+                    }),
+                    state.saturating_add(1),
+                ))
+            });
+
+            Ok(Box::pin(stream))
+        }
+    }
+
     struct ContinueOnceTurnEndHook {
         used: Mutex<bool>,
     }
@@ -1349,6 +1569,71 @@ mod tests {
             if ctx.event == HookEvent::TurnEnd {
                 return HookAction::ContinueWithMessage("continue".to_string());
             }
+            HookAction::Continue
+        }
+    }
+
+    struct BlockingApprovalHook {
+        gate: Arc<TokioMutex<Option<oneshot::Receiver<()>>>>,
+    }
+
+    impl BlockingApprovalHook {
+        fn new(gate: oneshot::Receiver<()>) -> Self {
+            Self {
+                gate: Arc::new(TokioMutex::new(Some(gate))),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HookHandler for BlockingApprovalHook {
+        async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
+            if ctx.event != HookEvent::BeforeToolCall || ctx.tool_name != "echo" {
+                return HookAction::Continue;
+            }
+
+            let request = ApprovalRequest::new(
+                "test-agent".to_string(),
+                ctx.tool_name.clone(),
+                "pause for approval".to_string(),
+                60,
+                RiskLevel::High,
+            );
+
+            if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+                &ctx.thread_event_sender,
+                ctx.thread_id.clone(),
+                ctx.turn_number,
+            ) {
+                let _ = sender.send(ThreadEvent::WaitingForApproval {
+                    thread_id,
+                    turn_number,
+                    request: request.clone(),
+                });
+            }
+
+            if let Some(gate) = self.gate.lock().await.take() {
+                let _ = gate.await;
+            }
+
+            if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+                &ctx.thread_event_sender,
+                ctx.thread_id.clone(),
+                ctx.turn_number,
+            ) {
+                let response = ApprovalResponse {
+                    request_id: request.id,
+                    decision: ApprovalDecision::Approved,
+                    decided_at: Utc::now(),
+                    decided_by: Some("test".to_string()),
+                };
+                let _ = sender.send(ThreadEvent::ApprovalResolved {
+                    thread_id,
+                    turn_number,
+                    response,
+                });
+            }
+
             HookAction::Continue
         }
     }
@@ -1463,5 +1748,222 @@ mod tests {
         let result = turn.execute().await;
 
         assert!(matches!(result, Err(TurnError::MaxIterationsReached(2))));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_normal_completion_emits_terminal_completed_progress() {
+        let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
+            content: Some("Hello, progress!".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }]));
+        let turn = make_turn(provider, vec![], 5);
+
+        let execution = turn.execute_progress().await;
+        let output = execution.result.expect("turn should succeed");
+
+        assert_eq!(output.appended_messages.len(), 1);
+        assert_eq!(output.appended_messages[0].content, "Hello, progress!");
+        assert!(matches!(
+            execution.progress.last(),
+            Some(TurnProgress::Completed(final_output))
+                if final_output.appended_messages.len() == 1
+                    && final_output.appended_messages[0].content == "Hello, progress!"
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_tool_progress_emission_includes_tool_started_and_completed() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-123".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "test message"}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let (stream_tx, _) = broadcast::channel(256);
+        let (thread_event_tx, _) = broadcast::channel(256);
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user("start")])
+            .provider(provider)
+            .tools(vec![Arc::new(EchoTool)])
+            .hooks(vec![])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .build()
+            .expect("turn should build");
+
+        let execution = turn.execute_progress().await;
+        assert!(execution.result.is_ok());
+        assert!(execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::ToolStarted { tool_name, .. } if tool_name == "echo")));
+        assert!(execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::ToolCompleted { tool_name, .. } if tool_name == "echo")));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_cancellation_returns_failed_progress() {
+        let provider = Arc::new(HangingStreamingProvider);
+        let cancellation = TurnCancellation::new();
+
+        let (stream_tx, _) = broadcast::channel(256);
+        let (thread_event_tx, _) = broadcast::channel(256);
+
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("test-thread".to_string())
+            .messages(vec![ChatMessage::user("Hello")])
+            .provider(provider)
+            .agent_record(Arc::new(AgentRecord::default()))
+            .tools(vec![])
+            .hooks(vec![])
+            .config(TurnConfig::default())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .cancellation(cancellation.clone())
+            .build()
+            .expect("turn should build");
+
+        let handle = tokio::spawn(async move { turn.execute_progress().await });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        cancellation.cancel();
+
+        let execution = tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+            .await
+            .expect("turn should terminate quickly after cancellation")
+            .expect("turn task should not panic");
+
+        assert!(matches!(execution.result, Err(TurnError::Cancelled)));
+        assert!(execution.progress.iter().any(
+            |item| matches!(item, TurnProgress::Failed { error } if error.contains("cancelled"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_progress_approval_pause_and_resume_emits_waiting_and_resolved_progress() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-approval".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "approval test"}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let approval_hook = Arc::new(BlockingApprovalHook::new(resume_rx));
+        let (stream_tx, _) = broadcast::channel(256);
+        let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
+
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user("start")])
+            .provider(provider)
+            .tools(vec![Arc::new(EchoTool)])
+            .hooks(vec![approval_hook])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .stream_tx(stream_tx)
+            .thread_event_tx(thread_event_tx)
+            .build()
+            .expect("turn should build");
+
+        let handle = tokio::spawn(async move { turn.execute_progress().await });
+
+        let mut saw_waiting = false;
+        while !saw_waiting {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), thread_event_rx.recv())
+                .await
+                .expect("should receive approval event in time")
+            {
+                Ok(ThreadEvent::WaitingForApproval { .. }) => {
+                    saw_waiting = true;
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+
+        resume_tx
+            .send(())
+            .expect("approval hook should still be waiting");
+
+        let execution = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("turn should resume and finish")
+            .expect("turn task should not panic");
+
+        assert!(execution.result.is_ok());
+        assert!(
+            execution
+                .progress
+                .iter()
+                .any(|item| matches!(item, TurnProgress::WaitingForApproval { .. }))
+        );
+        assert!(
+            execution
+                .progress
+                .iter()
+                .any(|item| matches!(item, TurnProgress::ApprovalResolved { .. }))
+        );
     }
 }

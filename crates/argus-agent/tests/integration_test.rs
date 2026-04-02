@@ -3,9 +3,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::broadcast;
+use chrono::Utc;
+use tokio::sync::{Mutex as TokioMutex, broadcast, oneshot};
 
-use argus_agent::turn::TurnCancellation;
+use argus_agent::turn::{TurnCancellation, TurnProgress};
 use argus_agent::{TurnBuilder, TurnConfig};
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
@@ -20,6 +21,10 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::{NamedTool, ToolError};
 use argus_protocol::{AgentId, MessageOverride, ThreadId};
+use argus_protocol::{
+    ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction, HookEvent, HookHandler,
+    RiskLevel, ToolHookContext,
+};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -191,6 +196,71 @@ impl NamedTool for CaptureThreadIdTool {
     ) -> Result<serde_json::Value, ToolError> {
         *self.seen_thread_id.lock().unwrap() = Some(ctx.thread_id);
         Ok(serde_json::json!({ "ok": true }))
+    }
+}
+
+struct BlockingApprovalHook {
+    gate: Arc<TokioMutex<Option<oneshot::Receiver<()>>>>,
+}
+
+impl BlockingApprovalHook {
+    fn new(gate: oneshot::Receiver<()>) -> Self {
+        Self {
+            gate: Arc::new(TokioMutex::new(Some(gate))),
+        }
+    }
+}
+
+#[async_trait]
+impl HookHandler for BlockingApprovalHook {
+    async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
+        if ctx.event != HookEvent::BeforeToolCall || ctx.tool_name != "echo" {
+            return HookAction::Continue;
+        }
+
+        let request = ApprovalRequest::new(
+            "test-agent".to_string(),
+            ctx.tool_name.clone(),
+            "pause for approval".to_string(),
+            60,
+            RiskLevel::High,
+        );
+
+        if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+            &ctx.thread_event_sender,
+            ctx.thread_id.clone(),
+            ctx.turn_number,
+        ) {
+            let _ = sender.send(ThreadEvent::WaitingForApproval {
+                thread_id,
+                turn_number,
+                request: request.clone(),
+            });
+        }
+
+        if let Some(gate) = self.gate.lock().await.take() {
+            let _ = gate.await;
+        }
+
+        if let (Some(sender), Some(thread_id), Some(turn_number)) = (
+            &ctx.thread_event_sender,
+            ctx.thread_id.clone(),
+            ctx.turn_number,
+        ) {
+            let response = ApprovalResponse {
+                request_id: request.id,
+                decision: ApprovalDecision::Approved,
+                decided_at: Utc::now(),
+                decided_by: Some("test".to_string()),
+            };
+            let _ = sender.send(ThreadEvent::ApprovalResolved {
+                thread_id,
+                turn_number,
+                response,
+            });
+        }
+
+        HookAction::Continue
     }
 }
 
@@ -919,5 +989,80 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
         *seen_thread_id.lock().unwrap(),
         Some(originating_thread_id),
         "tool context should preserve the originating thread route",
+    );
+}
+
+#[tokio::test]
+async fn turn_progress_approval_pause_and_resume_emits_progress_and_thread_events() {
+    let provider = Arc::new(MockProvider::with_responses(vec![
+        (
+            "first".to_string(),
+            vec![ToolCall {
+                id: "call-approval".to_string(),
+                name: "echo".to_string(),
+                arguments: serde_json::json!({"message": "approval test"}),
+            }],
+        ),
+        ("done".to_string(), Vec::new()),
+    ]));
+
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let approval_hook = Arc::new(BlockingApprovalHook::new(resume_rx));
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("integration-turn".to_string())
+        .messages(vec![ChatMessage::user("start")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord::default()))
+        .tools(vec![Arc::new(EchoTool)])
+        .hooks(vec![approval_hook])
+        .config(TurnConfig {
+            max_iterations: Some(5),
+            ..TurnConfig::default()
+        })
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let handle = tokio::spawn(async move { turn.execute_progress().await });
+
+    let mut saw_waiting = false;
+    while !saw_waiting {
+        match tokio::time::timeout(Duration::from_secs(1), thread_event_rx.recv())
+            .await
+            .expect("should receive approval event in time")
+        {
+            Ok(ThreadEvent::WaitingForApproval { .. }) => saw_waiting = true,
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+
+    resume_tx
+        .send(())
+        .expect("approval hook should still be waiting");
+
+    let execution = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("turn should resume and finish")
+        .expect("turn task should not panic");
+
+    assert!(execution.result.is_ok());
+    assert!(
+        execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::WaitingForApproval { .. }))
+    );
+    assert!(
+        execution
+            .progress
+            .iter()
+            .any(|item| matches!(item, TurnProgress::ApprovalResolved { .. }))
     );
 }
