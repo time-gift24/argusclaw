@@ -18,10 +18,14 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookAction, HookEvent, HookHandler, ThreadEvent, ThreadMailbox, TokenUsage,
-    ToolExecutionContext, ToolHookContext, ids::ThreadId, sanitize_tool_output,
+    AgentRecord, HookAction, HookEvent, HookHandler, HookRegistry, ThreadEvent, ThreadMailbox,
+    TokenUsage, ToolExecutionContext, ToolHookContext, ids::ThreadId, sanitize_tool_output,
 };
+use argus_tool::ToolManager;
 
+use super::plan_hook::PlanContinuationHook;
+use super::plan_store::FilePlanStore;
+use super::plan_tool::UpdatePlanTool;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
 use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
 
@@ -310,21 +314,83 @@ impl StreamingAccumulator {
 #[derive(Clone, Default)]
 pub(crate) struct TurnSharedContext {
     history: Arc<Vec<ChatMessage>>,
-    tools: Arc<Vec<Arc<dyn NamedTool>>>,
-    hooks: Arc<Vec<Arc<dyn HookHandler>>>,
+    static_tools: Arc<Vec<Arc<dyn NamedTool>>>,
+    static_hooks: Arc<Vec<Arc<dyn HookHandler>>>,
+    tool_manager: Option<Arc<ToolManager>>,
+    hook_registry: Option<Arc<HookRegistry>>,
+    plan_tool: Option<Arc<dyn NamedTool>>,
+    plan_hook: Option<Arc<dyn HookHandler>>,
 }
 
 impl TurnSharedContext {
-    pub(crate) fn new(
+    pub(crate) fn for_thread(
         history: Arc<Vec<ChatMessage>>,
-        tools: Arc<Vec<Arc<dyn NamedTool>>>,
-        hooks: Arc<Vec<Arc<dyn HookHandler>>>,
+        tool_manager: Arc<ToolManager>,
+        hook_registry: Option<Arc<HookRegistry>>,
+        plan_store: FilePlanStore,
     ) -> Self {
         Self {
             history,
-            tools,
-            hooks,
+            static_tools: Arc::new(Vec::new()),
+            static_hooks: Arc::new(Vec::new()),
+            tool_manager: Some(tool_manager),
+            hook_registry,
+            plan_tool: Some(Arc::new(UpdatePlanTool::new(Arc::new(plan_store.clone())))),
+            plan_hook: Some(Arc::new(PlanContinuationHook::new(Arc::new(plan_store)))),
         }
+    }
+
+    fn resolved_tools(&self, agent_record: &AgentRecord) -> Vec<Arc<dyn NamedTool>> {
+        let mut tools = if let Some(tool_manager) = self.tool_manager.as_ref() {
+            let enabled_tool_names = agent_record
+                .tool_names
+                .iter()
+                .collect::<std::collections::HashSet<_>>();
+            tool_manager
+                .list_ids()
+                .iter()
+                .filter(|name| enabled_tool_names.contains(name))
+                .filter_map(|name| tool_manager.get(name))
+                .collect::<Vec<_>>()
+        } else {
+            self.static_tools.iter().cloned().collect::<Vec<_>>()
+        };
+
+        if let Some(plan_tool) = self.plan_tool.as_ref() {
+            tools.push(Arc::clone(plan_tool));
+        }
+
+        tools
+    }
+
+    fn resolved_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
+        let mut hooks = self.static_hooks.iter().cloned().collect::<Vec<_>>();
+
+        if let Some(hook_registry) = self.hook_registry.as_ref() {
+            hooks.extend(hook_registry.all_handlers());
+        }
+
+        if let Some(plan_hook) = self.plan_hook.as_ref() {
+            hooks.push(Arc::clone(plan_hook));
+        }
+
+        hooks
+    }
+
+    fn find_tool(&self, agent_record: &AgentRecord, tool_name: &str) -> Option<Arc<dyn NamedTool>> {
+        self.resolved_tools(agent_record)
+            .into_iter()
+            .find(|tool| tool.name() == tool_name)
+    }
+
+    #[cfg(test)]
+    fn tool_manager_ptr(&self) -> Option<*const ToolManager> {
+        self.tool_manager.as_ref().map(Arc::as_ptr)
+    }
+
+    #[cfg(test)]
+    fn hook_registry_ptr(&self) -> Option<*const HookRegistry> {
+        self.hook_registry.as_ref().map(Arc::as_ptr)
     }
 }
 
@@ -456,7 +522,7 @@ impl TurnBuilder {
     /// Set the tool list for this turn.
     pub fn tools(mut self, value: Vec<Arc<dyn NamedTool>>) -> Self {
         self = self.update_shared(|shared| {
-            shared.tools = Arc::new(value);
+            shared.static_tools = Arc::new(value);
         });
         self
     }
@@ -464,7 +530,7 @@ impl TurnBuilder {
     /// Share an existing tool list with this turn.
     pub fn shared_tools(mut self, value: Arc<Vec<Arc<dyn NamedTool>>>) -> Self {
         self = self.update_shared(|shared| {
-            shared.tools = value;
+            shared.static_tools = value;
         });
         self
     }
@@ -472,7 +538,7 @@ impl TurnBuilder {
     /// Set the hook list for this turn.
     pub fn hooks(mut self, value: Vec<Arc<dyn HookHandler>>) -> Self {
         self = self.update_shared(|shared| {
-            shared.hooks = Arc::new(value);
+            shared.static_hooks = Arc::new(value);
         });
         self
     }
@@ -480,7 +546,7 @@ impl TurnBuilder {
     /// Share an existing hook list with this turn.
     pub fn shared_hooks(mut self, value: Arc<Vec<Arc<dyn HookHandler>>>) -> Self {
         self = self.update_shared(|shared| {
-            shared.hooks = value;
+            shared.static_hooks = value;
         });
         self
     }
@@ -518,8 +584,8 @@ impl std::fmt::Debug for Turn {
             .field("thread_id", &self.thread_id)
             .field("messages", &self.shared.history.len())
             .field("provider", &self.provider.model_name())
-            .field("tools", &self.shared.tools.len())
-            .field("hooks", &self.shared.hooks.len())
+            .field("tools", &self.shared.resolved_tools(&self.agent_record).len())
+            .field("hooks", &self.shared.resolved_hooks().len())
             .field("config", &self.config)
             .finish()
     }
@@ -584,8 +650,8 @@ impl Turn {
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
-            tool_count = %self.shared.tools.len(),
-            hook_count = %self.shared.hooks.len(),
+            tool_count = %self.shared.resolved_tools(&self.agent_record).len(),
+            hook_count = %self.shared.resolved_hooks().len(),
             "Turn execution started"
         );
 
@@ -679,7 +745,7 @@ impl Turn {
 
     /// Internal method: trigger hooks and return the action.
     async fn fire_hooks(&self, ctx: &ToolHookContext) -> Result<HookAction, TurnError> {
-        for hook in self.shared.hooks.iter() {
+        for hook in self.shared.resolved_hooks() {
             let action = hook.on_tool_event(ctx).await;
 
             if let HookAction::Block(reason) = action {
@@ -724,9 +790,10 @@ impl Turn {
                 pending_messages.push(ChatMessage::user(&content));
             }
 
+            let available_tools = self.shared.resolved_tools(&self.agent_record);
             let mut request_messages = self.materialize_messages(&pending_messages);
             if let Some(max) = max_tool_calls
-                && !self.shared.tools.is_empty()
+                && !available_tools.is_empty()
             {
                 let system_content = format!(
                     "IMPORTANT: You can only call at most {} tool(s) per response. \
@@ -748,7 +815,7 @@ impl Turn {
 
             // Prepare tools from the shared thread-owned context.
             let tools: Vec<ToolDefinition> =
-                self.shared.tools.iter().map(|t| t.definition()).collect();
+                available_tools.iter().map(|t| t.definition()).collect();
 
             // Build the request with current messages and tools
             let mut request =
@@ -1165,10 +1232,7 @@ impl Turn {
         // Find the tool in the shared thread-owned context.
         let tool = self
             .shared
-            .tools
-            .iter()
-            .find(|t| t.name() == tool_name)
-            .cloned();
+            .find_tool(&self.agent_record, &tool_name);
 
         // Fire BeforeToolCall hook
         let ctx = ToolHookContext {
@@ -1267,7 +1331,7 @@ impl Turn {
                         turn_number = %self.turn_number,
                         tool_call_id = %tool_call_id,
                         tool_name = %tool_name,
-                        available_tools = ?self.shared.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+                        available_tools = ?self.shared.resolved_tools(&self.agent_record).iter().map(|t| t.name()).collect::<Vec<_>>(),
                         "Tool not found in registry"
                     );
                     Err(argus_protocol::tool::ToolError::NotFound {
@@ -1401,7 +1465,7 @@ mod tests {
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
         AgentId, AgentType, ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction,
-        HookEvent, HookHandler, ProviderId, RiskLevel, SessionId, ThreadEvent,
+        HookEvent, HookHandler, HookRegistry, ProviderId, RiskLevel, SessionId, ThreadEvent,
         ToolExecutionContext, ToolHookContext, TokenUsage,
     };
     use async_trait::async_trait;
@@ -1513,6 +1577,36 @@ mod tests {
                 })?;
 
             Ok(serde_json::json!({ "echoed": message }))
+        }
+    }
+
+    struct VersionedTool {
+        version: &'static str,
+    }
+
+    #[async_trait]
+    impl NamedTool for VersionedTool {
+        fn name(&self) -> &str {
+            "late_echo"
+        }
+
+        fn definition(&self) -> argus_protocol::llm::ToolDefinition {
+            argus_protocol::llm::ToolDefinition {
+                name: "late_echo".to_string(),
+                description: "Return the current tool version".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({ "version": self.version }))
         }
     }
 
@@ -1695,6 +1789,13 @@ mod tests {
         })
     }
 
+    fn make_agent_record_with_tools(tool_names: Vec<&str>) -> Arc<AgentRecord> {
+        Arc::new(AgentRecord {
+            tool_names: tool_names.into_iter().map(str::to_string).collect(),
+            ..(*make_agent_record()).clone()
+        })
+    }
+
     fn make_turn(
         provider: Arc<dyn LlmProvider>,
         hooks: Vec<Arc<dyn HookHandler>>,
@@ -1722,21 +1823,37 @@ mod tests {
             .expect("turn should build")
     }
 
-    fn shared_tools_ptr(turn: &Turn) -> *const Vec<Arc<dyn NamedTool>> {
-        Arc::as_ptr(&turn.shared.tools)
+    fn shared_tool_manager_ptr(turn: &Turn) -> Option<*const ToolManager> {
+        turn.shared.tool_manager_ptr()
     }
 
-    fn shared_hooks_ptr(turn: &Turn) -> *const Vec<Arc<dyn HookHandler>> {
-        Arc::as_ptr(&turn.shared.hooks)
+    fn shared_hook_registry_ptr(turn: &Turn) -> Option<*const HookRegistry> {
+        turn.shared.hook_registry_ptr()
     }
 
     fn build_thread_for_shared_state_test(provider: Arc<dyn LlmProvider>) -> crate::thread::Thread {
+        build_thread_with_live_sources(
+            provider,
+            make_agent_record(),
+            Arc::new(argus_tool::ToolManager::new()),
+            Arc::new(HookRegistry::new()),
+        )
+    }
+
+    fn build_thread_with_live_sources(
+        provider: Arc<dyn LlmProvider>,
+        agent_record: Arc<AgentRecord>,
+        tool_manager: Arc<argus_tool::ToolManager>,
+        hooks: Arc<HookRegistry>,
+    ) -> crate::thread::Thread {
         let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
         ThreadBuilder::new()
             .provider(provider)
             .compactor(compactor)
-            .agent_record(make_agent_record())
+            .agent_record(agent_record)
             .session_id(SessionId::new())
+            .tool_manager(tool_manager)
+            .hooks(hooks)
             .build()
             .expect("thread should build")
     }
@@ -1750,8 +1867,8 @@ mod tests {
             .begin_turn("first".to_string(), None, TurnCancellation::default())
             .await
             .expect("first turn should build");
-        let first_tools = shared_tools_ptr(&first_turn);
-        let first_hooks = shared_hooks_ptr(&first_turn);
+        let first_tools = shared_tool_manager_ptr(&first_turn);
+        let first_hooks = shared_hook_registry_ptr(&first_turn);
 
         thread
             .finish_turn(Ok(TurnOutput {
@@ -1765,8 +1882,117 @@ mod tests {
             .await
             .expect("second turn should build");
 
-        assert_eq!(first_tools, shared_tools_ptr(&second_turn));
-        assert_eq!(first_hooks, shared_hooks_ptr(&second_turn));
+        assert_eq!(first_tools, shared_tool_manager_ptr(&second_turn));
+        assert_eq!(first_hooks, shared_hook_registry_ptr(&second_turn));
+    }
+
+    #[tokio::test]
+    async fn shared_history_turn_sees_late_tool_overwrite_after_thread_creation() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("tool call".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-late-tool".to_string(),
+                    name: "late_echo".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        tool_manager.register(Arc::new(VersionedTool { version: "v1" }));
+        let hooks = Arc::new(HookRegistry::new());
+        let mut thread = build_thread_with_live_sources(
+            provider,
+            make_agent_record_with_tools(vec!["late_echo"]),
+            Arc::clone(&tool_manager),
+            hooks,
+        );
+
+        tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
+
+        let output = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build")
+            .execute()
+            .await
+            .expect("turn should execute");
+
+        let tool_results = output
+            .appended_messages
+            .iter()
+            .filter(|message| message.role == argus_protocol::llm::Role::Tool)
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(tool_results, vec![r#"{"version":"v2"}"#.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn shared_history_turn_sees_late_hook_registration_after_thread_creation() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("second".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        let hooks = Arc::new(HookRegistry::new());
+        let mut thread = build_thread_with_live_sources(
+            provider,
+            make_agent_record(),
+            tool_manager,
+            Arc::clone(&hooks),
+        );
+
+        hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
+
+        let output = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build")
+            .execute()
+            .await
+            .expect("turn should execute");
+
+        assert!(
+            output
+                .appended_messages
+                .iter()
+                .any(|message| message.content == "second")
+        );
     }
 
     #[tokio::test]

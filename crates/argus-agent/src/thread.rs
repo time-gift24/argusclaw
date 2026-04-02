@@ -10,11 +10,10 @@ use crate::command::ThreadRuntimeSnapshot;
 use crate::turn::{TurnCancellation, TurnSharedContext};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
-use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, MailboxMessage, MessageOverride, QueuedUserMessage,
-    SessionId, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox,
-    ThreadRuntimeState, TokenUsage,
+    AgentRecord, HookRegistry, MailboxMessage, MessageOverride, QueuedUserMessage, SessionId,
+    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadRuntimeState,
+    TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -25,9 +24,7 @@ use super::history::{
     CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, TurnRecord, TurnState,
     flatten_turn_messages, shared_history,
 };
-use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
-use super::plan_tool::UpdatePlanTool;
 use super::turn_log_store::TurnLogPersistenceSnapshot;
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
@@ -264,7 +261,6 @@ pub struct Thread {
 
     /// Tool manager retained as thread-owned configuration.
     #[builder(default = "Arc::new(ToolManager::new())")]
-    #[allow(dead_code)]
     tool_manager: Arc<ToolManager>,
 
     /// Compactor for managing context size.
@@ -272,7 +268,6 @@ pub struct Thread {
 
     /// Hook registry for lifecycle events (optional).
     #[builder(default, setter(strip_option))]
-    #[allow(dead_code)]
     hooks: Option<Arc<HookRegistry>>,
 
     /// Thread configuration.
@@ -318,12 +313,6 @@ pub struct Thread {
     /// File-backed plan store with persistence.
     #[builder(default, setter(name = "plan_store"))]
     plan_store: FilePlanStore,
-
-    /// Shared tool set reused by all turns in this thread.
-    shared_turn_tools: Arc<Vec<Arc<dyn NamedTool>>>,
-
-    /// Shared hook set reused by all turns in this thread.
-    shared_turn_hooks: Arc<Vec<Arc<dyn HookHandler>>>,
 }
 
 impl std::fmt::Debug for Thread {
@@ -415,10 +404,6 @@ impl ThreadBuilder {
         if let Some(committed_messages) = cached_committed_messages.as_ref() {
             messages = Arc::clone(committed_messages);
         }
-        let shared_turn_tools =
-            Thread::build_shared_turn_tools(agent_record.as_ref(), &tool_manager, &plan_store);
-        let shared_turn_hooks = Thread::build_shared_turn_hooks(hooks.as_ref(), &plan_store);
-
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             agent_record,
@@ -433,8 +418,6 @@ impl ThreadBuilder {
             cached_committed_messages,
             compaction_checkpoint: self.compaction_checkpoint.flatten(),
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
-            shared_turn_tools,
-            shared_turn_hooks,
             tool_manager,
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
             hooks,
@@ -912,10 +895,11 @@ impl Thread {
             .current_turn
             .as_ref()
             .map_or_else(Vec::new, |turn| turn.pending_messages.clone());
-        let shared = Arc::new(TurnSharedContext::new(
+        let shared = Arc::new(TurnSharedContext::for_thread(
             self.build_turn_context(),
-            Arc::clone(&self.shared_turn_tools),
-            Arc::clone(&self.shared_turn_hooks),
+            Arc::clone(&self.tool_manager),
+            self.hooks.clone(),
+            self.plan_store.clone(),
         ));
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
@@ -948,40 +932,6 @@ impl Thread {
             .take_while(|message| message.role == argus_protocol::llm::Role::System)
             .cloned()
             .collect()
-    }
-
-    fn build_shared_turn_tools(
-        agent_record: &AgentRecord,
-        tool_manager: &Arc<ToolManager>,
-        plan_store: &FilePlanStore,
-    ) -> Arc<Vec<Arc<dyn NamedTool>>> {
-        let enabled_tool_names = agent_record
-            .tool_names
-            .iter()
-            .collect::<std::collections::HashSet<_>>();
-        let mut tools: Vec<Arc<dyn NamedTool>> = Vec::new();
-        let plan_tool: Arc<dyn NamedTool> =
-            Arc::new(UpdatePlanTool::new(Arc::new(plan_store.clone())));
-        tools.extend(
-            tool_manager
-                .list_ids()
-                .iter()
-                .filter(|name| enabled_tool_names.contains(name))
-                .filter_map(|name| tool_manager.get(name)),
-        );
-        tools.push(plan_tool);
-        Arc::new(tools)
-    }
-
-    fn build_shared_turn_hooks(
-        hooks: Option<&Arc<HookRegistry>>,
-        plan_store: &FilePlanStore,
-    ) -> Arc<Vec<Arc<dyn HookHandler>>> {
-        let mut shared_hooks = hooks.map(|registry| registry.all_handlers()).unwrap_or_default();
-        let continuation_hook: Arc<dyn HookHandler> =
-            Arc::new(PlanContinuationHook::new(Arc::new(plan_store.clone())));
-        shared_hooks.push(continuation_hook);
-        Arc::new(shared_hooks)
     }
 
     fn sync_cached_history_from_flat_messages(&mut self) {
