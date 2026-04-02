@@ -229,21 +229,4 @@ mod tests {
         assert_eq!(record.tool_names, vec!["chrome"]);
     }
 
-    #[tokio::test]
-    async fn seed_builtin_agents_includes_compact_context() {
-        let manager = make_template_manager_for_test().await;
-        manager.seed_builtin_agents().await.unwrap();
-
-        let record = manager
-            .find_by_display_name("Compact Context")
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert!(record.tool_names.is_empty());
-        assert!(record.system_prompt.contains("总结对话历史"));
-        assert!(record
-            .system_prompt
-            .contains("只输出可供后续 agent 继续工作的总结文本"));
-    }
 }

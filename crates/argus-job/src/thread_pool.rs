@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::{
-    CompactorManager, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
+    Compactor, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
     TurnConfig, TurnLogEvent, read_jsonl_events,
 };
 use argus_protocol::llm::{
@@ -36,10 +36,18 @@ use crate::types::ThreadPoolJobRequest;
 
 const DEFAULT_MAX_THREADS: u32 = 8;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ChatRuntimeConfig {
-    compactor_manager: Arc<CompactorManager>,
+    default_compactor: Arc<dyn Compactor>,
     trace_dir: PathBuf,
+}
+
+impl std::fmt::Debug for ChatRuntimeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatRuntimeConfig")
+            .field("trace_dir", &self.trace_dir)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -177,104 +185,19 @@ impl std::fmt::Debug for ThreadPool {
 }
 
 impl ThreadPool {
-    async fn resolve_compact_agent_binding(
-        &self,
-        compact_agent_id: Option<AgentId>,
-    ) -> Result<
-        Option<(
-            Arc<argus_protocol::AgentRecord>,
-            Arc<dyn argus_protocol::LlmProvider>,
-        )>,
-        JobError,
-    > {
-        let Some(compact_agent_id) = compact_agent_id else {
-            return Ok(None);
-        };
-
-        let compact_agent_record = self
-            .template_manager
-            .get(compact_agent_id)
-            .await
-            .map_err(|err| {
-                JobError::ExecutionFailed(format!(
-                    "failed to load compact agent {}: {err}",
-                    compact_agent_id.inner()
-                ))
-            })?
-            .ok_or_else(|| {
-                JobError::ExecutionFailed(format!(
-                    "compact agent {} not found",
-                    compact_agent_id.inner()
-                ))
-            })?;
-
-        let requested_model = compact_agent_record
-            .model_id
-            .clone()
-            .unwrap_or_else(|| format!("provider-{}", compact_agent_id.inner()));
-        let provider = if let Some(provider_id) = compact_agent_record.provider_id {
-            match compact_agent_record.model_id.as_deref() {
-                Some(model) => match self
-                    .provider_resolver
-                    .resolve_with_model(provider_id, model)
-                    .await
-                {
-                    Ok(provider) => Ok(provider),
-                    Err(_) => self.provider_resolver.resolve(provider_id).await,
-                },
-                None => self.provider_resolver.resolve(provider_id).await,
-            }
-        } else if let Some(model) = compact_agent_record.model_id.as_deref() {
-            if let Some(persistence) = &self.persistence {
-                match persistence
-                    .provider_repository
-                    .get_default_provider_id()
-                    .await
-                {
-                    Ok(Some(default_provider_id)) => match self
-                        .provider_resolver
-                        .resolve_with_model(
-                            ProviderId::new(default_provider_id.into_inner()),
-                            model,
-                        )
-                        .await
-                    {
-                        Ok(provider) => Ok(provider),
-                        Err(_) => self.provider_resolver.default_provider().await,
-                    },
-                    Ok(None) | Err(_) => self.provider_resolver.default_provider().await,
-                }
-            } else {
-                self.provider_resolver.default_provider().await
-            }
-        } else {
-            self.provider_resolver.default_provider().await
-        };
-
-        let provider = match provider {
-            Ok(provider) => provider,
-            Err(error) => Arc::new(UnavailableChatProvider::new(
-                requested_model,
-                format!("failed to resolve compact agent provider: {error}"),
-            )) as Arc<dyn argus_protocol::LlmProvider>,
-        };
-
-        Ok(Some((Arc::new(compact_agent_record), provider)))
-    }
-
     /// Create a new thread pool with a default runtime cap.
     pub fn new(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
+        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
     ) -> Self {
         Self::with_persistence(
             template_manager,
             provider_resolver,
             tool_manager,
-            compactor_manager,
+            default_compactor,
             trace_dir,
             None,
         )
@@ -285,7 +208,7 @@ impl ThreadPool {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
+        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
@@ -294,7 +217,7 @@ impl ThreadPool {
             provider_resolver,
             tool_manager,
             chat_runtime_config: ChatRuntimeConfig {
-                compactor_manager,
+                default_compactor,
                 trace_dir,
             },
             persistence,
@@ -1707,32 +1630,18 @@ impl ThreadPool {
         turn_config.on_turn_complete = Some(Self::build_on_turn_complete(
             self.chat_runtime_config.trace_dir.clone(),
         ));
-        let compact_agent_binding = self
-            .resolve_compact_agent_binding(thread_record.compact_agent_id)
-            .await?;
         let config = ThreadConfigBuilder::default()
-            .compact_agent_id(thread_record.compact_agent_id)
             .turn_config(turn_config)
             .build()
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        let mut thread_builder = ThreadBuilder::new()
+        let thread_builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(session_id)
             .agent_record(Arc::new(agent_record))
             .title(thread_record.title.clone())
             .provider(provider)
             .tool_manager(self.tool_manager.clone())
-            .compactor(
-                self.chat_runtime_config
-                    .compactor_manager
-                    .default_compactor()
-                    .clone(),
-            );
-        if let Some((compact_agent_record, compact_agent_provider)) = compact_agent_binding {
-            thread_builder = thread_builder
-                .compact_agent_record(compact_agent_record)
-                .compact_agent_provider(compact_agent_provider);
-        }
+            .compactor(self.chat_runtime_config.default_compactor.clone());
         let plan_store = FilePlanStore::new(
             self.chat_runtime_config.trace_dir.clone(),
             &thread_id.inner().to_string(),
@@ -1856,12 +1765,7 @@ impl ThreadPool {
             .title(thread_title)
             .provider(provider)
             .tool_manager(self.tool_manager.clone())
-            .compactor(
-                self.chat_runtime_config
-                    .compactor_manager
-                    .default_compactor()
-                    .clone(),
-            )
+            .compactor(self.chat_runtime_config.default_compactor.clone())
             .plan_store(plan_store)
             .config(config)
             .build()
@@ -2112,7 +2016,6 @@ impl ThreadPool {
             turn_count: 0,
             session_id: None,
             template_id: Some(RepoAgentId::new(request.agent_id.inner())),
-            compact_agent_id: None,
             model_override: model_override.clone(),
             created_at: now.to_string(),
             updated_at: now.to_string(),
@@ -2435,10 +2338,34 @@ impl ThreadPool {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
         )
     }
+}
+
+#[cfg(test)]
+pub(crate) fn noop_compactor() -> Arc<dyn Compactor> {
+    #[derive(Debug)]
+    struct NoopCompactor;
+
+    #[async_trait::async_trait]
+    impl Compactor for NoopCompactor {
+        async fn compact(
+            &self,
+            _provider: &dyn argus_protocol::LlmProvider,
+            _messages: &[argus_protocol::llm::ChatMessage],
+            _token_count: u32,
+        ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError> {
+            Ok(None)
+        }
+
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+    }
+
+    Arc::new(NoopCompactor)
 }
 
 #[cfg(test)]
@@ -2475,7 +2402,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use argus_agent::{CompactorManager, TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
+    use argus_agent::{TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
         LlmProviderRepository,
@@ -2690,7 +2617,7 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            super::noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 sqlite.clone() as Arc<dyn JobRepository>,
@@ -2778,7 +2705,7 @@ mod tests {
             template_manager,
             provider_resolver,
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            super::noop_compactor(),
             trace_dir,
             Some(ThreadPoolPersistence::new(
                 sqlite.clone() as Arc<dyn JobRepository>,
@@ -2828,7 +2755,6 @@ mod tests {
                 turn_count: 0,
                 session_id: Some(session_id),
                 template_id: Some(RepoAgentId::new(7)),
-                compact_agent_id: None,
                 model_override: Some("capturing".to_string()),
                 created_at: "2026-03-30T00:00:00Z".to_string(),
                 updated_at: "2026-03-30T00:00:00Z".to_string(),
@@ -2959,7 +2885,7 @@ mod tests {
             template_manager,
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            super::noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingCreateJobRepository) as Arc<dyn JobRepository>,
@@ -3029,7 +2955,6 @@ mod tests {
                         turn_count: 0,
                         session_id: None,
                         template_id: Some(RepoAgentId::new(7)),
-                        compact_agent_id: None,
                         model_override: Some("gpt-4o-mini".to_string()),
                         created_at: "2026-03-29T00:00:00Z".to_string(),
                         updated_at: "2026-03-29T00:00:00Z".to_string(),
@@ -3041,7 +2966,7 @@ mod tests {
             template_manager,
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            super::noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingUpdateThreadIdJobRepository::new(
@@ -3907,7 +3832,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_chat_runtime_returns_error_when_runtime_was_removed_mid_load() {
-        use argus_agent::{KeepRecentCompactor, ThreadBuilder};
+        use argus_agent::ThreadBuilder;
 
         let provider = Arc::new(CapturingProvider::new(
             "attach race reply",
@@ -3937,7 +3862,7 @@ mod tests {
                     agent_type: AgentType::Standard,
                 }))
                 .provider(provider)
-                .compactor(Arc::new(KeepRecentCompactor::with_defaults()))
+                .compactor(super::noop_compactor())
                 .build()
                 .expect("thread should build"),
         ));

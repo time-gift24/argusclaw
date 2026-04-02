@@ -1,340 +1,226 @@
-//! Compact module: strategies and manager for message compaction.
+//! Compact module: LLM-driven message compaction.
 //!
 //! This module provides:
-//! - `Compactor`: Async trait for implementing different compaction strategies.
-//! - `KeepRecentCompactor`: Keeps the most recent messages up to a count.
-//! - `KeepTokensCompactor`: Legacy compatibility strategy based on approximate token estimates.
-//! - `CompactorManager`: Shared manager that handles compaction using a strategy.
+//! - `Compactor`: Async trait for implementing compaction strategies.
+//! - `CompactResult`: Result type carrying compacted messages and token estimate.
+//! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
+use argus_protocol::llm::{
+    ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
+};
 use async_trait::async_trait;
 
 use super::error::CompactError;
-use crate::tokenizer::{count_text_tokens, count_total_tokens};
 
-/// Context for compaction operations.
-///
-/// This struct holds all the data needed for compaction without requiring
-/// a reference to the full Thread type. Thread-level threshold overrides are
-/// exposed here so built-in compactors can honor per-thread configuration
-/// without changing the `Compactor` trait.
-pub struct CompactContext<'a> {
-    /// LLM provider for context window info.
-    pub provider: &'a Arc<dyn LlmProvider>,
-    /// Current token count.
-    pub token_count: &'a mut u32,
-    /// Messages to compact.
-    pub messages: &'a mut Vec<ChatMessage>,
-    /// Optional thread-level threshold ratio override for built-in compactors.
-    threshold_ratio_override: Option<f32>,
+const DEFAULT_COMPACTION_PROMPT: &str = "\
+Provide a detailed prompt for continuing our conversation above.\n\
+  Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do\n\
+  next.\n\
+  The summary that you construct will be used so that another agent can read it and continue the work.\n\
+  Do not call any tools. Respond only with the summary text.\n\n\
+  When constructing the summary, try to stick to this template:\n\
+  ---\n\
+  ## Goal\n\n\
+  [What goal(s) is the user trying to accomplish?]\n\n\
+  ## Instructions\n\n\
+  - [What important instructions did the user give you that are relevant]\n\
+  - [If there is a plan or spec, include information about it so next agent can continue using it]\n\n\
+  ## Discoveries\n\n\
+  [What notable things were learned during this conversation that would be useful for the next agent to know when continuing the work]\n\n\
+  ## Accomplished\n\n\
+  [What work has been completed, what work is still in progress, and what work is left]\n\n\
+  ## Relevant files / directories\n\n\
+  [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the\n\
+   path to the directory.]\n\
+  ---";
+
+/// Result of a successful compaction.
+pub struct CompactResult {
+    /// Compacted message list (replaces the original history).
+    pub messages: Vec<ChatMessage>,
+    /// Estimated token count after compaction.
+    /// The authoritative count will come from the next LLM response.
+    pub token_count: u32,
+    /// Synthetic history messages that should be traced once with the next visible turn.
+    pub trace_prelude_messages: Vec<ChatMessage>,
 }
 
-impl<'a> CompactContext<'a> {
-    /// Create a new CompactContext.
-    pub fn new(
-        provider: &'a Arc<dyn LlmProvider>,
-        token_count: &'a mut u32,
-        messages: &'a mut Vec<ChatMessage>,
-    ) -> Self {
-        Self {
-            provider,
-            token_count,
-            messages,
-            threshold_ratio_override: None,
-        }
-    }
-
-    /// Apply a thread-level threshold ratio override for built-in compactors.
-    #[must_use]
-    pub fn with_threshold_ratio_override(mut self, threshold_ratio_override: f32) -> Self {
-        self.threshold_ratio_override = Some(threshold_ratio_override.clamp(0.1, 0.95));
-        self
-    }
-
-    /// Read the optional thread-level threshold override.
-    #[must_use]
-    pub fn threshold_ratio_override(&self) -> Option<f32> {
-        self.threshold_ratio_override
-    }
-
-    /// Recalculate token count from the current messages using the compatibility tokenizer.
-    pub fn recalculate_token_count(&mut self) -> Result<(), CompactError> {
-        *self.token_count = count_total_tokens(self.messages.iter().map(|m| m.content.as_str()))?;
-        Ok(())
-    }
-
-    /// Set the token count.
-    pub fn set_token_count(&mut self, count: u32) {
-        *self.token_count = count;
-    }
-}
-
-/// Compactor trait - responsible for deciding when and how to compact.
-///
-/// Implementations determine:
-/// 1. Whether compaction is needed based on context state
-/// 2. How to perform the compaction when needed
+/// Compactor trait — responsible for deciding when and how to compact.
 #[async_trait]
 pub trait Compactor: Send + Sync {
-    /// Check if compaction is needed and perform it if so.
-    ///
-    /// Returns `Ok(())` on success (may be a no-op if compaction wasn't needed).
-    /// Returns an error if compaction was needed but failed.
-    async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError>;
+    /// Attempt compaction. Returns `Some(CompactResult)` if compaction occurred,
+    /// `None` if compaction was not needed.
+    async fn compact(
+        &self,
+        provider: &dyn LlmProvider,
+        messages: &[ChatMessage],
+        token_count: u32,
+    ) -> Result<Option<CompactResult>, CompactError>;
 
     /// Name of the compactor strategy.
     fn name(&self) -> &'static str;
-
-    /// Number of recent non-system messages that should remain outside any synthetic summary.
-    fn preserved_tail_count(&self) -> Option<usize> {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------
-// KeepRecentCompactor
+// LlmCompactor
 // ---------------------------------------------------------------------------
 
-/// KeepRecentCompactor: keeps the most recent N messages.
+/// LLM-driven compactor that summarizes stale history using the current thread provider.
 ///
-/// Compaction triggers when token count exceeds `threshold_ratio` of context window.
-/// When triggered, keeps system messages + the most recent `keep_count` non-system messages.
-pub struct KeepRecentCompactor {
-    /// Threshold ratio to trigger compaction (0.0 - 1.0).
+/// When token usage exceeds the threshold ratio of the context window, older messages
+/// are sent to the current provider for summarization. The result replaces the old history
+/// with synthetic prompt/summary/replay messages.
+pub struct LlmCompactor {
     threshold_ratio: f32,
-    /// Number of recent non-system messages to keep.
-    keep_count: usize,
 }
 
-impl KeepRecentCompactor {
-    /// Create a new KeepRecentCompactor.
-    #[must_use]
-    pub fn new(threshold_ratio: f32, keep_count: usize) -> Self {
+impl LlmCompactor {
+    /// Create a new LlmCompactor.
+    pub fn new() -> Self {
         Self {
-            threshold_ratio: threshold_ratio.clamp(0.1, 0.95),
-            keep_count: keep_count.max(1),
+            threshold_ratio: 0.8,
         }
     }
 
-    /// Create with default settings (80% threshold, keep 50 messages).
+    /// Set a custom threshold ratio (clamped to 0.1 - 0.95).
     #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(0.8, 50)
+    pub fn with_threshold_ratio(mut self, ratio: f32) -> Self {
+        self.threshold_ratio = ratio.clamp(0.1, 0.95);
+        self
     }
-}
 
-#[async_trait]
-impl Compactor for KeepRecentCompactor {
-    async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError> {
-        let context_window = context.provider.context_window();
-        let threshold_ratio = context
-            .threshold_ratio_override()
-            .unwrap_or(self.threshold_ratio);
-        let threshold = (context_window as f32 * threshold_ratio) as u32;
+    fn threshold(&self, provider: &dyn LlmProvider) -> u32 {
+        (provider.context_window() as f32 * self.threshold_ratio) as u32
+    }
 
-        // Check if compaction is needed
-        if *context.token_count < threshold {
-            return Ok(());
-        }
+    fn compaction_prompt() -> &'static str {
+        DEFAULT_COMPACTION_PROMPT
+    }
 
-        // Perform compaction
-        let messages = &mut *context.messages;
-        let original_count = messages.len();
+    fn build_compaction_request_messages(
+        system_messages: &[ChatMessage],
+        compactable_messages: &[ChatMessage],
+    ) -> Vec<ChatMessage> {
+        let mut request_messages =
+            Vec::with_capacity(system_messages.len() + compactable_messages.len() + 1);
+        request_messages.extend(system_messages.iter().cloned());
+        request_messages.extend(compactable_messages.iter().cloned());
+        request_messages.push(ChatMessage::user(Self::compaction_prompt()));
+        request_messages
+    }
 
-        // Extract system messages
-        let system_msgs: Vec<_> = messages
+    fn split_history_segments(
+        messages: &[ChatMessage],
+    ) -> Option<(Vec<ChatMessage>, Vec<ChatMessage>)> {
+        let system_messages: Vec<_> = messages
             .iter()
             .filter(|m| m.role == Role::System)
             .cloned()
             .collect();
-
-        // Extract non-system messages
         let non_system: Vec<_> = messages
             .iter()
             .filter(|m| m.role != Role::System)
             .cloned()
             .collect();
 
-        // Keep the most recent N non-system messages
-        let start = non_system.len().saturating_sub(self.keep_count);
-        let recent: Vec<_> = non_system.into_iter().skip(start).collect();
-
-        // Reconstruct messages
-        *messages = [system_msgs, recent].concat();
-
-        // Update token count using proportional estimation.
-        // The authoritative count will come from the next LLM response.
-        let new_count = messages.len();
-        if original_count > 0 {
-            context.set_token_count(
-                (*context.token_count as usize * new_count / original_count) as u32,
-            );
+        if non_system.is_empty() {
+            return None;
         }
 
-        tracing::debug!(
-            compactor = self.name(),
-            new_token_count = *context.token_count,
-            "Compaction completed"
-        );
-
-        Ok(())
+        Some((system_messages, non_system))
     }
 
-    fn name(&self) -> &'static str {
-        "keep_recent"
-    }
-
-    fn preserved_tail_count(&self) -> Option<usize> {
-        Some(self.keep_count)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// KeepTokensCompactor
-// ---------------------------------------------------------------------------
-
-/// Legacy token-budget compactor kept for public API compatibility.
-#[allow(deprecated)]
-#[deprecated(note = "Prefer KeepRecentCompactor or LLM-driven compaction.")]
-pub struct KeepTokensCompactor {
-    /// Threshold ratio to trigger compaction (0.0 - 1.0).
-    threshold_ratio: f32,
-    /// Target ratio of context window to keep after compaction (0.0 - 1.0).
-    target_ratio: f32,
-}
-
-#[allow(deprecated)]
-impl KeepTokensCompactor {
-    /// Create a new KeepTokensCompactor.
-    #[must_use]
-    pub fn new(threshold_ratio: f32, target_ratio: f32) -> Self {
-        Self {
-            threshold_ratio: threshold_ratio.clamp(0.1, 0.95),
-            target_ratio: target_ratio.clamp(0.1, 0.9),
+    fn compaction_metadata(mode: ChatMessageMetadataMode, summary: bool) -> ChatMessageMetadata {
+        ChatMessageMetadata {
+            summary,
+            mode: Some(mode),
+            synthetic: true,
+            collapsed_by_default: true,
         }
-    }
-
-    /// Create with default settings (80% threshold, keep 50% of context).
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(0.8, 0.5)
     }
 }
 
 #[async_trait]
-#[allow(deprecated)]
-impl Compactor for KeepTokensCompactor {
-    async fn compact(&self, context: &mut CompactContext<'_>) -> Result<(), CompactError> {
-        let context_window = context.provider.context_window();
-        let threshold_ratio = context
-            .threshold_ratio_override()
-            .unwrap_or(self.threshold_ratio);
-        let threshold = (context_window as f32 * threshold_ratio) as u32;
-
-        if *context.token_count < threshold {
-            return Ok(());
+impl Compactor for LlmCompactor {
+    async fn compact(
+        &self,
+        provider: &dyn LlmProvider,
+        messages: &[ChatMessage],
+        token_count: u32,
+    ) -> Result<Option<CompactResult>, CompactError> {
+        if token_count < self.threshold(provider) {
+            return Ok(None);
         }
 
-        let target_tokens = (context_window as f32 * self.target_ratio) as u32;
-        let messages = &mut *context.messages;
+        let Some((system_messages, compactable_messages)) =
+            Self::split_history_segments(messages)
+        else {
+            return Ok(None);
+        };
 
-        let system_msgs: Vec<_> = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .cloned()
-            .collect();
+        let prompt = Self::compaction_prompt();
+        let request_messages =
+            Self::build_compaction_request_messages(&system_messages, &compactable_messages);
 
-        let mut kept: Vec<ChatMessage> = Vec::new();
-        let mut current_tokens = 0u32;
+        let request = CompletionRequest::new(request_messages);
 
-        for msg in messages.iter().rev() {
-            if msg.role == Role::System {
-                continue;
-            }
-            let msg_tokens = count_text_tokens(&msg.content)?;
-            if current_tokens + msg_tokens > target_tokens {
-                break;
-            }
-            kept.push(msg.clone());
-            current_tokens += msg_tokens;
-        }
+        let response = provider
+            .complete(request)
+            .await
+            .map_err(|error| CompactError::Failed {
+                reason: error.to_string(),
+            })?;
+        let summary = response.content.unwrap_or_default();
 
-        kept.reverse();
-        *messages = [system_msgs, kept].concat();
-        context.recalculate_token_count()?;
+        let synthetic_prompt = ChatMessage::user(prompt).with_metadata(Self::compaction_metadata(
+            ChatMessageMetadataMode::CompactionPrompt,
+            false,
+        ));
+        let synthetic_summary =
+            ChatMessage::assistant(&summary).with_metadata(Self::compaction_metadata(
+                ChatMessageMetadataMode::CompactionSummary,
+                true,
+            ));
+        let synthetic_replay = ChatMessage::user("Continue the conversation using the summary above.")
+            .with_metadata(Self::compaction_metadata(
+            ChatMessageMetadataMode::CompactionReplay,
+            false,
+        ));
+
+        let trace_prelude_messages = vec![
+            synthetic_prompt.clone(),
+            synthetic_summary.clone(),
+            synthetic_replay.clone(),
+        ];
+
+        let mut new_messages = system_messages;
+        new_messages.push(synthetic_prompt);
+        new_messages.push(synthetic_summary);
+        new_messages.push(synthetic_replay);
+
+        // Estimate new token count proportionally.
+        let original_len = messages.len();
+        let new_token_count = if original_len > 0 {
+            (token_count as usize * new_messages.len() / original_len) as u32
+        } else {
+            0
+        };
 
         tracing::debug!(
             compactor = self.name(),
-            new_token_count = *context.token_count,
-            "Compatibility compaction completed"
+            new_token_count,
+            "LLM compaction completed"
         );
 
-        Ok(())
+        Ok(Some(CompactResult {
+            messages: new_messages,
+            token_count: new_token_count,
+            trace_prelude_messages,
+        }))
     }
 
     fn name(&self) -> &'static str {
-        "keep_tokens"
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CompactorManager
-// ---------------------------------------------------------------------------
-
-/// Manages Compactor instances for agents.
-///
-/// Provides a default compactor and allows registration of named compactors.
-#[derive(Clone)]
-pub struct CompactorManager {
-    /// Default compactor.
-    default: Arc<dyn Compactor>,
-    /// Registered compactors by name.
-    compactors: HashMap<String, Arc<dyn Compactor>>,
-}
-
-impl CompactorManager {
-    /// Create a new CompactorManager with a default compactor.
-    #[must_use]
-    pub fn new(default: Arc<dyn Compactor>) -> Self {
-        Self {
-            default,
-            compactors: HashMap::new(),
-        }
-    }
-
-    /// Create a CompactorManager with default KeepRecentCompactor.
-    #[must_use]
-    pub fn with_defaults() -> Self {
-        Self::new(Arc::new(KeepRecentCompactor::with_defaults()))
-    }
-
-    /// Get the default compactor.
-    #[must_use]
-    pub fn default_compactor(&self) -> &Arc<dyn Compactor> {
-        &self.default
-    }
-
-    /// Register a named compactor.
-    pub fn register(&mut self, name: &str, compactor: Arc<dyn Compactor>) {
-        self.compactors.insert(name.to_string(), compactor);
-    }
-
-    /// Get a compactor by name.
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Compactor>> {
-        self.compactors.get(name)
-    }
-}
-
-impl std::fmt::Debug for CompactorManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompactorManager")
-            .field("default", &self.default.name())
-            .field("registered", &self.compactors.keys().collect::<Vec<_>>())
-            .finish()
+        "llm_compactor"
     }
 }
 
@@ -346,22 +232,54 @@ impl std::fmt::Debug for CompactorManager {
 mod tests {
     use std::sync::Arc;
 
-    #[allow(deprecated)]
-    use argus_protocol::LlmProvider;
-    use argus_protocol::llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError};
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
     use super::*;
 
-    struct FixedContextProvider {
+    struct SummaryProvider {
+        summary: String,
         context_window: u32,
     }
 
     #[async_trait]
-    impl LlmProvider for FixedContextProvider {
+    impl LlmProvider for SummaryProvider {
         fn model_name(&self) -> &str {
-            "fixed-context"
+            "summary-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: Some(self.summary.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 8,
+                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
+    }
+
+    struct FailingSummaryProvider;
+
+    #[async_trait]
+    impl LlmProvider for FailingSummaryProvider {
+        fn model_name(&self) -> &str {
+            "failing-summary-provider"
         }
 
         fn cost_per_token(&self) -> (Decimal, Decimal) {
@@ -373,8 +291,46 @@ mod tests {
             _request: CompletionRequest,
         ) -> Result<CompletionResponse, LlmError> {
             Err(LlmError::RequestFailed {
-                provider: "fixed-context".to_string(),
-                reason: "not implemented".to_string(),
+                provider: "failing-summary-provider".to_string(),
+                reason: "summary failed".to_string(),
+            })
+        }
+
+        fn context_window(&self) -> u32 {
+            100
+        }
+    }
+
+    struct RecordingSummaryProvider {
+        summary: String,
+        context_window: u32,
+        captured_requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingSummaryProvider {
+        fn model_name(&self) -> &str {
+            "recording-summary-provider"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.captured_requests.lock().unwrap().push(request);
+            Ok(CompletionResponse {
+                content: Some(self.summary.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 12,
+                output_tokens: 8,
+                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -384,61 +340,187 @@ mod tests {
     }
 
     #[test]
-    fn keep_recent_compactor_new_clamps_values() {
-        let compactor = KeepRecentCompactor::new(2.0, 0);
+    fn llm_compactor_clamps_threshold_ratio() {
+        let compactor = LlmCompactor::new().with_threshold_ratio(2.0);
         assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
-        assert_eq!(compactor.keep_count, 1);
-    }
-
-    #[test]
-    fn compactor_manager_defaults() {
-        let manager = CompactorManager::with_defaults();
-        assert_eq!(manager.default_compactor().name(), "keep_recent");
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn keep_tokens_compactor_new_clamps_values() {
-        let compactor = KeepTokensCompactor::new(2.0, 2.0);
-        assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
-        assert!((compactor.target_ratio - 0.9).abs() < f32::EPSILON);
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn compactor_manager_register_and_get() {
-        let mut manager = CompactorManager::with_defaults();
-        manager.register("tokens", Arc::new(KeepTokensCompactor::with_defaults()));
-
-        assert!(manager.get("tokens").is_some());
-        assert_eq!(manager.get("tokens").unwrap().name(), "keep_tokens");
-        assert!(manager.get("nonexistent").is_none());
     }
 
     #[tokio::test]
-    async fn keep_recent_compactor_uses_context_threshold_override() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(FixedContextProvider {
+    async fn returns_none_when_below_threshold() {
+        let provider = Arc::new(SummaryProvider {
+            summary: String::new(),
             context_window: 100,
         });
-        let repeated = ["test"; 10].join(" ");
-        let mut messages = vec![
-            ChatMessage::user(repeated.clone()),
-            ChatMessage::user(repeated.clone()),
-            ChatMessage::user(repeated.clone()),
+        let compactor = LlmCompactor::new();
+        let messages = vec![ChatMessage::user("hello")];
+        let result = compactor.compact(provider.as_ref(), &messages, 10).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_none_when_only_system_messages() {
+        let provider = Arc::new(SummaryProvider {
+            summary: String::new(),
+            context_window: 100,
+        });
+        let compactor = LlmCompactor::new();
+        let messages = vec![ChatMessage::system("system only")];
+        let result = compactor.compact(provider.as_ref(), &messages, 90).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn compacts_and_produces_synthetic_messages() {
+        let provider = Arc::new(SummaryProvider {
+            summary: "历史摘要".to_string(),
+            context_window: 100,
+        });
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
+
+        let messages = vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("recent tail"),
         ];
-        // Use a token count high enough to exceed the 20% threshold (20 tokens)
-        let mut token_count = 90u32;
-        let mut context = CompactContext::new(&provider, &mut token_count, &mut messages)
-            .with_threshold_ratio_override(0.2);
-
-        KeepRecentCompactor::new(0.8, 1)
-            .compact(&mut context)
+        let result = compactor
+            .compact(provider.as_ref(), &messages, 90)
             .await
-            .expect("override should force compaction");
+            .expect("compact should succeed")
+            .expect("should have compacted");
 
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, repeated);
-        // Proportional estimation: 90 * 1 / 3 = 30
-        assert_eq!(token_count, 30);
+        // prompt + summary + replay = 3
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(result.messages[0].role, Role::User); // synthetic prompt
+        assert!(result.messages[0]
+            .content
+            .contains("Provide a detailed prompt for continuing our conversation above."));
+        assert_eq!(result.messages[1].content, "历史摘要");
+        assert_eq!(result.messages[2].role, Role::User); // synthetic replay
+        assert_eq!(
+            result.messages[2].content,
+            "Continue the conversation using the summary above."
+        );
+        assert!(!result.trace_prelude_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failure_returns_error() {
+        let provider = Arc::new(FailingSummaryProvider);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
+
+        let messages = vec![
+            ChatMessage::user("old"),
+            ChatMessage::assistant("reply"),
+            ChatMessage::user("tail"),
+        ];
+        let result = compactor.compact(provider.as_ref(), &messages, 90).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn prompt_includes_handoff_details() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSummaryProvider {
+            summary: "历史摘要".to_string(),
+            context_window: 100,
+            captured_requests: Arc::clone(&captured),
+        });
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
+
+        let messages = vec![
+            ChatMessage::user("完成了 provider 绑定"),
+            ChatMessage::assistant("修改了 thread.rs"),
+            ChatMessage::user("接下来补默认 compactor"),
+            ChatMessage::assistant("记住用户偏好"),
+        ];
+        let _ = compactor
+            .compact(provider.as_ref(), &messages, 90)
+            .await
+            .expect("compact should succeed");
+
+        let captured = captured.lock().unwrap();
+        let request = captured.last().expect("request should be captured");
+        let prompt_message = request
+            .messages
+            .last()
+            .expect("request should contain prompt");
+        assert_eq!(prompt_message.role, Role::User);
+        assert!(request.model.is_none());
+        assert!(request.temperature.is_none());
+        let prompt = &prompt_message.content;
+
+        assert!(prompt.contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(prompt.contains("Do not call any tools."));
+        assert!(prompt.contains("## Goal"));
+        assert!(prompt.contains("## Relevant files / directories"));
+    }
+
+    #[tokio::test]
+    async fn compaction_request_preserves_history_and_appends_prompt() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSummaryProvider {
+            summary: "历史摘要".to_string(),
+            context_window: 100,
+            captured_requests: Arc::clone(&captured),
+        });
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2);
+
+        let messages = vec![
+            ChatMessage::system("system guardrails"),
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("recent question"),
+            ChatMessage::assistant("recent answer"),
+        ];
+        let _ = compactor
+            .compact(provider.as_ref(), &messages, 90)
+            .await
+            .expect("compact should succeed");
+
+        let captured = captured.lock().unwrap();
+        let request = captured.last().expect("request should be captured");
+        assert_eq!(request.messages.len(), 6);
+        assert_eq!(request.messages[0].role, Role::System);
+        assert_eq!(request.messages[0].content, "system guardrails");
+        assert_eq!(request.messages[1].content, "old question");
+        assert_eq!(request.messages[2].content, "old answer");
+        assert_eq!(request.messages[3].content, "recent question");
+        assert_eq!(request.messages[4].content, "recent answer");
+        assert_eq!(request.messages[5].role, Role::User);
+        assert!(request.messages[5]
+            .content
+            .contains("Provide a detailed prompt for continuing our conversation above."));
+    }
+
+    #[tokio::test]
+    async fn uses_current_provider_context_window() {
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.8);
+        let messages = vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("recent tail"),
+        ];
+        let small_context_provider = Arc::new(SummaryProvider {
+            summary: "small window summary".to_string(),
+            context_window: 100,
+        });
+        let large_context_provider = Arc::new(SummaryProvider {
+            summary: "large window summary".to_string(),
+            context_window: 200,
+        });
+
+        let compacted = compactor
+            .compact(small_context_provider.as_ref(), &messages, 90)
+            .await
+            .expect("small window compact should succeed");
+        assert!(compacted.is_some());
+
+        let skipped = compactor
+            .compact(large_context_provider.as_ref(), &messages, 90)
+            .await
+            .expect("large window compact should succeed");
+        assert!(skipped.is_none());
     }
 }

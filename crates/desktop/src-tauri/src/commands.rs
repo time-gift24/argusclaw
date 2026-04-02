@@ -363,7 +363,6 @@ pub async fn create_chat_session(
     template_id: String,
     provider_preference_id: Option<String>,
     model: Option<String>,
-    compact_agent_id: Option<String>,
 ) -> Result<ChatSessionPayload, String> {
     let template_id_i64: i64 = template_id
         .parse()
@@ -377,15 +376,6 @@ pub async fn create_chat_session(
                 .map_err(|e| format!("Invalid provider id: {}", e))
         })
         .transpose()?;
-    let compact_agent_id = compact_agent_id
-        .as_ref()
-        .map(|id| {
-            id.parse::<i64>()
-                .map(AgentId::new)
-                .map_err(|e| format!("Invalid compact agent id: {}", e))
-        })
-        .transpose()?;
-
     // Create a new session for this chat
     let session_id = wing.create_session("").await.map_err(|e| e.to_string())?;
 
@@ -396,7 +386,6 @@ pub async fn create_chat_session(
             AgentId::new(template_id_i64),
             provider_id,
             model.as_deref(),
-            compact_agent_id,
         )
         .await
         .map_err(|e| e.to_string())?;

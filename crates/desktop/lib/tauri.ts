@@ -308,13 +308,11 @@ export const chat = {
     templateId: number,
     providerPreferenceId: number | null,
     model: string | null,
-    compactAgentId: number | null = null,
   ) =>
     invoke<ChatSessionPayload>("create_chat_session", {
       templateId: templateId.toString(),
       providerPreferenceId: providerPreferenceId?.toString() ?? null,
       model,
-      compactAgentId: compactAgentId?.toString() ?? null,
     }),
 
   activateExistingThread: (sessionId: string, threadId: string) =>

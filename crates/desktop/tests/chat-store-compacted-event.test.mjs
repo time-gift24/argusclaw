@@ -32,7 +32,7 @@ test("chat store applies compacted events without disturbing streaming state", (
   );
 });
 
-test("chat store tracks compact-agent lifecycle with a dedicated compacting status", () => {
+test("chat store tracks compaction lifecycle with a dedicated compacting status", () => {
   assert.match(
     storeSource,
     /status:\s*"idle"\s*\|\s*"running"\s*\|\s*"compacting"\s*\|\s*"error"/,

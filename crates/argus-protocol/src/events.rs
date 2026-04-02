@@ -684,17 +684,17 @@ pub enum ThreadEvent {
         /// New token count after compaction.
         new_token_count: u32,
     },
-    /// Hidden compact-agent flow started.
+    /// Hidden compaction flow started.
     CompactionStarted {
         /// Thread ID.
         thread_id: String,
     },
-    /// Hidden compact-agent flow finished successfully.
+    /// Hidden compaction flow finished successfully.
     CompactionFinished {
         /// Thread ID.
         thread_id: String,
     },
-    /// Hidden compact-agent flow failed but the visible turn may continue.
+    /// Hidden compaction flow failed but the visible turn may continue.
     CompactionFailed {
         /// Thread ID.
         thread_id: String,

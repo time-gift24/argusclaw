@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
-use argus_agent::CompactorManager;
+use argus_agent::{Compactor, LlmCompactor};
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
@@ -74,7 +74,7 @@ pub struct ArgusWing {
     session_manager: Arc<SessionManager>,
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
-    compactor_manager: Arc<CompactorManager>,
+    default_compactor: Arc<dyn Compactor>,
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
     pub account_manager: Arc<AccountManager>,
@@ -129,8 +129,8 @@ impl ArgusWing {
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
 
-        // Create compactor manager
-        let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        // Create default compactor that summarizes stale history using the active thread provider.
+        let default_compactor = default_compactor();
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
 
@@ -142,7 +142,7 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
-            compactor_manager.clone(),
+            default_compactor.clone(),
             trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -175,7 +175,7 @@ impl ArgusWing {
             session_manager,
             approval_manager,
             tool_manager,
-            compactor_manager,
+            default_compactor,
             job_manager,
             account_manager,
             knowledge_repo_repo,
@@ -202,7 +202,7 @@ impl ArgusWing {
             arc_sqlite.clone(),
         ));
         let tool_manager = Arc::new(ToolManager::new());
-        let compactor_manager = Arc::new(CompactorManager::with_defaults());
+        let default_compactor = default_compactor();
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         // Create provider resolver wrapper FIRST
@@ -213,7 +213,7 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
-            compactor_manager.clone(),
+            default_compactor.clone(),
             trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -242,7 +242,7 @@ impl ArgusWing {
             session_manager,
             approval_manager,
             tool_manager,
-            compactor_manager,
+            default_compactor,
             job_manager,
             account_manager,
             knowledge_repo_repo,
@@ -291,10 +291,10 @@ impl ArgusWing {
         &self.approval_manager
     }
 
-    /// Get a reference to the compactor manager.
+    /// Get a reference to the default compactor.
     #[must_use]
-    pub fn compactor_manager(&self) -> &Arc<CompactorManager> {
-        &self.compactor_manager
+    pub fn default_compactor(&self) -> &Arc<dyn Compactor> {
+        &self.default_compactor
     }
 
     /// Get a point-in-time snapshot of aggregate thread-pool metrics.
@@ -506,7 +506,7 @@ impl ArgusWing {
 
         // Create thread
         let thread_id = self
-            .create_thread(session_id, template.id, None, None, None)
+            .create_thread(session_id, template.id, None, None)
             .await?;
 
         Ok((session_id, thread_id))
@@ -533,7 +533,6 @@ impl ArgusWing {
         template_id: AgentId,
         provider_id: Option<ProviderId>,
         model_override: Option<&str>,
-        compact_agent_id: Option<AgentId>,
     ) -> Result<ThreadId> {
         self.session_manager
             .create_thread(
@@ -541,7 +540,6 @@ impl ArgusWing {
                 template_id,
                 provider_id,
                 model_override,
-                compact_agent_id,
             )
             .await
     }
@@ -791,6 +789,15 @@ pub struct ToolInfo {
     pub description: String,
     pub risk_level: RiskLevel,
     pub parameters: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// Default compactor
+// ---------------------------------------------------------------------------
+
+/// Returns the default LLM-driven compactor used by interactive threads.
+fn default_compactor() -> Arc<dyn Compactor> {
+    Arc::new(LlmCompactor::new())
 }
 
 #[cfg(test)]
@@ -1072,7 +1079,6 @@ mod tests {
             template_id,
             Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
             None,
-            None,
         )
         .await
         .expect("thread should create");
@@ -1199,7 +1205,7 @@ mod tests {
             .await
             .expect("session should create");
 
-        wing.create_thread(session_id, template_id, None, None, None)
+        wing.create_thread(session_id, template_id, None, None)
             .await
             .expect("thread should create using the default provider fallback");
     }
@@ -1265,7 +1271,7 @@ mod tests {
             .expect("session should create");
 
         let thread_id = wing
-            .create_thread(session_id, template_id, None, None, None)
+            .create_thread(session_id, template_id, None, None)
             .await
             .expect("thread should create");
 
@@ -1315,7 +1321,7 @@ mod tests {
             .await
             .expect("session should create");
         let thread_id = wing
-            .create_thread(session_id, template_id, None, None, None)
+            .create_thread(session_id, template_id, None, None)
             .await
             .expect("thread should create");
 
@@ -1369,11 +1375,11 @@ mod tests {
             .await
             .expect("session should create");
         let first_thread_id = wing
-            .create_thread(session_id, template_id, None, None, None)
+            .create_thread(session_id, template_id, None, None)
             .await
             .expect("first thread should create");
         let second_thread_id = wing
-            .create_thread(session_id, template_id, None, None, None)
+            .create_thread(session_id, template_id, None, None)
             .await
             .expect("second thread should create");
 
@@ -1463,7 +1469,7 @@ mod tests {
             .expect("session should create");
 
         let thread_id = wing
-            .create_thread(session_id, template_id, None, None, None)
+            .create_thread(session_id, template_id, None, None)
             .await
             .expect("thread should create");
 
@@ -1577,7 +1583,7 @@ mod tests {
             .await
             .expect("foreign session should create");
         let thread_id = wing
-            .create_thread(owning_session_id, template_id, None, None, None)
+            .create_thread(owning_session_id, template_id, None, None)
             .await
             .expect("thread should create");
 
@@ -1644,7 +1650,7 @@ mod tests {
             .await
             .expect("foreign session should create");
         let thread_id = wing
-            .create_thread(owning_session_id, template_id, None, None, None)
+            .create_thread(owning_session_id, template_id, None, None)
             .await
             .expect("thread should create");
 
