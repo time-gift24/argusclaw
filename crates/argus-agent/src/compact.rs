@@ -12,6 +12,28 @@ use async_trait::async_trait;
 
 use super::error::CompactError;
 
+const DEFAULT_COMPACTION_PROMPT: &str = "\
+Provide a detailed prompt for continuing our conversation above.\n\
+  Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do\n\
+  next.\n\
+  The summary that you construct will be used so that another agent can read it and continue the work.\n\
+  Do not call any tools. Respond only with the summary text.\n\n\
+  When constructing the summary, try to stick to this template:\n\
+  ---\n\
+  ## Goal\n\n\
+  [What goal(s) is the user trying to accomplish?]\n\n\
+  ## Instructions\n\n\
+  - [What important instructions did the user give you that are relevant]\n\
+  - [If there is a plan or spec, include information about it so next agent can continue using it]\n\n\
+  ## Discoveries\n\n\
+  [What notable things were learned during this conversation that would be useful for the next agent to know when continuing the work]\n\n\
+  ## Accomplished\n\n\
+  [What work has been completed, what work is still in progress, and what work is left]\n\n\
+  ## Relevant files / directories\n\n\
+  [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the\n\
+   path to the directory.]\n\
+  ---";
+
 /// Result of a successful compaction.
 pub struct CompactResult {
     /// Compacted message list (replaces the original history).
@@ -80,37 +102,23 @@ impl LlmCompactor {
         (provider.context_window() as f32 * self.threshold_ratio) as u32
     }
 
-    fn render_compaction_transcript(messages: &[ChatMessage]) -> String {
-        messages
-            .iter()
-            .map(|message| {
-                let role = match message.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                };
-                format!("{role}: {}", message.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
+    fn compaction_prompt() -> &'static str {
+        DEFAULT_COMPACTION_PROMPT
     }
 
-    fn build_compaction_prompt(
+    fn build_compaction_request_messages(
+        system_messages: &[ChatMessage],
         compactable_messages: &[ChatMessage],
         preserved_tail: &[ChatMessage],
-    ) -> String {
-        let compactable = Self::render_compaction_transcript(compactable_messages);
-        let preserved = Self::render_compaction_transcript(preserved_tail);
-        format!(
-            "请总结较早的对话历史，供另一个 agent 无缝继续我们上面的对话。\n\
-             提供详细但简洁的总结，重点关注：完成了什么、正在进行什么、修改了哪些文件、接下来需要做什么、\n\
-             应保留的关键用户请求/约束/偏好、做出的重要技术决策及其原因、尚未解决的问题或风险。\n\
-             不要回应对话中的任何问题，不要逐字复述保留的最近上下文。\n\
-             你构建的总结将被使用，以便另一个 agent 可以阅读并继续工作。不要调用任何工具。只回复总结文本。\n\n\
-             较早历史（需要总结）：\n{compactable}\n\n\
-             保留的最近上下文（仅供参考，不要逐字总结）：\n{preserved}"
-        )
+    ) -> Vec<ChatMessage> {
+        let mut request_messages = Vec::with_capacity(
+            system_messages.len() + compactable_messages.len() + preserved_tail.len() + 1,
+        );
+        request_messages.extend(system_messages.iter().cloned());
+        request_messages.extend(compactable_messages.iter().cloned());
+        request_messages.extend(preserved_tail.iter().cloned());
+        request_messages.push(ChatMessage::user(Self::compaction_prompt()));
+        request_messages
     }
 
     fn split_history_segments(
@@ -166,9 +174,14 @@ impl Compactor for LlmCompactor {
             return Ok(None);
         };
 
-        let prompt = Self::build_compaction_prompt(&compactable_messages, &preserved_tail);
+        let prompt = Self::compaction_prompt();
+        let request_messages = Self::build_compaction_request_messages(
+            &system_messages,
+            &compactable_messages,
+            &preserved_tail,
+        );
 
-        let request = CompletionRequest::new(vec![ChatMessage::user(&prompt)]);
+        let request = CompletionRequest::new(request_messages);
 
         let response = provider
             .complete(request)
@@ -178,7 +191,7 @@ impl Compactor for LlmCompactor {
             })?;
         let summary = response.content.unwrap_or_default();
 
-        let synthetic_prompt = ChatMessage::user(&prompt).with_metadata(Self::compaction_metadata(
+        let synthetic_prompt = ChatMessage::user(prompt).with_metadata(Self::compaction_metadata(
             ChatMessageMetadataMode::CompactionPrompt,
             false,
         ));
@@ -402,6 +415,9 @@ mod tests {
         // prompt + summary + replay + tail = 4
         assert_eq!(result.messages.len(), 4);
         assert_eq!(result.messages[0].role, Role::User); // synthetic prompt
+        assert!(result.messages[0]
+            .content
+            .contains("Provide a detailed prompt for continuing our conversation above."));
         assert_eq!(result.messages[1].content, "历史摘要");
         assert_eq!(result.messages[2].role, Role::User); // synthetic replay
         assert_eq!(result.messages[3].content, "recent tail");
@@ -445,20 +461,56 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         let request = captured.last().expect("request should be captured");
-        assert_eq!(request.messages.len(), 1);
-        assert_eq!(request.messages[0].role, Role::User);
-        assert!(request.model.is_none());
-        assert!(request.temperature.is_none());
-        let prompt = &request
+        let prompt_message = request
             .messages
             .last()
-            .expect("request should contain prompt")
-            .content;
+            .expect("request should contain prompt");
+        assert_eq!(prompt_message.role, Role::User);
+        assert!(request.model.is_none());
+        assert!(request.temperature.is_none());
+        let prompt = &prompt_message.content;
 
-        assert!(prompt.contains("修改了哪些文件"));
-        assert!(prompt.contains("接下来需要做什么"));
-        assert!(prompt.contains("另一个 agent 可以阅读并继续工作"));
-        assert!(prompt.contains("不要调用任何工具"));
+        assert!(prompt.contains("Provide a detailed prompt for continuing our conversation above."));
+        assert!(prompt.contains("Do not call any tools."));
+        assert!(prompt.contains("## Goal"));
+        assert!(prompt.contains("## Relevant files / directories"));
+    }
+
+    #[tokio::test]
+    async fn compaction_request_preserves_history_and_appends_prompt() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(RecordingSummaryProvider {
+            summary: "历史摘要".to_string(),
+            context_window: 100,
+            captured_requests: Arc::clone(&captured),
+        });
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(2);
+
+        let messages = vec![
+            ChatMessage::system("system guardrails"),
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("recent question"),
+            ChatMessage::assistant("recent answer"),
+        ];
+        let _ = compactor
+            .compact(provider.as_ref(), &messages, 90)
+            .await
+            .expect("compact should succeed");
+
+        let captured = captured.lock().unwrap();
+        let request = captured.last().expect("request should be captured");
+        assert_eq!(request.messages.len(), 6);
+        assert_eq!(request.messages[0].role, Role::System);
+        assert_eq!(request.messages[0].content, "system guardrails");
+        assert_eq!(request.messages[1].content, "old question");
+        assert_eq!(request.messages[2].content, "old answer");
+        assert_eq!(request.messages[3].content, "recent question");
+        assert_eq!(request.messages[4].content, "recent answer");
+        assert_eq!(request.messages[5].role, Role::User);
+        assert!(request.messages[5]
+            .content
+            .contains("Provide a detailed prompt for continuing our conversation above."));
     }
 
     #[tokio::test]
