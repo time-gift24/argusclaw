@@ -4,175 +4,14 @@ use std::sync::Arc;
 
 use crate::turn::TurnCancellation;
 use crate::turn_log_store::persist_turn_log_snapshot;
-use argus_protocol::{
-    MailboxMessage, MessageOverride, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
-    ThreadMailbox, ThreadRuntimeState,
-};
-use tokio::sync::{RwLock, mpsc};
+use argus_protocol::{MessageOverride, ThreadCommand, ThreadControlEvent, ThreadRuntimeState};
+use tokio::sync::{mpsc, RwLock};
 
-use crate::command::ThreadRuntimeSnapshot;
 use crate::error::ThreadError;
 use crate::thread::Thread;
-
-/// Runtime decisions that the outer orchestrator can act on.
-#[derive(Debug, Clone)]
-pub(crate) enum ThreadRuntimeAction {
-    /// Start a new turn immediately.
-    StartTurn {
-        /// Turn number to execute.
-        turn_number: u32,
-        /// User message content.
-        content: String,
-        /// Optional per-message overrides.
-        msg_override: Option<MessageOverride>,
-    },
-    /// Active turn should be stopped.
-    StopTurn {
-        /// Turn number being stopped.
-        turn_number: u32,
-    },
-    /// No immediate action is required.
-    Noop,
-}
-
-/// Lightweight thread runtime state machine.
-#[derive(Debug)]
-pub(crate) struct ThreadRuntime {
-    state: ThreadRuntimeState,
-    next_turn_number: u32,
-    queue_depth: usize,
-}
-
-impl Default for ThreadRuntime {
-    fn default() -> Self {
-        Self {
-            state: ThreadRuntimeState::Idle,
-            next_turn_number: 1,
-            queue_depth: 0,
-        }
-    }
-}
-
-impl ThreadRuntime {
-    /// Create a new thread runtime seeded from the owning thread's next turn number.
-    ///
-    /// The returned runtime will start the next turn at `next_turn_number` so
-    /// runtime snapshots stay aligned with the owning [`Thread`].
-    #[must_use]
-    pub(crate) fn seeded_from_next_turn_number(next_turn_number: u32) -> Self {
-        Self {
-            state: ThreadRuntimeState::Idle,
-            next_turn_number,
-            queue_depth: 0,
-        }
-    }
-
-    /// Handle a runtime command and return the immediate action.
-    pub(crate) fn apply_command(
-        &mut self,
-        command: ThreadCommand,
-        mailbox: &mut ThreadMailbox,
-    ) -> ThreadRuntimeAction {
-        match command {
-            ThreadCommand::EnqueueUserMessage {
-                content,
-                msg_override,
-            } => {
-                mailbox.push(ThreadControlEvent::UserMessage {
-                    content,
-                    msg_override,
-                });
-                self.queue_depth = mailbox.pending_len();
-                self.try_start_next_turn(mailbox)
-            }
-            ThreadCommand::EnqueueMailboxMessage(message) => {
-                mailbox.push(ThreadControlEvent::DeliverMailboxMessage(message));
-                self.queue_depth = mailbox.pending_len();
-                self.try_start_next_turn(mailbox)
-            }
-            ThreadCommand::CancelActiveTurn => self.cancel_active_turn(),
-        }
-    }
-
-    /// Mark the current turn as finished and decide the next action.
-    pub(crate) fn finish_active_turn(
-        &mut self,
-        mailbox: &mut ThreadMailbox,
-    ) -> ThreadRuntimeAction {
-        self.state = ThreadRuntimeState::Idle;
-        self.queue_depth = mailbox.pending_len();
-        self.try_start_next_turn(mailbox)
-    }
-
-    /// Return an immutable runtime snapshot.
-    #[must_use]
-    pub(crate) fn snapshot(&self) -> ThreadRuntimeSnapshot {
-        ThreadRuntimeSnapshot {
-            state: self.state,
-            queue_depth: self.queue_depth,
-        }
-    }
-
-    /// Return current runtime state.
-    #[must_use]
-    pub(crate) fn state(&self) -> ThreadRuntimeState {
-        self.state
-    }
-
-    pub(crate) fn claim_queued_job_result(
-        &mut self,
-        mailbox: &mut ThreadMailbox,
-        job_id: &str,
-    ) -> Option<MailboxMessage> {
-        let claimed = mailbox.claim_job_result(job_id);
-        if claimed.is_some() {
-            self.queue_depth = mailbox.pending_len();
-        }
-        claimed
-    }
-
-    fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadRuntimeAction {
-        if !matches!(self.state, ThreadRuntimeState::Idle) {
-            return ThreadRuntimeAction::Noop;
-        }
-
-        match self.take_next_turn_message(mailbox) {
-            Some(message) => self.start_turn(message),
-            None => ThreadRuntimeAction::Noop,
-        }
-    }
-
-    fn start_turn(&mut self, message: QueuedUserMessage) -> ThreadRuntimeAction {
-        let turn_number = self.next_turn_number;
-        self.next_turn_number = self.next_turn_number.saturating_add(1);
-        self.state = ThreadRuntimeState::Running { turn_number };
-
-        ThreadRuntimeAction::StartTurn {
-            turn_number,
-            content: message.content,
-            msg_override: message.msg_override,
-        }
-    }
-
-    fn cancel_active_turn(&mut self) -> ThreadRuntimeAction {
-        match self.state {
-            ThreadRuntimeState::Running { turn_number }
-            | ThreadRuntimeState::WaitingForApproval { turn_number } => {
-                self.state = ThreadRuntimeState::Stopping { turn_number };
-                ThreadRuntimeAction::StopTurn { turn_number }
-            }
-            ThreadRuntimeState::Idle | ThreadRuntimeState::Stopping { .. } => {
-                ThreadRuntimeAction::Noop
-            }
-        }
-    }
-
-    fn take_next_turn_message(&mut self, mailbox: &mut ThreadMailbox) -> Option<QueuedUserMessage> {
-        let message = mailbox.take_next_turn_message();
-        self.queue_depth = mailbox.pending_len();
-        message
-    }
-}
+pub(crate) use crate::thread::{
+    ThreadReactor as ThreadRuntime, ThreadReactorAction as ThreadRuntimeAction,
+};
 
 /// Spawn the async thread runtime actor loop.
 pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
@@ -195,7 +34,7 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
 
         let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
         let mut runtime = ThreadRuntime::seeded_from_next_turn_number(next_turn_number);
-        let mut active_turn_cancellation: Option<TurnCancellation> = None;
+        sync_runtime_snapshot(&thread, &runtime).await;
         let mut shutdown_requested = false;
 
         loop {
@@ -232,7 +71,12 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                             // Production: UserInterrupt is an immediate stop signal for the active
                             // turn. The interrupt content is not currently used as redirect text.
                             let _ = content;
-                            runtime.cancel_active_turn()
+                            let mut mailbox = mailbox.lock().await;
+                            let action =
+                                runtime.apply_command(ThreadCommand::CancelActiveTurn, &mut mailbox);
+                            drop(mailbox);
+                            sync_runtime_snapshot(&thread, &runtime).await;
+                            action
                         }
                         ThreadControlEvent::ClaimQueuedJobResult { job_id, reply_tx } => {
                             let claimed = {
@@ -246,7 +90,16 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                             shutdown_requested = true;
                             match runtime.state() {
                                 ThreadRuntimeState::Idle => break,
-                                _ => runtime.cancel_active_turn(),
+                                _ => {
+                                    let mut mailbox = mailbox.lock().await;
+                                    let action = runtime.apply_command(
+                                        ThreadCommand::CancelActiveTurn,
+                                        &mut mailbox,
+                                    );
+                                    drop(mailbox);
+                                    sync_runtime_snapshot(&thread, &runtime).await;
+                                    action
+                                }
                             }
                         }
                     };
@@ -254,14 +107,12 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     process_runtime_action(
                         Arc::clone(&thread),
                         &mut runtime,
-                        &mut active_turn_cancellation,
                         runtime_action,
                         &turn_done_tx,
                     )
                     .await;
                 }
                 Some(result) = turn_done_rx.recv() => {
-                    active_turn_cancellation = None;
                     let settled_turn_number = match runtime.state() {
                         ThreadRuntimeState::Running { turn_number }
                         | ThreadRuntimeState::WaitingForApproval { turn_number }
@@ -270,6 +121,7 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     };
                     let (finish_result, turn_log_snapshot) = {
                         let mut guard = thread.write().await;
+                        guard.set_active_turn_cancellation(None);
                         let finish_result = guard.finish_turn(result);
                         let turn_log_snapshot = guard.turn_log_persistence_snapshot();
                         (finish_result, turn_log_snapshot)
@@ -313,10 +165,10 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         let mut mailbox = mailbox.lock().await;
                         runtime.finish_active_turn(&mut mailbox)
                     };
+                    sync_runtime_snapshot(&thread, &runtime).await;
                     process_runtime_action(
                         Arc::clone(&thread),
                         &mut runtime,
-                        &mut active_turn_cancellation,
                         runtime_action,
                         &turn_done_tx,
                     )
@@ -335,8 +187,10 @@ mod tests {
     use crate::error::CompactError;
     use crate::history::TurnRecord;
     use crate::thread::ThreadBuilder;
-    use argus_protocol::llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmProvider};
-    use argus_protocol::{AgentId, MailboxMessage, MailboxMessageType};
+    use argus_protocol::llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmProvider,
+    };
+    use argus_protocol::{AgentId, MailboxMessage, MailboxMessageType, ThreadMailbox};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use std::sync::Arc;
@@ -495,7 +349,7 @@ mod tests {
         );
         assert!(matches!(second, ThreadRuntimeAction::Noop));
 
-        let stop = runtime.cancel_active_turn();
+        let stop = runtime.apply_command(ThreadCommand::CancelActiveTurn, &mut mailbox);
         assert!(matches!(
             stop,
             ThreadRuntimeAction::StopTurn { turn_number: 1 }
@@ -567,7 +421,6 @@ mod tests {
 async fn process_runtime_action(
     thread: Arc<RwLock<Thread>>,
     runtime: &mut ThreadRuntime,
-    active_turn_cancellation: &mut Option<TurnCancellation>,
     action: ThreadRuntimeAction,
     turn_done_tx: &mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
 ) {
@@ -587,9 +440,7 @@ async fn process_runtime_action(
                 )
                 .await
                 {
-                    Ok(cancellation) => {
-                        *active_turn_cancellation = Some(cancellation);
-                    }
+                    Ok(()) => {}
                     Err(error) => {
                         let thread_id = {
                             let guard = thread.read().await;
@@ -633,7 +484,11 @@ async fn process_runtime_action(
                 break;
             }
             ThreadRuntimeAction::StopTurn { turn_number } => {
-                if let Some(cancellation) = active_turn_cancellation.as_ref() {
+                let cancellation = {
+                    let guard = thread.read().await;
+                    guard.active_turn_cancellation()
+                };
+                if let Some(cancellation) = cancellation {
                     tracing::info!(turn_number, "cancelling active turn");
                     cancellation.cancel();
                 } else {
@@ -652,7 +507,7 @@ async fn start_turn_task(
     content: String,
     msg_override: Option<MessageOverride>,
     turn_done_tx: mpsc::UnboundedSender<std::result::Result<crate::TurnOutput, ThreadError>>,
-) -> std::result::Result<TurnCancellation, ThreadError> {
+) -> std::result::Result<(), ThreadError> {
     let cancellation = TurnCancellation::new();
     let turn = {
         let mut guard = thread.write().await;
@@ -666,5 +521,12 @@ async fn start_turn_task(
         let _ = turn_done_tx.send(result);
     });
 
-    Ok(cancellation)
+    Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+async fn sync_runtime_snapshot(thread: &Arc<RwLock<Thread>>, runtime: &ThreadRuntime) {
+    let snapshot = runtime.snapshot();
+    let mut guard = thread.write().await;
+    guard.sync_runtime_snapshot(snapshot);
 }

@@ -3,13 +3,13 @@
 use argus_protocol::{MailboxMessage, ThreadCommand, ThreadMailbox, ThreadRuntimeState};
 
 use crate::command::ThreadRuntimeSnapshot;
-use crate::runtime::{ThreadRuntime, ThreadRuntimeAction};
+use crate::thread::{ThreadReactor, ThreadReactorAction as ThreadRuntimeAction};
 
 /// Handle API for interacting with a thread runtime.
 #[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct ThreadHandle {
-    runtime: ThreadRuntime,
+    runtime: ThreadReactor,
     mailbox: ThreadMailbox,
 }
 
@@ -23,7 +23,7 @@ impl ThreadHandle {
 
     /// Create a handle around an existing runtime.
     #[must_use]
-    pub(crate) fn with_runtime(runtime: ThreadRuntime) -> Self {
+    pub(crate) fn with_runtime(runtime: ThreadReactor) -> Self {
         Self {
             runtime,
             mailbox: ThreadMailbox::default(),
