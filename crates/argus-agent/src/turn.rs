@@ -374,13 +374,13 @@ pub struct Turn {
     /// LLM provider for completion requests.
     provider: Arc<dyn LlmProvider>,
 
-    /// Tools available for this turn (direct ownership, no ToolManager needed).
-    #[builder(default)]
-    tools: Vec<Arc<dyn NamedTool>>,
+    /// Shared tools available for this turn.
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    tools: Arc<Vec<Arc<dyn NamedTool>>>,
 
-    /// Hooks for lifecycle events (direct ownership, no HookRegistry needed).
-    #[builder(default)]
-    hooks: Vec<Arc<dyn HookHandler>>,
+    /// Shared hooks for lifecycle events.
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    hooks: Arc<Vec<Arc<dyn HookHandler>>>,
 
     /// Turn execution configuration.
     #[builder(default)]
@@ -410,10 +410,6 @@ pub struct Turn {
     /// Cancellation primitive used to stop this turn.
     #[builder(default)]
     cancellation: TurnCancellation,
-
-    /// Event forwarder task handle (cleaned up on drop).
-    #[builder(default)]
-    _forwarder_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TurnBuilder {
@@ -426,6 +422,30 @@ impl TurnBuilder {
     /// Share an existing history buffer with this turn.
     pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
         self.messages = Some(value);
+        self
+    }
+
+    /// Set the tool list for this turn.
+    pub fn tools(mut self, value: Vec<Arc<dyn NamedTool>>) -> Self {
+        self.tools = Some(Arc::new(value));
+        self
+    }
+
+    /// Share an existing tool list with this turn.
+    pub fn shared_tools(mut self, value: Arc<Vec<Arc<dyn NamedTool>>>) -> Self {
+        self.tools = Some(value);
+        self
+    }
+
+    /// Set the hook list for this turn.
+    pub fn hooks(mut self, value: Vec<Arc<dyn HookHandler>>) -> Self {
+        self.hooks = Some(Arc::new(value));
+        self
+    }
+
+    /// Share an existing hook list with this turn.
+    pub fn shared_hooks(mut self, value: Arc<Vec<Arc<dyn HookHandler>>>) -> Self {
+        self.hooks = Some(value);
         self
     }
 
@@ -519,15 +539,6 @@ impl Turn {
         mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
     ) -> Result<TurnOutput, TurnError> {
-        // Spawn event forwarder — clone stream_tx so it lives in the forwarder task.
-        // This prevents the channel from closing when the Turn is dropped.
-        self._forwarder_handle = Some(Self::spawn_event_forwarder(
-            self.stream_tx.clone(),
-            self.thread_event_tx.clone(),
-            self.thread_id.clone(),
-            self.turn_number,
-        ));
-
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
@@ -624,93 +635,9 @@ impl Turn {
         self.execute_progress().finish().await
     }
 
-    /// Internal method: spawn event forwarder task.
-    ///
-    /// Forwards TurnStreamEvent to ThreadEvent for external subscribers.
-    /// Returns the JoinHandle so the caller can store it.
-    fn spawn_event_forwarder(
-        stream_tx: broadcast::Sender<TurnStreamEvent>,
-        thread_event_tx: broadcast::Sender<ThreadEvent>,
-        thread_id: String,
-        turn_number: u32,
-    ) -> tokio::task::JoinHandle<()> {
-        let mut stream_rx = stream_tx.subscribe();
-
-        tokio::spawn(async move {
-            tracing::debug!(
-                thread_id = %thread_id,
-                turn_number = %turn_number,
-                "Event forwarder started"
-            );
-            while let Ok(event) = stream_rx.recv().await {
-                match event {
-                    TurnStreamEvent::LlmEvent(llm_event) => {
-                        if let Err(e) = thread_event_tx.send(ThreadEvent::Processing {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                            event: llm_event,
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %turn_number,
-                                error = %e,
-                                "Failed to forward LlmEvent to thread_event_tx"
-                            );
-                        }
-                    }
-                    TurnStreamEvent::ToolStarted {
-                        tool_call_id,
-                        tool_name,
-                        arguments,
-                    } => {
-                        if let Err(e) = thread_event_tx.send(ThreadEvent::ToolStarted {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                            tool_call_id,
-                            tool_name,
-                            arguments,
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %turn_number,
-                                error = %e,
-                                "Failed to forward ToolStarted to thread_event_tx"
-                            );
-                        }
-                    }
-                    TurnStreamEvent::ToolCompleted {
-                        tool_call_id,
-                        tool_name,
-                        result,
-                    } => {
-                        if let Err(e) = thread_event_tx.send(ThreadEvent::ToolCompleted {
-                            thread_id: thread_id.clone(),
-                            turn_number,
-                            tool_call_id,
-                            tool_name,
-                            result,
-                        }) {
-                            tracing::warn!(
-                                thread_id = %thread_id,
-                                turn_number = %turn_number,
-                                error = %e,
-                                "Failed to forward ToolCompleted to thread_event_tx"
-                            );
-                        }
-                    }
-                }
-            }
-            tracing::warn!(
-                thread_id = %thread_id,
-                turn_number = %turn_number,
-                "Event forwarder stopped (stream channel closed)"
-            );
-        })
-    }
-
     /// Internal method: trigger hooks and return the action.
     async fn fire_hooks(&self, ctx: &ToolHookContext) -> Result<HookAction, TurnError> {
-        for hook in &self.hooks {
+        for hook in self.hooks.iter() {
             let action = hook.on_tool_event(ctx).await;
 
             if let HookAction::Block(reason) = action {
@@ -1003,6 +930,18 @@ impl Turn {
                                 &progress_tx,
                                 TurnProgress::LlmEvent(event.clone()),
                             );
+                            if let Err(error) = self.thread_event_tx.send(ThreadEvent::Processing {
+                                thread_id: self.thread_id.clone(),
+                                turn_number: self.turn_number,
+                                event: event.clone(),
+                            }) {
+                                tracing::warn!(
+                                    thread_id = %self.thread_id,
+                                    turn_number = %self.turn_number,
+                                    error = %error,
+                                    "Failed to send Processing event"
+                                );
+                            }
                             // Forward to stream_tx
                             let _ = self
                                 .stream_tx

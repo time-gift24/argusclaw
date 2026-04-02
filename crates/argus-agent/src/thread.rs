@@ -23,7 +23,7 @@ use super::config::ThreadConfig;
 use super::error::ThreadError;
 use super::history::{
     CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, TurnRecord, TurnState,
-    flatten_turn_messages,
+    flatten_turn_messages, shared_history,
 };
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
@@ -553,9 +553,7 @@ impl Thread {
 
     /// Get message history (read-only).
     pub fn history(&self) -> &[ChatMessage] {
-        self.cached_committed_messages
-            .as_ref()
-            .map_or_else(|| self.messages.as_slice(), |messages| messages.as_slice())
+        shared_history(&self.messages, self.cached_committed_messages.as_ref()).as_slice()
     }
 
     /// Returns true when committed history contains visible transcript beyond system prompts.
@@ -577,7 +575,10 @@ impl Thread {
             );
             Arc::new(context_messages)
         } else {
-            Arc::clone(&self.messages)
+            Arc::clone(shared_history(
+                &self.messages,
+                self.cached_committed_messages.as_ref(),
+            ))
         }
     }
 
@@ -924,6 +925,8 @@ impl Thread {
         hooks.push(Arc::new(PlanContinuationHook::new(Arc::new(
             self.plan_store.clone(),
         ))));
+        let tools = Arc::new(tools);
+        let hooks = Arc::new(hooks);
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
@@ -936,8 +939,8 @@ impl Thread {
             .shared_messages(shared_messages)
             .pending_messages(pending_messages)
             .provider(self.provider.clone())
-            .tools(tools)
-            .hooks(hooks)
+            .shared_tools(tools)
+            .shared_hooks(hooks)
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
@@ -1386,6 +1389,30 @@ mod tests {
 
         assert_eq!(thread.history().len(), 3);
         assert_eq!(thread.turn_count(), 1);
+    }
+
+    #[test]
+    fn shared_history_build_turn_context_prefers_cached_committed_messages() {
+        let mut thread = build_test_thread();
+        thread.hydrate_turn_history_for_test(vec![TurnRecord::completed(
+            1,
+            vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        )]);
+
+        thread.messages = Arc::new(vec![
+            ChatMessage::system("You are a stale system message."),
+            ChatMessage::user("stale"),
+            ChatMessage::assistant("history"),
+        ]);
+
+        assert_eq!(thread.history()[1].content, "hi");
+        assert_eq!(thread.history()[2].content, "hello");
+
+        let context = thread.build_turn_context();
+        assert_eq!(context.len(), 3);
+        assert_eq!(context[0].role, argus_protocol::llm::Role::System);
+        assert_eq!(context[1].content, "hi");
+        assert_eq!(context[2].content, "hello");
     }
 
     #[test]
