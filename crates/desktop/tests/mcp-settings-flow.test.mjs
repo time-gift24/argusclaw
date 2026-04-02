@@ -52,6 +52,10 @@ test("settings exposes dedicated MCP routes and editor components", () => {
   assert.match(mcpPageSource, /<McpCard/)
   assert.match(mcpPageSource, /<McpTestDialog/)
   assert.match(mcpEditorSource, /<McpTestDialog/)
+  assert.match(mcpEditorSource, /const \[headerRows, setHeaderRows\] = React\.useState/)
+  assert.match(mcpEditorSource, /Header 名称/)
+  assert.match(mcpEditorSource, /Header 值/)
+  assert.match(mcpEditorSource, /addHeaderRow/)
 })
 
 test("settings navigation and breadcrumbs surface the MCP configuration section", () => {
