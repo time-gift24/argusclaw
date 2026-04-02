@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::{
-    Compactor, FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
-    TurnCancellation, TurnConfig, TurnLogEvent, read_jsonl_events,
+    Compactor, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
+    TurnConfig, TurnLogEvent, read_jsonl_events,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
@@ -185,91 +185,6 @@ impl std::fmt::Debug for ThreadPool {
 }
 
 impl ThreadPool {
-    async fn resolve_compact_agent_binding(
-        &self,
-        compact_agent_id: Option<AgentId>,
-    ) -> Result<Option<Arc<dyn Compactor>>, JobError> {
-        let Some(compact_agent_id) = compact_agent_id else {
-            return Ok(None);
-        };
-
-        let compact_agent_record = self
-            .template_manager
-            .get(compact_agent_id)
-            .await
-            .map_err(|err| {
-                JobError::ExecutionFailed(format!(
-                    "failed to load compact agent {}: {err}",
-                    compact_agent_id.inner()
-                ))
-            })?
-            .ok_or_else(|| {
-                JobError::ExecutionFailed(format!(
-                    "compact agent {} not found",
-                    compact_agent_id.inner()
-                ))
-            })?;
-
-        let requested_model = compact_agent_record
-            .model_id
-            .clone()
-            .unwrap_or_else(|| format!("provider-{}", compact_agent_id.inner()));
-        let provider = if let Some(provider_id) = compact_agent_record.provider_id {
-            match compact_agent_record.model_id.as_deref() {
-                Some(model) => match self
-                    .provider_resolver
-                    .resolve_with_model(provider_id, model)
-                    .await
-                {
-                    Ok(provider) => Ok(provider),
-                    Err(_) => self.provider_resolver.resolve(provider_id).await,
-                },
-                None => self.provider_resolver.resolve(provider_id).await,
-            }
-        } else if let Some(model) = compact_agent_record.model_id.as_deref() {
-            if let Some(persistence) = &self.persistence {
-                match persistence
-                    .provider_repository
-                    .get_default_provider_id()
-                    .await
-                {
-                    Ok(Some(default_provider_id)) => match self
-                        .provider_resolver
-                        .resolve_with_model(
-                            ProviderId::new(default_provider_id.into_inner()),
-                            model,
-                        )
-                        .await
-                    {
-                        Ok(provider) => Ok(provider),
-                        Err(_) => self.provider_resolver.default_provider().await,
-                    },
-                    Ok(None) | Err(_) => self.provider_resolver.default_provider().await,
-                }
-            } else {
-                self.provider_resolver.default_provider().await
-            }
-        } else {
-            self.provider_resolver.default_provider().await
-        };
-
-        let provider = match provider {
-            Ok(provider) => provider,
-            Err(error) => Arc::new(UnavailableChatProvider::new(
-                requested_model,
-                format!("failed to resolve compact agent provider: {error}"),
-            )) as Arc<dyn argus_protocol::LlmProvider>,
-        };
-
-        let compactor = LlmCompactor::new(
-            Arc::new(compact_agent_record),
-            provider,
-            128_000,
-        );
-
-        Ok(Some(Arc::new(compactor)))
-    }
-
     /// Create a new thread pool with a default runtime cap.
     pub fn new(
         template_manager: Arc<TemplateManager>,
@@ -1715,12 +1630,6 @@ impl ThreadPool {
         turn_config.on_turn_complete = Some(Self::build_on_turn_complete(
             self.chat_runtime_config.trace_dir.clone(),
         ));
-        let compact_agent_binding = self
-            .resolve_compact_agent_binding(thread_record.compact_agent_id)
-            .await?;
-        let compactor = compact_agent_binding.unwrap_or_else(|| {
-            self.chat_runtime_config.default_compactor.clone()
-        });
         let config = ThreadConfigBuilder::default()
             .turn_config(turn_config)
             .build()
@@ -1732,7 +1641,7 @@ impl ThreadPool {
             .title(thread_record.title.clone())
             .provider(provider)
             .tool_manager(self.tool_manager.clone())
-            .compactor(compactor);
+            .compactor(self.chat_runtime_config.default_compactor.clone());
         let plan_store = FilePlanStore::new(
             self.chat_runtime_config.trace_dir.clone(),
             &thread_id.inner().to_string(),
@@ -2107,7 +2016,6 @@ impl ThreadPool {
             turn_count: 0,
             session_id: None,
             template_id: Some(RepoAgentId::new(request.agent_id.inner())),
-            compact_agent_id: None,
             model_override: model_override.clone(),
             created_at: now.to_string(),
             updated_at: now.to_string(),
@@ -2445,6 +2353,7 @@ pub(crate) fn noop_compactor() -> Arc<dyn Compactor> {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
+            _provider: &dyn argus_protocol::LlmProvider,
             _messages: &[argus_protocol::llm::ChatMessage],
             _token_count: u32,
         ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError> {
@@ -2493,7 +2402,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use argus_agent::{CompactResult, Compactor, TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
+    use argus_agent::{TraceConfig, TraceWriter, TurnCancellation, TurnLogEvent};
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
         LlmProviderRepository,
@@ -2846,7 +2755,6 @@ mod tests {
                 turn_count: 0,
                 session_id: Some(session_id),
                 template_id: Some(RepoAgentId::new(7)),
-                compact_agent_id: None,
                 model_override: Some("capturing".to_string()),
                 created_at: "2026-03-30T00:00:00Z".to_string(),
                 updated_at: "2026-03-30T00:00:00Z".to_string(),
@@ -3047,7 +2955,6 @@ mod tests {
                         turn_count: 0,
                         session_id: None,
                         template_id: Some(RepoAgentId::new(7)),
-                        compact_agent_id: None,
                         model_override: Some("gpt-4o-mini".to_string()),
                         created_at: "2026-03-29T00:00:00Z".to_string(),
                         updated_at: "2026-03-29T00:00:00Z".to_string(),

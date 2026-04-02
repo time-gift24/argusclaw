@@ -821,7 +821,6 @@ impl SessionManager {
             turn_count: 0,
             session_id: Some(session_id),
             template_id: Some(template_id),
-            compact_agent_id: None,
             model_override: Some(effective_model.clone()),
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -1431,6 +1430,7 @@ mod tests {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
+            _provider: &dyn argus_protocol::LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, argus_agent::CompactError> {

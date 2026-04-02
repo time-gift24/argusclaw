@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
-use argus_agent::Compactor;
+use argus_agent::{Compactor, LlmCompactor};
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
@@ -129,8 +129,8 @@ impl ArgusWing {
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
 
-        // Create default compactor (no-op; threads needing LLM compaction build LlmCompactor on demand)
-        let default_compactor = noop_compactor();
+        // Create default compactor that summarizes stale history using the active thread provider.
+        let default_compactor = default_compactor();
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
 
@@ -202,7 +202,7 @@ impl ArgusWing {
             arc_sqlite.clone(),
         ));
         let tool_manager = Arc::new(ToolManager::new());
-        let default_compactor = noop_compactor();
+        let default_compactor = default_compactor();
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         // Create provider resolver wrapper FIRST
@@ -792,31 +792,12 @@ pub struct ToolInfo {
 }
 
 // ---------------------------------------------------------------------------
-// NoopCompactor — default compactor that never compacts
+// Default compactor
 // ---------------------------------------------------------------------------
 
-/// Returns a no-op compactor that always returns `Ok(None)`.
-///
-/// Used as the default for threads that do not have a dedicated compact agent.
-fn noop_compactor() -> Arc<dyn Compactor> {
-    struct NoopCompactor;
-
-    #[async_trait::async_trait]
-    impl Compactor for NoopCompactor {
-        async fn compact(
-            &self,
-            _messages: &[argus_protocol::llm::ChatMessage],
-            _token_count: u32,
-        ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError> {
-            Ok(None)
-        }
-
-        fn name(&self) -> &'static str {
-            "noop"
-        }
-    }
-
-    Arc::new(NoopCompactor)
+/// Returns the default LLM-driven compactor used by interactive threads.
+fn default_compactor() -> Arc<dyn Compactor> {
+    Arc::new(LlmCompactor::new())
 }
 
 #[cfg(test)]

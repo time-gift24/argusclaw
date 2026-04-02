@@ -400,7 +400,11 @@ impl Thread {
     ) -> Result<crate::Turn, ThreadError> {
         self.set_turn_running(true);
 
-        match self.compactor.compact(&self.messages, self.token_count).await {
+        match self
+            .compactor
+            .compact(self.provider.as_ref(), &self.messages, self.token_count)
+            .await
+        {
             Ok(Some(result)) => {
                 self.messages = result.messages;
                 self.token_count = result.token_count;
@@ -613,6 +617,7 @@ mod tests {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
+            _provider: &dyn LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
@@ -630,6 +635,7 @@ mod tests {
     impl Compactor for FailingCompactor {
         async fn compact(
             &self,
+            _provider: &dyn LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
@@ -1189,6 +1195,7 @@ mod tests {
     impl Compactor for SingleMessageCompactor {
         async fn compact(
             &self,
+            _provider: &dyn LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {

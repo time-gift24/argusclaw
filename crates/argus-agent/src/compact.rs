@@ -5,12 +5,9 @@
 //! - `CompactResult`: Result type carrying compacted messages and token estimate.
 //! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
 
-use std::sync::Arc;
-
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
-use argus_protocol::AgentRecord;
 use async_trait::async_trait;
 
 use super::error::CompactError;
@@ -33,6 +30,7 @@ pub trait Compactor: Send + Sync {
     /// `None` if compaction was not needed.
     async fn compact(
         &self,
+        provider: &dyn LlmProvider,
         messages: &[ChatMessage],
         token_count: u32,
     ) -> Result<Option<CompactResult>, CompactError>;
@@ -45,30 +43,20 @@ pub trait Compactor: Send + Sync {
 // LlmCompactor
 // ---------------------------------------------------------------------------
 
-/// LLM-driven compactor that summarizes stale history using a hidden compact agent.
+/// LLM-driven compactor that summarizes stale history using the current thread provider.
 ///
 /// When token usage exceeds the threshold ratio of the context window, older messages
-/// are sent to a compact agent for summarization. The result replaces the old history
+/// are sent to the current provider for summarization. The result replaces the old history
 /// with synthetic prompt/summary/replay messages plus the preserved recent tail.
 pub struct LlmCompactor {
-    record: Arc<AgentRecord>,
-    provider: Arc<dyn LlmProvider>,
-    context_window: u32,
     threshold_ratio: f32,
     tail_count: usize,
 }
 
 impl LlmCompactor {
     /// Create a new LlmCompactor.
-    pub fn new(
-        record: Arc<AgentRecord>,
-        provider: Arc<dyn LlmProvider>,
-        context_window: u32,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
-            record,
-            provider,
-            context_window,
             threshold_ratio: 0.8,
             tail_count: 50,
         }
@@ -88,8 +76,8 @@ impl LlmCompactor {
         self
     }
 
-    fn threshold(&self) -> u32 {
-        (self.context_window as f32 * self.threshold_ratio) as u32
+    fn threshold(&self, provider: &dyn LlmProvider) -> u32 {
+        (provider.context_window() as f32 * self.threshold_ratio) as u32
     }
 
     fn render_compaction_transcript(messages: &[ChatMessage]) -> String {
@@ -164,10 +152,11 @@ impl LlmCompactor {
 impl Compactor for LlmCompactor {
     async fn compact(
         &self,
+        provider: &dyn LlmProvider,
         messages: &[ChatMessage],
         token_count: u32,
     ) -> Result<Option<CompactResult>, CompactError> {
-        if token_count < self.threshold() {
+        if token_count < self.threshold(provider) {
             return Ok(None);
         }
 
@@ -179,28 +168,9 @@ impl Compactor for LlmCompactor {
 
         let prompt = Self::build_compaction_prompt(&compactable_messages, &preserved_tail);
 
-        let mut request_messages = Vec::new();
-        if !self.record.system_prompt.trim().is_empty() {
-            request_messages.push(ChatMessage::system(&self.record.system_prompt));
-        }
-        request_messages.push(ChatMessage::user(&prompt));
+        let request = CompletionRequest::new(vec![ChatMessage::user(&prompt)]);
 
-        let mut request = CompletionRequest::new(request_messages);
-        if let Some(model) = self.record.model_id.as_deref() {
-            request = request.with_model(model);
-        }
-        if let Some(max_tokens) = self.record.max_tokens {
-            request.max_tokens = Some(max_tokens);
-        }
-        if let Some(temperature) = self.record.temperature {
-            request.temperature = Some(temperature);
-        }
-        if let Some(thinking) = self.record.thinking_config.clone() {
-            request.thinking = Some(thinking);
-        }
-
-        let response = self
-            .provider
+        let response = provider
             .complete(request)
             .await
             .map_err(|error| CompactError::Failed {
@@ -272,34 +242,14 @@ mod tests {
     use std::sync::Arc;
 
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
     use super::*;
 
-    fn compact_agent_record() -> Arc<AgentRecord> {
-        Arc::new(AgentRecord {
-            id: AgentId::new(99),
-            display_name: "Compact Agent".to_string(),
-            description: "Summarizes stale history".to_string(),
-            version: "1.0.0".to_string(),
-            provider_id: Some(ProviderId::new(2)),
-            model_id: Some("compact-model".to_string()),
-            system_prompt:
-                "你是一个有用的AI助手，负责总结对话历史，供后续 agent 无缝继续工作。只输出总结文本。"
-                    .to_string(),
-            tool_names: vec![],
-            max_tokens: Some(256),
-            temperature: Some(0.1),
-            thinking_config: None,
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
-        })
-    }
-
     struct SummaryProvider {
         summary: String,
+        context_window: u32,
     }
 
     #[async_trait]
@@ -327,6 +277,10 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
     }
 
     struct FailingSummaryProvider;
@@ -350,10 +304,15 @@ mod tests {
                 reason: "summary failed".to_string(),
             })
         }
+
+        fn context_window(&self) -> u32 {
+            100
+        }
     }
 
     struct RecordingSummaryProvider {
         summary: String,
+        context_window: u32,
         captured_requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
     }
 
@@ -383,63 +342,51 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
     }
 
     #[test]
     fn llm_compactor_clamps_threshold_ratio() {
-        let compactor = LlmCompactor::new(
-            compact_agent_record(),
-            Arc::new(SummaryProvider {
-                summary: String::new(),
-            }),
-            100,
-        )
-        .with_threshold_ratio(2.0);
+        let compactor = LlmCompactor::new().with_threshold_ratio(2.0);
         assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
     }
 
     #[tokio::test]
     async fn returns_none_when_below_threshold() {
-        let compactor = LlmCompactor::new(
-            compact_agent_record(),
-            Arc::new(SummaryProvider {
-                summary: String::new(),
-            }),
-            100,
-        );
+        let provider = Arc::new(SummaryProvider {
+            summary: String::new(),
+            context_window: 100,
+        });
+        let compactor = LlmCompactor::new();
         let messages = vec![ChatMessage::user("hello")];
-        let result = compactor.compact(&messages, 10).await;
+        let result = compactor.compact(provider.as_ref(), &messages, 10).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn returns_none_when_no_compactable_segment() {
-        let compactor = LlmCompactor::new(
-            compact_agent_record(),
-            Arc::new(SummaryProvider {
-                summary: String::new(),
-            }),
-            100,
-        )
-        .with_tail_count(50);
+        let provider = Arc::new(SummaryProvider {
+            summary: String::new(),
+            context_window: 100,
+        });
+        let compactor = LlmCompactor::new().with_tail_count(50);
         let messages = vec![ChatMessage::user("a"), ChatMessage::assistant("b")];
-        let result = compactor.compact(&messages, 90).await;
+        let result = compactor.compact(provider.as_ref(), &messages, 90).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn compacts_and_produces_synthetic_messages() {
-        let compactor = LlmCompactor::new(
-            compact_agent_record(),
-            Arc::new(SummaryProvider {
-                summary: "历史摘要".to_string(),
-            }),
-            100,
-        )
-        .with_threshold_ratio(0.2)
-        .with_tail_count(1);
+        let provider = Arc::new(SummaryProvider {
+            summary: "历史摘要".to_string(),
+            context_window: 100,
+        });
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(1);
 
         let messages = vec![
             ChatMessage::user("old question"),
@@ -447,7 +394,7 @@ mod tests {
             ChatMessage::user("recent tail"),
         ];
         let result = compactor
-            .compact(&messages, 90)
+            .compact(provider.as_ref(), &messages, 90)
             .await
             .expect("compact should succeed")
             .expect("should have compacted");
@@ -463,50 +410,45 @@ mod tests {
 
     #[tokio::test]
     async fn failure_returns_error() {
-        let compactor = LlmCompactor::new(
-            compact_agent_record(),
-            Arc::new(FailingSummaryProvider),
-            100,
-        )
-        .with_threshold_ratio(0.2)
-        .with_tail_count(1);
+        let provider = Arc::new(FailingSummaryProvider);
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(1);
 
         let messages = vec![
             ChatMessage::user("old"),
             ChatMessage::assistant("reply"),
             ChatMessage::user("tail"),
         ];
-        let result = compactor.compact(&messages, 90).await;
+        let result = compactor.compact(provider.as_ref(), &messages, 90).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn prompt_includes_handoff_details() {
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let compactor = LlmCompactor::new(
-            compact_agent_record(),
-            Arc::new(RecordingSummaryProvider {
-                summary: "历史摘要".to_string(),
-                captured_requests: Arc::clone(&captured),
-            }),
-            100,
-        )
-        .with_threshold_ratio(0.2)
-        .with_tail_count(1);
+        let provider = Arc::new(RecordingSummaryProvider {
+            summary: "历史摘要".to_string(),
+            context_window: 100,
+            captured_requests: Arc::clone(&captured),
+        });
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.2).with_tail_count(1);
 
         let messages = vec![
             ChatMessage::user("完成了 provider 绑定"),
             ChatMessage::assistant("修改了 thread.rs"),
-            ChatMessage::user("接下来补默认 compact agent"),
+            ChatMessage::user("接下来补默认 compactor"),
             ChatMessage::assistant("记住用户偏好"),
         ];
         let _ = compactor
-            .compact(&messages, 90)
+            .compact(provider.as_ref(), &messages, 90)
             .await
             .expect("compact should succeed");
 
         let captured = captured.lock().unwrap();
         let request = captured.last().expect("request should be captured");
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].role, Role::User);
+        assert!(request.model.is_none());
+        assert!(request.temperature.is_none());
         let prompt = &request
             .messages
             .last()
@@ -517,5 +459,35 @@ mod tests {
         assert!(prompt.contains("接下来需要做什么"));
         assert!(prompt.contains("另一个 agent 可以阅读并继续工作"));
         assert!(prompt.contains("不要调用任何工具"));
+    }
+
+    #[tokio::test]
+    async fn uses_current_provider_context_window() {
+        let compactor = LlmCompactor::new().with_threshold_ratio(0.8).with_tail_count(1);
+        let messages = vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+            ChatMessage::user("recent tail"),
+        ];
+        let small_context_provider = Arc::new(SummaryProvider {
+            summary: "small window summary".to_string(),
+            context_window: 100,
+        });
+        let large_context_provider = Arc::new(SummaryProvider {
+            summary: "large window summary".to_string(),
+            context_window: 200,
+        });
+
+        let compacted = compactor
+            .compact(small_context_provider.as_ref(), &messages, 90)
+            .await
+            .expect("small window compact should succeed");
+        assert!(compacted.is_some());
+
+        let skipped = compactor
+            .compact(large_context_provider.as_ref(), &messages, 90)
+            .await
+            .expect("large window compact should succeed");
+        assert!(skipped.is_none());
     }
 }
