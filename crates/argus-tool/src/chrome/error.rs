@@ -14,6 +14,9 @@ pub enum ChromeToolError {
     #[error("session not found: {session_id}")]
     SessionNotFound { session_id: String },
 
+    #[error("shared browser session is unavailable; run navigate(url) first")]
+    SharedSessionUnavailable,
+
     #[error("failed to create directory '{path:?}': {reason}")]
     DirectoryCreateFailed { path: PathBuf, reason: String },
 

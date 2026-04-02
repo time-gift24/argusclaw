@@ -19,6 +19,7 @@ pub struct ChromePaths {
     pub driver: PathBuf,
     pub patched: PathBuf,
     pub tmp: PathBuf,
+    pub shared_session_state: PathBuf,
 }
 
 impl ChromePaths {
@@ -28,12 +29,14 @@ impl ChromePaths {
         let driver = root.join("driver");
         let patched = root.join("patched");
         let tmp = root.join("tmp");
+        let shared_session_state = root.join("shared-session.json");
 
         Self {
             root,
             driver,
             patched,
             tmp,
+            shared_session_state,
         }
     }
 

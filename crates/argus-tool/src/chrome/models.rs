@@ -11,8 +11,8 @@ use super::error::ChromeToolError;
 #[serde(rename_all = "snake_case")]
 pub enum ChromeAction {
     Install,
-    Open,
     Navigate,
+    Close,
     Wait,
     ExtractText,
     ListLinks,
@@ -33,8 +33,8 @@ impl ChromeAction {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Install => "install",
-            Self::Open => "open",
             Self::Navigate => "navigate",
+            Self::Close => "close",
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
             Self::ListLinks => "list_links",
@@ -59,8 +59,6 @@ pub struct ChromeToolArgs {
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
     pub selector: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
@@ -82,7 +80,6 @@ impl ChromeToolArgs {
             })?;
 
         args.url = normalized_optional_string(args.url);
-        args.session_id = normalized_optional_string(args.session_id);
         args.selector = normalized_optional_string(args.selector);
         args.text = normalized_optional_string(args.text);
         args.tab_id = normalized_optional_string(args.tab_id);
@@ -92,62 +89,49 @@ impl ChromeToolArgs {
             ChromeAction::Install => {
                 validate_for_install(&args)?;
             }
-            ChromeAction::Open => {
-                validate_for_open(&mut args)?;
-            }
             ChromeAction::Navigate => {
                 validate_for_navigate(&mut args)?;
             }
+            ChromeAction::Close => {
+                validate_for_close(&args)?;
+            }
             ChromeAction::Wait => {
-                require_session_id(&args)?;
                 validate_for_wait(&args)?;
             }
             ChromeAction::ExtractText => {
-                require_session_id(&args)?;
                 validate_for_extract_text(&args)?;
             }
             ChromeAction::ListLinks => {
-                require_session_id(&args)?;
                 validate_for_list_links(&args)?;
             }
             ChromeAction::NetworkRequests => {
-                require_session_id(&args)?;
                 validate_for_network_requests(&args)?;
             }
             ChromeAction::GetDomSummary => {
-                require_session_id(&args)?;
                 validate_for_dom_summary(&args)?;
             }
             ChromeAction::Click => {
-                require_session_id(&args)?;
                 validate_for_click(&args)?;
             }
             ChromeAction::Type => {
-                require_session_id(&args)?;
                 validate_for_type(&args)?;
             }
             ChromeAction::GetUrl => {
-                require_session_id(&args)?;
                 validate_for_get_url(&args)?;
             }
             ChromeAction::GetCookies => {
-                require_session_id(&args)?;
                 validate_for_get_cookies(&args)?;
             }
             ChromeAction::NewTab => {
-                require_session_id(&args)?;
                 validate_for_new_tab(&mut args)?;
             }
             ChromeAction::SwitchTab => {
-                require_session_id(&args)?;
                 validate_for_switch_tab(&args)?;
             }
             ChromeAction::CloseTab => {
-                require_session_id(&args)?;
                 validate_for_close_tab(&args)?;
             }
             ChromeAction::ListTabs => {
-                require_session_id(&args)?;
                 validate_for_list_tabs(&args)?;
             }
         }
@@ -221,21 +205,15 @@ fn normalized_optional_string(value: Option<String>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn require_session_id(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    args.session_id
-        .as_deref()
-        .ok_or_else(|| ChromeToolError::MissingRequiredField {
-            action: args.action.as_str().to_string(),
-            field: "session_id",
-        })
-        .map(|_| ())
-}
-
 fn validate_for_wait(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id", "timeout_ms"])
+    allow_only_fields(args, &["timeout_ms"])
 }
 
-fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
+fn validate_for_close(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
+    allow_only_fields(args, &[])
+}
+
+fn validate_for_navigate(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
     let url = args
         .url
         .as_deref()
@@ -244,21 +222,6 @@ fn validate_for_open(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
             field: "url",
         })?;
     allow_only_fields(args, &["url"])?;
-    let url = validate_url_for_action(args.action.as_str(), url)?;
-    args.url = Some(url);
-    Ok(())
-}
-
-fn validate_for_navigate(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
-    require_session_id(args)?;
-    let url = args
-        .url
-        .as_deref()
-        .ok_or_else(|| ChromeToolError::MissingRequiredField {
-            action: args.action.as_str().to_string(),
-            field: "url",
-        })?;
-    allow_only_fields(args, &["session_id", "url"])?;
     let url = validate_url_for_action(args.action.as_str(), url)?;
     args.url = Some(url);
     Ok(())
@@ -305,11 +268,11 @@ fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 }
 
 fn validate_for_extract_text(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id", "selector"])
+    allow_only_fields(args, &["selector"])
 }
 
 fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id"])
+    allow_only_fields(args, &[])
 }
 
 fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
@@ -324,30 +287,30 @@ fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeTool
         });
     }
 
-    allow_only_fields(args, &["session_id", "max_requests"])
+    allow_only_fields(args, &["max_requests"])
 }
 
 fn validate_for_dom_summary(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id"])
+    allow_only_fields(args, &[])
 }
 
 fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("selector", &args.selector, args.action.as_str())?;
-    allow_only_fields(args, &["session_id", "selector"])
+    allow_only_fields(args, &["selector"])
 }
 
 fn validate_for_type(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("selector", &args.selector, args.action.as_str())?;
     require_field("text", &args.text, args.action.as_str())?;
-    allow_only_fields(args, &["session_id", "selector", "text"])
+    allow_only_fields(args, &["selector", "text"])
 }
 
 fn validate_for_get_url(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id"])
+    allow_only_fields(args, &[])
 }
 
 fn validate_for_get_cookies(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id", "domain"])
+    allow_only_fields(args, &["domain"])
 }
 
 fn validate_for_new_tab(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError> {
@@ -358,7 +321,7 @@ fn validate_for_new_tab(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError
             action: args.action.as_str().to_string(),
             field: "url",
         })?;
-    allow_only_fields(args, &["session_id", "url"])?;
+    allow_only_fields(args, &["url"])?;
     let url = validate_url_for_action(args.action.as_str(), url)?;
     args.url = Some(url);
     Ok(())
@@ -366,16 +329,16 @@ fn validate_for_new_tab(args: &mut ChromeToolArgs) -> Result<(), ChromeToolError
 
 fn validate_for_switch_tab(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("tab_id", &args.tab_id, args.action.as_str())?;
-    allow_only_fields(args, &["session_id", "tab_id"])
+    allow_only_fields(args, &["tab_id"])
 }
 
 fn validate_for_close_tab(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     require_field("tab_id", &args.tab_id, args.action.as_str())?;
-    allow_only_fields(args, &["session_id", "tab_id"])
+    allow_only_fields(args, &["tab_id"])
 }
 
 fn validate_for_list_tabs(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &["session_id"])
+    allow_only_fields(args, &[])
 }
 
 fn require_field(
@@ -416,9 +379,6 @@ fn present_fields(args: &ChromeToolArgs) -> Vec<&'static str> {
 
     if args.url.is_some() {
         fields.push("url");
-    }
-    if args.session_id.is_some() {
-        fields.push("session_id");
     }
     if args.selector.is_some() {
         fields.push("selector");

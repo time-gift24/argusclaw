@@ -53,58 +53,65 @@ mod tests {
     }
 
     #[test]
-    fn open_requires_url() {
-        let err = ChromeToolArgs::validate(json!({ "action": "open" })).unwrap_err();
+    fn navigate_requires_url() {
+        let err = ChromeToolArgs::validate(json!({ "action": "navigate" })).unwrap_err();
         assert!(matches!(
             err,
             ChromeToolError::MissingRequiredField { action, field }
-            if action == "open" && field == "url"
+            if action == "navigate" && field == "url"
         ));
     }
 
     #[test]
-    fn open_rejects_malformed_url() {
+    fn navigate_rejects_malformed_url() {
         let err =
-            ChromeToolArgs::validate(json!({ "action": "open", "url": "not-a-url" })).unwrap_err();
+            ChromeToolArgs::validate(json!({ "action": "navigate", "url": "not-a-url" }))
+                .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
     #[test]
-    fn open_rejects_non_http_scheme() {
-        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "file:///tmp/a.txt" }))
-            .unwrap_err();
-        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
-
-        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "chrome://settings" }))
-            .unwrap_err();
-        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
-    }
-
-    #[test]
-    fn open_rejects_local_or_private_targets() {
+    fn navigate_rejects_non_http_scheme() {
         let err =
-            ChromeToolArgs::validate(json!({ "action": "open", "url": "https://localhost/path" }))
+            ChromeToolArgs::validate(json!({ "action": "navigate", "url": "file:///tmp/a.txt" }))
                 .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
 
         let err =
-            ChromeToolArgs::validate(json!({ "action": "open", "url": "https://127.0.0.1/path" }))
+            ChromeToolArgs::validate(json!({ "action": "navigate", "url": "chrome://settings" }))
                 .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
 
-        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "http://10.0.0.1" }))
+    #[test]
+    fn navigate_rejects_local_or_private_targets() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "url": "https://localhost/path"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "url": "https://127.0.0.1/path"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({ "action": "navigate", "url": "http://10.0.0.1" }))
             .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
 
-        let err = ChromeToolArgs::validate(json!({ "action": "open", "url": "http://0.0.0.0" }))
+        let err = ChromeToolArgs::validate(json!({ "action": "navigate", "url": "http://0.0.0.0" }))
             .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
     #[test]
-    fn open_stores_trimmed_validated_url() {
+    fn navigate_stores_trimmed_validated_url() {
         let args = ChromeToolArgs::validate(
-            json!({ "action": "open", "url": "  https://example.com/path?q=1  " }),
+            json!({ "action": "navigate", "url": "  https://example.com/path?q=1  " }),
         )
         .unwrap();
 
@@ -112,26 +119,9 @@ mod tests {
     }
 
     #[test]
-    fn open_and_navigate_reject_stray_tab_fields() {
-        let err = ChromeToolArgs::validate(json!({
-            "action": "open",
-            "url": "https://example.com",
-            "text": "hello",
-        }))
-        .unwrap_err();
-        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
-
-        let err = ChromeToolArgs::validate(json!({
-            "action": "open",
-            "url": "https://example.com",
-            "tab_id": "tab-1",
-        }))
-        .unwrap_err();
-        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
-
+    fn navigate_rejects_stray_fields() {
         let err = ChromeToolArgs::validate(json!({
             "action": "navigate",
-            "session_id": "session-1",
             "url": "https://example.com",
             "text": "hello",
         }))
@@ -140,36 +130,43 @@ mod tests {
 
         let err = ChromeToolArgs::validate(json!({
             "action": "navigate",
-            "session_id": "session-1",
             "url": "https://example.com",
             "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+
+        let err = ChromeToolArgs::validate(json!({
+            "action": "navigate",
+            "url": "https://example.com",
+            "session_id": "session-1",
         }))
         .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
     #[test]
-    fn click_requires_session_id_and_selector() {
-        // Missing session_id
+    fn click_requires_selector_and_rejects_session_id() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "click",
+        }))
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::MissingRequiredField { action, field }
+            if action == "click" && field == "selector"
+        ));
+
         let err = ChromeToolArgs::validate(json!({
             "action": "click",
             "selector": "#btn",
-        }))
-        .unwrap_err();
-        assert!(matches!(err, ChromeToolError::MissingRequiredField { .. }));
-
-        // Missing selector
-        let err = ChromeToolArgs::validate(json!({
-            "action": "click",
             "session_id": "session-1",
         }))
         .unwrap_err();
-        assert!(matches!(err, ChromeToolError::MissingRequiredField { .. }));
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
 
-        // url not allowed
         let err = ChromeToolArgs::validate(json!({
             "action": "click",
-            "session_id": "session-1",
             "selector": "#btn",
             "url": "https://example.com"
         }))
@@ -188,7 +185,6 @@ mod tests {
     fn wait_rejects_selector_argument() {
         let err = ChromeToolArgs::validate(json!({
             "action": "wait",
-            "session_id": "session-1",
             "selector": "#hero"
         }))
         .unwrap_err();
@@ -206,8 +202,46 @@ mod tests {
 
         let err = ChromeToolArgs::validate(json!({
             "action": "wait",
-            "session_id": "session-1",
             "tab_id": "tab-1",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
+    fn close_accepts_no_arguments() {
+        let args = ChromeToolArgs::validate(json!({
+            "action": "close",
+        }))
+        .unwrap();
+        assert_eq!(args.action.as_str(), "close");
+    }
+
+    #[test]
+    fn close_rejects_unexpected_url() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "close",
+            "url": "https://example.com",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
+    fn open_is_not_a_valid_action() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "open",
+            "url": "https://example.com",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
+    }
+
+    #[test]
+    fn restart_is_not_a_valid_action() {
+        let err = ChromeToolArgs::validate(json!({
+            "action": "restart",
+            "url": "https://example.com",
         }))
         .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
@@ -244,6 +278,8 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("explicit driver install"));
+        assert!(def.description.contains("hidden shared browser session"));
+        assert!(def.description.contains("navigate(url)"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
             .as_array()
@@ -252,16 +288,19 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("enum value should be a string"))
             .collect();
-        assert!(action_values.contains(&"open"));
+        assert!(action_values.contains(&"navigate"));
         assert!(action_values.contains(&"wait"));
         assert!(action_values.contains(&"extract_text"));
         assert!(action_values.contains(&"list_links"));
         assert!(action_values.contains(&"get_dom_summary"));
         assert!(action_values.contains(&"network_requests"));
         assert!(action_values.contains(&"install"));
+        assert!(action_values.contains(&"close"));
+        assert!(!action_values.contains(&"open"));
+        assert!(!action_values.contains(&"restart"));
         assert!(!action_values.contains(&"click"));
 
-        assert!(def.parameters["properties"].get("session_id").is_some());
+        assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("selector").is_some());
         assert!(def.parameters["properties"].get("max_requests").is_some());
         assert!(def.parameters["properties"].get("text").is_none());
@@ -273,6 +312,8 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("interactive"));
+        assert!(def.description.contains("hidden shared browser session"));
+        assert!(def.description.contains("navigate(url)"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
             .as_array()
@@ -286,6 +327,11 @@ mod tests {
         assert!(action_values.contains(&"get_url"));
         assert!(action_values.contains(&"get_cookies"));
         assert!(action_values.contains(&"install"));
+        assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"navigate"));
+        assert!(!action_values.contains(&"open"));
+        assert!(!action_values.contains(&"restart"));
+        assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("text").is_some());
     }
 
@@ -297,7 +343,6 @@ mod tests {
             .execute(
                 json!({
                     "action": "click",
-                    "session_id": "session-1",
                     "selector": "#btn",
                 }),
                 make_ctx(),
@@ -308,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chrome_tool_dispatches_read_actions_through_manager() {
+    async fn chrome_tool_navigate_boots_shared_session_without_public_session_id() {
         let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default().with_page(
             "https://example.com",
             "https://example.com/landing",
@@ -320,27 +365,48 @@ mod tests {
             "Visible page text",
         )));
 
-        let open = tool
+        let navigate = tool
             .execute(
                 json!({
-                    "action": "open",
+                    "action": "navigate",
                     "url": "https://example.com"
                 }),
                 make_ctx(),
             )
             .await
-            .expect("open should succeed");
+            .expect("navigate should succeed");
+        assert_eq!(navigate["action"], "navigate");
+        assert!(navigate.get("session_id").is_none());
+        assert_eq!(navigate["final_url"], "https://example.com/landing");
+    }
 
-        let session_id = open["session_id"]
-            .as_str()
-            .expect("open should return a session id")
-            .to_string();
+    #[tokio::test]
+    async fn chrome_tool_dispatches_read_actions_through_hidden_shared_session() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default().with_page(
+            "https://example.com",
+            "https://example.com/landing",
+            "Example Title",
+            vec![LinkSummary {
+                href: "https://example.com/docs".to_string(),
+                text: "Docs".to_string(),
+            }],
+            "Visible page text",
+        )));
+
+        tool.execute(
+            json!({
+                "action": "navigate",
+                "url": "https://example.com"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("navigate should succeed");
 
         let wait = tool
             .execute(
                 json!({
-                    "action": "wait",
-                    "session_id": session_id
+                    "action": "wait"
                 }),
                 make_ctx(),
             )
@@ -352,7 +418,6 @@ mod tests {
             .execute(
                 json!({
                     "action": "extract_text",
-                    "session_id": session_id,
                     "selector": "main"
                 }),
                 make_ctx(),
@@ -365,7 +430,6 @@ mod tests {
             .execute(
                 json!({
                     "action": "list_links",
-                    "session_id": session_id
                 }),
                 make_ctx(),
             )
@@ -378,7 +442,6 @@ mod tests {
             .execute(
                 json!({
                     "action": "get_dom_summary",
-                    "session_id": session_id
                 }),
                 make_ctx(),
             )
@@ -390,13 +453,78 @@ mod tests {
             .execute(
                 json!({
                     "action": "network_requests",
-                    "session_id": session_id
                 }),
                 make_ctx(),
             )
             .await
             .expect("network_requests should succeed");
         assert!(network["requests"].is_array());
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_close_shuts_down_session() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default().with_page(
+            "https://example.com",
+            "https://example.com/landing",
+            "Example Title",
+            vec![],
+            "Visible page text",
+        )));
+
+        tool.execute(
+            json!({
+                "action": "navigate",
+                "url": "https://example.com"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("navigate should succeed");
+
+        let close = tool
+            .execute(
+                json!({
+                    "action": "close",
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("close should succeed");
+        assert_eq!(close["status"], "ok");
+
+        let err = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                }),
+                make_ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("navigate(url)")
+        ));
+    }
+
+    #[tokio::test]
+    async fn chrome_tool_requires_navigate_before_extract_text() {
+        let tool = ChromeTool::new_for_test(Arc::new(FakeChromeBackend::default()));
+        let err = tool
+            .execute(
+                json!({
+                    "action": "extract_text",
+                }),
+                make_ctx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("navigate(url)")
+        ));
     }
 
     #[tokio::test]
@@ -437,25 +565,20 @@ mod tests {
             ),
         ));
 
-        let open = tool
-            .execute(
-                json!({
-                    "action": "open",
-                    "url": "https://www.example.com"
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("open should succeed");
-        let session_id = open["session_id"]
-            .as_str()
-            .expect("open should return a session id");
+        tool.execute(
+            json!({
+                "action": "navigate",
+                "url": "https://www.example.com"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("navigate should succeed");
 
         let cookies = tool
             .execute(
                 json!({
                     "action": "get_cookies",
-                    "session_id": session_id,
                     "domain": "www.example.com"
                 }),
                 make_ctx(),
@@ -528,7 +651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_constructor_requires_explicit_install_before_open() {
+    async fn managed_constructor_requires_explicit_install_before_navigate() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -546,13 +669,13 @@ mod tests {
         let err = tool
             .execute(
                 json!({
-                    "action": "open",
+                    "action": "navigate",
                     "url": "https://example.com"
                 }),
                 make_ctx(),
             )
             .await
-            .expect_err("managed open should require explicit install");
+            .expect_err("managed navigate should require explicit install");
 
         assert!(matches!(
             err,
@@ -585,18 +708,18 @@ mod tests {
             paths.clone(),
         );
 
-        let open = tool
+        let navigate = tool
             .execute(
                 json!({
-                    "action": "open",
+                    "action": "navigate",
                     "url": "https://example.com"
                 }),
                 make_ctx(),
             )
             .await
-            .expect("managed open should succeed with cached driver");
+            .expect("managed navigate should succeed with cached driver");
 
-        assert_eq!(open["page_title"], "Managed Example");
+        assert_eq!(navigate["page_title"], "Managed Example");
 
         let open_call = host
             .open_calls
@@ -636,13 +759,13 @@ mod tests {
 
         tool.execute(
             json!({
-                "action": "open",
+                "action": "navigate",
                 "url": "https://example.com"
             }),
             make_ctx(),
         )
         .await
-        .expect("interactive open should succeed");
+        .expect("interactive navigate should succeed");
 
         let open_call = host
             .open_calls
@@ -655,7 +778,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_constructor_reuses_session_on_second_open() {
+    async fn managed_constructor_reuses_shared_session_on_second_navigate() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         let host = Arc::new(FakeManagedChromeHost::new(
@@ -664,7 +787,7 @@ mod tests {
             "Managed Example",
         ));
         let tool = ChromeTool::new_with_managed_components_for_test(
-            host,
+            host.clone(),
             SpyManagedDownloader::new(HashMap::new()),
             paths.clone(),
         );
@@ -677,36 +800,32 @@ mod tests {
         .await
         .unwrap();
 
-        let first_open = tool
+        tool.execute(
+            json!({
+                "action": "navigate",
+                "url": "https://example.com/one"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("first navigate should succeed");
+        tool
             .execute(
                 json!({
-                    "action": "open",
-                    "url": "https://example.com/one"
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("first open should succeed");
-        let second_open = tool
-            .execute(
-                json!({
-                    "action": "open",
+                    "action": "navigate",
                     "url": "https://example.com/two"
                 }),
                 make_ctx(),
             )
             .await
-            .expect("second open should succeed");
+            .expect("second navigate should succeed");
 
-        // Production mode (limit=1) reuses the session instead of creating a new one
-        assert_eq!(first_open["session_id"], second_open["session_id"]);
+        assert_eq!(host.open_calls.lock().unwrap().len(), 1);
 
-        // The reused session is still alive and usable
         let result = tool
             .execute(
                 json!({
                     "action": "extract_text",
-                    "session_id": first_open["session_id"].as_str().unwrap()
                 }),
                 make_ctx(),
             )
@@ -719,6 +838,123 @@ mod tests {
     fn chrome_paths_use_arguswing_root() {
         let paths = ChromePaths::from_home(Path::new("/tmp/home"));
         assert_eq!(paths.root, PathBuf::from("/tmp/home/.arguswing/chrome"));
+    }
+
+    #[test]
+    fn chrome_paths_include_shared_session_state_file() {
+        let paths = ChromePaths::from_home(Path::new("/tmp/home"));
+        assert_eq!(
+            paths.shared_session_state,
+            PathBuf::from("/tmp/home/.arguswing/chrome/shared-session.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_recovers_shared_session_from_state_file() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        paths.ensure_directories().unwrap();
+        std::fs::write(
+            &paths.shared_session_state,
+            r#"{"session_id":"persisted-session"}"#,
+        )
+        .unwrap();
+        let host = Arc::new(
+            FakeManagedChromeHost::new(home.path().join("Google Chrome"), "124", "Managed Example")
+                .with_attached_session("persisted-session", "Recovered text"),
+        );
+        let tool = ChromeTool::new_with_managed_components_for_test(
+            host.clone(),
+            SpyManagedDownloader::new(HashMap::new()),
+            paths,
+        );
+
+        let result = tool
+            .execute(json!({ "action": "extract_text" }), make_ctx())
+            .await
+            .expect("extract_text should recover persisted shared session");
+
+        assert_eq!(result["content"], "Recovered text");
+        assert_eq!(host.attach_calls.lock().unwrap().as_slice(), &["persisted-session"]);
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_requires_navigate_when_persisted_session_is_stale() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        paths.ensure_directories().unwrap();
+        std::fs::write(
+            &paths.shared_session_state,
+            r#"{"session_id":"stale-session"}"#,
+        )
+        .unwrap();
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let tool = ChromeTool::new_with_managed_components_for_test(
+            host.clone(),
+            SpyManagedDownloader::new(HashMap::new()),
+            paths,
+        );
+
+        let err = tool
+            .execute(json!({ "action": "extract_text" }), make_ctx())
+            .await
+            .expect_err("stale persisted session should require navigate");
+
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("navigate(url)")
+        ));
+        assert_eq!(host.attach_calls.lock().unwrap().as_slice(), &["stale-session"]);
+    }
+
+    #[tokio::test]
+    async fn managed_constructor_recreates_stale_shared_session_on_navigate() {
+        let home = tempdir().unwrap();
+        let paths = ChromePaths::from_home(home.path());
+        paths.ensure_directories().unwrap();
+        std::fs::write(
+            &paths.shared_session_state,
+            r#"{"session_id":"stale-session"}"#,
+        )
+        .unwrap();
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
+        let tool = ChromeTool::new_with_managed_components_for_test(
+            host.clone(),
+            SpyManagedDownloader::with_zip_bytes(fake_driver_zip()),
+            paths,
+        );
+
+        ChromeInstaller::new(
+            ChromePaths::from_home(home.path()),
+            SpyManagedDownloader::with_zip_bytes(fake_driver_zip()),
+        )
+        .ensure_driver("124")
+        .await
+        .unwrap();
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "navigate",
+                    "url": "https://example.com"
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("navigate should recreate stale persisted session");
+
+        assert_eq!(result["page_title"], "Managed Example");
+        assert_eq!(host.attach_calls.lock().unwrap().as_slice(), &["stale-session"]);
+        assert_eq!(host.open_calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -739,11 +975,19 @@ mod tests {
         session_mode: SessionMode,
     }
 
+    #[derive(Debug, Clone)]
+    struct AttachedManagedSession {
+        page_title: String,
+        text: String,
+    }
+
     struct FakeManagedChromeHost {
         browser_binary: PathBuf,
         browser_version: String,
         page_title: String,
         open_calls: StdMutex<Vec<ManagedOpenCall>>,
+        attach_calls: StdMutex<Vec<String>>,
+        attached_sessions: StdMutex<HashMap<String, AttachedManagedSession>>,
     }
 
     impl FakeManagedChromeHost {
@@ -757,7 +1001,20 @@ mod tests {
                 browser_version: browser_version.into(),
                 page_title: page_title.into(),
                 open_calls: StdMutex::new(Vec::new()),
+                attach_calls: StdMutex::new(Vec::new()),
+                attached_sessions: StdMutex::new(HashMap::new()),
             }
+        }
+
+        fn with_attached_session(self, session_id: impl Into<String>, text: impl Into<String>) -> Self {
+            self.attached_sessions.lock().unwrap().insert(
+                session_id.into(),
+                AttachedManagedSession {
+                    page_title: self.page_title.clone(),
+                    text: text.into(),
+                },
+            );
+            self
         }
     }
 
@@ -801,9 +1058,53 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
+                backend_session_id: Some(format!(
+                    "managed-session-{}",
+                    self.open_calls.lock().unwrap().len()
+                )),
                 metadata: PageMetadata {
                     final_url: url.to_string(),
                     page_title: self.page_title.clone(),
+                },
+                session,
+            })
+        }
+
+        async fn attach_session(
+            &self,
+            session_id: &str,
+            _session_mode: SessionMode,
+        ) -> Result<BackendOpenResult, ChromeToolError> {
+            self.attach_calls
+                .lock()
+                .unwrap()
+                .push(session_id.to_string());
+            let attached = self
+                .attached_sessions
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .cloned()
+                .ok_or(ChromeToolError::SharedSessionUnavailable)?;
+
+            let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
+                links: vec![],
+                text: attached.text,
+                network_requests: Vec::new(),
+                url: "https://example.com/recovered".to_string(),
+                cookies: vec![],
+                tabs: StdMutex::new(vec![FakeTab {
+                    handle: "tab-1".to_string(),
+                    url: "https://example.com/recovered".to_string(),
+                    title: attached.page_title.clone(),
+                }]),
+            });
+
+            Ok(BackendOpenResult {
+                backend_session_id: Some(session_id.to_string()),
+                metadata: PageMetadata {
+                    final_url: "https://example.com/recovered".to_string(),
+                    page_title: attached.page_title,
                 },
                 session,
             })
@@ -1087,6 +1388,7 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
+                backend_session_id: None,
                 metadata: PageMetadata {
                     final_url: page.final_url.clone(),
                     page_title: page.page_title.clone(),
