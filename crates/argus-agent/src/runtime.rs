@@ -51,21 +51,27 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                         ThreadControlEvent::UserMessage { content, msg_override } => {
                             // Production: user messages are queued FIFO while a turn is running.
                             let mut mailbox = mailbox.lock().await;
-                            runtime.apply_command(
+                            let action = runtime.apply_command(
                                 ThreadCommand::EnqueueUserMessage {
                                     content,
                                     msg_override,
                                 },
                                 &mut mailbox,
-                            )
+                            );
+                            drop(mailbox);
+                            sync_runtime_snapshot(&thread, &runtime).await;
+                            action
                         }
                         ThreadControlEvent::DeliverMailboxMessage(message) => {
                             // Production: mailbox messages are queued FIFO while a turn is running.
                             let mut mailbox = mailbox.lock().await;
-                            runtime.apply_command(
+                            let action = runtime.apply_command(
                                 ThreadCommand::EnqueueMailboxMessage(message),
                                 &mut mailbox,
-                            )
+                            );
+                            drop(mailbox);
+                            sync_runtime_snapshot(&thread, &runtime).await;
+                            action
                         }
                         ThreadControlEvent::UserInterrupt { content } => {
                             // Production: UserInterrupt is an immediate stop signal for the active
@@ -83,6 +89,7 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                                 let mut mailbox = mailbox.lock().await;
                                 runtime.claim_queued_job_result(&mut mailbox, &job_id)
                             };
+                            sync_runtime_snapshot(&thread, &runtime).await;
                             let _ = reply_tx.send(claimed);
                             ThreadRuntimeAction::Noop
                         }
@@ -188,12 +195,16 @@ mod tests {
     use crate::history::TurnRecord;
     use crate::thread::ThreadBuilder;
     use argus_protocol::llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmProvider,
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
     };
-    use argus_protocol::{AgentId, MailboxMessage, MailboxMessageType, ThreadMailbox};
+    use argus_protocol::{
+        AgentId, MailboxMessage, MailboxMessageType, SessionId, ThreadControlEvent, ThreadMailbox,
+    };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use std::sync::Arc;
+    use tokio::sync::{oneshot, RwLock};
+    use tokio::time::{sleep, timeout, Duration};
 
     struct DummyProvider;
 
@@ -273,6 +284,67 @@ mod tests {
             read: false,
             summary: None,
         }
+    }
+
+    struct SlowProvider {
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SlowProvider {
+        fn model_name(&self) -> &str {
+            "slow"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            sleep(self.delay).await;
+            Ok(CompletionResponse {
+                content: Some("slow reply".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 10,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    fn build_test_thread_with_provider(provider: Arc<dyn LlmProvider>) -> Arc<RwLock<Thread>> {
+        Arc::new(RwLock::new(
+            ThreadBuilder::new()
+                .provider(provider)
+                .compactor(Arc::new(NoopCompactor))
+                .agent_record(test_agent_record())
+                .session_id(SessionId::new())
+                .build()
+                .expect("thread should build"),
+        ))
+    }
+
+    async fn wait_for_runtime_queue_depth(thread: &Arc<RwLock<Thread>>, expected_depth: usize) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = {
+                    let guard = thread.read().await;
+                    guard.runtime_snapshot()
+                };
+                if snapshot.queue_depth == expected_depth {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime snapshot should reach expected queue depth");
     }
 
     #[test]
@@ -414,6 +486,70 @@ mod tests {
             next,
             ThreadRuntimeAction::StartTurn { content, .. } if content == "follow-up"
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_syncs_queue_depth_after_queueing_and_claiming_job_results() {
+        let thread = build_test_thread_with_provider(Arc::new(SlowProvider {
+            delay: Duration::from_millis(250),
+        }));
+
+        Thread::spawn_runtime_actor(Arc::clone(&thread));
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_user_message("first".to_string(), None)
+                .expect("message should queue");
+        }
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let state = {
+                    let guard = thread.read().await;
+                    guard.runtime_snapshot().state
+                };
+                if matches!(state, ThreadRuntimeState::Running { turn_number: 1 }) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("thread should start first turn");
+
+        {
+            let guard = thread.read().await;
+            guard
+                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(
+                    queued_job_result("job-1"),
+                ))
+                .expect("job result should queue");
+        }
+
+        wait_for_runtime_queue_depth(&thread, 1).await;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        {
+            let guard = thread.read().await;
+            guard
+                .send_control_event(ThreadControlEvent::ClaimQueuedJobResult {
+                    job_id: "job-1".to_string(),
+                    reply_tx,
+                })
+                .expect("claim should queue");
+        }
+
+        let claimed = timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("claim reply should arrive")
+            .expect("claim reply channel should stay open");
+        assert_eq!(
+            claimed.as_ref().and_then(MailboxMessage::job_id),
+            Some("job-1")
+        );
+
+        wait_for_runtime_queue_depth(&thread, 0).await;
     }
 }
 
