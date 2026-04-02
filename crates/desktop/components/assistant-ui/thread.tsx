@@ -368,7 +368,7 @@ const PendingAssistantArtifacts: FC = () => {
                <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/tools:rotate-180" />
             </div>
           </summary>
-          <div className="mt-2 flex flex-col gap-1 pl-4 border-l-2 border-muted/30 ml-4">
+          <div className="mt-2 flex max-h-[min(18rem,35vh)] flex-col gap-1 overflow-y-auto custom-scrollbar border-l-2 border-muted/30 pl-4 pr-1 ml-4">
             {toolCalls.map((tc) => (
               <ManualToolFallback
                 key={tc.tool_call_id}
@@ -468,7 +468,8 @@ const JobStatusArtifacts: FC = () => {
           </div>
         </summary>
 
-        <div className="mt-3 flex flex-col gap-2">
+        <div className="mt-3 max-h-[min(22rem,40vh)] overflow-y-auto custom-scrollbar pr-1">
+          <div className="flex flex-col gap-2">
           {sorted.map((job) => {
             const isStopping = !!stoppingJobIds[job.job_id];
             const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
@@ -600,6 +601,7 @@ const JobStatusArtifacts: FC = () => {
               </div>
             );
           })}
+          </div>
         </div>
       </details>
     </div>
