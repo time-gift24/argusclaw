@@ -7,7 +7,6 @@ import {
   ChevronDownIcon,
   Loader2,
   XCircleIcon,
-  Wrench,
 } from "lucide-react";
 import {
   useScrollLock,
@@ -184,7 +183,7 @@ function ToolFallbackArgs({
       {...props}
     >
       <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">参数 (Arguments)</p>
-      <pre className="aui-tool-fallback-args-value whitespace-pre-wrap text-[11px] text-muted-foreground bg-muted/20 p-3 rounded-xl border border-muted/40 font-mono">
+      <pre className="aui-tool-fallback-args-value max-h-[18rem] overflow-auto custom-scrollbar whitespace-pre-wrap text-[11px] text-muted-foreground bg-muted/20 p-3 rounded-xl border border-muted/40 font-mono">
         {argsText}
       </pre>
     </div>
@@ -210,7 +209,7 @@ function ToolFallbackResult({
       {...props}
     >
       <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">输出 (Output)</p>
-      <pre className="aui-tool-fallback-result-content whitespace-pre-wrap text-[11px] text-muted-foreground bg-emerald-500/5 p-3 rounded-xl border border-emerald-500/10 font-mono">
+      <pre className="aui-tool-fallback-result-content max-h-[18rem] overflow-auto custom-scrollbar whitespace-pre-wrap text-[11px] text-muted-foreground bg-emerald-500/5 p-3 rounded-xl border border-emerald-500/10 font-mono">
         {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
       </pre>
     </div>

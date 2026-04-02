@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { Plus, Cloud, Check, Loader2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Plus, Cloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   providers,
@@ -16,7 +16,7 @@ import {
 } from "@/components/settings";
 
 export default function ProvidersPage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>(
     [],
   );
@@ -163,7 +163,7 @@ export default function ProvidersPage() {
           </p>
         </div>
 
-        <Button size="sm" onClick={() => router.push("/settings/providers/new")} className="h-9 shadow-sm">
+        <Button size="sm" onClick={() => navigate("/settings/providers/new")} className="h-9 shadow-sm">
           <Plus className="h-4 w-4 mr-1.5" />
           添加提供者
         </Button>
@@ -178,7 +178,7 @@ export default function ProvidersPage() {
             <p className="font-medium text-muted-foreground">暂无模型提供者</p>
             <p className="text-xs text-muted-foreground/60">开始配置您的第一个 AI 推理服务吧</p>
           </div>
-          <Button size="sm" onClick={() => router.push("/settings/providers/new")} className="px-6">
+          <Button size="sm" onClick={() => navigate("/settings/providers/new")} className="px-6">
             <Plus className="h-4 w-4 mr-1.5" />
             立即添加
           </Button>

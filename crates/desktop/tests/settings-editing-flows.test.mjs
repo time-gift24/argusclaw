@@ -105,7 +105,7 @@ test("agent editor treats provider as optional when deciding whether the form ca
     /<Button[\s\S]*size="sm"[\s\S]*onClick=\{handleSave\}[\s\S]*disabled=\{saving \|\| !canSave\}[\s\S]*>/,
   );
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(formData\)/);
-  assert.match(agentEditorSource, /router\.push\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
+  assert.match(agentEditorSource, /navigate\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
   assert.doesNotMatch(providerSelectBlock, /required/);
 });
 
@@ -138,10 +138,10 @@ test("provider editing flow uses dedicated routes while keeping dialog open stat
   const loginDialogSource = readFileSync(loginDialogPath, "utf8");
   const agentsPageSource = readFileSync(agentsPagePath, "utf8");
 
-  assert.match(providersPageSource, /router\.push\("\/settings\/providers\/new"\)/);
-  assert.match(providerCardSource, /router\.push\(`\/settings\/providers\/edit\?id=\$\{provider\.id\}`\)/);
-  assert.match(loginDialogSource, /router\.push\('\/settings\/providers\/edit\?id=1'\)/);
-  assert.match(agentsPageSource, /router\.push\(`\/settings\/agents\/edit\?id=\$\{id\}`\)/);
+  assert.match(providersPageSource, /navigate\("\/settings\/providers\/new"\)/);
+  assert.match(providerCardSource, /navigate\(`\/settings\/providers\/edit\?id=\$\{provider\.id\}`\)/);
+  assert.match(loginDialogSource, /navigate\('\/settings\/providers\/edit\?id=1'\)/);
+  assert.match(agentsPageSource, /navigate\(`\/settings\/agents\/edit\?id=\$\{id\}`\)/);
   assert.match(providerDialogSource, /open\?: boolean/);
   assert.match(
     providerDialogSource,

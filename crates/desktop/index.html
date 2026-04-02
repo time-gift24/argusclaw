@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh" class="h-full">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ArgusWing</title>
+    <script>
+      (() => {
+        const storageKey = "arguswing-theme";
+        const stored = localStorage.getItem(storageKey);
+        const theme = stored === "light" || stored === "dark" || stored === "system"
+          ? stored
+          : "system";
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const resolvedTheme = theme === "system" ? (prefersDark ? "dark" : "light") : theme;
+        document.documentElement.classList.toggle("dark", resolvedTheme === "dark");
+      })();
+    </script>
+  </head>
+  <body class="h-full">
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

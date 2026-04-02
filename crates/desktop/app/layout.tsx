@@ -3,7 +3,6 @@
 import { useEffect } from "react"
 import { Home } from "lucide-react"
 
-import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { ToastProvider } from "@/components/ui/toast"
@@ -29,29 +28,23 @@ export default function RootLayout({
   }, [fetchCurrentUser])
 
   return (
-    <html
-      lang="zh"
-      suppressHydrationWarning
-      className="h-full antialiased font-sans"
-    >
-      <body className="flex h-dvh min-h-dvh flex-col overflow-hidden">
-        <TooltipProvider>
-          <ToastProvider>
-            <ThemeProvider>
-              <DashboardShell navigationItems={navigationItems}>
-                {children}
-              </DashboardShell>
-            </ThemeProvider>
-          </ToastProvider>
-        </TooltipProvider>
-        {toast && (
-          <LoginToast
-            message={toast.message}
-            type={toast.type}
-            onClose={hideToast}
-          />
-        )}
-      </body>
-    </html>
+    <div className="flex h-dvh min-h-dvh flex-col overflow-hidden font-sans antialiased">
+      <TooltipProvider>
+        <ToastProvider>
+          <ThemeProvider>
+            <DashboardShell navigationItems={navigationItems}>
+              {children}
+            </DashboardShell>
+          </ThemeProvider>
+        </ToastProvider>
+      </TooltipProvider>
+      {toast && (
+        <LoginToast
+          message={toast.message}
+          type={toast.type}
+          onClose={hideToast}
+        />
+      )}
+    </div>
   )
 }

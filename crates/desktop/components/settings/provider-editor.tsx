@@ -1,8 +1,8 @@
 "use client"
 
 import * as React from "react"
-import { useRouter } from "next/navigation"
-import { Save, Plus, X, Check, AlertCircle, Loader2, ArrowLeft, Cloud, Globe, Key, List, Activity } from "lucide-react"
+import { useNavigate } from "react-router-dom"
+import { Save, Plus, X, Check, AlertCircle, Loader2, ArrowLeft, Globe, Key, List, Activity } from "lucide-react"
 import {
   providers,
   type ProviderSecretStatus,
@@ -20,7 +20,6 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useToast } from "@/components/ui/toast"
-import { cn } from "@/lib/utils"
 
 export interface LlmProviderRecord {
   id: number
@@ -59,7 +58,7 @@ function createDefaultFormData(): LlmProviderRecord {
 }
 
 export function ProviderEditor({ providerId }: ProviderEditorProps) {
-  const router = useRouter()
+  const navigate = useNavigate()
   const { addToast } = useToast()
   const isEditing = !!providerId
 
@@ -67,8 +66,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [formData, setFormData] = React.useState<LlmProviderRecord>(createDefaultFormData)
   const [newModel, setNewModel] = React.useState("")
-  const [newHeaderName, setNewHeaderName] = React.useState("")
-  const [newHeaderValue, setNewHeaderValue] = React.useState("")
 
   // Test connection state
   const [testResults, setTestResults] = React.useState<Record<string, ProviderTestResult>>({})
@@ -112,19 +109,6 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     loadData()
   }, [providerId])
 
-  // Auto-test all models
-  React.useEffect(() => {
-    if (!loading && isEditing && formData.models.length > 0 && !hasAutoTested) {
-      setHasAutoTested(true)
-      const timer = setTimeout(() => {
-        formData.models.forEach((model) => {
-          testModel(model, formData.models)
-        })
-      }, 500)
-      return () => clearTimeout(timer)
-    }
-  }, [loading, isEditing, formData.models, hasAutoTested])
-
   const canSave = Boolean(
     formData.display_name.trim() &&
     formData.base_url.trim() &&
@@ -155,7 +139,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
       }
       await providers.upsert(input)
       addToast("success", isEditing ? "提供者已更新" : "提供者已创建")
-      router.push("/settings/providers")
+      navigate("/settings/providers")
     } catch (error) {
       console.error("Failed to save provider:", error)
       addToast("error", "保存失败")
@@ -168,44 +152,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
     setFormData({ ...formData, default_model: model })
   }
 
-  const handleAddHeader = () => {
-    const name = newHeaderName.trim()
-    if (!name || formData.extra_headers[name] !== undefined) return
-    setFormData({
-      ...formData,
-      extra_headers: { ...formData.extra_headers, [name]: newHeaderValue.trim() },
-    })
-    setNewHeaderName("")
-    setNewHeaderValue("")
-  }
-
-  const handleRemoveHeader = (name: string) => {
-    const next = { ...formData.extra_headers }
-    delete next[name]
-    setFormData({ ...formData, extra_headers: next })
-  }
-
-  const handleAddModel = async () => {
-    const model = newModel.trim()
-    if (!model || formData.models.includes(model)) return
-    const newModels = [...formData.models, model]
-    const newModelConfig = {
-      ...formData.model_config,
-      [model]: { max_context_window: 128000 },
-    }
-    setFormData({
-      ...formData,
-      models: newModels,
-      model_config: newModelConfig,
-      default_model: formData.default_model || model,
-    })
-    setNewModel("")
-    if (formData.base_url.trim() && canRunConnectionTest) {
-      await testModel(model, newModels)
-    }
-  }
-
-  const testModel = async (model: string, models: string[]) => {
+  const testModel = React.useCallback(async (model: string, models: string[]) => {
     setTestingModels((prev) => new Set(prev).add(model))
     try {
       const input: ProviderInput = {
@@ -236,6 +183,39 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
         const next = new Set(prev); next.delete(model); return next
       })
     }
+  }, [formData])
+
+  // Auto-test all models
+  React.useEffect(() => {
+    if (!loading && isEditing && formData.models.length > 0 && !hasAutoTested) {
+      setHasAutoTested(true)
+      const timer = setTimeout(() => {
+        formData.models.forEach((model) => {
+          void testModel(model, formData.models)
+        })
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [formData.models, hasAutoTested, isEditing, loading, testModel])
+
+  const handleAddModel = async () => {
+    const model = newModel.trim()
+    if (!model || formData.models.includes(model)) return
+    const newModels = [...formData.models, model]
+    const newModelConfig = {
+      ...formData.model_config,
+      [model]: { max_context_window: 128000 },
+    }
+    setFormData({
+      ...formData,
+      models: newModels,
+      model_config: newModelConfig,
+      default_model: formData.default_model || model,
+    })
+    setNewModel("")
+    if (formData.base_url.trim() && canRunConnectionTest) {
+      await testModel(model, newModels)
+    }
   }
 
   const handleRemoveModel = (model: string) => {
@@ -264,7 +244,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
       {/* 顶部标题栏 */}
       <div className="flex items-center justify-between border-b pb-6 shrink-0 px-1">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full hover:bg-muted" onClick={() => router.push("/settings/providers")}>
+          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full hover:bg-muted" onClick={() => navigate("/settings/providers")}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div className="space-y-0.5">
@@ -275,7 +255,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/providers")} className="h-9 text-sm text-muted-foreground hover:text-foreground">取消</Button>
+          <Button variant="ghost" size="sm" onClick={() => navigate("/settings/providers")} className="h-9 text-sm text-muted-foreground hover:text-foreground">取消</Button>
           <Button size="sm" onClick={handleSubmit} disabled={saving || !canSave} className="h-9 px-6 text-sm font-bold shadow-lg shadow-primary/20">
             <Save className="h-4 w-4 mr-2" />
             {saving ? "正在保存..." : "保存配置"}
@@ -310,14 +290,14 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
                   </div>
                 </div>
                 <div className="flex items-center gap-3 bg-background/50 p-3 rounded-xl border border-muted/40 h-14 shadow-inner mt-2">
-                  <Checkbox id="is_default" checked={formData.is_default} onCheckedChange={(v) => setFormData({ ...formData, is_default: !!v })} />
+                  <Checkbox id="is_default" checked={formData.is_default} onCheckedChange={(v) => setFormData({ ...formData, is_default: v === true })} />
                   <Label htmlFor="is_default" className="text-sm cursor-pointer font-bold">设为全局默认提供者</Label>
                 </div>
                 <div className="flex items-center gap-3 bg-background/50 p-3 rounded-xl border border-muted/40 h-14 shadow-inner">
                   <Checkbox
                     id="account_token_source"
                     checked={formData.meta_data.account_token_source === "true"}
-                    onCheckedChange={(v) => setFormData({ ...formData, meta_data: { ...formData.meta_data, account_token_source: !!v ? "true" : "" } })}
+                    onCheckedChange={(v) => setFormData({ ...formData, meta_data: { ...formData.meta_data, account_token_source: v === true ? "true" : "" } })}
                   />
                   <Label htmlFor="account_token_source" className="text-sm cursor-pointer font-bold">使用账号鉴权</Label>
                 </div>

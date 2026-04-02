@@ -9,7 +9,7 @@
 | 桌面框架 | Tauri 2.0 |
 | UI 框架 | React 19 |
 | 语言 | TypeScript |
-| 构建工具 | Next.js (仅构建，无 SSR) |
+| 构建工具 | Vite 8 + React Router 7 |
 | 样式 | Tailwind CSS v4 |
 | UI 组件 | shadcn/ui (CVA + clsx + tailwind-merge) |
 | 图标 | @hugeicons/react |
@@ -71,10 +71,10 @@
 | `/settings` | 设置 |
 | `/settings/providers` | 设置 / LLM 提供者 |
 | `/settings/providers/new` | 设置 / LLM 提供者 / 新建 |
-| `/settings/providers/[id]` | 设置 / LLM 提供者 / [名称] |
+| `/settings/providers/edit?id=...` | 设置 / LLM 提供者 / [名称] |
 | `/settings/agents` | 设置 / 智能体 |
 | `/settings/agents/new` | 设置 / 智能体 / 新建 |
-| `/settings/agents/[id]` | 设置 / 智能体 / [名称] |
+| `/settings/agents/edit?id=...` | 设置 / 智能体 / [名称] |
 
 ---
 
@@ -173,7 +173,7 @@ className="text-sm" // 14px
 ## 开发命令
 
 ```bash
-pnpm dev          # Next.js 开发模式
+pnpm dev          # Vite 开发模式
 pnpm tauri dev    # Tauri 开发模式
 pnpm build        # 生产构建
 pnpm tauri build  # Tauri 生产构建

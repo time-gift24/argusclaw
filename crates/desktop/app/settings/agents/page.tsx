@@ -1,9 +1,8 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
-import { useRouter } from "next/navigation"
-import { Plus, ChevronDown, Bot, Layers, Filter } from "lucide-react"
+import { Link, useNavigate } from "react-router-dom"
+import { Plus, ChevronDown, Bot, Layers } from "lucide-react"
 import { agents, providers, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 import {
   AgentCard,
@@ -19,7 +18,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 
 export default function AgentsPage() {
-  const router = useRouter()
+  const navigate = useNavigate()
   const [agentList, setAgentList] = React.useState<AgentRecord[]>([])
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [loading, setLoading] = React.useState(true)
@@ -47,7 +46,7 @@ export default function AgentsPage() {
   }, [loadData])
 
   const handleEdit = (id: number) => {
-    router.push(`/settings/agents/edit?id=${id}`)
+    navigate(`/settings/agents/edit?id=${id}`)
   }
 
   const handleDelete = async () => {
@@ -110,7 +109,7 @@ export default function AgentsPage() {
           )}
 
           <div className="flex items-center gap-2">
-            <Link href="/settings/agents/new">
+            <Link to="/settings/agents/new">
               <Button size="sm" className="h-9 shadow-sm">
                 <Plus className="h-4 w-4 mr-1.5" />
                 新建智能体
@@ -133,7 +132,7 @@ export default function AgentsPage() {
                   {parentAgents.map((agent) => (
                     <DropdownMenuItem
                       key={agent.id}
-                      onClick={() => router.push(`/settings/agents/new?parent=${agent.id}`)}
+                      onClick={() => navigate(`/settings/agents/new?parent=${agent.id}`)}
                       className="cursor-pointer"
                     >
                       {agent.display_name}
@@ -156,7 +155,7 @@ export default function AgentsPage() {
             <p className="font-medium text-muted-foreground">暂无智能体配置</p>
             <p className="text-xs text-muted-foreground/60">开始创建您的第一个 AI 助手吧</p>
           </div>
-          <Link href="/settings/agents/new">
+          <Link to="/settings/agents/new">
             <Button size="sm" className="px-6">
               <Plus className="h-4 w-4 mr-1.5" />
               立即创建

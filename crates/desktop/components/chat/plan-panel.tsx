@@ -3,7 +3,6 @@
 import { useState } from "react";
 import {
   CheckIcon,
-  ChevronDownIcon,
   ChevronRightIcon,
   MinusIcon,
   LayoutList,

@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Plus, Pencil } from "lucide-react"
-import { agents, type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
+import { type AgentRecord, type LlmProviderSummary } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,

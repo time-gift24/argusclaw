@@ -2,8 +2,8 @@
 
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
-import { useRouter } from "next/navigation"
-import { CircleHelp, Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2 } from "lucide-react"
+import { useNavigate } from "react-router-dom"
+import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2 } from "lucide-react"
 import { agents, providers, tools, knowledge, type AgentRecord, type LlmProviderSummary, type ToolInfo, type KnowledgeRepoRecord } from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useToast } from "@/components/ui/toast"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -21,7 +20,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogClose,
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
@@ -55,7 +53,7 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
 }
 
 export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
-  const router = useRouter()
+  const navigate = useNavigate()
   const { addToast } = useToast()
   const isEditing = agentId !== undefined
 
@@ -66,7 +64,6 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const [knowledgeRepoList, setKnowledgeRepoList] = React.useState<KnowledgeRepoRecord[]>([])
   const [agentWorkspaces, setAgentWorkspaces] = React.useState<string[]>([])
   const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
-  const [savingWorkspaces, setSavingWorkspaces] = React.useState(false)
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = React.useState(false)
   const [addRepoInput, setAddRepoInput] = React.useState("")
   const [addWorkspaceInput, setAddWorkspaceInput] = React.useState("")
@@ -155,7 +152,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId, parentId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agentId, parentId])
 
   const handleSave = async () => {
     if (!canSave) return
@@ -165,17 +162,14 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       // Save knowledge workspace bindings
       if (isEditing || savedId) {
         const targetId = isEditing ? agentId! : savedId
-        setSavingWorkspaces(true)
         try {
           await knowledge.setAgentWorkspaces(targetId, agentWorkspaces)
         } catch (wsError) {
           console.error("Failed to save knowledge workspaces:", wsError)
-        } finally {
-          setSavingWorkspaces(false)
         }
       }
       addToast("success", isEditing ? "配置已保存" : "创建成功")
-      router.push(`/settings/agents/edit?id=${savedId}`)
+      navigate(`/settings/agents/edit?id=${savedId}`)
     } catch (error) {
       console.error("Failed to save agent:", error)
       addToast("error", "保存失败")
@@ -251,7 +245,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             variant="ghost"
             size="icon"
             className="h-9 w-9 rounded-full hover:bg-muted"
-            onClick={() => router.push("/settings/agents")}
+            onClick={() => navigate("/settings/agents")}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -265,7 +259,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/agents")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
+          <Button variant="ghost" size="sm" onClick={() => navigate("/settings/agents")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
             取消
           </Button>
           <Button size="sm" onClick={handleSave} disabled={saving || !canSave} className="h-9 px-6 text-sm font-bold shadow-lg shadow-primary/20">
