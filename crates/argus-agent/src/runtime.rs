@@ -693,7 +693,11 @@ async fn start_turn_task(
     };
 
     tokio::spawn(async move {
-        let result = turn.execute().await.map_err(ThreadError::TurnFailed);
+        let result = turn
+            .execute_progress()
+            .finish()
+            .await
+            .map_err(ThreadError::TurnFailed);
         let _ = turn_done_tx.send(result);
     });
 

@@ -82,7 +82,13 @@ impl TurnExecution {
 
     /// Wait for the terminal turn result.
     pub async fn finish(self) -> Result<TurnOutput, TurnError> {
-        match self.result_rx.await {
+        let TurnExecution {
+            progress_rx,
+            result_rx,
+        } = self;
+        drop(progress_rx);
+
+        match result_rx.await {
             Ok(result) => result,
             Err(error) => Err(TurnError::BuildFailed(format!(
                 "turn execution task failed: {error}"
@@ -1899,9 +1905,10 @@ mod tests {
         cancellation.cancel();
         let mut saw_failed_progress = false;
         loop {
-            let progress = tokio::time::timeout(std::time::Duration::from_millis(500), execution.recv())
-                .await
-                .expect("turn should terminate quickly after cancellation");
+            let progress =
+                tokio::time::timeout(std::time::Duration::from_millis(500), execution.recv())
+                    .await
+                    .expect("turn should terminate quickly after cancellation");
             let Some(progress) = progress else {
                 break;
             };
@@ -1987,12 +1994,10 @@ mod tests {
             .send(())
             .expect("approval hook should still be waiting");
 
-        let execution = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            execution.collect(),
-        )
-        .await
-        .expect("turn should resume and finish");
+        let execution =
+            tokio::time::timeout(std::time::Duration::from_secs(2), execution.collect())
+                .await
+                .expect("turn should resume and finish");
 
         assert!(execution.result.is_ok());
         assert!(

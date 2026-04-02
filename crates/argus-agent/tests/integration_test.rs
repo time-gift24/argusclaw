@@ -497,9 +497,14 @@ async fn turn_cancel_does_not_emit_terminal_thread_events() {
     assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
 
     let mut saw_failed = false;
+    let mut saw_idle = false;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_millis(250) {
         match tokio::time::timeout(Duration::from_millis(50), thread_event_rx.recv()).await {
+            Ok(Ok(ThreadEvent::Idle { .. })) => {
+                saw_idle = true;
+                break;
+            }
             Ok(Ok(ThreadEvent::TurnFailed { .. })) => {
                 saw_failed = true;
                 break;
@@ -514,6 +519,10 @@ async fn turn_cancel_does_not_emit_terminal_thread_events() {
     assert!(
         !saw_failed,
         "raw turn execution should not emit terminal runtime lifecycle events"
+    );
+    assert!(
+        !saw_idle,
+        "raw turn execution should not emit Idle directly"
     );
 }
 
@@ -634,6 +643,7 @@ async fn test_turn_streams_retry_events() {
     // Collect retry events from ThreadEvent::Processing
     let mut retry_count = 0;
     let mut max_retries_seen = 0;
+    let mut saw_completed = false;
 
     // Listen for events with a timeout
     let timeout = Duration::from_secs(5);
@@ -659,7 +669,7 @@ async fn test_turn_streams_retry_events() {
                 );
             }
             Ok(ThreadEvent::TurnCompleted { .. }) => {
-                // Don't break, continue listening for more events
+                saw_completed = true;
             }
             Ok(ThreadEvent::TurnFailed { .. }) => {
                 panic!("turn should not fail with retryable errors");
@@ -679,6 +689,10 @@ async fn test_turn_streams_retry_events() {
     assert_eq!(
         max_retries_seen, 3,
         "should report max_retries=3 from RetryConfig::default()"
+    );
+    assert!(
+        !saw_completed,
+        "raw turn execution should not emit TurnCompleted directly"
     );
 }
 
