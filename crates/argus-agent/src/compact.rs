@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - `Compactor`: Async trait for implementing compaction strategies.
-//! - `CompactResult`: Result type carrying compacted messages and token estimate.
+//! - `CompactResult`: Result type carrying checkpoint summary messages and token estimate.
 //! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
 
 use argus_protocol::llm::{
@@ -36,8 +36,8 @@ Provide a detailed prompt for continuing our conversation above.\n\
 
 /// Result of a successful compaction.
 pub struct CompactResult {
-    /// Compacted message list (replaces the original history).
-    pub messages: Vec<ChatMessage>,
+    /// Summary messages to use in a compaction checkpoint.
+    pub summary_messages: Vec<ChatMessage>,
     /// Estimated token count after compaction.
     /// The authoritative count will come from the next LLM response.
     pub token_count: u32,
@@ -193,15 +193,16 @@ impl Compactor for LlmCompactor {
             synthetic_replay.clone(),
         ];
 
-        let mut new_messages = system_messages;
-        new_messages.push(synthetic_prompt);
-        new_messages.push(synthetic_summary);
-        new_messages.push(synthetic_replay);
+        let summary_messages = vec![
+            synthetic_prompt,
+            synthetic_summary,
+            synthetic_replay,
+        ];
 
         // Estimate new token count proportionally.
         let original_len = messages.len();
         let new_token_count = if original_len > 0 {
-            (token_count as usize * new_messages.len() / original_len) as u32
+            (token_count as usize * summary_messages.len() / original_len) as u32
         } else {
             0
         };
@@ -213,7 +214,7 @@ impl Compactor for LlmCompactor {
         );
 
         Ok(Some(CompactResult {
-            messages: new_messages,
+            summary_messages,
             token_count: new_token_count,
             trace_prelude_messages,
         }))
@@ -391,15 +392,15 @@ mod tests {
             .expect("should have compacted");
 
         // prompt + summary + replay = 3
-        assert_eq!(result.messages.len(), 3);
-        assert_eq!(result.messages[0].role, Role::User); // synthetic prompt
-        assert!(result.messages[0]
+        assert_eq!(result.summary_messages.len(), 3);
+        assert_eq!(result.summary_messages[0].role, Role::User); // synthetic prompt
+        assert!(result.summary_messages[0]
             .content
             .contains("Provide a detailed prompt for continuing our conversation above."));
-        assert_eq!(result.messages[1].content, "历史摘要");
-        assert_eq!(result.messages[2].role, Role::User); // synthetic replay
+        assert_eq!(result.summary_messages[1].content, "历史摘要");
+        assert_eq!(result.summary_messages[2].role, Role::User); // synthetic replay
         assert_eq!(
-            result.messages[2].content,
+            result.summary_messages[2].content,
             "Continue the conversation using the summary above."
         );
         assert!(!result.trace_prelude_messages.is_empty());

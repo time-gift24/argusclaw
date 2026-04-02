@@ -357,6 +357,22 @@ impl Thread {
             .map_or_else(|| self.messages.as_slice(), |messages| messages.as_slice())
     }
 
+    fn build_turn_context(&self) -> Arc<Vec<ChatMessage>> {
+        if let Some(checkpoint) = self.compaction_checkpoint.as_ref() {
+            let mut context_messages = self.system_messages.clone();
+            context_messages.extend(checkpoint.summary_messages.iter().cloned());
+            context_messages.extend(
+                self.turns
+                    .iter()
+                    .filter(|turn| turn.turn_number > checkpoint.summarized_through_turn)
+                    .flat_map(|turn| turn.messages.iter().cloned()),
+            );
+            Arc::new(context_messages)
+        } else {
+            Arc::clone(&self.messages)
+        }
+    }
+
     /// Get current token count.
     pub fn token_count(&self) -> u32 {
         self.token_count
@@ -539,14 +555,22 @@ impl Thread {
     ) -> Result<crate::Turn, ThreadError> {
         self.set_turn_running(true);
 
+        let turn_context = self.build_turn_context();
         match self
             .compactor
-            .compact(self.provider.as_ref(), self.messages.as_slice(), self.token_count)
+            .compact(
+                self.provider.as_ref(),
+                turn_context.as_slice(),
+                self.token_count,
+            )
             .await
         {
             Ok(Some(result)) => {
-                self.messages = Arc::new(result.messages);
-                self.sync_cached_history_from_flat_messages();
+                self.compaction_checkpoint = Some(CompactionCheckpoint {
+                    summarized_through_turn: self.turn_count(),
+                    summary_messages: result.summary_messages,
+                    created_at: Utc::now(),
+                });
                 self.token_count = result.token_count;
                 self.pending_trace_prelude_messages = result.trace_prelude_messages;
                 self.broadcast_to_self(ThreadEvent::Compacted {
@@ -635,6 +659,7 @@ impl Thread {
             .current_turn
             .as_ref()
             .map_or_else(Vec::new, |turn| turn.pending_messages.clone());
+        let shared_messages = self.build_turn_context();
 
         // Thread is responsible for building: collect tools and hooks
         // Filter tools by agent_record.tool_names; empty means no tools
@@ -674,7 +699,7 @@ impl Thread {
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
             .session_id(self.session_id)
-            .shared_messages(Arc::clone(&self.messages))
+            .shared_messages(shared_messages)
             .pending_messages(pending_messages)
             .provider(self.provider.clone())
             .tools(tools)
@@ -1475,7 +1500,7 @@ mod tests {
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
             Ok(Some(CompactResult {
-                messages: vec![ChatMessage::user("compacted")],
+                summary_messages: vec![ChatMessage::user("compacted")],
                 token_count: 10,
                 trace_prelude_messages: vec![],
             }))
@@ -1528,6 +1553,78 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn compaction_does_not_rewrite_committed_turn_history() {
+        let compactor: Arc<dyn Compactor> = Arc::new(SingleMessageCompactor);
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 100,
+            }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        let repeated = repeated_test_message();
+        let persisted_messages = vec![
+            ChatMessage::user(repeated.clone()),
+            ChatMessage::assistant("history reply"),
+            ChatMessage::user(repeated),
+        ];
+        thread.hydrate_from_persisted_state(
+            persisted_messages,
+            90,
+            0,
+            Utc::now(),
+        );
+        let before = thread.history().to_vec();
+
+        let _turn = thread
+            .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build after compaction");
+
+        let after = thread.history().to_vec();
+        assert_eq!(after.len(), before.len());
+        for (after_message, before_message) in after.iter().zip(before.iter()) {
+            assert_eq!(after_message.role, before_message.role);
+            assert_eq!(after_message.content, before_message.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_turn_context_uses_compaction_checkpoint_summary_messages() {
+        let compactor: Arc<dyn Compactor> = Arc::new(SingleMessageCompactor);
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(SmallContextProvider {
+                context_window: 100,
+            }))
+            .compactor(compactor)
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        let persisted_messages = vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant("old answer"),
+        ];
+        thread.hydrate_from_persisted_state(
+            persisted_messages,
+            90,
+            0,
+            Utc::now(),
+        );
+
+        let _turn = thread
+            .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build after compaction");
+
+        let context = thread.build_turn_context();
+        assert_eq!(context.len(), 1);
+        assert_eq!(context[0].content, "compacted");
     }
 
     #[tokio::test]
