@@ -53,15 +53,15 @@ impl Default for ThreadRuntime {
 }
 
 impl ThreadRuntime {
-    /// Create a new thread runtime seeded from an already-persisted turn count.
+    /// Create a new thread runtime seeded from the owning thread's next turn number.
     ///
-    /// The returned runtime will start the next turn at `turn_count + 1` so
+    /// The returned runtime will start the next turn at `next_turn_number` so
     /// runtime snapshots stay aligned with the owning [`Thread`].
     #[must_use]
-    pub(crate) fn seeded_from_turn_count(turn_count: u32) -> Self {
+    pub(crate) fn seeded_from_next_turn_number(next_turn_number: u32) -> Self {
         Self {
             state: ThreadRuntimeState::Idle,
-            next_turn_number: turn_count.saturating_add(1),
+            next_turn_number,
             queue_depth: 0,
         }
     }
@@ -176,7 +176,7 @@ impl ThreadRuntime {
 /// Spawn the async thread runtime actor loop.
 pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
     tokio::spawn(async move {
-        let (mut control_rx, mailbox, seeded_turn_count) = {
+        let (mut control_rx, mailbox, next_turn_number) = {
             let mut guard = thread.write().await;
             let control_rx = match guard.take_control_rx() {
                 Some(rx) => rx,
@@ -185,11 +185,15 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
                     return;
                 }
             };
-            (control_rx, guard.mailbox(), guard.turn_count())
+            (
+                control_rx,
+                guard.mailbox(),
+                guard.next_turn_number_for_runtime(),
+            )
         };
 
         let (turn_done_tx, mut turn_done_rx) = mpsc::unbounded_channel();
-        let mut runtime = ThreadRuntime::seeded_from_turn_count(seeded_turn_count);
+        let mut runtime = ThreadRuntime::seeded_from_next_turn_number(next_turn_number);
         let mut active_turn_cancellation: Option<TurnCancellation> = None;
         let mut shutdown_requested = false;
 
@@ -314,7 +318,74 @@ pub(crate) fn spawn_runtime_actor(thread: Arc<RwLock<Thread>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compact::{CompactResult, Compactor};
+    use crate::error::CompactError;
+    use crate::history::TurnRecord;
+    use crate::thread::ThreadBuilder;
+    use argus_protocol::llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmProvider};
     use argus_protocol::{AgentId, MailboxMessage, MailboxMessageType};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+
+    struct DummyProvider;
+
+    #[async_trait]
+    impl LlmProvider for DummyProvider {
+        fn model_name(&self) -> &str {
+            "dummy"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "dummy".to_string(),
+                reason: "not implemented".to_string(),
+            })
+        }
+    }
+
+    struct NoopCompactor;
+
+    #[async_trait]
+    impl Compactor for NoopCompactor {
+        async fn compact(
+            &self,
+            _provider: &dyn LlmProvider,
+            _messages: &[ChatMessage],
+            _token_count: u32,
+        ) -> Result<Option<CompactResult>, CompactError> {
+            Ok(None)
+        }
+
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+    }
+
+    fn test_agent_record() -> Arc<argus_protocol::AgentRecord> {
+        Arc::new(argus_protocol::AgentRecord {
+            id: AgentId::new(1),
+            display_name: "Test Agent".to_string(),
+            description: "A test agent".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(argus_protocol::ProviderId::new(1)),
+            model_id: None,
+            system_prompt: "You are a test agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: None,
+            parent_agent_id: None,
+            agent_type: argus_protocol::AgentType::Standard,
+        })
+    }
 
     fn queued_job_result(job_id: &str) -> MailboxMessage {
         MailboxMessage {
@@ -339,7 +410,7 @@ mod tests {
 
     #[test]
     fn runtime_turn_numbering_starts_after_seeded_turn_count() {
-        let mut runtime = ThreadRuntime::seeded_from_turn_count(3);
+        let mut runtime = ThreadRuntime::seeded_from_next_turn_number(4);
         let mut mailbox = ThreadMailbox::default();
         let action = runtime.apply_command(
             ThreadCommand::EnqueueUserMessage {
@@ -352,6 +423,36 @@ mod tests {
         assert!(matches!(
             action,
             ThreadRuntimeAction::StartTurn { turn_number: 4, .. }
+        ));
+    }
+
+    #[test]
+    fn runtime_turn_numbering_uses_thread_next_turn_number_when_seeded_history_exists() {
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record())
+            .session_id(argus_protocol::SessionId::new())
+            .turns(vec![TurnRecord::completed(
+                4,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            )])
+            .build()
+            .unwrap();
+        let mut runtime =
+            ThreadRuntime::seeded_from_next_turn_number(thread.next_turn_number_for_runtime());
+        let mut mailbox = ThreadMailbox::default();
+        let action = runtime.apply_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "next".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
+
+        assert!(matches!(
+            action,
+            ThreadRuntimeAction::StartTurn { turn_number: 5, .. }
         ));
     }
 

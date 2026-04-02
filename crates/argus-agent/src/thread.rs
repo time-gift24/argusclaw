@@ -19,6 +19,7 @@ use argus_tool::ToolManager;
 use super::compact::Compactor;
 use super::config::ThreadConfig;
 use super::error::ThreadError;
+use super::history::{flatten_turn_messages, CompactionCheckpoint, InFlightTurn, TurnRecord};
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
@@ -58,6 +59,26 @@ pub struct Thread {
     #[builder(setter(custom), default = "Arc::new(Vec::new())")]
     messages: Arc<Vec<ChatMessage>>,
 
+    /// System messages that prefix the committed history view.
+    #[builder(default)]
+    system_messages: Vec<ChatMessage>,
+
+    /// Settled turn history. This becomes authoritative as migration proceeds.
+    #[builder(default)]
+    turns: Vec<TurnRecord>,
+
+    /// The single in-flight turn, if any.
+    #[builder(default)]
+    current_turn: Option<InFlightTurn>,
+
+    /// Compatibility cache for committed message history.
+    #[builder(default)]
+    cached_committed_messages: Option<Arc<Vec<ChatMessage>>>,
+
+    /// Compaction checkpoint metadata for future context construction.
+    #[builder(default)]
+    compaction_checkpoint: Option<CompactionCheckpoint>,
+
     /// LLM provider (required, injected by Session).
     provider: Arc<dyn LlmProvider>,
 
@@ -83,6 +104,10 @@ pub struct Thread {
     /// Turn count (internal).
     #[builder(default)]
     turn_count: u32,
+
+    /// Next turn number to allocate.
+    #[builder(default = "1")]
+    next_turn_number: u32,
 
     /// Pipe for sending/receiving ThreadEvents.
     #[builder(default)]
@@ -121,6 +146,11 @@ impl std::fmt::Debug for Thread {
             .field("agent_id", &self.agent_record.id)
             .field("title", &self.title)
             .field("messages", &self.messages.len())
+            .field(
+                "cached_committed_messages",
+                &self.cached_committed_messages.as_ref().map_or(0, |messages| messages.len()),
+            )
+            .field("turns", &self.turns.len())
             .field("token_count", &self.token_count)
             .field("turn_count", &self.turn_count)
             .field("plan_items", &self.plan_store.store().read().unwrap().len())
@@ -159,6 +189,8 @@ impl ThreadBuilder {
 
         let agent_record = self.agent_record.ok_or(ThreadError::AgentRecordNotSet)?;
         let session_id = self.session_id.ok_or(ThreadError::SessionIdNotSet)?;
+        let turns = self.turns.unwrap_or_default();
+        let current_turn = self.current_turn.flatten();
 
         // Initialize messages with system prompt if not empty and no existing system message
         let mut messages = self.messages.unwrap_or_else(|| Arc::new(Vec::new()));
@@ -169,6 +201,22 @@ impl ThreadBuilder {
             Arc::make_mut(&mut messages).insert(0, ChatMessage::system(&agent_record.system_prompt));
         }
 
+        let system_messages = Thread::collect_system_messages(messages.as_slice());
+        let cached_committed_messages = if turns.is_empty() {
+            Some(Arc::clone(&messages))
+        } else {
+            Some(Thread::materialize_committed_messages(
+                &system_messages,
+                &turns,
+            ))
+        };
+        let next_turn_number = self
+            .next_turn_number
+            .unwrap_or_else(|| Thread::derive_next_turn_number(&turns));
+        if let Some(committed_messages) = cached_committed_messages.as_ref() {
+            messages = Arc::clone(committed_messages);
+        }
+
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             agent_record,
@@ -177,6 +225,11 @@ impl ThreadBuilder {
             created_at: self.created_at.unwrap_or_else(Utc::now),
             updated_at: self.updated_at.unwrap_or_else(Utc::now),
             messages,
+            system_messages,
+            turns,
+            current_turn,
+            cached_committed_messages,
+            compaction_checkpoint: self.compaction_checkpoint.flatten(),
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
             tool_manager: self
                 .tool_manager
@@ -186,6 +239,7 @@ impl ThreadBuilder {
             config: self.config.unwrap_or_default(),
             token_count: 0,
             turn_count: 0,
+            next_turn_number,
             pipe_tx,
             control_tx,
             control_rx: Some(control_rx),
@@ -239,9 +293,9 @@ impl Thread {
     pub fn info(&self) -> ThreadInfo {
         ThreadInfo {
             id: self.id.to_string(),
-            message_count: self.messages.len(),
+            message_count: self.history().len(),
             token_count: self.token_count,
-            turn_count: self.turn_count,
+            turn_count: self.turn_count(),
             plan_item_count: self.plan_store.store().read().unwrap().len(),
         }
     }
@@ -295,7 +349,9 @@ impl Thread {
 
     /// Get message history (read-only).
     pub fn history(&self) -> &[ChatMessage] {
-        self.messages.as_slice()
+        self.cached_committed_messages
+            .as_ref()
+            .map_or_else(|| self.messages.as_slice(), |messages| messages.as_slice())
     }
 
     /// Get current token count.
@@ -305,7 +361,15 @@ impl Thread {
 
     /// Get turn count.
     pub fn turn_count(&self) -> u32 {
-        self.turn_count
+        if self.turns.is_empty() {
+            self.turn_count
+        } else {
+            self.turns.len() as u32
+        }
+    }
+
+    pub(crate) fn next_turn_number_for_runtime(&self) -> u32 {
+        self.next_turn_number
     }
 
     /// Get a read-only snapshot of the current plan state.
@@ -330,6 +394,7 @@ impl Thread {
 
     /// Get mutable access to messages (for Compactor).
     pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
+        self.cached_committed_messages = None;
         Arc::make_mut(&mut self.messages)
     }
 
@@ -360,13 +425,20 @@ impl Thread {
         }
 
         self.messages = Arc::new(messages);
+        self.system_messages = Self::collect_system_messages(self.messages.as_slice());
+        self.turns.clear();
+        self.current_turn = None;
+        self.compaction_checkpoint = None;
+        self.cached_committed_messages = Some(Arc::clone(&self.messages));
         self.token_count = token_count;
         self.turn_count = turn_count;
+        self.next_turn_number = turn_count.saturating_add(1);
         self.updated_at = updated_at;
     }
 
     fn apply_turn_output(&mut self, output: TurnOutput) {
         Arc::make_mut(&mut self.messages).extend(output.appended_messages);
+        self.sync_cached_history_from_flat_messages();
         self.token_count = output.token_usage.total_tokens;
         self.updated_at = Utc::now();
     }
@@ -418,6 +490,7 @@ impl Thread {
         {
             Ok(Some(result)) => {
                 self.messages = Arc::new(result.messages);
+                self.sync_cached_history_from_flat_messages();
                 self.token_count = result.token_count;
                 self.pending_trace_prelude_messages = result.trace_prelude_messages;
                 self.broadcast_to_self(ThreadEvent::Compacted {
@@ -451,6 +524,7 @@ impl Thread {
         };
 
         Arc::make_mut(&mut self.messages).push(ChatMessage::user(user_input));
+        self.sync_cached_history_from_flat_messages();
         match self.build_turn(effective_record, cancellation) {
             Ok(turn) => Ok(turn),
             Err(error) => {
@@ -482,8 +556,9 @@ impl Thread {
         agent_record: Arc<AgentRecord>,
         cancellation: TurnCancellation,
     ) -> Result<crate::Turn, ThreadError> {
-        self.turn_count += 1;
-        let turn_number = self.turn_count;
+        let turn_number = self.next_turn_number;
+        self.next_turn_number = self.next_turn_number.saturating_add(1);
+        self.turn_count = turn_number;
         let thread_id = self.id.to_string();
 
         // Thread is responsible for building: collect tools and hooks
@@ -545,6 +620,59 @@ impl Thread {
             .build()
             .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))
     }
+
+    fn collect_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        messages
+            .iter()
+            .take_while(|message| message.role == argus_protocol::llm::Role::System)
+            .cloned()
+            .collect()
+    }
+
+    fn sync_cached_history_from_flat_messages(&mut self) {
+        self.system_messages = Self::collect_system_messages(self.messages.as_slice());
+        self.cached_committed_messages = Some(Arc::clone(&self.messages));
+    }
+
+    fn rebuild_cached_committed_messages(&mut self) {
+        self.cached_committed_messages = Some(Self::materialize_committed_messages(
+            &self.system_messages,
+            &self.turns,
+        ));
+    }
+
+    fn sync_flat_messages_from_cached_history(&mut self) {
+        if let Some(messages) = self.cached_committed_messages.as_ref() {
+            self.messages = Arc::clone(messages);
+        }
+    }
+
+    fn materialize_committed_messages(
+        system_messages: &[ChatMessage],
+        turns: &[TurnRecord],
+    ) -> Arc<Vec<ChatMessage>> {
+        let mut messages = system_messages.to_vec();
+        messages.extend(flatten_turn_messages(turns));
+        Arc::new(messages)
+    }
+
+    fn derive_next_turn_number(turns: &[TurnRecord]) -> u32 {
+        turns
+            .iter()
+            .map(|turn| turn.turn_number)
+            .max()
+            .map_or(1, |turn_number| turn_number.saturating_add(1))
+    }
+
+    #[cfg(test)]
+    fn hydrate_turn_history_for_test(&mut self, turns: Vec<TurnRecord>) {
+        self.turns = turns;
+        self.current_turn = None;
+        self.turn_count = self.turns.len() as u32;
+        self.next_turn_number = Self::derive_next_turn_number(&self.turns);
+        self.rebuild_cached_committed_messages();
+        self.sync_flat_messages_from_cached_history();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -561,6 +689,7 @@ mod tests {
     use super::*;
     use crate::compact::CompactResult;
     use crate::error::CompactError;
+    use crate::history::TurnRecord;
     use crate::runtime::ThreadRuntimeAction;
     use crate::thread_handle::ThreadHandle;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
@@ -759,7 +888,20 @@ mod tests {
         }
     }
 
-    fn build_test_thread(provider: Arc<dyn LlmProvider>) -> Arc<tokio::sync::RwLock<Thread>> {
+    fn build_test_thread() -> Thread {
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build")
+    }
+
+    fn build_test_thread_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> Arc<tokio::sync::RwLock<Thread>> {
         let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
         Arc::new(tokio::sync::RwLock::new(
             ThreadBuilder::new()
@@ -909,6 +1051,63 @@ mod tests {
         assert_eq!(thread.updated_at(), updated_at);
     }
 
+    #[tokio::test]
+    async fn history_reads_from_cached_committed_messages() {
+        let mut thread = build_test_thread();
+        thread.hydrate_turn_history_for_test(vec![TurnRecord::completed(
+            1,
+            vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        )]);
+
+        assert_eq!(thread.history().len(), 3);
+        assert_eq!(thread.turn_count(), 1);
+    }
+
+    #[test]
+    fn builder_keeps_committed_history_and_turn_count_aligned_when_seeded_with_turns() {
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .messages(vec![
+                ChatMessage::system("You are a stale system message."),
+                ChatMessage::user("stale"),
+                ChatMessage::assistant("history"),
+            ])
+            .turns(vec![TurnRecord::completed(
+                1,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            )])
+            .build()
+            .unwrap();
+
+        assert_eq!(thread.history().len(), 3);
+        assert_eq!(thread.history()[0].role, argus_protocol::llm::Role::System);
+        assert_eq!(thread.history()[1].content, "hi");
+        assert_eq!(thread.history()[2].content, "hello");
+        assert_eq!(thread.turn_count(), 1);
+    }
+
+    #[test]
+    fn builder_derives_next_turn_number_from_seeded_turns() {
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .turns(vec![TurnRecord::completed(
+                4,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            )])
+            .build()
+            .unwrap();
+
+        assert_eq!(thread.next_turn_number, 5);
+    }
+
     #[test]
     fn plan_returns_read_only_snapshot() {
         let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
@@ -996,7 +1195,7 @@ mod tests {
                 ResponsePlan::Ok("second turn reply".to_string()),
             ],
         ));
-        let thread = build_test_thread(provider.clone());
+        let thread = build_test_thread_with_provider(provider.clone());
 
         Thread::spawn_runtime_actor(Arc::clone(&thread));
 
@@ -1037,7 +1236,7 @@ mod tests {
             Duration::from_millis(20),
             vec![ResponsePlan::Ok("settled reply".to_string())],
         ));
-        let thread = build_test_thread(provider);
+        let thread = build_test_thread_with_provider(provider);
 
         Thread::spawn_runtime_actor(Arc::clone(&thread));
 
@@ -1064,7 +1263,7 @@ mod tests {
                 ResponsePlan::Ok("second turn reply".to_string()),
             ],
         ));
-        let thread = build_test_thread(provider.clone());
+        let thread = build_test_thread_with_provider(provider.clone());
 
         Thread::spawn_runtime_actor(Arc::clone(&thread));
 
@@ -1154,7 +1353,7 @@ mod tests {
                 ResponsePlan::Ok("second turn reply".to_string()),
             ],
         ));
-        let thread = build_test_thread(provider.clone());
+        let thread = build_test_thread_with_provider(provider.clone());
 
         Thread::spawn_runtime_actor(Arc::clone(&thread));
 
