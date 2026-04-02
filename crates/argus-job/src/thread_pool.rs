@@ -1126,7 +1126,7 @@ impl ThreadPool {
         thread: Arc<RwLock<argus_agent::Thread>>,
         mut runtime_rx: broadcast::Receiver<ThreadEvent>,
     ) -> Result<(), JobError> {
-        self.attach_runtime(thread_id, thread, &mut runtime_rx, "chat thread")
+        self.attach_runtime(thread_id, thread, &mut runtime_rx, "chat thread", true)
             .await
     }
 
@@ -1136,6 +1136,7 @@ impl ThreadPool {
         thread: Arc<RwLock<argus_agent::Thread>>,
         runtime_rx: &mut broadcast::Receiver<ThreadEvent>,
         runtime_label: &'static str,
+        cool_on_idle: bool,
     ) -> Result<(), JobError> {
         let estimated_memory_bytes = Self::estimate_thread_memory(&thread).await;
         let control_tx = {
@@ -1185,7 +1186,7 @@ impl ThreadPool {
                 match runtime_rx.recv().await {
                     Ok(event) => {
                         let _ = sender.send(event.clone());
-                        if matches!(event, ThreadEvent::Idle { .. }) {
+                        if cool_on_idle && matches!(event, ThreadEvent::Idle { .. }) {
                             let Some(thread_for_metrics) = thread_for_metrics.upgrade() else {
                                 break;
                             };
@@ -1324,7 +1325,7 @@ impl ThreadPool {
         thread: Arc<RwLock<argus_agent::Thread>>,
         mut runtime_rx: broadcast::Receiver<ThreadEvent>,
     ) -> Result<(), JobError> {
-        self.attach_runtime(thread_id, thread, &mut runtime_rx, "job thread")
+        self.attach_runtime(thread_id, thread, &mut runtime_rx, "job thread", false)
             .await
     }
 
@@ -3782,7 +3783,10 @@ mod tests {
         assert_eq!(snapshot.queued_threads, 1);
         assert_eq!(snapshot.active_threads, 1);
 
-        let first = first.await.expect("first job should join");
+        let first = timeout(Duration::from_secs(5), first)
+            .await
+            .expect("first job should complete once capacity frees")
+            .expect("first job should join");
         let second = timeout(Duration::from_secs(5), second)
             .await
             .expect("second job should complete once capacity frees")
