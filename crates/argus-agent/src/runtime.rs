@@ -551,6 +551,36 @@ mod tests {
 
         wait_for_runtime_queue_depth(&thread, 0).await;
     }
+
+    #[tokio::test]
+    async fn failed_start_turn_cleanup_syncs_runtime_snapshot_back_to_thread() {
+        let thread = build_test_thread_with_provider(Arc::new(DummyProvider));
+        let mut runtime = ThreadRuntime::default();
+        let mut mailbox = ThreadMailbox::default();
+
+        let action = runtime.apply_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "first".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
+        assert!(matches!(
+            action,
+            ThreadRuntimeAction::StartTurn { turn_number: 1, .. }
+        ));
+
+        sync_runtime_snapshot(&thread, &runtime).await;
+
+        finish_failed_start_turn(&thread, &mut runtime, 1, "thread-test").await;
+
+        let snapshot = {
+            let guard = thread.read().await;
+            guard.runtime_snapshot()
+        };
+        assert_eq!(snapshot.state, ThreadRuntimeState::Idle);
+        assert_eq!(snapshot.queue_depth, 0);
+    }
 }
 
 #[allow(clippy::items_after_test_module)]
@@ -596,24 +626,9 @@ async fn process_runtime_action(
                             "failed to start queued turn: {}",
                             error
                         );
-                        let mailbox = {
-                            let guard = thread.read().await;
-                            guard.mailbox()
-                        };
-                        let mut mailbox = mailbox.lock().await;
-                        next_action = runtime.finish_active_turn(&mut mailbox);
-                        {
-                            let guard = thread.read().await;
-                            guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
-                                thread_id: thread_id.clone(),
-                                turn_number,
-                            });
-                        }
-                        if matches!(next_action, ThreadRuntimeAction::Noop) {
-                            let guard = thread.read().await;
-                            guard
-                                .broadcast_to_self(argus_protocol::ThreadEvent::Idle { thread_id });
-                        }
+                        next_action =
+                            finish_failed_start_turn(&thread, runtime, turn_number, &thread_id)
+                                .await;
                         continue;
                     }
                 }
@@ -658,6 +673,38 @@ async fn start_turn_task(
     });
 
     Ok(())
+}
+
+async fn finish_failed_start_turn(
+    thread: &Arc<RwLock<Thread>>,
+    runtime: &mut ThreadRuntime,
+    turn_number: u32,
+    thread_id: &str,
+) -> ThreadRuntimeAction {
+    let mailbox = {
+        let guard = thread.read().await;
+        guard.mailbox()
+    };
+    let mut mailbox = mailbox.lock().await;
+    let next_action = runtime.finish_active_turn(&mut mailbox);
+    drop(mailbox);
+    sync_runtime_snapshot(thread, runtime).await;
+
+    {
+        let guard = thread.read().await;
+        guard.broadcast_to_self(argus_protocol::ThreadEvent::TurnSettled {
+            thread_id: thread_id.to_string(),
+            turn_number,
+        });
+    }
+    if matches!(next_action, ThreadRuntimeAction::Noop) {
+        let guard = thread.read().await;
+        guard.broadcast_to_self(argus_protocol::ThreadEvent::Idle {
+            thread_id: thread_id.to_string(),
+        });
+    }
+
+    next_action
 }
 
 #[allow(clippy::needless_pass_by_value)]
