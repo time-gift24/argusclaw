@@ -25,8 +25,6 @@ use uuid::Uuid;
 use crate::session::{Session, SessionSummary, ThreadSummary};
 use argus_protocol::ProviderResolver;
 
-const DEFAULT_COMPACT_AGENT_DISPLAY_NAME: &str = "Compact Context";
-
 #[derive(Debug)]
 struct RecoveredThreadState {
     messages: Vec<ChatMessage>,
@@ -479,40 +477,6 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    async fn resolve_thread_compact_agent_id(
-        &self,
-        compact_agent_id: Option<AgentId>,
-    ) -> Result<Option<AgentId>> {
-        if compact_agent_id.is_some() {
-            return Ok(compact_agent_id);
-        }
-
-        if let Some(agent) = self
-            .template_manager
-            .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
-            .await?
-        {
-            return Ok(Some(agent.id));
-        }
-
-        self.template_manager.seed_builtin_agents().await?;
-
-        match self
-            .template_manager
-            .find_by_display_name(DEFAULT_COMPACT_AGENT_DISPLAY_NAME)
-            .await?
-        {
-            Some(agent) => Ok(Some(agent.id)),
-            None => {
-                tracing::warn!(
-                    compact_agent = DEFAULT_COMPACT_AGENT_DISPLAY_NAME,
-                    "default compact agent is unavailable even after builtin seeding"
-                );
-                Ok(None)
-            }
-        }
-    }
-
     /// Create a new SessionManager.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -771,7 +735,6 @@ impl SessionManager {
         template_id: AgentId,
         explicit_provider_id: Option<ProviderId>,
         model_override: Option<&str>,
-        compact_agent_id: Option<AgentId>,
     ) -> Result<ThreadId> {
         let session = self.load(session_id).await?;
 
@@ -844,9 +807,6 @@ impl SessionManager {
         };
 
         let effective_model = provider.model_name().to_string();
-        let compact_agent_id = self
-            .resolve_thread_compact_agent_id(compact_agent_id)
-            .await?;
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
@@ -861,7 +821,7 @@ impl SessionManager {
             turn_count: 0,
             session_id: Some(session_id),
             template_id: Some(template_id),
-            compact_agent_id,
+            compact_agent_id: None,
             model_override: Some(effective_model.clone()),
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
@@ -1438,7 +1398,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use argus_agent::{CompactorManager, KeepRecentCompactor, ThreadBuilder};
+    use argus_agent::{CompactResult, Compactor, ThreadBuilder};
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
     };
@@ -1464,6 +1424,23 @@ mod tests {
         recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
         SessionSchedulerBackend,
     };
+
+    struct NoopCompactor;
+
+    #[async_trait]
+    impl Compactor for NoopCompactor {
+        async fn compact(
+            &self,
+            _messages: &[ChatMessage],
+            _token_count: u32,
+        ) -> Result<Option<CompactResult>, argus_agent::CompactError> {
+            Ok(None)
+        }
+
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+    }
 
     #[derive(Debug)]
     struct CapturingProvider {
@@ -1622,7 +1599,7 @@ mod tests {
             template_manager.clone(),
             Arc::clone(&provider_resolver),
             tool_manager.clone(),
-            Arc::new(CompactorManager::with_defaults()),
+            Arc::new(NoopCompactor) as Arc<dyn Compactor>,
             trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -1686,7 +1663,7 @@ mod tests {
             template_manager.clone(),
             Arc::clone(&provider_resolver),
             tool_manager.clone(),
-            Arc::new(CompactorManager::with_defaults()),
+            Arc::new(NoopCompactor) as Arc<dyn Compactor>,
             trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -1755,7 +1732,7 @@ mod tests {
             template_manager.clone(),
             Arc::clone(&provider_resolver),
             tool_manager.clone(),
-            Arc::new(CompactorManager::with_defaults()),
+            Arc::new(NoopCompactor) as Arc<dyn Compactor>,
             trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -1801,7 +1778,7 @@ mod tests {
         session_id: SessionId,
         provider: Arc<CapturingProvider>,
     ) -> Arc<tokio::sync::RwLock<argus_agent::Thread>> {
-        let compactor = Arc::new(KeepRecentCompactor::with_defaults());
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
         Arc::new(tokio::sync::RwLock::new(
             ThreadBuilder::new()
                 .provider(provider)
@@ -2359,7 +2336,7 @@ mod tests {
             .await
             .expect("session should create");
         let parent_thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .create_thread(session_id, AgentId::new(7), None, None)
             .await
             .expect("parent thread should create");
         let job_id = "job-parent-route".to_string();
@@ -2396,7 +2373,7 @@ mod tests {
             .await
             .expect("session should create");
         let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .create_thread(session_id, AgentId::new(7), None, None)
             .await
             .expect("thread should create");
 
@@ -2482,7 +2459,7 @@ mod tests {
             .await
             .expect("first session should create");
         let thread_a = manager
-            .create_thread(session_a, AgentId::new(7), None, None, None)
+            .create_thread(session_a, AgentId::new(7), None, None)
             .await
             .expect("first thread should create");
         let session_b = manager
@@ -2490,7 +2467,7 @@ mod tests {
             .await
             .expect("second session should create");
         let thread_b = manager
-            .create_thread(session_b, AgentId::new(7), None, None, None)
+            .create_thread(session_b, AgentId::new(7), None, None)
             .await
             .expect("second thread should create");
 
@@ -2521,7 +2498,7 @@ mod tests {
             .await
             .expect("session should create");
         let parent_thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .create_thread(session_id, AgentId::new(7), None, None)
             .await
             .expect("parent thread should create");
         let job_id = "job-mailbox-unloaded-child".to_string();
@@ -2567,7 +2544,7 @@ mod tests {
             .await
             .expect("session should create");
         let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None, None)
+            .create_thread(session_id, AgentId::new(7), None, None)
             .await
             .expect("thread should create");
 
@@ -2581,46 +2558,6 @@ mod tests {
             session.get_thread(&thread_id).is_some(),
             "loaded session should expose persisted live threads"
         );
-    }
-
-    #[tokio::test]
-    async fn create_thread_defaults_compact_agent_to_builtin_template() {
-        let manager = test_session_manager().await;
-
-        let compact_agent = manager
-            .template_manager
-            .find_by_display_name("Compact Context")
-            .await
-            .expect("compact template lookup before thread create should succeed");
-        assert!(
-            compact_agent.is_none(),
-            "test helper intentionally starts without builtin compact agent seeded"
-        );
-
-        let session_id = manager
-            .create("compact-by-default".to_string())
-            .await
-            .expect("session should create");
-        let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None, None)
-            .await
-            .expect("thread should create");
-
-        let compact_agent = manager
-            .template_manager
-            .find_by_display_name("Compact Context")
-            .await
-            .expect("compact template lookup should succeed after thread create")
-            .expect("compact template should exist");
-
-        let thread = manager
-            .thread_repo
-            .get_thread(&thread_id)
-            .await
-            .expect("thread lookup should succeed")
-            .expect("thread should persist");
-
-        assert_eq!(thread.compact_agent_id, Some(compact_agent.id));
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(test)]
 use argus_agent::TurnOutput;
-use argus_agent::{CompactorManager, TurnCancellation};
+use argus_agent::{Compactor, TurnCancellation};
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
@@ -87,14 +87,14 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
+        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
     ) -> Self {
         Self::new_with_persistence(
             template_manager,
             provider_resolver,
             tool_manager,
-            compactor_manager,
+            default_compactor,
             trace_dir,
             None,
         )
@@ -105,7 +105,7 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
+        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
@@ -113,7 +113,7 @@ impl JobManager {
             template_manager,
             provider_resolver,
             tool_manager,
-            compactor_manager,
+            default_compactor,
             trace_dir,
             persistence,
         ));
@@ -130,7 +130,7 @@ impl JobManager {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        compactor_manager: Arc<CompactorManager>,
+        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
         job_repository: Arc<dyn JobRepository>,
         thread_repository: Arc<dyn ThreadRepository>,
@@ -140,7 +140,7 @@ impl JobManager {
             template_manager,
             provider_resolver,
             tool_manager,
-            compactor_manager,
+            default_compactor,
             trace_dir,
             Some(ThreadPoolPersistence::new(
                 job_repository,
@@ -568,7 +568,7 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            crate::thread_pool::noop_compactor(),
             std::env::temp_dir().join("argus-job-tests"),
         )
     }
@@ -684,7 +684,7 @@ mod tests {
                 template_manager,
                 Arc::new(FixedProviderResolver::new(provider)),
                 Arc::new(ToolManager::new()),
-                Arc::new(CompactorManager::with_defaults()),
+                crate::thread_pool::noop_compactor(),
                 std::env::temp_dir().join("argus-job-tests"),
             ),
             agent_id,
@@ -714,7 +714,7 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            Arc::new(CompactorManager::with_defaults()),
+            crate::thread_pool::noop_compactor(),
             std::env::temp_dir().join("argus-job-tests"),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
