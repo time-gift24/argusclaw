@@ -573,6 +573,12 @@ impl Thread {
             .any(|message| message.role != Role::System)
     }
 
+    /// Iterate over committed message history from turn records.
+    /// Only reads from `turns` - does not use cached flattened messages.
+    pub fn history_iter(&self) -> impl Iterator<Item = &ChatMessage> + '_ {
+        self.turns.iter().flat_map(|turn| turn.messages.iter())
+    }
+
     fn build_turn_context(&self) -> Arc<Vec<ChatMessage>> {
         if let Some(checkpoint) = self.compaction_checkpoint.as_ref() {
             let mut context_messages = self.system_messages.clone();
@@ -683,22 +689,26 @@ impl Thread {
         recovered: RecoveredThreadLogState,
         updated_at: DateTime<Utc>,
     ) {
+        // In the new model, system messages are stored in SystemBootstrap TurnRecords
+        // and are included via flatten_turn_messages(turns). We keep system_messages
+        // separate only for build_turn_context when there's a checkpoint.
+        // For the committed history (via history/history_iter), Bootstrap messages
+        // come from flatten_turn_messages.
         let existing_system = self
             .messages
             .first()
             .filter(|message| message.role == Role::System)
             .cloned();
 
-        // Extract system_messages from SystemBootstrap record
-        let mut system_messages: Vec<ChatMessage> = recovered
+        // system_messages is used by build_turn_context for checkpoint-based context.
+        // We extract it from Bootstrap here. The committed history gets Bootstrap
+        // via flatten_turn_messages.
+        let system_messages: Vec<ChatMessage> = recovered
             .turns
             .iter()
             .find(|t| matches!(t.kind, crate::history::TurnRecordKind::SystemBootstrap))
             .map(|t| t.messages.clone())
-            .unwrap_or_default();
-        if system_messages.is_empty() {
-            system_messages.push(existing_system.unwrap_or_else(|| ChatMessage::system("")));
-        }
+            .unwrap_or_else(|| existing_system.clone().map(|m| vec![m]).unwrap_or_default());
 
         // Extract latest Checkpoint record
         let compaction_checkpoint: Option<CompactionCheckpoint> = recovered
@@ -725,8 +735,11 @@ impl Thread {
         self.turns = recovered.turns;
         self.current_turn = None;
         self.compaction_checkpoint = compaction_checkpoint;
-        let committed_messages =
-            Self::materialize_committed_messages(&self.system_messages, &self.turns);
+        // In the new model, committed messages come from flatten_turn_messages which
+        // includes Bootstrap and UserTurn records. We set messages directly from
+        // flatten_turn_messages to avoid double-counting Bootstrap (which is already
+        // in self.turns and would be prepended again via system_messages).
+        let committed_messages: Arc<Vec<ChatMessage>> = Arc::new(flatten_turn_messages(&self.turns));
         self.cached_committed_messages = Some(Arc::clone(&committed_messages));
         self.messages = committed_messages;
         self.token_count = token_count;
@@ -1835,6 +1848,22 @@ mod tests {
         ))
     }
 
+    fn seeded_thread_with_system_and_one_user_turn() -> Thread {
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        thread.hydrate_turn_history_for_test(vec![
+            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
+            TurnRecord::user_completed(1, 1, vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")]),
+        ]);
+        thread
+    }
+
     fn repeated_test_message() -> String {
         ["test"; 10].join(" ")
     }
@@ -1983,6 +2012,13 @@ mod tests {
 
         assert_eq!(thread.history().len(), 3);
         assert_eq!(thread.turn_count(), 1);
+    }
+
+    #[test]
+    fn history_iter_reads_from_turn_records_without_cached_flattened_messages() {
+        let thread = seeded_thread_with_system_and_one_user_turn();
+        let history: Vec<_> = thread.history_iter().map(|m| m.content.clone()).collect();
+        assert_eq!(history, vec!["sys", "hi", "hello"]);
     }
 
     #[test]
