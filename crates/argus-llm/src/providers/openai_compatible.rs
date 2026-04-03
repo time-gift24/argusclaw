@@ -473,6 +473,13 @@ impl OpenAiCompatibleProvider {
         body: &ChatCompletionsRequest,
         extra_headers: &[(String, String)],
     ) -> reqwest::RequestBuilder {
+        match serde_json::to_string_pretty(body) {
+            Ok(json) => eprintln!("[openai-compatible] outgoing request json:\n{json}"),
+            Err(error) => eprintln!(
+                "[openai-compatible] failed to serialize outgoing request json: {error}"
+            ),
+        }
+
         let client = if body.stream {
             &self.stream_client
         } else {
@@ -602,25 +609,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
             "openai-compatible complete response"
         );
 
-        // If content is None but reasoning_content exists, use reasoning_content
-        let content = if choice.message.content.is_none() {
-            if let Some(ref reasoning) = choice.message.reasoning_content {
-                tracing::warn!("content is None, using reasoning_content as fallback");
-                Some(reasoning.clone())
-            } else if choice.message.tool_calls.is_some() {
-                None
-            } else {
-                tracing::warn!(
-                    "both content and reasoning_content are None, returning empty string"
-                );
-                Some(String::new())
-            }
-        } else {
-            choice.message.content
-        };
-
         Ok(CompletionResponse {
-            content,
+            content: choice.message.content,
             reasoning_content: choice.message.reasoning_content,
             tool_calls: choice
                 .message
@@ -734,6 +724,8 @@ struct OpenAiMessage {
     role: Role,
     content: OpenAiContent,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -759,6 +751,7 @@ impl From<argus_protocol::llm::ChatMessage> for OpenAiMessage {
         Self {
             role: value.role,
             content,
+            reasoning_content: value.reasoning_content,
             tool_call_id: value.tool_call_id,
             name: value.name,
             tool_calls: value.tool_calls.map(|calls| {
@@ -1067,6 +1060,22 @@ mod tests {
 
         assert_eq!(json["thinking"]["type"], "enabled");
         assert_eq!(json["thinking"]["clear_thinking"], false);
+    }
+
+    #[test]
+    fn chat_completions_request_serializes_reasoning_content() {
+        let request = CompletionRequest::new(vec![
+            argus_protocol::llm::ChatMessage::assistant_with_reasoning(
+                "final answer",
+                Some("hidden reasoning".to_string()),
+            ),
+        ]);
+
+        let body = ChatCompletionsRequest::from_completion_request("glm-5", request, false);
+        let json = serde_json::to_value(body).expect("request should serialize");
+
+        assert_eq!(json["messages"][0]["content"], "final answer");
+        assert_eq!(json["messages"][0]["reasoning_content"], "hidden reasoning");
     }
 
     #[test]

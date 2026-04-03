@@ -1333,7 +1333,6 @@ mod tests {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
-            _provider: &dyn argus_protocol::LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, argus_agent::CompactError> {
@@ -1502,7 +1501,6 @@ mod tests {
             template_manager.clone(),
             Arc::clone(&provider_resolver),
             tool_manager.clone(),
-            Arc::new(NoopCompactor) as Arc<dyn Compactor>,
             trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -1566,7 +1564,6 @@ mod tests {
             template_manager.clone(),
             Arc::clone(&provider_resolver),
             tool_manager.clone(),
-            Arc::new(NoopCompactor) as Arc<dyn Compactor>,
             trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -1635,7 +1632,6 @@ mod tests {
             template_manager.clone(),
             Arc::clone(&provider_resolver),
             tool_manager.clone(),
-            Arc::new(NoopCompactor) as Arc<dyn Compactor>,
             trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,

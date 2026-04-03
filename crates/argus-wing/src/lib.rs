@@ -29,7 +29,6 @@ use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
-use argus_agent::{Compactor, LlmCompactor};
 use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
@@ -74,7 +73,6 @@ pub struct ArgusWing {
     session_manager: Arc<SessionManager>,
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
-    default_compactor: Arc<dyn Compactor>,
     #[allow(dead_code)]
     job_manager: Arc<JobManager>,
     pub account_manager: Arc<AccountManager>,
@@ -129,8 +127,6 @@ impl ArgusWing {
         // Create tool manager
         let tool_manager = Arc::new(ToolManager::new());
 
-        // Create default compactor that summarizes stale history using the active thread provider.
-        let default_compactor = default_compactor();
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
 
@@ -142,7 +138,6 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
-            default_compactor.clone(),
             trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -175,7 +170,6 @@ impl ArgusWing {
             session_manager,
             approval_manager,
             tool_manager,
-            default_compactor,
             job_manager,
             account_manager,
             knowledge_repo_repo,
@@ -202,7 +196,6 @@ impl ArgusWing {
             arc_sqlite.clone(),
         ));
         let tool_manager = Arc::new(ToolManager::new());
-        let default_compactor = default_compactor();
         let trace_dir = default_trace_dir();
         std::fs::create_dir_all(&trace_dir).ok();
         // Create provider resolver wrapper FIRST
@@ -213,7 +206,6 @@ impl ArgusWing {
             template_manager.clone(),
             provider_resolver.clone(),
             tool_manager.clone(),
-            default_compactor.clone(),
             trace_dir.clone(),
             arc_sqlite.clone() as Arc<dyn JobRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
@@ -242,7 +234,6 @@ impl ArgusWing {
             session_manager,
             approval_manager,
             tool_manager,
-            default_compactor,
             job_manager,
             account_manager,
             knowledge_repo_repo,
@@ -289,12 +280,6 @@ impl ArgusWing {
     #[must_use]
     pub fn approval_manager(&self) -> &Arc<ApprovalManager> {
         &self.approval_manager
-    }
-
-    /// Get a reference to the default compactor.
-    #[must_use]
-    pub fn default_compactor(&self) -> &Arc<dyn Compactor> {
-        &self.default_compactor
     }
 
     /// Get a point-in-time snapshot of aggregate thread-pool metrics.
@@ -784,15 +769,6 @@ pub struct ToolInfo {
     pub description: String,
     pub risk_level: RiskLevel,
     pub parameters: serde_json::Value,
-}
-
-// ---------------------------------------------------------------------------
-// Default compactor
-// ---------------------------------------------------------------------------
-
-/// Returns the default LLM-driven compactor used by interactive threads.
-fn default_compactor() -> Arc<dyn Compactor> {
-    Arc::new(LlmCompactor::new())
 }
 
 #[cfg(test)]

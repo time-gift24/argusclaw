@@ -17,6 +17,12 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 - KISS (Keep It Simple and Stupid，尽可能保持简单)
 - DRY (Don't Repeat Yourself，禁止重复你自身)
 
+## 人机交互第一性原则（非常重要）
+- 动机与目标务必澄清，禁止假设我清楚我的目标
+- 动机与目标明晰后，客观给予我更优的最短路径实现
+- 出现任何设计缺陷和bug等，禁止以补丁思维说明，而是追溯到最源头的动机解释根因
+- 输出保持简洁，直击变更点或重点，禁止复述不变部分
+
 ## 编码前检查
 
 **禁令（极其重要）**
