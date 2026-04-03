@@ -72,6 +72,12 @@ pub struct LlmCompactor {
     threshold_ratio: f32,
 }
 
+impl Default for LlmCompactor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LlmCompactor {
     /// Create a new LlmCompactor.
     pub fn new() -> Self {
@@ -327,6 +333,14 @@ mod tests {
     fn llm_compactor_clamps_threshold_ratio() {
         let compactor = LlmCompactor::new().with_threshold_ratio(2.0);
         assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn llm_compactor_default_matches_new() {
+        let compactor = LlmCompactor::default();
+        assert!(
+            (compactor.threshold_ratio - LlmCompactor::new().threshold_ratio).abs() < f32::EPSILON
+        );
     }
 
     #[tokio::test]
