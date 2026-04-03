@@ -55,17 +55,13 @@ pub struct TurnLogPersistenceSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct RecoveredThreadLogState {
-    pub system_messages: Vec<ChatMessage>,
     pub turns: Vec<TurnRecord>,
-    pub checkpoint: Option<CompactionCheckpoint>,
 }
 
 impl RecoveredThreadLogState {
     #[must_use]
     pub fn committed_messages(&self) -> Vec<ChatMessage> {
-        let mut messages = self.system_messages.clone();
-        messages.extend(flatten_turn_messages(&self.turns));
-        messages
+        flatten_turn_messages(&self.turns)
     }
 
     #[must_use]
@@ -108,6 +104,10 @@ pub fn checkpoint_path(base_dir: &Path) -> PathBuf {
 
 pub fn turns_dir(base_dir: &Path) -> PathBuf {
     base_dir.join(TURNS_DIR)
+}
+
+pub fn meta_jsonl_path(base_dir: &Path) -> PathBuf {
+    turns_dir(base_dir).join("meta.jsonl")
 }
 
 pub async fn write_turn_messages(path: &Path, messages: &[ChatMessage]) -> std::io::Result<()> {
@@ -176,6 +176,79 @@ pub async fn read_checkpoint(path: &Path) -> Result<CompactionCheckpoint, TurnLo
     serde_json::from_str(&content).map_err(|error| TurnLogError::MalformedEvent {
         line: 1,
         reason: error.to_string(),
+    })
+}
+
+/// Append a single TurnRecord to the append-only meta.jsonl log.
+pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<(), TurnLogError> {
+    let turns_dir = turns_dir(base_dir);
+    fs::create_dir_all(&turns_dir)
+        .await
+        .map_err(|error| TurnLogError::MalformedEvent {
+            line: 0,
+            reason: format!("failed to create turns dir: {error}"),
+        })?;
+    let meta_path = meta_jsonl_path(base_dir);
+    let line = serde_json::to_string(record)
+        .map_err(|error| TurnLogError::MalformedEvent {
+            line: 0,
+            reason: format!("failed to serialize turn record: {error}"),
+        })?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&meta_path)
+        .await
+        .map_err(|error| TurnLogError::MalformedEvent {
+            line: 0,
+            reason: format!("failed to open meta.jsonl: {error}"),
+        })?;
+    file.write_all(line.as_bytes()).await.map_err(|error| TurnLogError::MalformedEvent {
+        line: 0,
+        reason: format!("failed to append to meta.jsonl: {error}"),
+    })?;
+    file.write_all(b"\n").await.map_err(|error| TurnLogError::MalformedEvent {
+        line: 0,
+        reason: format!("failed to write newline: {error}"),
+    })?;
+    Ok(())
+}
+
+/// Recover thread log state by replaying the append-only meta.jsonl.
+/// Validates that the first record is SystemBootstrap.
+pub async fn recover_thread_log_state(base_dir: &Path) -> Result<RecoveredThreadLogState, TurnLogError> {
+    let meta_path = meta_jsonl_path(base_dir);
+    if !fs::try_exists(&meta_path).await.unwrap_or(false) {
+        return Ok(RecoveredThreadLogState {
+            turns: Vec::new(),
+        });
+    }
+    let content = fs::read_to_string(&meta_path)
+        .await
+        .map_err(|error| TurnLogError::MalformedEvent {
+            line: 0,
+            reason: format!("failed to read meta.jsonl: {error}"),
+        })?;
+    let mut turns = Vec::new();
+    for (index, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: TurnRecord = serde_json::from_str(line).map_err(|error| TurnLogError::MalformedEvent {
+            line: index + 1,
+            reason: error.to_string(),
+        })?;
+        if index == 0 && !matches!(record.kind, TurnRecordKind::SystemBootstrap) {
+            return Err(TurnLogError::MalformedEvent {
+                line: 1,
+                reason: "first record must be SystemBootstrap".to_string(),
+            });
+        }
+        turns.push(record);
+    }
+    Ok(RecoveredThreadLogState {
+        turns,
     })
 }
 
@@ -275,117 +348,6 @@ pub async fn read_turn_record(
     }))
 }
 
-pub async fn recover_thread_log_state(
-    base_dir: &Path,
-    turn_count_hint: Option<u32>,
-) -> Result<RecoveredThreadLogState, TurnLogError> {
-    let turns_dir = turns_dir(base_dir);
-    let turn_numbers = resolve_turn_numbers(&turns_dir, turn_count_hint).await?;
-    let mut turns = Vec::with_capacity(turn_numbers.len());
-
-    for turn_number in turn_numbers {
-        let turn = read_turn_record(&turns_dir, turn_number)
-            .await?
-            .ok_or_else(|| {
-                TurnLogError::TurnNotFound(turn_messages_path(&turns_dir, turn_number))
-            })?;
-        turns.push(turn);
-    }
-
-    let system_messages = {
-        let path = thread_meta_path(base_dir);
-        if fs::try_exists(&path).await.unwrap_or(false) {
-            read_thread_meta(&path).await?.system_messages
-        } else {
-            Vec::new()
-        }
-    };
-    let checkpoint = {
-        let path = checkpoint_path(base_dir);
-        if fs::try_exists(&path).await.unwrap_or(false) {
-            Some(read_checkpoint(&path).await?)
-        } else {
-            None
-        }
-    };
-
-    Ok(RecoveredThreadLogState {
-        system_messages,
-        turns,
-        checkpoint,
-    })
-}
-
-async fn resolve_turn_numbers(
-    turns_dir: &Path,
-    turn_count_hint: Option<u32>,
-) -> Result<Vec<u32>, TurnLogError> {
-    if !fs::try_exists(turns_dir).await.unwrap_or(false) {
-        if turn_count_hint.unwrap_or(0) > 0 {
-            return Err(TurnLogError::TurnNotFound(turn_messages_path(turns_dir, 1)));
-        }
-        return Ok(Vec::new());
-    }
-
-    let mut entries =
-        fs::read_dir(turns_dir)
-            .await
-            .map_err(|error| TurnLogError::MalformedEvent {
-                line: 1,
-                reason: format!(
-                    "failed to inspect trace turns directory {}: {error}",
-                    turns_dir.display()
-                ),
-            })?;
-    let mut turn_numbers = Vec::new();
-
-    while let Some(entry) =
-        entries
-            .next_entry()
-            .await
-            .map_err(|error| TurnLogError::MalformedEvent {
-                line: 1,
-                reason: format!(
-                    "failed to inspect trace turns directory {}: {error}",
-                    turns_dir.display()
-                ),
-            })?
-    {
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-
-        if let Some(stem) = file_name.strip_suffix(".messages.jsonl") {
-            let turn_number =
-                stem.parse::<u32>()
-                    .map_err(|error| TurnLogError::MalformedEvent {
-                        line: 1,
-                        reason: format!(
-                            "failed to parse turn trace filename {}: {error}",
-                            path.display()
-                        ),
-                    })?;
-            turn_numbers.push(turn_number);
-        }
-    }
-
-    turn_numbers.sort_unstable();
-    turn_numbers.dedup();
-
-    let highest_discovered_turn = turn_numbers.last().copied().unwrap_or(0);
-    let highest_expected_turn = highest_discovered_turn.max(turn_count_hint.unwrap_or(0));
-    for expected in 1..=highest_expected_turn {
-        if turn_numbers.get((expected - 1) as usize).copied() != Some(expected) {
-            return Err(TurnLogError::TurnNotFound(turn_messages_path(
-                turns_dir, expected,
-            )));
-        }
-    }
-
-    Ok((1..=highest_expected_turn).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -430,83 +392,9 @@ mod tests {
         assert!(matches!(record.state, TurnState::Completed));
     }
 
-    #[tokio::test]
-    async fn recover_thread_log_state_restores_system_messages_turns_and_checkpoint() {
-        let temp_dir = tempdir().expect("temp dir should exist");
-        let base_dir = temp_dir.path().join("thread");
-        let turn = TurnRecord {
-            seq: 1,
-            kind: TurnRecordKind::UserTurn,
-            turn_number: Some(1),
-            state: TurnState::Completed,
-            messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-            token_usage: Some(TokenUsage {
-                input_tokens: 1,
-                output_tokens: 2,
-                total_tokens: 3,
-            }),
-            context_token_count: Some(3),
-            started_at: chrono::Utc::now(),
-            finished_at: Some(chrono::Utc::now()),
-            model: Some("test-model".to_string()),
-            error: None,
-        };
-        let checkpoint = CompactionCheckpoint {
-            summarized_through_turn: 1,
-            summary_messages: vec![ChatMessage::assistant("summary")],
-            created_at: chrono::Utc::now(),
-            token_count_stale: false,
-        };
-
-        persist_turn_log_snapshot(&TurnLogPersistenceSnapshot {
-            base_dir: base_dir.clone(),
-            turn: turn.clone(),
-            system_messages: vec![ChatMessage::system("persisted system")],
-            checkpoint: Some(checkpoint.clone()),
-        })
-        .await
-        .expect("turn log snapshot should persist");
-
-        let recovered = recover_thread_log_state(&base_dir, Some(1))
-            .await
-            .expect("turn log state should recover");
-
-        assert_eq!(recovered.system_messages.len(), 1);
-        assert_eq!(recovered.system_messages[0].content, "persisted system");
-        assert_eq!(recovered.turns.len(), 1);
-        assert_eq!(recovered.turns[0].turn_number, Some(1));
-        assert_eq!(recovered.turns[0].messages.len(), 2);
-        assert_eq!(
-            recovered.turns[0].messages[0].content,
-            turn.messages[0].content
-        );
-        assert_eq!(
-            recovered.turns[0].messages[1].content,
-            turn.messages[1].content
-        );
-        let recovered_checkpoint = recovered
-            .checkpoint
-            .as_ref()
-            .expect("checkpoint should recover");
-        assert_eq!(recovered_checkpoint.summarized_through_turn, 1);
-        assert_eq!(recovered_checkpoint.summary_messages.len(), 1);
-        assert_eq!(
-            recovered_checkpoint.summary_messages[0].content,
-            checkpoint.summary_messages[0].content
-        );
-        assert_eq!(recovered.turn_count(), 1);
-        assert_eq!(recovered.token_count(), 3);
-        assert_eq!(recovered.committed_messages().len(), 3);
-        assert_eq!(
-            recovered.committed_messages()[0].content,
-            "persisted system"
-        );
-    }
-
     #[test]
     fn recovered_token_count_falls_back_to_legacy_total_tokens() {
         let recovered = RecoveredThreadLogState {
-            system_messages: Vec::new(),
             turns: vec![TurnRecord {
                 seq: 1,
                 kind: TurnRecordKind::UserTurn,
@@ -524,9 +412,51 @@ mod tests {
                 model: Some("test-model".to_string()),
                 error: None,
             }],
-            checkpoint: None,
         };
 
         assert_eq!(recovered.token_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn append_and_recover_meta_jsonl_roundtrip() {
+        // append system, user, checkpoint; recover and assert same sequence
+        use crate::history::TurnRecordKind;
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let base_dir = temp_dir.path();
+
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]);
+        append_turn_record(base_dir, &bootstrap).await.expect("bootstrap should append");
+
+        let user = TurnRecord::user_completed(1, 1, vec![ChatMessage::user("hi")]);
+        append_turn_record(base_dir, &user).await.expect("user turn should append");
+
+        let checkpoint = TurnRecord::checkpoint(2, 1, vec![ChatMessage::assistant("summary")]);
+        append_turn_record(base_dir, &checkpoint).await.expect("checkpoint should append");
+
+        let recovered = recover_thread_log_state(base_dir)
+            .await
+            .expect("recovery should succeed");
+
+        assert_eq!(recovered.turns.len(), 3);
+        assert!(matches!(recovered.turns[0].kind, TurnRecordKind::SystemBootstrap));
+        assert!(matches!(recovered.turns[1].kind, TurnRecordKind::UserTurn));
+        assert!(matches!(&recovered.turns[2].kind, TurnRecordKind::Checkpoint { through_turn: 1 }));
+        assert_eq!(recovered.turns[1].messages[0].content, "hi");
+        assert_eq!(recovered.turns[2].messages[0].content, "summary");
+    }
+
+    #[tokio::test]
+    async fn recover_fails_when_first_record_is_not_system_bootstrap() {
+        // write invalid log and assert strict error
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let base_dir = temp_dir.path();
+        let turns_dir = turns_dir(base_dir);
+        fs::create_dir_all(&turns_dir).await.expect("turns dir should exist");
+        let meta_path = meta_jsonl_path(base_dir);
+        let invalid_record = serde_json::to_string(&TurnRecord::user_completed(0, 0, vec![ChatMessage::user("bad")])).unwrap();
+        fs::write(&meta_path, format!("{invalid_record}\n")).await.expect("invalid log should write");
+
+        let result = recover_thread_log_state(base_dir).await;
+        assert!(result.is_err());
     }
 }

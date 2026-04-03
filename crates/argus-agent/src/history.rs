@@ -142,6 +142,7 @@ pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
 pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {
     turns
         .iter()
+        .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
         .flat_map(|turn| turn.messages.iter().cloned())
         .collect()
 }

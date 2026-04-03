@@ -688,19 +688,43 @@ impl Thread {
             .first()
             .filter(|message| message.role == Role::System)
             .cloned();
+
+        // Extract system_messages from SystemBootstrap record
+        let mut system_messages: Vec<ChatMessage> = recovered
+            .turns
+            .iter()
+            .find(|t| matches!(t.kind, crate::history::TurnRecordKind::SystemBootstrap))
+            .map(|t| t.messages.clone())
+            .unwrap_or_default();
+        if system_messages.is_empty() {
+            system_messages.push(existing_system.unwrap_or_else(|| ChatMessage::system("")));
+        }
+
+        // Extract latest Checkpoint record
+        let compaction_checkpoint: Option<CompactionCheckpoint> = recovered
+            .turns
+            .iter()
+            .filter_map(|t| {
+                if let crate::history::TurnRecordKind::Checkpoint { through_turn } = t.kind {
+                    Some(CompactionCheckpoint {
+                        summarized_through_turn: through_turn,
+                        summary_messages: t.messages.clone(),
+                        created_at: t.finished_at.unwrap_or_else(chrono::Utc::now),
+                        token_count_stale: false,
+                    })
+                } else {
+                    None
+                }
+            })
+            .last();
+
         let token_count = recovered.token_count();
         let turn_count = recovered.turn_count();
-        let mut system_messages = recovered.system_messages;
-        if system_messages.is_empty()
-            && let Some(system_message) = existing_system
-        {
-            system_messages.push(system_message);
-        }
 
         self.system_messages = system_messages;
         self.turns = recovered.turns;
         self.current_turn = None;
-        self.compaction_checkpoint = recovered.checkpoint;
+        self.compaction_checkpoint = compaction_checkpoint;
         let committed_messages =
             Self::materialize_committed_messages(&self.system_messages, &self.turns);
         self.cached_committed_messages = Some(Arc::clone(&committed_messages));
@@ -1506,8 +1530,8 @@ mod tests {
     use crate::thread_handle::ThreadHandle;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::{
-        persist_turn_log_snapshot, read_turn_messages, read_turn_meta, recover_thread_log_state,
-        turn_messages_path, turn_meta_path, turns_dir,
+        append_turn_record, persist_turn_log_snapshot, read_turn_messages, read_turn_meta,
+        recover_thread_log_state, turn_messages_path, turn_meta_path, turns_dir,
     };
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
@@ -2995,13 +3019,11 @@ mod tests {
     async fn recovered_turn_log_state_restores_checkpoint_context_and_next_turn_number() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let base_dir = temp_dir.path().join("session").join("thread");
-        let system_messages = vec![ChatMessage::system("Persisted system prompt")];
-        let checkpoint = CompactionCheckpoint {
-            summarized_through_turn: 1,
-            summary_messages: vec![ChatMessage::assistant("summary of turn one")],
-            created_at: Utc::now(),
-            token_count_stale: false,
-        };
+
+        // Append records in seq order: SystemBootstrap, UserTurn, UserTurn, Checkpoint
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("Persisted system prompt")]);
+        append_turn_record(&base_dir, &bootstrap).await.expect("bootstrap should append");
+
         let turn_one = TurnRecord {
             seq: 1,
             kind: crate::history::TurnRecordKind::UserTurn,
@@ -3022,6 +3044,8 @@ mod tests {
             model: Some("dummy".to_string()),
             error: None,
         };
+        append_turn_record(&base_dir, &turn_one).await.expect("turn one should append");
+
         let turn_two = TurnRecord {
             seq: 2,
             kind: crate::history::TurnRecordKind::UserTurn,
@@ -3042,25 +3066,12 @@ mod tests {
             model: Some("dummy".to_string()),
             error: None,
         };
+        append_turn_record(&base_dir, &turn_two).await.expect("turn two should append");
 
-        persist_turn_log_snapshot(&TurnLogPersistenceSnapshot {
-            base_dir: base_dir.clone(),
-            turn: turn_one,
-            system_messages: system_messages.clone(),
-            checkpoint: None,
-        })
-        .await
-        .expect("first turn log snapshot should persist");
-        persist_turn_log_snapshot(&TurnLogPersistenceSnapshot {
-            base_dir: base_dir.clone(),
-            turn: turn_two,
-            system_messages: system_messages.clone(),
-            checkpoint: Some(checkpoint.clone()),
-        })
-        .await
-        .expect("second turn log snapshot should persist");
+        let checkpoint_record = TurnRecord::checkpoint(3, 1, vec![ChatMessage::assistant("summary of turn one")]);
+        append_turn_record(&base_dir, &checkpoint_record).await.expect("checkpoint should append");
 
-        let recovered = recover_thread_log_state(&base_dir, Some(2))
+        let recovered = recover_thread_log_state(&base_dir)
             .await
             .expect("turn log state should recover");
 
