@@ -580,17 +580,50 @@ impl Thread {
     }
 
     fn build_turn_context(&self) -> Arc<Vec<ChatMessage>> {
-        if let Some(checkpoint) = self.compaction_checkpoint.as_ref() {
+        // Find the latest checkpoint by seq
+        let latest_checkpoint = self
+            .turns
+            .iter()
+            .filter_map(|turn| {
+                if let crate::history::TurnRecordKind::Checkpoint { through_turn } = &turn.kind {
+                    Some((turn.seq, *through_turn, turn.messages.as_slice()))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(seq, _, _)| *seq);
+
+        if let Some((_, through_turn, checkpoint_messages)) = latest_checkpoint {
+            let mut context_messages: Vec<ChatMessage> = self
+                .turns
+                .iter()
+                .filter(|turn| matches!(turn.kind, crate::history::TurnRecordKind::SystemBootstrap))
+                .flat_map(|turn| turn.messages.iter().cloned())
+                .collect();
+            context_messages.extend(checkpoint_messages.iter().cloned());
+            context_messages.extend(
+                self.turns
+                    .iter()
+                    .filter(|turn| turn.turn_number.is_some_and(|tn| tn > through_turn))
+                    .flat_map(|turn| turn.messages.iter().cloned()),
+            );
+            Arc::new(context_messages)
+        } else if let Some(checkpoint) = self.compaction_checkpoint.as_ref() {
+            // Fallback to legacy compaction_checkpoint field for older code paths
             let mut context_messages = self.system_messages.clone();
             context_messages.extend(checkpoint.summary_messages.iter().cloned());
             context_messages.extend(
                 self.turns
                     .iter()
-                    .filter(|turn| turn.turn_number.is_some_and(|tn| tn > checkpoint.summarized_through_turn))
+                    .filter(|turn| {
+                        turn.turn_number
+                            .is_some_and(|tn| tn > checkpoint.summarized_through_turn)
+                    })
                     .flat_map(|turn| turn.messages.iter().cloned()),
             );
             Arc::new(context_messages)
         } else {
+            // No checkpoint at all: fall back to shared_history for older hydration paths
             Arc::clone(shared_history(
                 &self.messages,
                 self.cached_committed_messages.as_ref(),
@@ -726,7 +759,7 @@ impl Thread {
                     None
                 }
             })
-            .last();
+            .next_back();
 
         let token_count = recovered.token_count();
         let turn_count = recovered.turn_count();
@@ -739,7 +772,8 @@ impl Thread {
         // includes Bootstrap and UserTurn records. We set messages directly from
         // flatten_turn_messages to avoid double-counting Bootstrap (which is already
         // in self.turns and would be prepended again via system_messages).
-        let committed_messages: Arc<Vec<ChatMessage>> = Arc::new(flatten_turn_messages(&self.turns));
+        let committed_messages: Arc<Vec<ChatMessage>> =
+            Arc::new(flatten_turn_messages(&self.turns));
         self.cached_committed_messages = Some(Arc::clone(&committed_messages));
         self.messages = committed_messages;
         self.token_count = token_count;
@@ -813,6 +847,20 @@ impl Thread {
         self.updated_at = Utc::now();
 
         Ok(())
+    }
+
+    /// Append a checkpoint record to the turn history.
+    /// Checkpoints do not consume turn numbers.
+    pub fn append_checkpoint_record(
+        &mut self,
+        through_turn: u32,
+        summary_messages: Vec<ChatMessage>,
+    ) {
+        self.turns.push(TurnRecord::checkpoint(
+            self.turns.len() as u64,
+            through_turn,
+            summary_messages,
+        ));
     }
 
     pub(crate) fn turn_log_persistence_snapshot(&self) -> Option<TurnLogPersistenceSnapshot> {
@@ -1859,7 +1907,11 @@ mod tests {
             .expect("thread should build");
         thread.hydrate_turn_history_for_test(vec![
             TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
-            TurnRecord::user_completed(1, 1, vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")]),
+            TurnRecord::user_completed(
+                1,
+                1,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            ),
         ]);
         thread
     }
@@ -2019,6 +2071,58 @@ mod tests {
         let thread = seeded_thread_with_system_and_one_user_turn();
         let history: Vec<_> = thread.history_iter().map(|m| m.content.clone()).collect();
         assert_eq!(history, vec!["sys", "hi", "hello"]);
+    }
+
+    #[tokio::test]
+    async fn compaction_appends_checkpoint_record_without_consuming_turn_number() {
+        // ensure next user turn number stays contiguous after checkpoint append
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+
+        // Seed with a turn
+        thread.hydrate_turn_history_for_test(vec![
+            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
+            TurnRecord::user_completed(1, 1, vec![ChatMessage::user("hi")]),
+        ]);
+
+        // Append checkpoint record
+        thread.append_checkpoint_record(1, vec![ChatMessage::assistant("summary of turn 1")]);
+
+        // Next turn number should still be 2 (checkpoint doesn't consume turn number)
+        assert_eq!(thread.next_turn_number, 2);
+        // Turn count should still be 1
+        assert_eq!(thread.turn_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn build_turn_context_uses_latest_checkpoint_plus_following_user_turns() {
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(compactor)
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+
+        // Seed: sys + turn 1 + turn 2 + checkpoint through turn 1
+        thread.hydrate_turn_history_for_test(vec![
+            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
+            TurnRecord::user_completed(1, 1, vec![ChatMessage::user("turn1")]),
+            TurnRecord::user_completed(2, 2, vec![ChatMessage::user("turn2")]),
+            TurnRecord::checkpoint(3, 1, vec![ChatMessage::assistant("summary of turn 1")]),
+        ]);
+
+        let context = thread.build_turn_context();
+        let contents: Vec<_> = context.iter().map(|m| m.content.clone()).collect();
+        // Context should be: sys + summary + turn2
+        assert_eq!(contents, vec!["sys", "summary of turn 1", "turn2"]);
     }
 
     #[test]
@@ -3057,8 +3161,11 @@ mod tests {
         let base_dir = temp_dir.path().join("session").join("thread");
 
         // Append records in seq order: SystemBootstrap, UserTurn, UserTurn, Checkpoint
-        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("Persisted system prompt")]);
-        append_turn_record(&base_dir, &bootstrap).await.expect("bootstrap should append");
+        let bootstrap =
+            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("Persisted system prompt")]);
+        append_turn_record(&base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
 
         let turn_one = TurnRecord {
             seq: 1,
@@ -3080,7 +3187,9 @@ mod tests {
             model: Some("dummy".to_string()),
             error: None,
         };
-        append_turn_record(&base_dir, &turn_one).await.expect("turn one should append");
+        append_turn_record(&base_dir, &turn_one)
+            .await
+            .expect("turn one should append");
 
         let turn_two = TurnRecord {
             seq: 2,
@@ -3102,10 +3211,15 @@ mod tests {
             model: Some("dummy".to_string()),
             error: None,
         };
-        append_turn_record(&base_dir, &turn_two).await.expect("turn two should append");
+        append_turn_record(&base_dir, &turn_two)
+            .await
+            .expect("turn two should append");
 
-        let checkpoint_record = TurnRecord::checkpoint(3, 1, vec![ChatMessage::assistant("summary of turn one")]);
-        append_turn_record(&base_dir, &checkpoint_record).await.expect("checkpoint should append");
+        let checkpoint_record =
+            TurnRecord::checkpoint(3, 1, vec![ChatMessage::assistant("summary of turn one")]);
+        append_turn_record(&base_dir, &checkpoint_record)
+            .await
+            .expect("checkpoint should append");
 
         let recovered = recover_thread_log_state(&base_dir)
             .await
