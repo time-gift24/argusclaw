@@ -8,9 +8,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use argus_agent::TurnCancellation;
 #[cfg(test)]
 use argus_agent::TurnOutput;
-use argus_agent::TurnCancellation;
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{

@@ -97,11 +97,8 @@ impl LlmCompactor {
         DEFAULT_COMPACTION_PROMPT
     }
 
-    fn build_compaction_request_messages(
-        compactable_messages: &[ChatMessage],
-    ) -> Vec<ChatMessage> {
-        let mut request_messages =
-            Vec::with_capacity(compactable_messages.len() + 1);
+    fn build_compaction_request_messages(compactable_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let mut request_messages = Vec::with_capacity(compactable_messages.len() + 1);
         request_messages.extend(compactable_messages.iter().cloned());
         request_messages.push(ChatMessage::user(Self::compaction_prompt()));
         request_messages
@@ -154,18 +151,17 @@ impl Compactor for LlmCompactor {
             return Ok(None);
         };
 
-        let request_messages =
-            Self::build_compaction_request_messages(&compactable_messages);
+        let request_messages = Self::build_compaction_request_messages(&compactable_messages);
 
         let request = CompletionRequest::new(request_messages);
 
-        let response = self
-            .provider
-            .complete(request)
-            .await
-            .map_err(|error| CompactError::Failed {
-                reason: error.to_string(),
-            })?;
+        let response =
+            self.provider
+                .complete(request)
+                .await
+                .map_err(|error| CompactError::Failed {
+                    reason: error.to_string(),
+                })?;
         let summary = response.content.unwrap_or_default();
 
         let synthetic_summary = ChatMessage::assistant(&summary).with_metadata(

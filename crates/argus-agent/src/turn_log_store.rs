@@ -6,7 +6,9 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::TurnLogError;
-use crate::history::{CompactionCheckpoint, TurnRecord, TurnRecordKind, TurnState, flatten_turn_messages};
+use crate::history::{
+    CompactionCheckpoint, TurnRecord, TurnRecordKind, TurnState, flatten_turn_messages,
+};
 
 const THREAD_META_FILE: &str = "thread.meta.json";
 const CHECKPOINTS_DIR: &str = "checkpoints";
@@ -78,7 +80,9 @@ impl RecoveredThreadLogState {
 
     #[must_use]
     pub fn turn_count(&self) -> u32 {
-        self.turns.last().map_or(0, |turn| turn.turn_number.unwrap_or(0))
+        self.turns
+            .last()
+            .map_or(0, |turn| turn.turn_number.unwrap_or(0))
     }
 }
 
@@ -189,11 +193,10 @@ pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<
             reason: format!("failed to create turns dir: {error}"),
         })?;
     let meta_path = meta_jsonl_path(base_dir);
-    let line = serde_json::to_string(record)
-        .map_err(|error| TurnLogError::MalformedEvent {
-            line: 0,
-            reason: format!("failed to serialize turn record: {error}"),
-        })?;
+    let line = serde_json::to_string(record).map_err(|error| TurnLogError::MalformedEvent {
+        line: 0,
+        reason: format!("failed to serialize turn record: {error}"),
+    })?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -203,42 +206,48 @@ pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<
             line: 0,
             reason: format!("failed to open meta.jsonl: {error}"),
         })?;
-    file.write_all(line.as_bytes()).await.map_err(|error| TurnLogError::MalformedEvent {
-        line: 0,
-        reason: format!("failed to append to meta.jsonl: {error}"),
-    })?;
-    file.write_all(b"\n").await.map_err(|error| TurnLogError::MalformedEvent {
-        line: 0,
-        reason: format!("failed to write newline: {error}"),
-    })?;
+    file.write_all(line.as_bytes())
+        .await
+        .map_err(|error| TurnLogError::MalformedEvent {
+            line: 0,
+            reason: format!("failed to append to meta.jsonl: {error}"),
+        })?;
+    file.write_all(b"\n")
+        .await
+        .map_err(|error| TurnLogError::MalformedEvent {
+            line: 0,
+            reason: format!("failed to write newline: {error}"),
+        })?;
     Ok(())
 }
 
 /// Recover thread log state by replaying the append-only meta.jsonl.
 /// Validates that the first record is SystemBootstrap.
-pub async fn recover_thread_log_state(base_dir: &Path) -> Result<RecoveredThreadLogState, TurnLogError> {
+pub async fn recover_thread_log_state(
+    base_dir: &Path,
+) -> Result<RecoveredThreadLogState, TurnLogError> {
     let meta_path = meta_jsonl_path(base_dir);
     if !fs::try_exists(&meta_path).await.unwrap_or(false) {
-        return Ok(RecoveredThreadLogState {
-            turns: Vec::new(),
-        });
+        return Ok(RecoveredThreadLogState { turns: Vec::new() });
     }
-    let content = fs::read_to_string(&meta_path)
-        .await
-        .map_err(|error| TurnLogError::MalformedEvent {
-            line: 0,
-            reason: format!("failed to read meta.jsonl: {error}"),
-        })?;
+    let content =
+        fs::read_to_string(&meta_path)
+            .await
+            .map_err(|error| TurnLogError::MalformedEvent {
+                line: 0,
+                reason: format!("failed to read meta.jsonl: {error}"),
+            })?;
     let mut turns = Vec::new();
     for (index, line) in content.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let record: TurnRecord = serde_json::from_str(line).map_err(|error| TurnLogError::MalformedEvent {
-            line: index + 1,
-            reason: error.to_string(),
-        })?;
+        let record: TurnRecord =
+            serde_json::from_str(line).map_err(|error| TurnLogError::MalformedEvent {
+                line: index + 1,
+                reason: error.to_string(),
+            })?;
         if index == 0 && !matches!(record.kind, TurnRecordKind::SystemBootstrap) {
             return Err(TurnLogError::MalformedEvent {
                 line: 1,
@@ -247,9 +256,7 @@ pub async fn recover_thread_log_state(base_dir: &Path) -> Result<RecoveredThread
         }
         turns.push(record);
     }
-    Ok(RecoveredThreadLogState {
-        turns,
-    })
+    Ok(RecoveredThreadLogState { turns })
 }
 
 pub async fn persist_turn_log_snapshot(
@@ -425,22 +432,34 @@ mod tests {
         let base_dir = temp_dir.path();
 
         let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]);
-        append_turn_record(base_dir, &bootstrap).await.expect("bootstrap should append");
+        append_turn_record(base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
 
         let user = TurnRecord::user_completed(1, 1, vec![ChatMessage::user("hi")]);
-        append_turn_record(base_dir, &user).await.expect("user turn should append");
+        append_turn_record(base_dir, &user)
+            .await
+            .expect("user turn should append");
 
         let checkpoint = TurnRecord::checkpoint(2, 1, vec![ChatMessage::assistant("summary")]);
-        append_turn_record(base_dir, &checkpoint).await.expect("checkpoint should append");
+        append_turn_record(base_dir, &checkpoint)
+            .await
+            .expect("checkpoint should append");
 
         let recovered = recover_thread_log_state(base_dir)
             .await
             .expect("recovery should succeed");
 
         assert_eq!(recovered.turns.len(), 3);
-        assert!(matches!(recovered.turns[0].kind, TurnRecordKind::SystemBootstrap));
+        assert!(matches!(
+            recovered.turns[0].kind,
+            TurnRecordKind::SystemBootstrap
+        ));
         assert!(matches!(recovered.turns[1].kind, TurnRecordKind::UserTurn));
-        assert!(matches!(&recovered.turns[2].kind, TurnRecordKind::Checkpoint { through_turn: 1 }));
+        assert!(matches!(
+            &recovered.turns[2].kind,
+            TurnRecordKind::Checkpoint { through_turn: 1 }
+        ));
         assert_eq!(recovered.turns[1].messages[0].content, "hi");
         assert_eq!(recovered.turns[2].messages[0].content, "summary");
     }
@@ -451,10 +470,19 @@ mod tests {
         let temp_dir = tempdir().expect("temp dir should exist");
         let base_dir = temp_dir.path();
         let turns_dir = turns_dir(base_dir);
-        fs::create_dir_all(&turns_dir).await.expect("turns dir should exist");
+        fs::create_dir_all(&turns_dir)
+            .await
+            .expect("turns dir should exist");
         let meta_path = meta_jsonl_path(base_dir);
-        let invalid_record = serde_json::to_string(&TurnRecord::user_completed(0, 0, vec![ChatMessage::user("bad")])).unwrap();
-        fs::write(&meta_path, format!("{invalid_record}\n")).await.expect("invalid log should write");
+        let invalid_record = serde_json::to_string(&TurnRecord::user_completed(
+            0,
+            0,
+            vec![ChatMessage::user("bad")],
+        ))
+        .unwrap();
+        fs::write(&meta_path, format!("{invalid_record}\n"))
+            .await
+            .expect("invalid log should write");
 
         let result = recover_thread_log_state(base_dir).await;
         assert!(result.is_err());

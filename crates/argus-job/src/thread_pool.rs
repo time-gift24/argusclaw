@@ -5,21 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+#[cfg(test)]
+use argus_agent::Compactor;
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
     TurnConfig,
 };
-#[cfg(test)]
-use argus_agent::Compactor;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
 };
 use argus_protocol::{
     AgentId, LlmProvider, MailboxMessage, MailboxMessageType, ProviderId, ProviderResolver,
-    SessionId,
-    ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThreadPoolEventReason,
+    SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThreadPoolEventReason,
     ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot,
     ThreadPoolState, ThreadRuntimeStatus,
 };
@@ -1662,12 +1661,9 @@ impl ThreadPool {
             .trace_dir
             .join(session_id.to_string())
             .join(thread_id.to_string());
-        let recovered = recover_thread_log_state(
-            &base_dir,
-            (thread_record.turn_count > 0).then_some(thread_record.turn_count),
-        )
-        .await
-        .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let recovered = recover_thread_log_state(&base_dir)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         if recovered.turn_count() > 0 {
             thread
                 .write()
@@ -1779,12 +1775,9 @@ impl ThreadPool {
                 .chat_runtime_config
                 .trace_dir
                 .join(thread_id.to_string());
-            let recovered = recover_thread_log_state(
-                &base_dir,
-                (thread_record.turn_count > 0).then_some(thread_record.turn_count),
-            )
-            .await
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+            let recovered = recover_thread_log_state(&base_dir)
+                .await
+                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
             if recovered.turn_count() > 0 {
                 thread
                     .write()
@@ -2150,12 +2143,11 @@ impl ThreadPool {
         trace_dir: &Path,
         session_id: &SessionId,
         thread_id: &ThreadId,
-        turn_count_hint: Option<u32>,
     ) -> Result<RecoveredThreadState, io::Error> {
         let base_dir = trace_dir
             .join(session_id.to_string())
             .join(thread_id.to_string());
-        let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
+        let recovered = recover_thread_log_state(&base_dir)
             .await
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         Ok(Self::flatten_recovered_thread_state(recovered))
@@ -2165,10 +2157,9 @@ impl ThreadPool {
     async fn recover_job_thread_state_from_trace(
         trace_dir: &Path,
         thread_id: &ThreadId,
-        turn_count_hint: Option<u32>,
     ) -> Result<RecoveredThreadState, io::Error> {
         let base_dir = trace_dir.join(thread_id.to_string());
-        let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
+        let recovered = recover_thread_log_state(&base_dir)
             .await
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
         Ok(Self::flatten_recovered_thread_state(recovered))
@@ -2290,10 +2281,9 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::TurnCancellation;
-    use argus_agent::history::TurnState;
+    use argus_agent::history::{TurnRecord, TurnState};
     use argus_agent::turn_log_store::{
-        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
-        write_turn_meta,
+        append_turn_record, turns_dir,
     };
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderId,
@@ -2664,6 +2654,13 @@ mod tests {
         path
     }
 
+    async fn write_bootstrap(base_dir: &Path) {
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("test system")]);
+        append_turn_record(base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
+    }
+
     async fn write_committed_turn(
         base_dir: &Path,
         turn_number: u32,
@@ -2671,35 +2668,30 @@ mod tests {
         assistant_content: &str,
         total_tokens: u32,
     ) {
-        let turn_dir = turns_dir(base_dir);
-        write_turn_messages(
-            &turn_messages_path(&turn_dir, turn_number),
-            &[
+        // Write to meta.jsonl using append_turn_record
+        let turn = TurnRecord {
+            seq: turn_number as u64,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(turn_number),
+            state: TurnState::Completed,
+            messages: vec![
                 ChatMessage::user(user_content),
                 ChatMessage::assistant(assistant_content),
             ],
-        )
-        .await
-        .expect("messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_dir, turn_number),
-            &TurnLogMeta {
-                turn_number,
-                state: TurnState::Completed,
-                token_usage: Some(TokenUsage {
-                    input_tokens: total_tokens / 2,
-                    output_tokens: total_tokens.saturating_sub(total_tokens / 2),
-                    total_tokens,
-                }),
-                context_token_count: Some(total_tokens),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("meta should write");
+            token_usage: Some(TokenUsage {
+                input_tokens: total_tokens / 2,
+                output_tokens: total_tokens.saturating_sub(total_tokens / 2),
+                total_tokens,
+            }),
+            context_token_count: Some(total_tokens),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(base_dir, &turn)
+            .await
+            .expect("turn record should append");
     }
 
     async fn wait_for_thread_drop<T>(weak: &std::sync::Weak<T>) {
@@ -3909,7 +3901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_thread_state_from_sparse_turn_files_fails_on_missing_turns() {
+    async fn recover_thread_state_from_sparse_seq_records_succeeds() {
         let trace_dir = unique_trace_dir("argus-thread-pool-chat-recovery");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
@@ -3917,27 +3909,33 @@ mod tests {
             .join(session_id.to_string())
             .join(thread_id.to_string());
 
+        // Write bootstrap first (required by recovery)
+        write_bootstrap(&base_dir).await;
+        // Write turn with seq 1
         write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
+        // Write turn with seq 3 (skipping seq 2) - this is allowed in new model
         write_committed_turn(&base_dir, 3, "third prompt", "third reply", 33).await;
 
         let recovered = ThreadPool::recover_thread_state_from_trace(
             &trace_dir,
             &session_id,
             &thread_id,
-            Some(3),
         )
         .await
-        .expect_err("sparse traces should now fail like session recovery");
+        .expect("recovery should succeed even with non-sequential seqs");
 
+        // Should recover both turns (note: new model doesn't require sequential seqs)
+        assert_eq!(recovered.turn_count, 3); // turn_count comes from max turn_number
         assert!(
-            recovered.to_string().contains("missing turn trace file 2")
-                || recovered.to_string().contains("turn file not found"),
-            "unexpected sparse recovery error: {recovered}"
+            recovered
+                .messages
+                .iter()
+                .any(|message| message.content == "third reply")
         );
     }
 
     #[tokio::test]
-    async fn recover_thread_state_from_trace_uses_turns_beyond_persisted_count_hint() {
+    async fn recover_thread_state_from_trace_reads_all_turns() {
         let trace_dir = unique_trace_dir("argus-thread-pool-trace-ahead");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
@@ -3945,6 +3943,8 @@ mod tests {
             .join(session_id.to_string())
             .join(thread_id.to_string());
 
+        // Write bootstrap first (required by recovery)
+        write_bootstrap(&base_dir).await;
         write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
         write_committed_turn(&base_dir, 2, "second prompt", "second reply", 22).await;
 
@@ -3952,10 +3952,9 @@ mod tests {
             &trace_dir,
             &session_id,
             &thread_id,
-            Some(1),
         )
         .await
-        .expect("trace recovery should discover turns beyond the persisted count hint");
+        .expect("trace recovery should find all turns");
 
         assert_eq!(recovered.turn_count, 2);
         assert!(
@@ -3976,6 +3975,8 @@ mod tests {
             .join(session_id.to_string())
             .join(thread_id.to_string());
 
+        // Write bootstrap first (required by recovery)
+        write_bootstrap(&base_dir).await;
         write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
         write_committed_turn(&base_dir, 2, "second prompt", "second reply", 22).await;
 
@@ -3983,42 +3984,38 @@ mod tests {
             &trace_dir,
             &session_id,
             &thread_id,
-            Some(1),
         )
         .await
         .expect("committed turn logs should recover");
 
         assert_eq!(recovered.turn_count, 2);
         assert_eq!(recovered.token_count, 22);
-        assert_eq!(recovered.messages.len(), 4);
-        assert_eq!(recovered.messages[0].content, "first prompt");
-        assert_eq!(recovered.messages[3].content, "second reply");
+        // 1 bootstrap + 2 turns * 2 messages = 5 messages
+        assert_eq!(recovered.messages.len(), 5);
+        assert_eq!(recovered.messages[1].content, "first prompt");
+        assert_eq!(recovered.messages[4].content, "second reply");
     }
 
     #[tokio::test]
-    async fn recover_job_thread_state_fails_on_invalid_turn_files() {
+    async fn recover_job_thread_state_fails_on_invalid_jsonl() {
         let trace_dir = unique_trace_dir("argus-thread-pool-job-recovery");
         let thread_id = ThreadId::new();
         let base_dir = trace_dir.join(thread_id.to_string());
-
-        write_committed_turn(&base_dir, 1, "first prompt", "first reply", 11).await;
         let turn_dir = turns_dir(&base_dir);
-        std::fs::write(
-            turn_messages_path(&turn_dir, 2),
-            "{\"role\":\"user\",\"content\":\"broken\"}\n",
-        )
-        .expect("invalid turn messages should persist");
-        std::fs::write(turn_meta_path(&turn_dir, 2), "{invalid-json")
-            .expect("invalid turn meta should persist");
+        std::fs::create_dir_all(&turn_dir).expect("turns dir should exist");
+
+        // Write invalid JSON to meta.jsonl
+        let meta_path = turn_dir.join("meta.jsonl");
+        std::fs::write(&meta_path, "{invalid-json\n")
+            .expect("invalid meta.jsonl should persist");
 
         let recovered =
-            ThreadPool::recover_job_thread_state_from_trace(&trace_dir, &thread_id, Some(2))
+            ThreadPool::recover_job_thread_state_from_trace(&trace_dir, &thread_id)
                 .await
-                .expect_err("invalid turn files should fail recovery");
+                .expect_err("invalid meta.jsonl should fail recovery");
 
         assert!(
-            recovered.to_string().contains("turn")
-                || recovered.to_string().contains("JSON")
+            recovered.to_string().contains("JSON")
                 || recovered.to_string().contains("invalid"),
             "unexpected invalid recovery error: {recovered}"
         );

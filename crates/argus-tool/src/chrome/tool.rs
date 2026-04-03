@@ -279,17 +279,17 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::Close => {
-                self.manager
-                    .close_shared()
-                    .await
-                    .map_err(Self::map_error)?;
+                self.manager.close_shared().await.map_err(Self::map_error)?;
                 Ok(json!({
                     "action": "close",
                     "status": "ok",
                 }))
             }
             ChromeAction::Wait => {
-                self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                self.manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
 
                 let timeout_ms = args.timeout_ms.unwrap_or(1).min(1_000);
                 tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
@@ -300,7 +300,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::ExtractText => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let text = self
                     .manager
                     .extract_text(&session_id, args.selector.as_deref())
@@ -314,7 +318,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::ListLinks => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let links = self
                     .manager
                     .list_links(&session_id)
@@ -328,7 +336,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::GetDomSummary => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let summary = self
                     .manager
                     .get_dom_summary(&session_id)
@@ -342,7 +354,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::NetworkRequests => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let requests = self
                     .manager
                     .network_requests(&session_id, args.max_requests)
@@ -356,7 +372,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::Click => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let selector = required_field(&args, "selector", args.selector.as_deref())?;
                 self.manager
                     .click(&session_id, selector)
@@ -369,7 +389,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::Type => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let selector = required_field(&args, "selector", args.selector.as_deref())?;
                 let text = required_field(&args, "text", args.text.as_deref())?;
                 self.manager
@@ -383,7 +407,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::GetUrl => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let url = self
                     .manager
                     .current_url(&session_id)
@@ -396,7 +424,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::GetCookies => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let cookies = self
                     .manager
                     .get_cookies(&session_id, args.domain.as_deref())
@@ -409,7 +441,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::NewTab => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
                     tool_name: "chrome".to_string(),
                     reason: "missing url for new_tab action".to_string(),
@@ -428,7 +464,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::SwitchTab => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
                 let metadata = self
                     .manager
@@ -444,7 +484,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::CloseTab => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
                 self.manager
                     .close_tab(&session_id, tab_id)
@@ -458,7 +502,11 @@ impl NamedTool for ChromeTool {
                 }))
             }
             ChromeAction::ListTabs => {
-                let session_id = self.manager.shared_session_id().await.map_err(Self::map_error)?;
+                let session_id = self
+                    .manager
+                    .shared_session_id()
+                    .await
+                    .map_err(Self::map_error)?;
                 let tabs = self
                     .manager
                     .list_tabs(&session_id)

@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
+use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1052,7 +1052,6 @@ impl SessionManager {
                 &self.trace_dir,
                 &session_id,
                 thread_id,
-                thread.turn_count(),
             )
             .await?;
             if !recovered.is_empty() {
@@ -1060,7 +1059,7 @@ impl SessionManager {
             }
             return Ok(thread.history().to_vec());
         }
-        let thread_record = self
+        let _thread_record = self
             .thread_repo
             .get_thread_in_session(thread_id, &session_id)
             .await
@@ -1072,7 +1071,6 @@ impl SessionManager {
             &self.trace_dir,
             &session_id,
             thread_id,
-            thread_record.turn_count as u32,
         )
         .await
     }
@@ -1098,7 +1096,6 @@ impl SessionManager {
                         &self.trace_dir,
                         &session_id,
                         thread_id,
-                        Some(thread.turn_count()),
                     )
                     .await?;
                     if recovered.turn_count > 0 {
@@ -1135,7 +1132,6 @@ impl SessionManager {
             &self.trace_dir,
             &session_id,
             thread_id,
-            (thread_record.turn_count > 0).then_some(thread_record.turn_count),
         )
         .await?;
 
@@ -1230,25 +1226,21 @@ async fn recover_messages_from_trace(
     trace_dir: &std::path::Path,
     session_id: &SessionId,
     thread_id: &ThreadId,
-    turn_count: u32,
 ) -> Result<Vec<ChatMessage>> {
-    Ok(
-        recover_thread_state_from_trace(trace_dir, session_id, thread_id, Some(turn_count))
-            .await?
-            .messages,
-    )
+    Ok(recover_thread_state_from_trace(trace_dir, session_id, thread_id)
+        .await?
+        .messages)
 }
 
 async fn recover_thread_state_from_trace(
     trace_dir: &std::path::Path,
     session_id: &SessionId,
     thread_id: &ThreadId,
-    turn_count_hint: Option<u32>,
 ) -> Result<RecoveredThreadState> {
     let base_dir = trace_dir
         .join(session_id.to_string())
         .join(thread_id.to_string());
-    let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
+    let recovered = recover_thread_log_state(&base_dir)
         .await
         .map_err(|error| ArgusError::DatabaseError {
             reason: format_turn_log_recovery_error(thread_id, &error),
@@ -1295,10 +1287,8 @@ mod tests {
     use std::time::Duration;
 
     use argus_agent::history::TurnState;
-    use argus_agent::turn_log_store::{
-        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
-        write_turn_meta,
-    };
+    use argus_agent::history::TurnRecord;
+    use argus_agent::turn_log_store::{append_turn_record, turns_dir};
     use argus_agent::{CompactResult, Compactor, ThreadBuilder};
     use argus_protocol::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
@@ -1311,7 +1301,7 @@ mod tests {
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
-    use argus_repository::{ArgusSqlite, migrate};
+    use argus_repository::{migrate, ArgusSqlite};
     use argus_template::TemplateManager;
     use argus_tool::{
         CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
@@ -1323,8 +1313,8 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        Session, SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
-        recover_thread_state_from_trace,
+        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
+        SessionSchedulerBackend,
     };
 
     struct NoopCompactor;
@@ -1721,50 +1711,53 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        let turn_logs_dir = turns_dir(&base_dir);
         fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 1),
-            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        )
-        .await
-        .expect("messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    total_tokens: 2,
-                }),
-                context_token_count: Some(2),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("meta should write");
+        // Write bootstrap
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]);
+        append_turn_record(&base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
+
+        // Write turn 1
+        let turn = TurnRecord {
+            seq: 1,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(1),
+            state: TurnState::Completed,
+            messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                total_tokens: 2,
+            }),
+            context_token_count: Some(2),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(&base_dir, &turn)
+            .await
+            .expect("turn should append");
 
         let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, Some(1))
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id)
                 .await
                 .expect("new-format turn logs should recover");
 
         assert_eq!(recovered.turn_count, 1);
         assert_eq!(recovered.token_count, 2);
-        assert_eq!(recovered.messages.len(), 2);
-        assert_eq!(recovered.messages[0].content, "hi");
-        assert_eq!(recovered.messages[1].content, "hello");
+        // 1 bootstrap + 1 turn * 2 messages = 3 messages
+        assert_eq!(recovered.messages.len(), 3);
+        assert_eq!(recovered.messages[0].content, "sys");
+        assert_eq!(recovered.messages[1].content, "hi");
+        assert_eq!(recovered.messages[2].content, "hello");
     }
 
     #[tokio::test]
@@ -1786,56 +1779,60 @@ mod tests {
         );
         fs::create_dir_all(&trace_turns_dir).expect("turns dir should exist");
 
-        write_turn_messages(
-            &turn_messages_path(&trace_turns_dir, 1),
-            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        )
-        .await
-        .expect("first turn messages should write");
-        write_turn_meta(
-            &turn_meta_path(&trace_turns_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    total_tokens: 2,
-                }),
-                context_token_count: Some(2),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("first turn meta should write");
-        write_turn_messages(
-            &turn_messages_path(&trace_turns_dir, 2),
-            &[ChatMessage::user("again"), ChatMessage::assistant("done")],
-        )
-        .await
-        .expect("second turn messages should write");
-        write_turn_meta(
-            &turn_meta_path(&trace_turns_dir, 2),
-            &TurnLogMeta {
-                turn_number: 2,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 2,
-                    output_tokens: 4,
-                    total_tokens: 6,
-                }),
-                context_token_count: Some(6),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("second turn meta should write");
+        let base_dir = manager
+            .trace_dir
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+
+        // Write bootstrap
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]);
+        append_turn_record(&base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
+
+        // Write turn 1
+        let turn1 = TurnRecord {
+            seq: 1,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(1),
+            state: TurnState::Completed,
+            messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                total_tokens: 2,
+            }),
+            context_token_count: Some(2),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(&base_dir, &turn1)
+            .await
+            .expect("first turn should append");
+
+        // Write turn 2
+        let turn2 = TurnRecord {
+            seq: 2,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(2),
+            state: TurnState::Completed,
+            messages: vec![ChatMessage::user("again"), ChatMessage::assistant("done")],
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 2,
+                output_tokens: 4,
+                total_tokens: 6,
+            }),
+            context_token_count: Some(6),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(&base_dir, &turn2)
+            .await
+            .expect("second turn should append");
 
         manager
             .unload(session_id)
@@ -1849,7 +1846,9 @@ mod tests {
 
         assert_eq!(turn_count, 2);
         assert_eq!(token_count, 6);
-        assert_eq!(messages.len(), 4);
+        // 1 bootstrap + 2 turns * 2 messages = 5 messages
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].content, "sys");
         assert_eq!(
             messages.last().map(|message| message.content.as_str()),
             Some("done")
@@ -1861,134 +1860,134 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        let turn_logs_dir = turns_dir(&base_dir);
         fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 1),
-            &[
+        // Write system bootstrap
+        let bootstrap = TurnRecord::system_bootstrap(
+            0,
+            vec![ChatMessage::system("sys")],
+        );
+        append_turn_record(&base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
+
+        // Write turn 1
+        let turn_one = TurnRecord {
+            seq: 1,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(1),
+            state: TurnState::Completed,
+            messages: vec![
                 ChatMessage::user("用户问题一"),
                 ChatMessage::assistant("总结一"),
                 ChatMessage::tool_result("call_1", "bash", "'/tmp'"),
             ],
-        )
-        .await
-        .expect("turn one messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                }),
-                context_token_count: Some(15),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("turn one meta should write");
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 2),
-            &[
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+            }),
+            context_token_count: Some(15),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(&base_dir, &turn_one)
+            .await
+            .expect("turn one should append");
+
+        // Write turn 2
+        let turn_two = TurnRecord {
+            seq: 2,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(2),
+            state: TurnState::Completed,
+            messages: vec![
                 ChatMessage::user("用户问题二"),
                 ChatMessage::assistant("总结二"),
             ],
-        )
-        .await
-        .expect("turn two messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 2),
-            &TurnLogMeta {
-                turn_number: 2,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 20,
-                    output_tokens: 8,
-                    total_tokens: 28,
-                }),
-                context_token_count: Some(28),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("turn two meta should write");
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 20,
+                output_tokens: 8,
+                total_tokens: 28,
+            }),
+            context_token_count: Some(28),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(&base_dir, &turn_two)
+            .await
+            .expect("turn two should append");
 
-        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id)
             .await
             .expect("committed log recovery should succeed");
 
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[0].content, "用户问题一");
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert_eq!(messages[1].content, "总结一");
-        assert_eq!(messages[2].role, Role::Tool);
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(messages[2].name.as_deref(), Some("bash"));
-        assert_eq!(messages[3].role, Role::User);
-        assert_eq!(messages[3].content, "用户问题二");
-        assert_eq!(messages[4].role, Role::Assistant);
-        assert_eq!(messages[4].content, "总结二");
+        // flatten_turn_messages includes Bootstrap + Turn1 + Turn2 = 1 + 3 + 2 = 6 messages
+        // But wait - the test expects 5 messages without the system prompt
+        // In the new model, Bootstrap messages ARE included in committed messages
+        // So we get: sys + 3 + 2 = 6 messages
+        // But the old test expected 5 (no sys), so the new behavior is correct (includes sys)
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, "sys");
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[1].content, "用户问题一");
+        assert_eq!(messages[2].role, Role::Assistant);
+        assert_eq!(messages[2].content, "总结一");
+        assert_eq!(messages[3].role, Role::Tool);
+        assert_eq!(messages[3].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(messages[3].name.as_deref(), Some("bash"));
+        assert_eq!(messages[4].role, Role::User);
+        assert_eq!(messages[4].content, "用户问题二");
+        assert_eq!(messages[5].role, Role::Assistant);
+        assert_eq!(messages[5].content, "总结二");
     }
 
     #[tokio::test]
-    async fn recover_messages_from_trace_fails_when_turn_file_is_missing() {
+    async fn recover_messages_from_trace_fails_when_first_record_is_not_bootstrap() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        let turn_logs_dir = turns_dir(&base_dir);
         fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 1),
-            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        )
-        .await
-        .expect("turn one messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                }),
-                context_token_count: Some(15),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("turn one meta should write");
-
-        let error = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
+        // Write a UserTurn as first record (invalid - must start with SystemBootstrap)
+        let invalid_record = TurnRecord {
+            seq: 0,
+            kind: argus_agent::history::TurnRecordKind::UserTurn,
+            turn_number: Some(1),
+            state: TurnState::Completed,
+            messages: vec![ChatMessage::user("invalid first record")],
+            token_usage: None,
+            context_token_count: None,
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("test-model".to_string()),
+            error: None,
+        };
+        append_turn_record(&base_dir, &invalid_record)
             .await
-            .expect_err("missing turn file should fail");
+            .expect("invalid record should append");
 
-        assert!(error.to_string().contains("missing turn trace file 2"));
+        // Recovery should fail because first record must be SystemBootstrap
+        let error = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id)
+            .await
+            .expect_err("first record not being bootstrap should fail");
+
+        assert!(error.to_string().contains("SystemBootstrap"));
     }
 
     #[tokio::test]
@@ -1996,54 +1995,56 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        let turn_logs_dir = turns_dir(&base_dir);
         fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        for (turn_number, user, assistant, total_tokens) in [
-            (1, "用户问题一", "回答一", 15),
-            (2, "用户问题二", "回答二", 28),
+        // Write bootstrap
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]);
+        append_turn_record(&base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
+
+        for (seq, turn_number, user, assistant, total_tokens) in [
+            (1, 1, "用户问题一", "回答一", 15),
+            (2, 2, "用户问题二", "回答二", 28),
         ] {
-            write_turn_messages(
-                &turn_messages_path(&turn_logs_dir, turn_number),
-                &[ChatMessage::user(user), ChatMessage::assistant(assistant)],
-            )
-            .await
-            .expect("turn messages should write");
-            write_turn_meta(
-                &turn_meta_path(&turn_logs_dir, turn_number),
-                &TurnLogMeta {
-                    turn_number,
-                    state: TurnState::Completed,
-                    token_usage: Some(argus_protocol::TokenUsage {
-                        input_tokens: total_tokens / 2,
-                        output_tokens: total_tokens - (total_tokens / 2),
-                        total_tokens,
-                    }),
-                    context_token_count: Some(total_tokens),
-                    started_at: Utc::now(),
-                    finished_at: Some(Utc::now()),
-                    model: Some("test-model".to_string()),
-                    error: None,
-                },
-            )
-            .await
-            .expect("turn meta should write");
+            let turn = TurnRecord {
+                seq,
+                kind: argus_agent::history::TurnRecordKind::UserTurn,
+                turn_number: Some(turn_number),
+                state: TurnState::Completed,
+                messages: vec![ChatMessage::user(user), ChatMessage::assistant(assistant)],
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: total_tokens / 2,
+                    output_tokens: total_tokens - (total_tokens / 2),
+                    total_tokens,
+                }),
+                context_token_count: Some(total_tokens),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            };
+            append_turn_record(&base_dir, &turn)
+                .await
+                .expect("turn should append");
         }
 
-        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id)
             .await
-            .expect("recovery should discover committed turns beyond the persisted count hint");
+            .expect("recovery should succeed");
 
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].content, "用户问题一");
-        assert_eq!(messages[1].content, "回答一");
-        assert_eq!(messages[2].content, "用户问题二");
-        assert_eq!(messages[3].content, "回答二");
+        // 1 bootstrap + 2 turns * 2 messages each = 5 messages
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].content, "sys");
+        assert_eq!(messages[1].content, "用户问题一");
+        assert_eq!(messages[2].content, "回答一");
+        assert_eq!(messages[3].content, "用户问题二");
+        assert_eq!(messages[4].content, "回答二");
     }
 
     #[tokio::test]
@@ -2051,54 +2052,56 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        let turn_logs_dir = turns_dir(&base_dir);
         fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
 
-        for (turn_number, user, assistant, total_tokens) in
-            [(1, "hi", "hello", 15), (2, "again", "welcome back", 28)]
+        // Write bootstrap
+        let bootstrap = TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]);
+        append_turn_record(&base_dir, &bootstrap)
+            .await
+            .expect("bootstrap should append");
+
+        for (seq, turn_number, user, assistant, total_tokens) in
+            [(1, 1, "hi", "hello", 15), (2, 2, "again", "welcome back", 28)]
         {
-            write_turn_messages(
-                &turn_messages_path(&turn_logs_dir, turn_number),
-                &[ChatMessage::user(user), ChatMessage::assistant(assistant)],
-            )
-            .await
-            .expect("turn messages should write");
-            write_turn_meta(
-                &turn_meta_path(&turn_logs_dir, turn_number),
-                &TurnLogMeta {
-                    turn_number,
-                    state: TurnState::Completed,
-                    token_usage: Some(argus_protocol::TokenUsage {
-                        input_tokens: total_tokens / 2,
-                        output_tokens: total_tokens - (total_tokens / 2),
-                        total_tokens,
-                    }),
-                    context_token_count: Some(total_tokens),
-                    started_at: Utc::now(),
-                    finished_at: Some(Utc::now()),
-                    model: Some("test-model".to_string()),
-                    error: None,
-                },
-            )
-            .await
-            .expect("turn meta should write");
+            let turn = TurnRecord {
+                seq,
+                kind: argus_agent::history::TurnRecordKind::UserTurn,
+                turn_number: Some(turn_number),
+                state: TurnState::Completed,
+                messages: vec![ChatMessage::user(user), ChatMessage::assistant(assistant)],
+                token_usage: Some(argus_protocol::TokenUsage {
+                    input_tokens: total_tokens / 2,
+                    output_tokens: total_tokens - (total_tokens / 2),
+                    total_tokens,
+                }),
+                context_token_count: Some(total_tokens),
+                started_at: Utc::now(),
+                finished_at: Some(Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            };
+            append_turn_record(&base_dir, &turn)
+                .await
+                .expect("turn should append");
         }
 
         let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id)
                 .await
                 .expect("committed log recovery should succeed");
 
         assert_eq!(recovered.turn_count, 2);
         assert_eq!(recovered.token_count, 28);
-        assert_eq!(recovered.messages.len(), 4);
-        assert_eq!(recovered.messages[0].content, "hi");
-        assert_eq!(recovered.messages[3].content, "welcome back");
+        // 1 bootstrap + 2 turns * 2 messages = 5 messages
+        assert_eq!(recovered.messages.len(), 5);
+        assert_eq!(recovered.messages[0].content, "sys");
+        assert_eq!(recovered.messages[1].content, "hi");
+        assert_eq!(recovered.messages[4].content, "welcome back");
     }
 
     #[tokio::test]
@@ -2108,7 +2111,7 @@ mod tests {
         let thread_id = ThreadId::new();
 
         let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
+            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id)
                 .await
                 .expect("missing turns dir should be treated as empty history");
 

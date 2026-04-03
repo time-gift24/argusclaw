@@ -64,9 +64,8 @@ mod tests {
 
     #[test]
     fn navigate_rejects_malformed_url() {
-        let err =
-            ChromeToolArgs::validate(json!({ "action": "navigate", "url": "not-a-url" }))
-                .unwrap_err();
+        let err = ChromeToolArgs::validate(json!({ "action": "navigate", "url": "not-a-url" }))
+            .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
@@ -99,12 +98,14 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
 
-        let err = ChromeToolArgs::validate(json!({ "action": "navigate", "url": "http://10.0.0.1" }))
-            .unwrap_err();
+        let err =
+            ChromeToolArgs::validate(json!({ "action": "navigate", "url": "http://10.0.0.1" }))
+                .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
 
-        let err = ChromeToolArgs::validate(json!({ "action": "navigate", "url": "http://0.0.0.0" }))
-            .unwrap_err();
+        let err =
+            ChromeToolArgs::validate(json!({ "action": "navigate", "url": "http://0.0.0.0" }))
+                .unwrap_err();
         assert!(matches!(err, ChromeToolError::InvalidArguments { .. }));
     }
 
@@ -809,16 +810,15 @@ mod tests {
         )
         .await
         .expect("first navigate should succeed");
-        tool
-            .execute(
-                json!({
-                    "action": "navigate",
-                    "url": "https://example.com/two"
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("second navigate should succeed");
+        tool.execute(
+            json!({
+                "action": "navigate",
+                "url": "https://example.com/two"
+            }),
+            make_ctx(),
+        )
+        .await
+        .expect("second navigate should succeed");
 
         assert_eq!(host.open_calls.lock().unwrap().len(), 1);
 
@@ -875,7 +875,10 @@ mod tests {
             .expect("extract_text should recover persisted shared session");
 
         assert_eq!(result["content"], "Recovered text");
-        assert_eq!(host.attach_calls.lock().unwrap().as_slice(), &["persisted-session"]);
+        assert_eq!(
+            host.attach_calls.lock().unwrap().as_slice(),
+            &["persisted-session"]
+        );
     }
 
     #[tokio::test]
@@ -909,7 +912,10 @@ mod tests {
             ToolError::ExecutionFailed { reason, .. }
             if reason.contains("navigate(url)")
         ));
-        assert_eq!(host.attach_calls.lock().unwrap().as_slice(), &["stale-session"]);
+        assert_eq!(
+            host.attach_calls.lock().unwrap().as_slice(),
+            &["stale-session"]
+        );
     }
 
     #[tokio::test]
@@ -953,7 +959,10 @@ mod tests {
             .expect("navigate should recreate stale persisted session");
 
         assert_eq!(result["page_title"], "Managed Example");
-        assert_eq!(host.attach_calls.lock().unwrap().as_slice(), &["stale-session"]);
+        assert_eq!(
+            host.attach_calls.lock().unwrap().as_slice(),
+            &["stale-session"]
+        );
         assert_eq!(host.open_calls.lock().unwrap().len(), 1);
     }
 
@@ -1006,7 +1015,11 @@ mod tests {
             }
         }
 
-        fn with_attached_session(self, session_id: impl Into<String>, text: impl Into<String>) -> Self {
+        fn with_attached_session(
+            self,
+            session_id: impl Into<String>,
+            text: impl Into<String>,
+        ) -> Self {
             self.attached_sessions.lock().unwrap().insert(
                 session_id.into(),
                 AttachedManagedSession {

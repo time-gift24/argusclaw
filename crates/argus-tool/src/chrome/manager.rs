@@ -9,11 +9,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Client as ReqwestClient;
 use serde::{Deserialize, Serialize};
+use thirtyfour::SessionId;
 use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
 use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
-use thirtyfour::session::handle::SessionHandle;
 use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
-use thirtyfour::SessionId;
+use thirtyfour::session::handle::SessionHandle;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
@@ -644,23 +644,23 @@ impl ChromeManager {
                 reason: e.to_string(),
             }
         })?;
-        let state = serde_json::from_str(&contents).map_err(|e| ChromeToolError::FileReadFailed {
-            path: self.paths.shared_session_state.clone(),
-            reason: format!("invalid shared session state: {e}"),
-        })?;
+        let state =
+            serde_json::from_str(&contents).map_err(|e| ChromeToolError::FileReadFailed {
+                path: self.paths.shared_session_state.clone(),
+                reason: format!("invalid shared session state: {e}"),
+            })?;
         Ok(Some(state))
     }
 
     fn write_shared_session_state(&self, session_id: &str) -> Result<(), ChromeToolError> {
         self.paths.ensure_directories()?;
-        let contents =
-            serde_json::to_vec(&SharedSessionState {
-                session_id: session_id.to_string(),
-            })
-            .map_err(|e| ChromeToolError::FileWriteFailed {
-                path: self.paths.shared_session_state.clone(),
-                reason: e.to_string(),
-            })?;
+        let contents = serde_json::to_vec(&SharedSessionState {
+            session_id: session_id.to_string(),
+        })
+        .map_err(|e| ChromeToolError::FileWriteFailed {
+            path: self.paths.shared_session_state.clone(),
+            reason: e.to_string(),
+        })?;
         std::fs::write(&self.paths.shared_session_state, contents).map_err(|e| {
             ChromeToolError::FileWriteFailed {
                 path: self.paths.shared_session_state.clone(),

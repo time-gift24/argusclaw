@@ -475,9 +475,9 @@ impl OpenAiCompatibleProvider {
     ) -> reqwest::RequestBuilder {
         match serde_json::to_string_pretty(body) {
             Ok(json) => eprintln!("[openai-compatible] outgoing request json:\n{json}"),
-            Err(error) => eprintln!(
-                "[openai-compatible] failed to serialize outgoing request json: {error}"
-            ),
+            Err(error) => {
+                eprintln!("[openai-compatible] failed to serialize outgoing request json: {error}")
+            }
         }
 
         let client = if body.stream {
