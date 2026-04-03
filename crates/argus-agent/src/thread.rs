@@ -1263,29 +1263,23 @@ impl Thread {
         if !self.token_count_stale {
             match self
                 .compactor
-                .compact(
-                    self.provider.as_ref(),
-                    turn_context.as_slice(),
-                    self.token_count,
-                )
+                .compact(turn_context.as_slice(), self.token_count)
                 .await
             {
                 Ok(Some(result)) => {
-                    let token_count_stale = result.token_count.is_none();
+                    let new_token_count = result.token_count;
                     self.compaction_checkpoint = Some(CompactionCheckpoint {
                         summarized_through_turn: self.turn_count(),
                         summary_messages: result.summary_messages,
                         created_at: Utc::now(),
-                        token_count_stale,
+                        token_count_stale: false,
                     });
-                    self.token_count_stale = token_count_stale;
-                    if let Some(new_token_count) = result.token_count {
-                        self.token_count = new_token_count;
-                        self.broadcast_to_self(ThreadEvent::Compacted {
-                            thread_id: self.id.to_string(),
-                            new_token_count: self.token_count,
-                        });
-                    }
+                    self.token_count_stale = false;
+                    self.token_count = new_token_count;
+                    self.broadcast_to_self(ThreadEvent::Compacted {
+                        thread_id: self.id.to_string(),
+                        new_token_count: self.token_count,
+                    });
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -1579,7 +1573,6 @@ mod tests {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
-            _provider: &dyn LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
@@ -1597,7 +1590,6 @@ mod tests {
     impl Compactor for FailingCompactor {
         async fn compact(
             &self,
-            _provider: &dyn LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
@@ -2519,13 +2511,12 @@ mod tests {
     impl Compactor for SingleMessageCompactor {
         async fn compact(
             &self,
-            _provider: &dyn LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
             Ok(Some(CompactResult {
                 summary_messages: vec![ChatMessage::user("compacted")],
-                token_count: Some(10),
+                token_count: 10,
             }))
         }
 

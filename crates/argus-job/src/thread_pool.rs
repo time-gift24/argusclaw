@@ -8,14 +8,16 @@ use std::sync::{Arc, Mutex as StdMutex};
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    Compactor, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
+    Compactor, FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
+    TurnCancellation,
     TurnConfig,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
 };
 use argus_protocol::{
-    AgentId, MailboxMessage, MailboxMessageType, ProviderId, ProviderResolver, SessionId,
+    AgentId, LlmProvider, MailboxMessage, MailboxMessageType, ProviderId, ProviderResolver,
+    SessionId,
     ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThreadPoolEventReason,
     ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot,
     ThreadPoolState, ThreadRuntimeStatus,
@@ -192,6 +194,14 @@ impl std::fmt::Debug for ThreadPool {
 }
 
 impl ThreadPool {
+    fn compactor_for_provider(&self, provider: Arc<dyn LlmProvider>) -> Arc<dyn Compactor> {
+        if self.chat_runtime_config.default_compactor.name() == "llm_compactor" {
+            Arc::new(LlmCompactor::new(provider))
+        } else {
+            self.chat_runtime_config.default_compactor.clone()
+        }
+    }
+
     /// Create a new thread pool with a default runtime cap.
     pub fn new(
         template_manager: Arc<TemplateManager>,
@@ -1644,9 +1654,9 @@ impl ThreadPool {
             .session_id(session_id)
             .agent_record(Arc::new(agent_record))
             .title(thread_record.title.clone())
-            .provider(provider)
+            .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(self.chat_runtime_config.default_compactor.clone());
+            .compactor(self.compactor_for_provider(provider));
         let plan_store = FilePlanStore::new(
             self.chat_runtime_config.trace_dir.clone(),
             &thread_id.inner().to_string(),
@@ -1766,9 +1776,9 @@ impl ThreadPool {
             .session_id(Self::job_runtime_session_id(thread_id))
             .agent_record(Arc::new(agent_record))
             .title(thread_title)
-            .provider(provider)
+            .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(self.chat_runtime_config.default_compactor.clone())
+            .compactor(self.compactor_for_provider(provider))
             .plan_store(plan_store)
             .config(config)
             .build()
@@ -2245,7 +2255,6 @@ pub(crate) fn noop_compactor() -> Arc<dyn Compactor> {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
-            _provider: &dyn argus_protocol::LlmProvider,
             _messages: &[argus_protocol::llm::ChatMessage],
             _token_count: u32,
         ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError>

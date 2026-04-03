@@ -201,7 +201,6 @@ struct NoopCompactor;
 impl Compactor for NoopCompactor {
     async fn compact(
         &self,
-        _provider: &dyn LlmProvider,
         _messages: &[ChatMessage],
         _token_count: u32,
     ) -> Result<Option<CompactResult>, CompactError> {

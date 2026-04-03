@@ -405,6 +405,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "dirs",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sqlx",

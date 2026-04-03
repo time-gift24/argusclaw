@@ -1333,7 +1333,6 @@ mod tests {
     impl Compactor for NoopCompactor {
         async fn compact(
             &self,
-            _provider: &dyn argus_protocol::LlmProvider,
             _messages: &[ChatMessage],
             _token_count: u32,
         ) -> Result<Option<CompactResult>, argus_agent::CompactError> {

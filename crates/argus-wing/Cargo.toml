@@ -29,6 +29,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 dirs = { workspace = true }
+rust_decimal = { workspace = true }
 
 # Internal crates
 argus-protocol = { path = "../argus-protocol" }

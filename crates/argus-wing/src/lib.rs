@@ -35,6 +35,7 @@ use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
+use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
 use argus_protocol::{
     knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId,
     LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
@@ -50,6 +51,7 @@ use argus_repository::{connect, connect_path, migrate, ArgusSqlite};
 use argus_session::{SessionManager, SessionSummary, ThreadSummary};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
+use rust_decimal::Decimal;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
@@ -790,9 +792,37 @@ pub struct ToolInfo {
 // Default compactor
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+struct DefaultCompactionProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for DefaultCompactionProvider {
+    fn model_name(&self) -> &str {
+        "default-compaction-provider"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> std::result::Result<CompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: self.model_name().to_string(),
+            reason: "thread-specific compactor should be bound in thread pool".to_string(),
+        })
+    }
+
+    fn context_window(&self) -> u32 {
+        0
+    }
+}
+
 /// Returns the default LLM-driven compactor used by interactive threads.
 fn default_compactor() -> Arc<dyn Compactor> {
-    Arc::new(LlmCompactor::new())
+    Arc::new(LlmCompactor::new(Arc::new(DefaultCompactionProvider)))
 }
 
 #[cfg(test)]
