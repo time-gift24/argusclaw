@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::error::TurnLogError;
 use crate::history::{CompactionCheckpoint, TurnRecord, TurnState, flatten_turn_messages};
+use crate::token_estimate::estimate_token_count;
 
 const THREAD_META_FILE: &str = "thread.meta.json";
 const CHECKPOINTS_DIR: &str = "checkpoints";
@@ -68,16 +69,28 @@ impl RecoveredThreadLogState {
 
     #[must_use]
     pub fn token_count(&self) -> u32 {
-        self.turns
-            .iter()
-            .rev()
-            .find_map(|turn| turn.token_usage.as_ref().map(|usage| usage.total_tokens))
-            .unwrap_or(0)
+        estimate_token_count(&self.context_messages())
     }
 
     #[must_use]
     pub fn turn_count(&self) -> u32 {
         self.turns.last().map_or(0, |turn| turn.turn_number)
+    }
+
+    fn context_messages(&self) -> Vec<ChatMessage> {
+        if let Some(checkpoint) = self.checkpoint.as_ref() {
+            let mut messages = self.system_messages.clone();
+            messages.extend(checkpoint.summary_messages.iter().cloned());
+            messages.extend(
+                self.turns
+                    .iter()
+                    .filter(|turn| turn.turn_number > checkpoint.summarized_through_turn)
+                    .flat_map(|turn| turn.messages.iter().cloned()),
+            );
+            messages
+        } else {
+            self.committed_messages()
+        }
     }
 }
 

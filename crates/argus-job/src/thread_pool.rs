@@ -3973,7 +3973,7 @@ mod tests {
                 .iter()
                 .any(|message| message.content == "second reply")
         );
-        assert_eq!(recovered.token_count, 22);
+        assert_eq!(recovered.token_count, 8);
     }
 
     #[tokio::test]
@@ -3998,7 +3998,7 @@ mod tests {
         .expect("committed turn logs should recover");
 
         assert_eq!(recovered.turn_count, 2);
-        assert_eq!(recovered.token_count, 22);
+        assert_eq!(recovered.token_count, 8);
         assert_eq!(recovered.messages.len(), 4);
         assert_eq!(recovered.messages[0].content, "first prompt");
         assert_eq!(recovered.messages[3].content, "second reply");

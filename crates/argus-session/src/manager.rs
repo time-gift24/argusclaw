@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
+use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1296,8 +1296,8 @@ mod tests {
 
     use argus_agent::history::TurnState;
     use argus_agent::turn_log_store::{
-        turn_messages_path, turn_meta_path, turns_dir, write_turn_messages, write_turn_meta,
-        TurnLogMeta,
+        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
+        write_turn_meta,
     };
     use argus_agent::{CompactResult, Compactor, ThreadBuilder};
     use argus_protocol::llm::{
@@ -1311,7 +1311,7 @@ mod tests {
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
-    use argus_repository::{migrate, ArgusSqlite};
+    use argus_repository::{ArgusSqlite, migrate};
     use argus_template::TemplateManager;
     use argus_tool::{
         CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
@@ -1323,8 +1323,8 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
-        SessionSchedulerBackend,
+        Session, SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
+        recover_thread_state_from_trace,
     };
 
     struct NoopCompactor;
@@ -2091,7 +2091,7 @@ mod tests {
                 .expect("committed log recovery should succeed");
 
         assert_eq!(recovered.turn_count, 2);
-        assert_eq!(recovered.token_count, 28);
+        assert_eq!(recovered.token_count, 5);
         assert_eq!(recovered.messages.len(), 4);
         assert_eq!(recovered.messages[0].content, "hi");
         assert_eq!(recovered.messages[3].content, "welcome back");
