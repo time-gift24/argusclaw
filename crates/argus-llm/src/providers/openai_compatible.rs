@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, ContentPart, LlmError, LlmEventStream, LlmProvider,
-    LlmStreamEvent, ProviderCapabilities, Role, ThinkingConfig, ToolCall, ToolCallDelta,
+    LlmStreamEvent, LlmUsage, ProviderCapabilities, Role, ThinkingConfig, ToolCall, ToolCallDelta,
     ToolDefinition,
 };
 
@@ -591,7 +591,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     provider: "openai-compatible".to_string(),
                     reason: "response had no choices".to_string(),
                 })?;
-        let usage = payload.usage.unwrap_or_default();
+        let usage = payload.usage.unwrap_or_default().into_llm_usage();
 
         // Log the raw response for debugging
         tracing::debug!(
@@ -629,11 +629,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 .into_iter()
                 .map(ToolCall::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
             finish_reason: parse_finish_reason(choice.finish_reason.as_deref()),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
         })
     }
 
@@ -843,6 +843,39 @@ struct Usage {
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
+    #[serde(default)]
+    total_tokens: u32,
+    #[serde(default)]
+    prompt_tokens_details: PromptTokensDetails,
+    #[serde(default)]
+    completion_tokens_details: CompletionTokensDetails,
+}
+
+impl Usage {
+    fn into_llm_usage(self) -> LlmUsage {
+        let mut usage = LlmUsage::new(self.prompt_tokens, self.completion_tokens);
+        if self.total_tokens != 0 {
+            usage.total_tokens = self.total_tokens;
+        }
+        usage.cache_read_input_tokens = self.prompt_tokens_details.cached_tokens;
+        usage.cache_creation_input_tokens = self.prompt_tokens_details.cache_creation_tokens;
+        usage.reasoning_tokens = self.completion_tokens_details.reasoning_tokens;
+        usage
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
+    #[serde(default)]
+    cache_creation_tokens: u32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -892,8 +925,7 @@ fn parse_stream_frame_impl(
 
     if let Some(usage) = chunk.usage {
         events.push(Ok(LlmStreamEvent::Usage {
-            input_tokens: usage.prompt_tokens,
-            output_tokens: usage.completion_tokens,
+            usage: usage.into_llm_usage(),
         }));
     }
 
@@ -1183,7 +1215,7 @@ mod tests {
     #[test]
     fn parse_stream_frame_extracts_finish_and_usage() {
         let events = parse_stream_frame(
-            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":3}}}"#,
         )
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
@@ -1193,8 +1225,43 @@ mod tests {
             events,
             vec![
                 LlmStreamEvent::Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
+                    usage: argus_protocol::llm::LlmUsage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        total_tokens: 15,
+                        cache_read_input_tokens: 2,
+                        cache_creation_input_tokens: 0,
+                        reasoning_tokens: 3,
+                    },
+                },
+                LlmStreamEvent::Finished {
+                    finish_reason: argus_protocol::llm::FinishReason::Stop,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_stream_frame_defaults_missing_usage_details() {
+        let events = parse_stream_frame(
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":11}}"#,
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("finish frame should parse");
+
+        assert_eq!(
+            events,
+            vec![
+                LlmStreamEvent::Usage {
+                    usage: argus_protocol::llm::LlmUsage {
+                        input_tokens: 7,
+                        output_tokens: 11,
+                        total_tokens: 18,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        reasoning_tokens: 0,
+                    },
                 },
                 LlmStreamEvent::Finished {
                     finish_reason: argus_protocol::llm::FinishReason::Stop,

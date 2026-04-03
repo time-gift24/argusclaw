@@ -453,6 +453,36 @@ pub struct CompletionResponse {
     pub cache_creation_input_tokens: u32,
 }
 
+/// Detailed token usage reported by an LLM provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmUsage {
+    /// Number of input tokens used.
+    pub input_tokens: u32,
+    /// Number of output tokens generated.
+    pub output_tokens: u32,
+    /// Total tokens reported by the provider.
+    pub total_tokens: u32,
+    /// Tokens read from a server-side prompt cache.
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to a server-side prompt cache.
+    pub cache_creation_input_tokens: u32,
+    /// Output tokens consumed by model reasoning.
+    pub reasoning_tokens: u32,
+}
+
+impl LlmUsage {
+    /// Create a usage summary from input and output token counts.
+    #[must_use]
+    pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            ..Self::default()
+        }
+    }
+}
+
 /// A delta emitted while streaming a completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmStreamEvent {
@@ -463,10 +493,7 @@ pub enum LlmStreamEvent {
     /// Incremental tool call output from the model.
     ToolCallDelta(ToolCallDelta),
     /// Usage information emitted by the provider during streaming.
-    Usage {
-        input_tokens: u32,
-        output_tokens: u32,
-    },
+    Usage { usage: LlmUsage },
     /// The model finished generating output.
     Finished { finish_reason: FinishReason },
     /// Retry attempt due to transient error.

@@ -54,6 +54,7 @@ pub use llm::{
     LlmProviderRecordJson,
     LlmProviderRepository,
     LlmStreamEvent,
+    LlmUsage,
     ModelMetadata,
     ProviderCapabilities,
     ProviderSecretStatus,

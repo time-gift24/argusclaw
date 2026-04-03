@@ -275,6 +275,10 @@ pub enum ThreadEventPayload {
     LlmUsage {
         input_tokens: u32,
         output_tokens: u32,
+        total_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+        reasoning_tokens: u32,
     },
     RetryAttempt {
         attempt: u32,
@@ -368,12 +372,13 @@ impl ThreadEventPayload {
                 name: delta.name,
                 arguments_delta: delta.arguments_delta,
             }),
-            LlmStreamEvent::Usage {
-                input_tokens,
-                output_tokens,
-            } => Some(Self::LlmUsage {
-                input_tokens,
-                output_tokens,
+            LlmStreamEvent::Usage { usage } => Some(Self::LlmUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
             }),
             LlmStreamEvent::RetryAttempt {
                 attempt,
@@ -391,7 +396,7 @@ impl ThreadEventPayload {
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::{LlmStreamEvent, ThreadEvent, ThreadId, ThreadPoolSnapshot};
+    use argus_protocol::{LlmStreamEvent, LlmUsage, ThreadEvent, ThreadId, ThreadPoolSnapshot};
 
     use super::{ThreadEventEnvelope, ThreadEventPayload};
 
@@ -444,6 +449,33 @@ mod tests {
             } if tool_call_id == "call-1"
                 && tool_name == "shell"
                 && result == &serde_json::Value::String("command failed".to_string())
+        ));
+    }
+
+    #[test]
+    fn usage_event_conversion_preserves_detailed_usage_fields() {
+        let payload = ThreadEventPayload::from_llm_event(LlmStreamEvent::Usage {
+            usage: LlmUsage {
+                input_tokens: 18,
+                output_tokens: 2428,
+                total_tokens: 2446,
+                cache_read_input_tokens: 2,
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: 1353,
+            },
+        })
+        .expect("usage events should be forwarded");
+
+        assert!(matches!(
+            payload,
+            ThreadEventPayload::LlmUsage {
+                input_tokens: 18,
+                output_tokens: 2428,
+                total_tokens: 2446,
+                cache_read_input_tokens: 2,
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: 1353,
+            }
         ));
     }
 
