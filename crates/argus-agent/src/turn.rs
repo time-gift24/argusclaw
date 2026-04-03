@@ -719,6 +719,7 @@ impl Turn {
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
+        let mut context_token_count = None;
 
         let max_tool_calls = self.config.max_tool_calls;
 
@@ -805,12 +806,15 @@ impl Turn {
             );
 
             // Process response
-            let next_action =
-                match self.process_finish_reason(response, &mut pending_messages, &mut token_usage)
-                {
-                    Ok(next_action) => next_action,
-                    Err(error) => return Err(error),
-                };
+            let next_action = match self.process_finish_reason(
+                response,
+                &mut pending_messages,
+                &mut token_usage,
+                &mut context_token_count,
+            ) {
+                Ok(next_action) => next_action,
+                Err(error) => return Err(error),
+            };
             match next_action {
                 NextAction::Return(output) => {
                     // Fire TurnEnd hook
@@ -1036,6 +1040,7 @@ impl Turn {
         response: CompletionResponse,
         pending_messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
+        context_token_count: &mut Option<u32>,
     ) -> Result<NextAction, TurnError> {
         let CompletionResponse {
             content,
@@ -1051,6 +1056,7 @@ impl Turn {
         token_usage.input_tokens += input_tokens;
         token_usage.output_tokens += output_tokens;
         token_usage.total_tokens += input_tokens + output_tokens;
+        *context_token_count = Some(input_tokens + output_tokens);
 
         match finish_reason {
             FinishReason::Stop => {
@@ -1068,6 +1074,7 @@ impl Turn {
                 Ok(NextAction::Return(TurnOutput {
                     appended_messages: std::mem::take(pending_messages),
                     token_usage: token_usage.clone(),
+                    context_token_count: *context_token_count,
                 }))
             }
             FinishReason::ToolUse => {
@@ -1138,11 +1145,13 @@ impl Turn {
                     Ok(NextAction::Return(TurnOutput {
                         appended_messages: std::mem::take(pending_messages),
                         token_usage: token_usage.clone(),
+                        context_token_count: *context_token_count,
                     }))
                 } else {
                     Ok(NextAction::Return(TurnOutput {
                         appended_messages: std::mem::take(pending_messages),
                         token_usage: token_usage.clone(),
+                        context_token_count: *context_token_count,
                     }))
                 }
             }
@@ -1880,6 +1889,7 @@ mod tests {
             .finish_turn(Ok(TurnOutput {
                 appended_messages: vec![ChatMessage::assistant("done")],
                 token_usage: TokenUsage::default(),
+                context_token_count: None,
             }))
             .expect("first turn should settle");
 
@@ -2226,6 +2236,44 @@ mod tests {
             .progress
             .iter()
             .any(|item| matches!(item, TurnProgress::ToolCompleted { tool_name, .. } if tool_name == "echo")));
+    }
+
+    #[tokio::test]
+    async fn execute_reports_context_token_count_from_last_provider_response() {
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("first".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![argus_protocol::llm::ToolCall {
+                    id: "call-123".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "test message"}),
+                }],
+                input_tokens: 11,
+                output_tokens: 7,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 17,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let turn = make_turn(provider, vec![], 5);
+        let output = turn.execute().await.expect("turn should succeed");
+
+        assert_eq!(output.token_usage.input_tokens, 28);
+        assert_eq!(output.token_usage.output_tokens, 12);
+        assert_eq!(output.token_usage.total_tokens, 40);
+        assert_eq!(output.context_token_count, Some(22));
     }
 
     #[tokio::test]

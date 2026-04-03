@@ -655,6 +655,8 @@ pub enum ThreadEvent {
         turn_number: u32,
         /// Token usage for this turn.
         token_usage: TokenUsage,
+        /// Provider-reported context token count for the final LLM call in this turn.
+        context_token_count: Option<u32>,
     },
     /// Turn failed.
     TurnFailed {

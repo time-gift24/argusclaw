@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
+use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1296,8 +1296,8 @@ mod tests {
 
     use argus_agent::history::TurnState;
     use argus_agent::turn_log_store::{
-        turn_messages_path, turn_meta_path, turns_dir, write_turn_messages, write_turn_meta,
-        TurnLogMeta,
+        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
+        write_turn_meta,
     };
     use argus_agent::{CompactResult, Compactor, ThreadBuilder};
     use argus_protocol::llm::{
@@ -1311,7 +1311,7 @@ mod tests {
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
-    use argus_repository::{migrate, ArgusSqlite};
+    use argus_repository::{ArgusSqlite, migrate};
     use argus_template::TemplateManager;
     use argus_tool::{
         CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
@@ -1323,8 +1323,8 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
-        SessionSchedulerBackend,
+        Session, SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
+        recover_thread_state_from_trace,
     };
 
     struct NoopCompactor;
@@ -1749,6 +1749,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                 }),
+                context_token_count: Some(2),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1805,6 +1806,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                 }),
+                context_token_count: Some(2),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1829,6 +1831,7 @@ mod tests {
                     output_tokens: 4,
                     total_tokens: 6,
                 }),
+                context_token_count: Some(6),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1890,6 +1893,7 @@ mod tests {
                     output_tokens: 5,
                     total_tokens: 15,
                 }),
+                context_token_count: Some(15),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1917,6 +1921,7 @@ mod tests {
                     output_tokens: 8,
                     total_tokens: 28,
                 }),
+                context_token_count: Some(28),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1973,6 +1978,7 @@ mod tests {
                     output_tokens: 5,
                     total_tokens: 15,
                 }),
+                context_token_count: Some(15),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -2022,6 +2028,7 @@ mod tests {
                         output_tokens: total_tokens - (total_tokens / 2),
                         total_tokens,
                     }),
+                    context_token_count: Some(total_tokens),
                     started_at: Utc::now(),
                     finished_at: Some(Utc::now()),
                     model: Some("test-model".to_string()),
@@ -2075,6 +2082,7 @@ mod tests {
                         output_tokens: total_tokens - (total_tokens / 2),
                         total_tokens,
                     }),
+                    context_token_count: Some(total_tokens),
                     started_at: Utc::now(),
                     finished_at: Some(Utc::now()),
                     model: Some("test-model".to_string()),

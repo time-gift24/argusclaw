@@ -729,6 +729,7 @@ mod tests {
         TurnOutput {
             appended_messages: vec![ChatMessage::assistant(content)],
             token_usage: TokenUsage::default(),
+            context_token_count: None,
         }
     }
 

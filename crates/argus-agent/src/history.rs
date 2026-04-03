@@ -19,6 +19,7 @@ pub struct TurnRecord {
     pub state: TurnState,
     pub messages: Vec<ChatMessage>,
     pub token_usage: Option<TokenUsage>,
+    pub context_token_count: Option<u32>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub model: Option<String>,
@@ -33,6 +34,7 @@ impl TurnRecord {
             state: TurnState::Completed,
             messages,
             token_usage: None,
+            context_token_count: None,
             started_at,
             finished_at: Some(Utc::now()),
             model: None,
@@ -81,6 +83,8 @@ pub struct CompactionCheckpoint {
     pub summarized_through_turn: u32,
     pub summary_messages: Vec<ChatMessage>,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub token_count_stale: bool,
 }
 
 pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {

@@ -18,6 +18,7 @@ pub struct TurnLogMeta {
     pub turn_number: u32,
     pub state: TurnState,
     pub token_usage: Option<TokenUsage>,
+    pub context_token_count: Option<u32>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
     pub model: Option<String>,
@@ -30,6 +31,7 @@ impl From<&TurnRecord> for TurnLogMeta {
             turn_number: turn.turn_number,
             state: turn.state.clone(),
             token_usage: turn.token_usage.clone(),
+            context_token_count: turn.context_token_count,
             started_at: turn.started_at,
             finished_at: turn.finished_at,
             model: turn.model.clone(),
@@ -71,7 +73,10 @@ impl RecoveredThreadLogState {
         self.turns
             .iter()
             .rev()
-            .find_map(|turn| turn.token_usage.as_ref().map(|usage| usage.total_tokens))
+            .find_map(|turn| {
+                turn.context_token_count
+                    .or_else(|| turn.token_usage.as_ref().map(|usage| usage.total_tokens))
+            })
             .unwrap_or(0)
     }
 
@@ -259,6 +264,7 @@ pub async fn read_turn_record(
         state: meta.state,
         messages,
         token_usage: meta.token_usage,
+        context_token_count: meta.context_token_count,
         started_at: meta.started_at,
         finished_at: meta.finished_at,
         model: meta.model,
@@ -396,6 +402,7 @@ mod tests {
                 output_tokens: 1,
                 total_tokens: 2,
             }),
+            context_token_count: Some(2),
             started_at: chrono::Utc::now(),
             finished_at: Some(chrono::Utc::now()),
             model: Some("test-model".to_string()),
@@ -433,6 +440,7 @@ mod tests {
                 output_tokens: 2,
                 total_tokens: 3,
             }),
+            context_token_count: Some(3),
             started_at: chrono::Utc::now(),
             finished_at: Some(chrono::Utc::now()),
             model: Some("test-model".to_string()),
@@ -442,6 +450,7 @@ mod tests {
             summarized_through_turn: 1,
             summary_messages: vec![ChatMessage::assistant("summary")],
             created_at: chrono::Utc::now(),
+            token_count_stale: false,
         };
 
         persist_turn_log_snapshot(&TurnLogPersistenceSnapshot {
@@ -487,5 +496,30 @@ mod tests {
             recovered.committed_messages()[0].content,
             "persisted system"
         );
+    }
+
+    #[test]
+    fn recovered_token_count_falls_back_to_legacy_total_tokens() {
+        let recovered = RecoveredThreadLogState {
+            system_messages: Vec::new(),
+            turns: vec![TurnRecord {
+                turn_number: 1,
+                state: TurnState::Completed,
+                messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+                token_usage: Some(TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                }),
+                context_token_count: None,
+                started_at: chrono::Utc::now(),
+                finished_at: Some(chrono::Utc::now()),
+                model: Some("test-model".to_string()),
+                error: None,
+            }],
+            checkpoint: None,
+        };
+
+        assert_eq!(recovered.token_count(), 3);
     }
 }
