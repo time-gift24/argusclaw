@@ -28,7 +28,9 @@ use super::history::{
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
-use super::turn_log_store::{TurnLogPersistenceSnapshot, persist_turn_log_snapshot};
+use super::turn_log_store::{
+    RecoveredThreadLogState, TurnLogPersistenceSnapshot, persist_turn_log_snapshot,
+};
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -591,7 +593,13 @@ impl Thread {
 
     /// Get turn count.
     pub fn turn_count(&self) -> u32 {
-        self.turn_count.max(self.turns.len() as u32)
+        self.turn_count.max(
+            self.turns
+                .iter()
+                .map(|turn| turn.turn_number)
+                .max()
+                .unwrap_or(0),
+        )
     }
 
     pub(crate) fn next_turn_number_for_runtime(&self) -> u32 {
@@ -659,6 +667,41 @@ impl Thread {
         self.token_count = token_count;
         self.turn_count = turn_count;
         self.next_turn_number = turn_count.saturating_add(1);
+        self.updated_at = updated_at;
+    }
+
+    pub fn hydrate_from_turn_log_state(
+        &mut self,
+        recovered: RecoveredThreadLogState,
+        updated_at: DateTime<Utc>,
+    ) {
+        let existing_system = self
+            .messages
+            .first()
+            .filter(|message| message.role == Role::System)
+            .cloned();
+        let token_count = recovered.token_count();
+        let turn_count = recovered.turn_count();
+        let mut system_messages = recovered.system_messages;
+        if system_messages.is_empty()
+            && let Some(system_message) = existing_system
+        {
+            system_messages.push(system_message);
+        }
+
+        self.system_messages = system_messages;
+        self.turns = recovered.turns;
+        self.current_turn = None;
+        self.compaction_checkpoint = recovered.checkpoint;
+        let committed_messages =
+            Self::materialize_committed_messages(&self.system_messages, &self.turns);
+        self.cached_committed_messages = Some(Arc::clone(&committed_messages));
+        self.messages = committed_messages;
+        self.token_count = token_count;
+        self.turn_count = turn_count;
+        self.next_turn_number = Self::derive_next_turn_number(&self.turns);
+        self.active_turn_cancellation = None;
+        self.runtime_snapshot = ThreadRuntimeSnapshot::default();
         self.updated_at = updated_at;
     }
 
@@ -938,8 +981,13 @@ impl Thread {
                     turn_number,
                     content,
                     msg_override,
-                } => match Self::start_turn_execution(Arc::clone(&thread), content, msg_override)
-                    .await
+                } => match Self::start_turn_execution(
+                    Arc::clone(&thread),
+                    turn_number,
+                    content,
+                    msg_override,
+                )
+                .await
                 {
                     Ok(execution) => {
                         *active_turn = Some(execution);
@@ -996,6 +1044,7 @@ impl Thread {
 
     async fn start_turn_execution(
         thread: Arc<RwLock<Self>>,
+        turn_number: u32,
         content: String,
         msg_override: Option<MessageOverride>,
     ) -> Result<TurnExecution, ThreadError> {
@@ -1003,7 +1052,7 @@ impl Thread {
         let turn = {
             let mut guard = thread.write().await;
             guard
-                .begin_turn(content, msg_override, cancellation.clone())
+                .begin_turn_with_number(turn_number, content, msg_override, cancellation.clone())
                 .await?
         };
 
@@ -1182,6 +1231,19 @@ impl Thread {
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
     ) -> Result<crate::Turn, ThreadError> {
+        let turn_number = self.next_turn_number;
+        self.next_turn_number = self.next_turn_number.saturating_add(1);
+        self.begin_turn_with_number(turn_number, user_input, msg_override, cancellation)
+            .await
+    }
+
+    async fn begin_turn_with_number(
+        &mut self,
+        turn_number: u32,
+        user_input: String,
+        msg_override: Option<MessageOverride>,
+        cancellation: TurnCancellation,
+    ) -> Result<crate::Turn, ThreadError> {
         let turn_context = self.build_turn_context();
         match self
             .compactor
@@ -1234,22 +1296,16 @@ impl Thread {
             tools: Arc::new(self.build_shared_turn_tools(effective_record.as_ref())),
             hooks: Arc::new(self.build_shared_turn_hooks()),
         });
-        let turn_number = self.next_turn_number;
-        self.next_turn_number = self.next_turn_number.saturating_add(1);
-        self.turn_count = turn_number;
+        self.next_turn_number = self.next_turn_number.max(turn_number.saturating_add(1));
+        self.turn_count = self.turn_count.max(turn_number);
         self.start_current_turn(turn_number, user_input, Arc::clone(&shared));
         self.set_active_turn_cancellation(Some(cancellation.clone()));
-        self.sync_runtime_snapshot(ThreadRuntimeSnapshot {
-            state: ThreadRuntimeState::Running { turn_number },
-            queue_depth: self.runtime_snapshot.queue_depth,
-        });
 
         match self.build_turn(turn_number, effective_record, cancellation, shared) {
             Ok(turn) => Ok(turn),
             Err(error) => {
                 self.current_turn = None;
                 self.set_active_turn_cancellation(None);
-                self.sync_runtime_snapshot(ThreadRuntimeSnapshot::default());
                 Err(error)
             }
         }
@@ -1271,18 +1327,15 @@ impl Thread {
                     Some(output.token_usage),
                     None,
                 )?;
-                self.sync_runtime_snapshot(ThreadRuntimeSnapshot::default());
                 Ok(())
             }
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
                 self.settle_current_turn(TurnState::Cancelled, None, None, None)?;
-                self.sync_runtime_snapshot(ThreadRuntimeSnapshot::default());
                 Ok(())
             }
             Err(error) => {
                 let error_message = error.to_string();
                 self.settle_current_turn(TurnState::Failed, None, None, Some(error_message))?;
-                self.sync_runtime_snapshot(ThreadRuntimeSnapshot::default());
                 Err(error)
             }
         }
@@ -1389,7 +1442,12 @@ impl Thread {
     fn hydrate_turn_history_for_test(&mut self, turns: Vec<TurnRecord>) {
         self.turns = turns;
         self.current_turn = None;
-        self.turn_count = self.turns.len() as u32;
+        self.turn_count = self
+            .turns
+            .iter()
+            .map(|turn| turn.turn_number)
+            .max()
+            .unwrap_or(0);
         self.next_turn_number = Self::derive_next_turn_number(&self.turns);
         let committed_messages =
             Self::materialize_committed_messages(&self.system_messages, &self.turns);
@@ -1402,7 +1460,6 @@ impl Thread {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1417,8 +1474,8 @@ mod tests {
     use crate::thread_handle::ThreadHandle;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::{
-        persist_turn_log_snapshot, read_turn_messages, read_turn_meta, turn_messages_path,
-        turn_meta_path, turns_dir,
+        persist_turn_log_snapshot, read_turn_messages, read_turn_meta, recover_thread_log_state,
+        turn_messages_path, turn_meta_path, turns_dir,
     };
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
@@ -1915,6 +1972,34 @@ mod tests {
             Arc::as_ptr(&current_turn.shared),
             turn.shared_snapshot_ptr()
         );
+    }
+
+    #[tokio::test]
+    async fn reactor_start_turn_uses_runtime_assigned_turn_number() {
+        let thread = Arc::new(RwLock::new(build_test_thread()));
+        let mut runtime = ThreadReactor::seeded_from_next_turn_number(7);
+        let mut active_turn = None;
+
+        Thread::process_reactor_action(
+            Arc::clone(&thread),
+            &mut runtime,
+            ThreadReactorAction::StartTurn {
+                turn_number: 7,
+                content: "hello".to_string(),
+                msg_override: None,
+            },
+            &mut active_turn,
+        )
+        .await;
+
+        let guard = thread.read().await;
+        let current_turn = guard
+            .current_turn
+            .as_ref()
+            .expect("runtime should install an in-flight turn");
+
+        assert_eq!(current_turn.turn_number, 7);
+        assert_eq!(guard.turn_count(), 7);
     }
 
     #[test]
@@ -2779,6 +2864,118 @@ mod tests {
             meta.token_usage.as_ref().map(|usage| usage.total_tokens),
             Some(2)
         );
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_log_state_restores_checkpoint_context_and_next_turn_number() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let base_dir = temp_dir.path().join("session").join("thread");
+        let system_messages = vec![ChatMessage::system("Persisted system prompt")];
+        let checkpoint = CompactionCheckpoint {
+            summarized_through_turn: 1,
+            summary_messages: vec![ChatMessage::assistant("summary of turn one")],
+            created_at: Utc::now(),
+        };
+        let turn_one = TurnRecord {
+            turn_number: 1,
+            state: crate::history::TurnState::Completed,
+            messages: vec![
+                ChatMessage::user("old question"),
+                ChatMessage::assistant("old answer"),
+            ],
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 4,
+                output_tokens: 6,
+                total_tokens: 10,
+            }),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("dummy".to_string()),
+            error: None,
+        };
+        let turn_two = TurnRecord {
+            turn_number: 2,
+            state: crate::history::TurnState::Completed,
+            messages: vec![
+                ChatMessage::user("latest question"),
+                ChatMessage::assistant("latest answer"),
+            ],
+            token_usage: Some(argus_protocol::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 12,
+                total_tokens: 22,
+            }),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            model: Some("dummy".to_string()),
+            error: None,
+        };
+
+        persist_turn_log_snapshot(&TurnLogPersistenceSnapshot {
+            base_dir: base_dir.clone(),
+            turn: turn_one,
+            system_messages: system_messages.clone(),
+            checkpoint: None,
+        })
+        .await
+        .expect("first turn log snapshot should persist");
+        persist_turn_log_snapshot(&TurnLogPersistenceSnapshot {
+            base_dir: base_dir.clone(),
+            turn: turn_two,
+            system_messages: system_messages.clone(),
+            checkpoint: Some(checkpoint.clone()),
+        })
+        .await
+        .expect("second turn log snapshot should persist");
+
+        let recovered = recover_thread_log_state(&base_dir, Some(2))
+            .await
+            .expect("turn log state should recover");
+
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        thread.hydrate_from_turn_log_state(recovered, Utc::now());
+
+        assert_eq!(thread.history().len(), 5);
+        assert_eq!(thread.history()[0].content, "Persisted system prompt");
+        assert_eq!(thread.history()[1].content, "old question");
+        assert_eq!(thread.history()[4].content, "latest answer");
+        assert_eq!(thread.turn_count(), 2);
+        assert_eq!(thread.token_count(), 22);
+
+        let context = thread.build_turn_context();
+        assert_eq!(context.len(), 4);
+        assert_eq!(context[0].content, "Persisted system prompt");
+        assert_eq!(context[1].content, "summary of turn one");
+        assert_eq!(context[2].content, "latest question");
+        assert_eq!(context[3].content, "latest answer");
+
+        let _turn = thread
+            .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("recovered thread should start the next turn");
+        let current_turn = thread
+            .current_turn
+            .as_ref()
+            .expect("recovered thread should install an in-flight turn");
+
+        assert_eq!(current_turn.turn_number, 3);
+        assert_eq!(current_turn.shared.history.len(), 4);
+        assert_eq!(
+            current_turn.shared.history[0].content,
+            "Persisted system prompt"
+        );
+        assert_eq!(
+            current_turn.shared.history[1].content,
+            "summary of turn one"
+        );
+        assert_eq!(current_turn.shared.history[2].content, "latest question");
+        assert_eq!(current_turn.shared.history[3].content, "latest answer");
     }
 
     #[tokio::test]

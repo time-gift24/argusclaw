@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::config::ThreadConfigBuilder;
-use argus_agent::turn_log_store::read_turn_record;
+use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     Compactor, FilePlanStore, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
     TurnConfig,
@@ -32,6 +32,11 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, 
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
+#[cfg(test)]
+use argus_agent::turn_log_store::RecoveredThreadLogState;
+#[cfg(test)]
+use std::io;
+
 use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
 
@@ -51,6 +56,7 @@ impl std::fmt::Debug for ChatRuntimeConfig {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct RecoveredThreadState {
     messages: Vec<ChatMessage>,
@@ -1655,21 +1661,22 @@ impl ThreadPool {
         let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
-        let recovered = Self::recover_thread_state_from_trace(
-            &self.chat_runtime_config.trace_dir,
-            &session_id,
-            &thread_id,
+        let base_dir = self
+            .chat_runtime_config
+            .trace_dir
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        let recovered = recover_thread_log_state(
+            &base_dir,
             (thread_record.turn_count > 0).then_some(thread_record.turn_count),
         )
         .await
         .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        if recovered.turn_count > 0 {
-            thread.write().await.hydrate_from_persisted_state(
-                recovered.messages,
-                thread_record.token_count.max(recovered.token_count),
-                thread_record.turn_count.max(recovered.turn_count),
-                updated_at,
-            );
+        if recovered.turn_count() > 0 {
+            thread
+                .write()
+                .await
+                .hydrate_from_turn_log_state(recovered, updated_at);
         }
 
         Ok(thread)
@@ -1772,20 +1779,21 @@ impl ThreadPool {
             let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
-            let recovered = Self::recover_job_thread_state_from_trace(
-                &self.chat_runtime_config.trace_dir,
-                &thread_id,
+            let base_dir = self
+                .chat_runtime_config
+                .trace_dir
+                .join(thread_id.to_string());
+            let recovered = recover_thread_log_state(
+                &base_dir,
                 (thread_record.turn_count > 0).then_some(thread_record.turn_count),
             )
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-            if recovered.turn_count > 0 {
-                thread.write().await.hydrate_from_persisted_state(
-                    recovered.messages,
-                    thread_record.token_count.max(recovered.token_count),
-                    thread_record.turn_count.max(recovered.turn_count),
-                    updated_at,
-                );
+            if recovered.turn_count() > 0 {
+                thread
+                    .write()
+                    .await
+                    .hydrate_from_turn_log_state(recovered, updated_at);
             }
         }
 
@@ -2141,119 +2149,42 @@ impl ThreadPool {
         tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await
     }
 
-    async fn collect_turn_numbers(
-        turns_dir: &Path,
-        turn_count_hint: Option<u32>,
-    ) -> Result<Vec<u32>, std::io::Error> {
-        if !turns_dir.exists() {
-            if turn_count_hint.is_some() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("turns dir not found: {}", turns_dir.display()),
-                ));
-            }
-            return Ok(Vec::new());
-        }
-
-        let mut turn_numbers = Vec::new();
-        let mut entries = tokio::fs::read_dir(turns_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-
-            if let Some(stem) = file_name.strip_suffix(".messages.jsonl")
-                && let Ok(number) = stem.parse::<u32>()
-            {
-                turn_numbers.push(number);
-            }
-        }
-        turn_numbers.sort_unstable();
-        turn_numbers.dedup();
-        Ok(turn_numbers)
-    }
-
+    #[cfg(test)]
     async fn recover_thread_state_from_trace(
         trace_dir: &Path,
         session_id: &SessionId,
         thread_id: &ThreadId,
         turn_count_hint: Option<u32>,
-    ) -> Result<RecoveredThreadState, std::io::Error> {
-        let turns_dir = trace_dir
+    ) -> Result<RecoveredThreadState, io::Error> {
+        let base_dir = trace_dir
             .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        let turn_numbers = Self::collect_turn_numbers(&turns_dir, turn_count_hint).await?;
-
-        let mut messages = Vec::new();
-        let mut token_count = 0;
-        let mut max_turn_number = 0;
-        for turn_number in &turn_numbers {
-            match read_turn_record(&turns_dir, *turn_number).await {
-                Ok(Some(turn)) => {
-                    max_turn_number = max_turn_number.max(*turn_number);
-                    messages.extend(turn.messages);
-                    if let Some(turn_token_usage) = turn.token_usage {
-                        token_count = turn_token_usage.total_tokens;
-                    }
-                }
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(
-                        turn_number,
-                        error = %error,
-                        "Skipping unreadable committed turn log during recovery"
-                    );
-                    continue;
-                }
-            }
-        }
-
-        Ok(RecoveredThreadState {
-            messages,
-            turn_count: max_turn_number,
-            token_count,
-        })
+            .join(thread_id.to_string());
+        let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        Ok(Self::flatten_recovered_thread_state(recovered))
     }
 
+    #[cfg(test)]
     async fn recover_job_thread_state_from_trace(
         trace_dir: &Path,
         thread_id: &ThreadId,
         turn_count_hint: Option<u32>,
-    ) -> Result<RecoveredThreadState, std::io::Error> {
-        let turns_dir = trace_dir.join(thread_id.to_string()).join("turns");
-        let turn_numbers = Self::collect_turn_numbers(&turns_dir, turn_count_hint).await?;
+    ) -> Result<RecoveredThreadState, io::Error> {
+        let base_dir = trace_dir.join(thread_id.to_string());
+        let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        Ok(Self::flatten_recovered_thread_state(recovered))
+    }
 
-        let mut messages = Vec::new();
-        let mut token_count = 0;
-        let mut max_turn_number = 0;
-        for turn_number in &turn_numbers {
-            match read_turn_record(&turns_dir, *turn_number).await {
-                Ok(Some(turn)) => {
-                    max_turn_number = max_turn_number.max(*turn_number);
-                    messages.extend(turn.messages);
-                    if let Some(turn_token_usage) = turn.token_usage {
-                        token_count = turn_token_usage.total_tokens;
-                    }
-                }
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(
-                        turn_number,
-                        error = %error,
-                        "Skipping unreadable committed turn log during recovery"
-                    );
-                    continue;
-                }
-            }
+    #[cfg(test)]
+    fn flatten_recovered_thread_state(recovered: RecoveredThreadLogState) -> RecoveredThreadState {
+        RecoveredThreadState {
+            messages: recovered.committed_messages(),
+            turn_count: recovered.turn_count(),
+            token_count: recovered.token_count(),
         }
-
-        Ok(RecoveredThreadState {
-            messages,
-            turn_count: max_turn_number,
-            token_count,
-        })
     }
 
     #[cfg(test)]
@@ -3987,7 +3918,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_thread_state_from_sparse_turn_files_uses_highest_turn_number() {
+    async fn recover_thread_state_from_sparse_turn_files_fails_on_missing_turns() {
         let trace_dir = unique_trace_dir("argus-thread-pool-chat-recovery");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
@@ -4005,22 +3936,13 @@ mod tests {
             Some(3),
         )
         .await
-        .expect("sparse traces should recover");
+        .expect_err("sparse traces should now fail like session recovery");
 
-        assert_eq!(recovered.turn_count, 3);
         assert!(
-            recovered
-                .messages
-                .iter()
-                .any(|message| message.content == "first reply")
+            recovered.to_string().contains("missing turn trace file 2")
+                || recovered.to_string().contains("turn file not found"),
+            "unexpected sparse recovery error: {recovered}"
         );
-        assert!(
-            recovered
-                .messages
-                .iter()
-                .any(|message| message.content == "third reply")
-        );
-        assert_eq!(recovered.token_count, 33);
     }
 
     #[tokio::test]
@@ -4083,7 +4005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_job_thread_state_skips_invalid_turn_files() {
+    async fn recover_job_thread_state_fails_on_invalid_turn_files() {
         let trace_dir = unique_trace_dir("argus-thread-pool-job-recovery");
         let thread_id = ThreadId::new();
         let base_dir = trace_dir.join(thread_id.to_string());
@@ -4101,16 +4023,14 @@ mod tests {
         let recovered =
             ThreadPool::recover_job_thread_state_from_trace(&trace_dir, &thread_id, Some(2))
                 .await
-                .expect("invalid turn files should be skipped");
+                .expect_err("invalid turn files should fail recovery");
 
-        assert_eq!(recovered.turn_count, 1);
         assert!(
-            recovered
-                .messages
-                .iter()
-                .any(|message| message.content == "first reply")
+            recovered.to_string().contains("turn")
+                || recovered.to_string().contains("JSON")
+                || recovered.to_string().contains("invalid"),
+            "unexpected invalid recovery error: {recovered}"
         );
-        assert_eq!(recovered.token_count, 11);
     }
 
     #[tokio::test]
