@@ -8,10 +8,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    Compactor, FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
-    TurnCancellation,
+    FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
     TurnConfig,
 };
+#[cfg(test)]
+use argus_agent::Compactor;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
 };
@@ -46,7 +47,6 @@ const DEFAULT_MAX_THREADS: u32 = 8;
 
 #[derive(Clone)]
 struct ChatRuntimeConfig {
-    default_compactor: Arc<dyn Compactor>,
     trace_dir: PathBuf,
 }
 
@@ -194,27 +194,17 @@ impl std::fmt::Debug for ThreadPool {
 }
 
 impl ThreadPool {
-    fn compactor_for_provider(&self, provider: Arc<dyn LlmProvider>) -> Arc<dyn Compactor> {
-        if self.chat_runtime_config.default_compactor.name() == "llm_compactor" {
-            Arc::new(LlmCompactor::new(provider))
-        } else {
-            self.chat_runtime_config.default_compactor.clone()
-        }
-    }
-
     /// Create a new thread pool with a default runtime cap.
     pub fn new(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
     ) -> Self {
         Self::with_persistence(
             template_manager,
             provider_resolver,
             tool_manager,
-            default_compactor,
             trace_dir,
             None,
         )
@@ -225,7 +215,6 @@ impl ThreadPool {
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
-        default_compactor: Arc<dyn Compactor>,
         trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
@@ -233,10 +222,7 @@ impl ThreadPool {
             template_manager,
             provider_resolver,
             tool_manager,
-            chat_runtime_config: ChatRuntimeConfig {
-                default_compactor,
-                trace_dir,
-            },
+            chat_runtime_config: ChatRuntimeConfig { trace_dir },
             persistence,
             max_threads: DEFAULT_MAX_THREADS,
             resident_slots: Arc::new(Semaphore::new(DEFAULT_MAX_THREADS as usize)),
@@ -1656,7 +1642,7 @@ impl ThreadPool {
             .title(thread_record.title.clone())
             .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(self.compactor_for_provider(provider));
+            .compactor(Arc::new(LlmCompactor::new(provider)));
         let plan_store = FilePlanStore::new(
             self.chat_runtime_config.trace_dir.clone(),
             &thread_id.inner().to_string(),
@@ -1778,7 +1764,7 @@ impl ThreadPool {
             .title(thread_title)
             .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(self.compactor_for_provider(provider))
+            .compactor(Arc::new(LlmCompactor::new(provider)))
             .plan_store(plan_store)
             .config(config)
             .build()
@@ -2240,7 +2226,6 @@ impl ThreadPool {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
         )
     }
@@ -2525,7 +2510,6 @@ mod tests {
             )),
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            super::noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 sqlite.clone() as Arc<dyn JobRepository>,
@@ -2613,7 +2597,6 @@ mod tests {
             template_manager,
             provider_resolver,
             Arc::new(ToolManager::new()),
-            super::noop_compactor(),
             trace_dir,
             Some(ThreadPoolPersistence::new(
                 sqlite.clone() as Arc<dyn JobRepository>,
@@ -2789,7 +2772,6 @@ mod tests {
             template_manager,
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            super::noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingCreateJobRepository) as Arc<dyn JobRepository>,
@@ -2870,7 +2852,6 @@ mod tests {
             template_manager,
             Arc::new(DummyProviderResolver),
             Arc::new(ToolManager::new()),
-            super::noop_compactor(),
             std::env::temp_dir().join("argus-thread-pool-tests"),
             Some(ThreadPoolPersistence::new(
                 Arc::new(FailingUpdateThreadIdJobRepository::new(
@@ -4008,7 +3989,7 @@ mod tests {
         .expect("committed turn logs should recover");
 
         assert_eq!(recovered.turn_count, 2);
-        assert_eq!(recovered.token_count, 8);
+        assert_eq!(recovered.token_count, 22);
         assert_eq!(recovered.messages.len(), 4);
         assert_eq!(recovered.messages[0].content, "first prompt");
         assert_eq!(recovered.messages[3].content, "second reply");
