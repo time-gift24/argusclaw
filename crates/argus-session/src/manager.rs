@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::read_turn_record;
+use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
@@ -1101,15 +1101,19 @@ impl SessionManager {
                         Some(thread.turn_count()),
                     )
                     .await?;
-                    (
-                        if recovered.messages.is_empty() {
-                            thread.history().to_vec()
-                        } else {
-                            recovered.messages
-                        },
-                        thread.turn_count().max(recovered.turn_count),
-                        thread.token_count().max(recovered.token_count),
-                    )
+                    if recovered.turn_count > 0 {
+                        (
+                            recovered.messages,
+                            recovered.turn_count,
+                            recovered.token_count,
+                        )
+                    } else {
+                        (
+                            thread.history().to_vec(),
+                            thread.turn_count(),
+                            thread.token_count(),
+                        )
+                    }
                 };
             return Ok((
                 messages,
@@ -1135,12 +1139,21 @@ impl SessionManager {
         )
         .await?;
 
-        Ok((
-            recovered.messages,
-            thread_record.turn_count.max(recovered.turn_count),
-            thread_record.token_count.max(recovered.token_count),
-            0,
-        ))
+        Ok(if recovered.turn_count > 0 {
+            (
+                recovered.messages,
+                recovered.turn_count,
+                recovered.token_count,
+                0,
+            )
+        } else {
+            (
+                recovered.messages,
+                thread_record.turn_count,
+                thread_record.token_count,
+                0,
+            )
+        })
     }
 
     /// Activate a historical thread so it can continue as a live in-memory thread.
@@ -1232,111 +1245,46 @@ async fn recover_thread_state_from_trace(
     thread_id: &ThreadId,
     turn_count_hint: Option<u32>,
 ) -> Result<RecoveredThreadState> {
-    let turns_dir = trace_dir
+    let base_dir = trace_dir
         .join(session_id.to_string())
-        .join(thread_id.to_string())
-        .join("turns");
-    let turn_numbers = resolve_turn_numbers(&turns_dir, turn_count_hint).await?;
-    let mut messages = Vec::new();
-    let mut token_count = 0;
+        .join(thread_id.to_string());
+    let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
+        .await
+        .map_err(|error| ArgusError::DatabaseError {
+            reason: format_turn_log_recovery_error(thread_id, &error),
+        })?;
 
-    for turn_number in &turn_numbers {
-        let turn = read_turn_record(&turns_dir, *turn_number)
-            .await
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: format!(
-                    "failed to recover turn {turn_number} for thread {thread_id}: {error}"
-                ),
-            })?
-            .ok_or_else(|| ArgusError::DatabaseError {
-                reason: format!("missing turn trace file {turn_number}"),
-            })?;
-
-        messages.extend(turn.messages);
-        if let Some(token_usage) = turn.token_usage {
-            token_count = token_usage.total_tokens;
-        }
-    }
-
-    Ok(RecoveredThreadState {
-        messages,
-        turn_count: turn_numbers.len() as u32,
-        token_count,
-    })
+    Ok(flatten_recovered_thread_state(recovered))
 }
 
-async fn resolve_turn_numbers(
-    turns_dir: &std::path::Path,
-    turn_count_hint: Option<u32>,
-) -> Result<Vec<u32>> {
-    if !turns_dir.exists() {
-        if let Some(turn_count) = turn_count_hint {
-            if turn_count > 0 {
-                return Err(ArgusError::DatabaseError {
-                    reason: format!(
-                        "missing turn trace file 1; turns directory not found at {}",
-                        turns_dir.display()
-                    ),
-                });
+fn flatten_recovered_thread_state(recovered: RecoveredThreadLogState) -> RecoveredThreadState {
+    RecoveredThreadState {
+        messages: recovered.committed_messages(),
+        turn_count: recovered.turn_count(),
+        token_count: recovered.token_count(),
+    }
+}
+
+fn format_turn_log_recovery_error(
+    thread_id: &ThreadId,
+    error: &argus_agent::TurnLogError,
+) -> String {
+    match error {
+        argus_agent::TurnLogError::TurnNotFound(path) => {
+            let turn_number = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.split('.').next())
+                .and_then(|stem| stem.parse::<u32>().ok());
+            match turn_number {
+                Some(turn_number) => format!("missing turn trace file {turn_number}"),
+                None => {
+                    format!("failed to recover committed turn log for thread {thread_id}: {error}")
+                }
             }
         }
-        return Ok(Vec::new());
+        _ => format!("failed to recover committed turn log for thread {thread_id}: {error}"),
     }
-
-    let mut entries =
-        tokio::fs::read_dir(turns_dir)
-            .await
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: format!(
-                    "failed to inspect trace turns directory {}: {error}",
-                    turns_dir.display()
-                ),
-            })?;
-    let mut turn_numbers = Vec::new();
-
-    while let Some(entry) =
-        entries
-            .next_entry()
-            .await
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: format!(
-                    "failed to inspect trace turns directory {}: {error}",
-                    turns_dir.display()
-                ),
-            })?
-    {
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-
-        if let Some(stem) = file_name.strip_suffix(".messages.jsonl") {
-            let turn_number = stem
-                .parse::<u32>()
-                .map_err(|error| ArgusError::DatabaseError {
-                    reason: format!(
-                        "failed to parse turn trace filename {}: {error}",
-                        path.display()
-                    ),
-                })?;
-            turn_numbers.push(turn_number);
-        }
-    }
-
-    turn_numbers.sort_unstable();
-    turn_numbers.dedup();
-
-    let highest_discovered_turn = turn_numbers.last().copied().unwrap_or(0);
-    let highest_expected_turn = highest_discovered_turn.max(turn_count_hint.unwrap_or(0));
-    for expected in 1..=highest_expected_turn {
-        if turn_numbers.get((expected - 1) as usize).copied() != Some(expected) {
-            return Err(ArgusError::DatabaseError {
-                reason: format!("missing turn trace file {expected}"),
-            });
-        }
-    }
-
-    Ok((1..=highest_expected_turn).collect())
 }
 
 #[cfg(test)]
