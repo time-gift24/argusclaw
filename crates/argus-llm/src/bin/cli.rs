@@ -343,13 +343,14 @@ async fn complete_prompt(
             .complete(request)
             .await
             .map_err(|e| anyhow!("Completion failed: {}", e))?;
+        let usage = response.token_usage();
 
         println!("{}", response.content.as_deref().unwrap_or(""));
         println!();
         println!(
             "Tokens: {} input, {} output ({}ms)",
-            response.input_tokens,
-            response.output_tokens,
+            usage.prompt_tokens,
+            usage.completion_tokens,
             started.elapsed().as_millis()
         );
 

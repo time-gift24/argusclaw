@@ -1667,7 +1667,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 10,
                 output_tokens: 5,
-                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                finish_reason: argus_protocol::llm::FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1748,7 +1748,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 10,
                 output_tokens: 5,
-                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                finish_reason: argus_protocol::llm::FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -2713,8 +2713,8 @@ mod tests {
         let output = TurnOutput {
             appended_messages: vec![ChatMessage::assistant("hello")],
             token_usage: argus_protocol::TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
+                prompt_tokens: 1,
+                completion_tokens: 1,
                 total_tokens: 2,
             },
         };
@@ -2794,8 +2794,8 @@ mod tests {
             .finish_turn(Ok(TurnOutput {
                 appended_messages: vec![ChatMessage::user("next"), ChatMessage::assistant("done")],
                 token_usage: argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
                     total_tokens: 2,
                 },
             }))
@@ -2833,8 +2833,8 @@ mod tests {
             .finish_turn(Ok(TurnOutput {
                 appended_messages: vec![ChatMessage::assistant("hello")],
                 token_usage: argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
                     total_tokens: 2,
                 },
             }))
@@ -2884,8 +2884,8 @@ mod tests {
                 ChatMessage::assistant("old answer"),
             ],
             token_usage: Some(argus_protocol::TokenUsage {
-                input_tokens: 4,
-                output_tokens: 6,
+                prompt_tokens: 4,
+                completion_tokens: 6,
                 total_tokens: 10,
             }),
             started_at: Utc::now(),
@@ -2901,8 +2901,8 @@ mod tests {
                 ChatMessage::assistant("latest answer"),
             ],
             token_usage: Some(argus_protocol::TokenUsage {
-                input_tokens: 10,
-                output_tokens: 12,
+                prompt_tokens: 10,
+                completion_tokens: 12,
                 total_tokens: 22,
             }),
             started_at: Utc::now(),

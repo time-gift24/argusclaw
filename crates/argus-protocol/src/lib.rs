@@ -34,7 +34,6 @@ pub use knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
 pub use message_override::MessageOverride;
 pub use plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
 pub use risk_level::RiskLevel;
-pub use token_usage::TokenUsage;
 
 pub use llm::{
     ChatMessage,
@@ -54,7 +53,6 @@ pub use llm::{
     LlmProviderRecordJson,
     LlmProviderRepository,
     LlmStreamEvent,
-    LlmUsage,
     ModelMetadata,
     ProviderCapabilities,
     ProviderSecretStatus,
@@ -64,6 +62,7 @@ pub use llm::{
     SecretString,
     ThinkingConfig,
     ThinkingMode,
+    TokenUsage,
     ToolCall,
     ToolCallDelta,
     ToolDefinition,

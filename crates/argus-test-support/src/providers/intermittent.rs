@@ -11,6 +11,7 @@ use rust_decimal::Decimal;
 
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream, LlmProvider,
+    TokenUsage,
 };
 
 /// Provider that succeeds on first call, fails on next 3 calls, then succeeds.
@@ -74,7 +75,7 @@ impl LlmProvider for IntermittentFailureProvider {
             tool_calls: vec![],
             input_tokens: 10,
             output_tokens: 5,
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::stop().with_usage(TokenUsage::new(10, 5)),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -94,7 +95,7 @@ impl LlmProvider for IntermittentFailureProvider {
         // Simple stream that emits a finish event
         let stream = futures_util::stream::once(async move {
             Ok(argus_protocol::llm::LlmStreamEvent::Finished {
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop().with_usage(TokenUsage::new(10, 5)),
             })
         });
 
@@ -148,10 +149,12 @@ mod tests {
         let provider = IntermittentFailureProvider::new();
 
         // Call 1: Success
-        assert!(provider
-            .complete(CompletionRequest::new(vec![]))
-            .await
-            .is_ok());
+        assert!(
+            provider
+                .complete(CompletionRequest::new(vec![]))
+                .await
+                .is_ok()
+        );
 
         // Calls 2-4: Failures
         for i in 2..=4 {
@@ -161,10 +164,12 @@ mod tests {
         }
 
         // Call 5: Success
-        assert!(provider
-            .complete(CompletionRequest::new(vec![]))
-            .await
-            .is_ok());
+        assert!(
+            provider
+                .complete(CompletionRequest::new(vec![]))
+                .await
+                .is_ok()
+        );
 
         assert_eq!(provider.calls(), 5);
     }

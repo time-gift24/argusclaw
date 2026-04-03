@@ -466,7 +466,7 @@ mod tests {
                 tool_calls: vec![],
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -579,7 +579,7 @@ mod tests {
                     delta: "ok".to_string(),
                 }),
                 Ok(LlmStreamEvent::Finished {
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: FinishReason::stop(),
                 }),
             ])))
         }
@@ -743,7 +743,7 @@ mod tests {
         assert!(matches!(
             &events[2],
             Ok(LlmStreamEvent::Finished {
-                finish_reason: FinishReason::Stop
+                finish_reason: FinishReason::Stop { .. }
             })
         ));
     }

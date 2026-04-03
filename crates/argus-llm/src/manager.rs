@@ -552,7 +552,6 @@ struct TestStreamingAccumulator {
     content: String,
     reasoning_content: String,
     tool_calls: Vec<(Option<String>, Option<String>, String)>,
-    usage: argus_protocol::LlmUsage,
     finish_reason: FinishReason,
 }
 
@@ -562,8 +561,7 @@ impl TestStreamingAccumulator {
             content: String::new(),
             reasoning_content: String::new(),
             tool_calls: Vec::new(),
-            usage: argus_protocol::LlmUsage::default(),
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::Unknown { usage: None },
         }
     }
 
@@ -590,9 +588,6 @@ impl TestStreamingAccumulator {
                     self.tool_calls[tc.index].2.push_str(&args_delta);
                 }
             }
-            LlmStreamEvent::Usage { usage } => {
-                self.usage = usage;
-            }
             LlmStreamEvent::Finished { finish_reason } => {
                 self.finish_reason = finish_reason;
             }
@@ -603,6 +598,8 @@ impl TestStreamingAccumulator {
     }
 
     fn into_response(self) -> CompletionResponse {
+        let usage = self.finish_reason.usage().cloned().unwrap_or_default();
+
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_iter()
@@ -627,11 +624,11 @@ impl TestStreamingAccumulator {
                 Some(self.reasoning_content)
             },
             tool_calls,
-            input_tokens: self.usage.input_tokens,
-            output_tokens: self.usage.output_tokens,
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
             finish_reason: self.finish_reason,
-            cache_read_input_tokens: self.usage.cache_read_input_tokens,
-            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         }
     }
 

@@ -104,9 +104,9 @@ impl LlmProvider for MockProvider {
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let response = self.next_response();
         let finish_reason = if response.tool_calls.is_empty() {
-            FinishReason::Stop
+            FinishReason::stop()
         } else {
-            FinishReason::ToolUse
+            FinishReason::tool_use()
         };
 
         Ok(CompletionResponse {
@@ -330,7 +330,7 @@ impl LlmProvider for FlakyProvider {
             tool_calls: vec![],
             input_tokens: 10,
             output_tokens: 5,
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::stop(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -353,7 +353,7 @@ impl LlmProvider for FlakyProvider {
         // Create a simple stream that just emits a finish event
         let stream = futures_util::stream::once(async move {
             Ok(argus_protocol::llm::LlmStreamEvent::Finished {
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
             })
         });
 

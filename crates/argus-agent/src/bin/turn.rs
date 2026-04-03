@@ -258,8 +258,8 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
     }
     println!(
         "Tokens: {} input, {} output, {} total",
-        output.token_usage.input_tokens,
-        output.token_usage.output_tokens,
+        output.token_usage.prompt_tokens,
+        output.token_usage.completion_tokens,
         output.token_usage.total_tokens
     );
 
@@ -356,8 +356,8 @@ Example flow:
 
     println!(
         "Tokens: {} input, {} output, {} total",
-        output.token_usage.input_tokens,
-        output.token_usage.output_tokens,
+        output.token_usage.prompt_tokens,
+        output.token_usage.completion_tokens,
         output.token_usage.total_tokens
     );
 
@@ -415,8 +415,8 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
                 println!("Turn completed successfully!");
                 println!(
                     "Tokens: {} input, {} output, {} total",
-                    output.token_usage.input_tokens,
-                    output.token_usage.output_tokens,
+                    output.token_usage.prompt_tokens,
+                    output.token_usage.completion_tokens,
                     output.token_usage.total_tokens
                 );
                 Ok(())

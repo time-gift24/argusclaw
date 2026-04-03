@@ -643,7 +643,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: self.token_count,
                 output_tokens: self.token_count / 2,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })

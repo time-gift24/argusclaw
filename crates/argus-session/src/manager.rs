@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
+use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1296,8 +1296,8 @@ mod tests {
 
     use argus_agent::history::TurnState;
     use argus_agent::turn_log_store::{
-        turn_messages_path, turn_meta_path, turns_dir, write_turn_messages, write_turn_meta,
-        TurnLogMeta,
+        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
+        write_turn_meta,
     };
     use argus_agent::{CompactResult, Compactor, ThreadBuilder};
     use argus_protocol::llm::{
@@ -1311,7 +1311,7 @@ mod tests {
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
-    use argus_repository::{migrate, ArgusSqlite};
+    use argus_repository::{ArgusSqlite, migrate};
     use argus_template::TemplateManager;
     use argus_tool::{
         CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
@@ -1323,8 +1323,8 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, Session, SessionManager,
-        SessionSchedulerBackend,
+        Session, SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
+        recover_thread_state_from_trace,
     };
 
     struct NoopCompactor;
@@ -1400,7 +1400,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 12,
                 output_tokens: 5,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1745,8 +1745,8 @@ mod tests {
                 turn_number: 1,
                 state: TurnState::Completed,
                 token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
                     total_tokens: 2,
                 }),
                 started_at: Utc::now(),
@@ -1801,8 +1801,8 @@ mod tests {
                 turn_number: 1,
                 state: TurnState::Completed,
                 token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
                     total_tokens: 2,
                 }),
                 started_at: Utc::now(),
@@ -1825,8 +1825,8 @@ mod tests {
                 turn_number: 2,
                 state: TurnState::Completed,
                 token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 2,
-                    output_tokens: 4,
+                    prompt_tokens: 2,
+                    completion_tokens: 4,
                     total_tokens: 6,
                 }),
                 started_at: Utc::now(),
@@ -1886,8 +1886,8 @@ mod tests {
                 turn_number: 1,
                 state: TurnState::Completed,
                 token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
                     total_tokens: 15,
                 }),
                 started_at: Utc::now(),
@@ -1913,8 +1913,8 @@ mod tests {
                 turn_number: 2,
                 state: TurnState::Completed,
                 token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 20,
-                    output_tokens: 8,
+                    prompt_tokens: 20,
+                    completion_tokens: 8,
                     total_tokens: 28,
                 }),
                 started_at: Utc::now(),
@@ -1969,8 +1969,8 @@ mod tests {
                 turn_number: 1,
                 state: TurnState::Completed,
                 token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
                     total_tokens: 15,
                 }),
                 started_at: Utc::now(),
@@ -2018,8 +2018,8 @@ mod tests {
                     turn_number,
                     state: TurnState::Completed,
                     token_usage: Some(argus_protocol::TokenUsage {
-                        input_tokens: total_tokens / 2,
-                        output_tokens: total_tokens - (total_tokens / 2),
+                        prompt_tokens: total_tokens / 2,
+                        completion_tokens: total_tokens - (total_tokens / 2),
                         total_tokens,
                     }),
                     started_at: Utc::now(),
@@ -2071,8 +2071,8 @@ mod tests {
                     turn_number,
                     state: TurnState::Completed,
                     token_usage: Some(argus_protocol::TokenUsage {
-                        input_tokens: total_tokens / 2,
-                        output_tokens: total_tokens - (total_tokens / 2),
+                        prompt_tokens: total_tokens / 2,
+                        completion_tokens: total_tokens - (total_tokens / 2),
                         total_tokens,
                     }),
                     started_at: Utc::now(),

@@ -247,7 +247,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 12,
                 output_tokens: 8,
-                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                finish_reason: argus_protocol::llm::FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -312,7 +312,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 12,
                 output_tokens: 8,
-                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                finish_reason: argus_protocol::llm::FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })

@@ -215,7 +215,6 @@ struct StreamingAccumulator {
     content: String,
     reasoning_content: String,
     tool_calls: Vec<(Option<String>, Option<String>, String)>,
-    usage: argus_protocol::LlmUsage,
     finish_reason: FinishReason,
 }
 
@@ -225,8 +224,7 @@ impl StreamingAccumulator {
             content: String::new(),
             reasoning_content: String::new(),
             tool_calls: Vec::new(),
-            usage: argus_protocol::LlmUsage::default(),
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::Unknown { usage: None },
         }
     }
 
@@ -253,9 +251,6 @@ impl StreamingAccumulator {
                     self.tool_calls[tc.index].2.push_str(&args_delta);
                 }
             }
-            LlmStreamEvent::Usage { usage } => {
-                self.usage = usage;
-            }
             LlmStreamEvent::Finished { finish_reason } => {
                 self.finish_reason = finish_reason;
             }
@@ -267,6 +262,8 @@ impl StreamingAccumulator {
     }
 
     fn into_response(self) -> CompletionResponse {
+        let usage = self.finish_reason.usage().cloned().unwrap_or_default();
+
         // Convert accumulated tool calls to ToolCall structs
         let tool_calls: Vec<ToolCall> = self
             .tool_calls
@@ -292,11 +289,11 @@ impl StreamingAccumulator {
                 Some(self.reasoning_content)
             },
             tool_calls,
-            input_tokens: self.usage.input_tokens,
-            output_tokens: self.usage.output_tokens,
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
             finish_reason: self.finish_reason,
-            cache_read_input_tokens: self.usage.cache_read_input_tokens,
-            cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         }
     }
 }
@@ -926,7 +923,7 @@ impl Turn {
                 }
                 NextAction::LengthExceeded => {
                     return Err(TurnError::ContextLengthExceeded(
-                        (token_usage.input_tokens + token_usage.output_tokens) as usize,
+                        (token_usage.prompt_tokens + token_usage.completion_tokens) as usize,
                     ));
                 }
             }
@@ -1031,23 +1028,21 @@ impl Turn {
         pending_messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
     ) -> Result<NextAction, TurnError> {
+        let response_usage = response.token_usage();
         let CompletionResponse {
             content,
             reasoning_content,
             tool_calls: response_tool_calls,
-            input_tokens,
-            output_tokens,
             finish_reason,
             ..
         } = response;
 
-        // Track token usage
-        token_usage.input_tokens += input_tokens;
-        token_usage.output_tokens += output_tokens;
-        token_usage.total_tokens += input_tokens + output_tokens;
+        token_usage.prompt_tokens += response_usage.prompt_tokens;
+        token_usage.completion_tokens += response_usage.completion_tokens;
+        token_usage.total_tokens += response_usage.total_tokens;
 
         match finish_reason {
-            FinishReason::Stop => {
+            FinishReason::Stop { .. } => {
                 if content.as_deref().is_some_and(|value| !value.is_empty())
                     || reasoning_content
                         .as_deref()
@@ -1064,7 +1059,7 @@ impl Turn {
                     token_usage: token_usage.clone(),
                 }))
             }
-            FinishReason::ToolUse => {
+            FinishReason::ToolUse { .. } => {
                 // Limit tool calls based on max_tool_calls config
                 let tool_calls: Vec<ToolCall> = match self.config.max_tool_calls {
                     Some(max) if response_tool_calls.len() > max as usize => {
@@ -1091,8 +1086,8 @@ impl Turn {
                     content,
                 })
             }
-            FinishReason::Length => Ok(NextAction::LengthExceeded),
-            FinishReason::ContentFilter | FinishReason::Unknown => {
+            FinishReason::Length { .. } => Ok(NextAction::LengthExceeded),
+            FinishReason::ContentFilter { .. } | FinishReason::Unknown { .. } => {
                 // If there are actual tool calls, treat as ToolUse (some providers
                 // return non-standard finish_reason values when tool calls are present)
                 if !response_tool_calls.is_empty() {
@@ -1470,7 +1465,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     input_tokens: 1,
                     output_tokens: 1,
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: FinishReason::stop(),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 });
@@ -1907,7 +1902,7 @@ mod tests {
                 }],
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::ToolUse,
+                finish_reason: FinishReason::tool_use(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -1917,7 +1912,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -1961,7 +1956,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -1971,7 +1966,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -2015,7 +2010,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     input_tokens: 1,
                     output_tokens: 1,
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: FinishReason::stop(),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 },
@@ -2025,7 +2020,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     input_tokens: 1,
                     output_tokens: 1,
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: FinishReason::stop(),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 },
@@ -2077,7 +2072,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -2087,7 +2082,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -2124,7 +2119,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: 1,
             output_tokens: 1,
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::stop(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }]));
@@ -2143,7 +2138,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: 1,
             output_tokens: 1,
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::stop(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }]));
@@ -2175,7 +2170,7 @@ mod tests {
                 }],
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::ToolUse,
+                finish_reason: FinishReason::tool_use(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -2185,7 +2180,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -2289,7 +2284,7 @@ mod tests {
                 }],
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::ToolUse,
+                finish_reason: FinishReason::tool_use(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -2299,7 +2294,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: FinishReason::Stop,
+                finish_reason: FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },

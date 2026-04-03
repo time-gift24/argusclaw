@@ -392,8 +392,8 @@ mod tests {
             turn_number: 1,
             state: TurnState::Completed,
             token_usage: Some(TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
+                prompt_tokens: 1,
+                completion_tokens: 1,
                 total_tokens: 2,
             }),
             started_at: chrono::Utc::now(),
@@ -429,8 +429,8 @@ mod tests {
             state: TurnState::Completed,
             messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
             token_usage: Some(TokenUsage {
-                input_tokens: 1,
-                output_tokens: 2,
+                prompt_tokens: 1,
+                completion_tokens: 2,
                 total_tokens: 3,
             }),
             started_at: chrono::Utc::now(),

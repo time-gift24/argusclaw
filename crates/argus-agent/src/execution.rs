@@ -168,7 +168,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     input_tokens: 10,
                     output_tokens: 5,
-                    finish_reason: argus_protocol::llm::FinishReason::Stop,
+                    finish_reason: argus_protocol::llm::FinishReason::stop(),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -221,7 +221,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 10,
                 output_tokens: 5,
-                finish_reason: argus_protocol::llm::FinishReason::Stop,
+                finish_reason: argus_protocol::llm::FinishReason::stop(),
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             },
@@ -237,8 +237,8 @@ mod tests {
         assert_eq!(output.appended_messages[0].content, "Hello, world!");
 
         // Token usage should be tracked
-        assert_eq!(output.token_usage.input_tokens, 10);
-        assert_eq!(output.token_usage.output_tokens, 5);
+        assert_eq!(output.token_usage.prompt_tokens, 10);
+        assert_eq!(output.token_usage.completion_tokens, 5);
         assert_eq!(output.token_usage.total_tokens, 15);
     }
 }

@@ -53,7 +53,7 @@ impl LlmProvider for SimpleMockProvider {
             tool_calls: vec![],
             input_tokens: 10,
             output_tokens: 5,
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::stop(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -174,7 +174,7 @@ impl LlmProvider for SequencedDelayedMockProvider {
             tool_calls: vec![],
             input_tokens: 10,
             output_tokens: 5,
-            finish_reason: FinishReason::Stop,
+            finish_reason: FinishReason::stop(),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })

@@ -210,8 +210,8 @@ async fn run(cli: Cli) -> Result<()> {
     }
     println!(
         "\nToken usage: input={}, output={}, total={}",
-        output.token_usage.input_tokens,
-        output.token_usage.output_tokens,
+        output.token_usage.prompt_tokens,
+        output.token_usage.completion_tokens,
         output.token_usage.total_tokens
     );
     Ok(())

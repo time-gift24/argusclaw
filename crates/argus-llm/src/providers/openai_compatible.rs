@@ -14,9 +14,10 @@ use reqwest::header::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use argus_protocol::TokenUsage;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, ContentPart, LlmError, LlmEventStream, LlmProvider,
-    LlmStreamEvent, LlmUsage, ProviderCapabilities, Role, ThinkingConfig, ToolCall, ToolCallDelta,
+    LlmStreamEvent, ProviderCapabilities, Role, ThinkingConfig, ToolCall, ToolCallDelta,
     ToolDefinition,
 };
 
@@ -591,7 +592,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     provider: "openai-compatible".to_string(),
                     reason: "response had no choices".to_string(),
                 })?;
-        let usage = payload.usage.unwrap_or_default().into_llm_usage();
+        let usage = payload.usage.unwrap_or_default().into_token_usage();
 
         // Log the raw response for debugging
         tracing::debug!(
@@ -629,11 +630,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 .into_iter()
                 .map(ToolCall::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            finish_reason: parse_finish_reason(choice.finish_reason.as_deref()),
-            cache_read_input_tokens: usage.cache_read_input_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+            finish_reason: parse_finish_reason(choice.finish_reason.as_deref(), Some(usage)),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         })
     }
 
@@ -845,37 +846,16 @@ struct Usage {
     completion_tokens: u32,
     #[serde(default)]
     total_tokens: u32,
-    #[serde(default)]
-    prompt_tokens_details: PromptTokensDetails,
-    #[serde(default)]
-    completion_tokens_details: CompletionTokensDetails,
 }
 
 impl Usage {
-    fn into_llm_usage(self) -> LlmUsage {
-        let mut usage = LlmUsage::new(self.prompt_tokens, self.completion_tokens);
+    fn into_token_usage(self) -> TokenUsage {
+        let mut usage = TokenUsage::new(self.prompt_tokens, self.completion_tokens);
         if self.total_tokens != 0 {
             usage.total_tokens = self.total_tokens;
         }
-        usage.cache_read_input_tokens = self.prompt_tokens_details.cached_tokens;
-        usage.cache_creation_input_tokens = self.prompt_tokens_details.cache_creation_tokens;
-        usage.reasoning_tokens = self.completion_tokens_details.reasoning_tokens;
         usage
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PromptTokensDetails {
-    #[serde(default)]
-    cached_tokens: u32,
-    #[serde(default)]
-    cache_creation_tokens: u32,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CompletionTokensDetails {
-    #[serde(default)]
-    reasoning_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -922,12 +902,7 @@ fn parse_stream_frame_impl(
     let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
 
     let mut events = Vec::new();
-
-    if let Some(usage) = chunk.usage {
-        events.push(Ok(LlmStreamEvent::Usage {
-            usage: usage.into_llm_usage(),
-        }));
-    }
+    let finish_usage = chunk.usage.map(Usage::into_token_usage);
 
     for choice in chunk.choices {
         if let Some(reasoning) = choice.delta.reasoning_content
@@ -958,7 +933,7 @@ fn parse_stream_frame_impl(
 
         if let Some(finish_reason) = choice.finish_reason.as_deref() {
             events.push(Ok(LlmStreamEvent::Finished {
-                finish_reason: parse_finish_reason(Some(finish_reason)),
+                finish_reason: parse_finish_reason(Some(finish_reason), finish_usage.clone()),
             }));
         }
     }
@@ -997,16 +972,21 @@ fn parse_final_stream_frame(data: &str) -> Vec<Result<LlmStreamEvent, LlmError>>
     }
 }
 
-fn parse_finish_reason(reason: Option<&str>) -> argus_protocol::llm::FinishReason {
+fn parse_finish_reason(
+    reason: Option<&str>,
+    usage: Option<TokenUsage>,
+) -> argus_protocol::llm::FinishReason {
     tracing::debug!(raw_finish_reason = ?reason, "parse_finish_reason");
     match reason {
-        Some("stop") => argus_protocol::llm::FinishReason::Stop,
-        Some("length") => argus_protocol::llm::FinishReason::Length,
-        Some("tool_calls") => argus_protocol::llm::FinishReason::ToolUse,
-        Some("content_filter") => argus_protocol::llm::FinishReason::ContentFilter,
+        Some("stop") => argus_protocol::llm::FinishReason::Stop { usage },
+        Some("length") => argus_protocol::llm::FinishReason::Length { usage },
+        Some("tool_calls") => argus_protocol::llm::FinishReason::ToolUse { usage },
+        Some("content_filter") => argus_protocol::llm::FinishReason::ContentFilter { usage },
         // BigModel uses "model_context_window_exceeded" for context length exceeded
-        Some("model_context_window_exceeded") => argus_protocol::llm::FinishReason::Length,
-        _ => argus_protocol::llm::FinishReason::Unknown,
+        Some("model_context_window_exceeded") => {
+            argus_protocol::llm::FinishReason::Length { usage }
+        }
+        _ => argus_protocol::llm::FinishReason::Unknown { usage },
     }
 }
 
@@ -1223,21 +1203,15 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![
-                LlmStreamEvent::Usage {
-                    usage: argus_protocol::llm::LlmUsage {
-                        input_tokens: 10,
-                        output_tokens: 5,
+            vec![LlmStreamEvent::Finished {
+                finish_reason: argus_protocol::llm::FinishReason::Stop {
+                    usage: Some(argus_protocol::TokenUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
                         total_tokens: 15,
-                        cache_read_input_tokens: 2,
-                        cache_creation_input_tokens: 0,
-                        reasoning_tokens: 3,
-                    },
+                    }),
                 },
-                LlmStreamEvent::Finished {
-                    finish_reason: argus_protocol::llm::FinishReason::Stop,
-                },
-            ]
+            },]
         );
     }
 
@@ -1252,21 +1226,15 @@ mod tests {
 
         assert_eq!(
             events,
-            vec![
-                LlmStreamEvent::Usage {
-                    usage: argus_protocol::llm::LlmUsage {
-                        input_tokens: 7,
-                        output_tokens: 11,
+            vec![LlmStreamEvent::Finished {
+                finish_reason: argus_protocol::llm::FinishReason::Stop {
+                    usage: Some(argus_protocol::TokenUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 11,
                         total_tokens: 18,
-                        cache_read_input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        reasoning_tokens: 0,
-                    },
+                    }),
                 },
-                LlmStreamEvent::Finished {
-                    finish_reason: argus_protocol::llm::FinishReason::Stop,
-                },
-            ]
+            },]
         );
     }
 

@@ -101,13 +101,62 @@ pub enum ThinkingMode {
 }
 
 /// Why the completion finished.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
-    Stop,
-    Length,
-    ToolUse,
-    ContentFilter,
-    Unknown,
+    Stop { usage: Option<TokenUsage> },
+    Length { usage: Option<TokenUsage> },
+    ToolUse { usage: Option<TokenUsage> },
+    ContentFilter { usage: Option<TokenUsage> },
+    Unknown { usage: Option<TokenUsage> },
+}
+
+impl FinishReason {
+    #[must_use]
+    pub const fn stop() -> Self {
+        Self::Stop { usage: None }
+    }
+
+    #[must_use]
+    pub const fn length() -> Self {
+        Self::Length { usage: None }
+    }
+
+    #[must_use]
+    pub const fn tool_use() -> Self {
+        Self::ToolUse { usage: None }
+    }
+
+    #[must_use]
+    pub const fn content_filter() -> Self {
+        Self::ContentFilter { usage: None }
+    }
+
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self::Unknown { usage: None }
+    }
+
+    #[must_use]
+    pub fn with_usage(self, usage: TokenUsage) -> Self {
+        match self {
+            Self::Stop { .. } => Self::Stop { usage: Some(usage) },
+            Self::Length { .. } => Self::Length { usage: Some(usage) },
+            Self::ToolUse { .. } => Self::ToolUse { usage: Some(usage) },
+            Self::ContentFilter { .. } => Self::ContentFilter { usage: Some(usage) },
+            Self::Unknown { .. } => Self::Unknown { usage: Some(usage) },
+        }
+    }
+
+    #[must_use]
+    pub fn usage(&self) -> Option<&TokenUsage> {
+        match self {
+            Self::Stop { usage }
+            | Self::Length { usage }
+            | Self::ToolUse { usage }
+            | Self::ContentFilter { usage }
+            | Self::Unknown { usage } => usage.as_ref(),
+        }
+    }
 }
 
 // ============================================================================
@@ -434,6 +483,32 @@ impl CompletionRequest {
     }
 }
 
+/// Token usage statistics reported by an LLM provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TokenUsage {
+    /// Number of prompt tokens used.
+    #[serde(alias = "input_tokens")]
+    pub prompt_tokens: u32,
+    /// Number of completion tokens generated.
+    #[serde(alias = "output_tokens")]
+    pub completion_tokens: u32,
+    /// Total tokens (prompt + completion).
+    pub total_tokens: u32,
+}
+
+impl TokenUsage {
+    /// Create a usage summary from prompt and completion token counts.
+    #[must_use]
+    pub fn new(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+        }
+    }
+}
+
 /// Response from a chat completion (with optional tool calls).
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
@@ -453,33 +528,13 @@ pub struct CompletionResponse {
     pub cache_creation_input_tokens: u32,
 }
 
-/// Detailed token usage reported by an LLM provider.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LlmUsage {
-    /// Number of input tokens used.
-    pub input_tokens: u32,
-    /// Number of output tokens generated.
-    pub output_tokens: u32,
-    /// Total tokens reported by the provider.
-    pub total_tokens: u32,
-    /// Tokens read from a server-side prompt cache.
-    pub cache_read_input_tokens: u32,
-    /// Tokens written to a server-side prompt cache.
-    pub cache_creation_input_tokens: u32,
-    /// Output tokens consumed by model reasoning.
-    pub reasoning_tokens: u32,
-}
-
-impl LlmUsage {
-    /// Create a usage summary from input and output token counts.
+impl CompletionResponse {
     #[must_use]
-    pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
-        Self {
-            input_tokens,
-            output_tokens,
-            total_tokens: input_tokens.saturating_add(output_tokens),
-            ..Self::default()
-        }
+    pub fn token_usage(&self) -> TokenUsage {
+        self.finish_reason
+            .usage()
+            .cloned()
+            .unwrap_or_else(|| TokenUsage::new(self.input_tokens, self.output_tokens))
     }
 }
 
@@ -492,8 +547,6 @@ pub enum LlmStreamEvent {
     ContentDelta { delta: String },
     /// Incremental tool call output from the model.
     ToolCallDelta(ToolCallDelta),
-    /// Usage information emitted by the provider during streaming.
-    Usage { usage: LlmUsage },
     /// The model finished generating output.
     Finished { finish_reason: FinishReason },
     /// Retry attempt due to transient error.
@@ -869,7 +922,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: FinishReason::Stop,
+                    finish_reason: FinishReason::stop(),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })

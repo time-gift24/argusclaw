@@ -139,7 +139,6 @@ export type ThreadEventPayload =
       name?: string | null;
       arguments_delta?: string | null;
     }
-  | { type: "llm_usage"; input_tokens: number; output_tokens: number }
   | {
       type: "tool_started";
       tool_call_id: string;

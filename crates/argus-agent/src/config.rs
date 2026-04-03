@@ -294,14 +294,14 @@ mod tests {
             .build()
             .unwrap();
         assert!(output.appended_messages.is_empty());
-        assert_eq!(output.token_usage.input_tokens, 0);
+        assert_eq!(output.token_usage.prompt_tokens, 0);
     }
 
     #[test]
     fn test_turn_output_with_token_usage() {
         let token_usage = argus_protocol::TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
+            prompt_tokens: 100,
+            completion_tokens: 50,
             total_tokens: 150,
         };
         let output = TurnOutputBuilder::default()

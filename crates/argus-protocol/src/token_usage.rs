@@ -1,48 +1,57 @@
-//! Token usage statistics.
+//! Backward-compatible shim for `TokenUsage`.
 
-use serde::{Deserialize, Serialize};
-
-/// Token usage statistics.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    /// Number of input tokens used.
-    pub input_tokens: u32,
-    /// Number of output tokens generated.
-    pub output_tokens: u32,
-    /// Total tokens (input + output).
-    pub total_tokens: u32,
-}
+pub use crate::llm::TokenUsage;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::TokenUsage;
 
     #[test]
     fn test_token_usage_default() {
         let usage = TokenUsage::default();
-        assert_eq!(usage.input_tokens, 0);
-        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
         assert_eq!(usage.total_tokens, 0);
     }
 
     #[test]
     fn test_token_usage_equality() {
         let usage1 = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
+            prompt_tokens: 100,
+            completion_tokens: 50,
             total_tokens: 150,
         };
         let usage2 = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
+            prompt_tokens: 100,
+            completion_tokens: 50,
             total_tokens: 150,
         };
         let usage3 = TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
+            prompt_tokens: 100,
+            completion_tokens: 50,
             total_tokens: 200,
         };
         assert_eq!(usage1, usage2);
         assert_ne!(usage1, usage3);
+    }
+
+    #[test]
+    fn test_token_usage_new_sets_total() {
+        let usage = TokenUsage::new(18, 2428);
+
+        assert_eq!(usage.prompt_tokens, 18);
+        assert_eq!(usage.completion_tokens, 2428);
+        assert_eq!(usage.total_tokens, 2446);
+    }
+
+    #[test]
+    fn test_token_usage_deserializes_legacy_shape() {
+        let usage: TokenUsage =
+            serde_json::from_str(r#"{"input_tokens":18,"output_tokens":2428,"total_tokens":2446}"#)
+                .expect("legacy usage payload should deserialize");
+
+        assert_eq!(usage.prompt_tokens, 18);
+        assert_eq!(usage.completion_tokens, 2428);
+        assert_eq!(usage.total_tokens, 2446);
     }
 }
