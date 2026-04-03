@@ -6,7 +6,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::TurnLogError;
-use crate::history::{CompactionCheckpoint, TurnRecord, TurnState, flatten_turn_messages};
+use crate::history::{CompactionCheckpoint, TurnRecord, TurnRecordKind, TurnState, flatten_turn_messages};
 
 const THREAD_META_FILE: &str = "thread.meta.json";
 const CHECKPOINTS_DIR: &str = "checkpoints";
@@ -28,7 +28,7 @@ pub struct TurnLogMeta {
 impl From<&TurnRecord> for TurnLogMeta {
     fn from(turn: &TurnRecord) -> Self {
         Self {
-            turn_number: turn.turn_number,
+            turn_number: turn.turn_number.unwrap_or(0),
             state: turn.state.clone(),
             token_usage: turn.token_usage.clone(),
             context_token_count: turn.context_token_count,
@@ -82,7 +82,7 @@ impl RecoveredThreadLogState {
 
     #[must_use]
     pub fn turn_count(&self) -> u32 {
-        self.turns.last().map_or(0, |turn| turn.turn_number)
+        self.turns.last().map_or(0, |turn| turn.turn_number.unwrap_or(0))
     }
 }
 
@@ -183,13 +183,14 @@ pub async fn persist_turn_log_snapshot(
     snapshot: &TurnLogPersistenceSnapshot,
 ) -> std::io::Result<()> {
     let turns_dir = turns_dir(&snapshot.base_dir);
+    let turn_number = snapshot.turn.turn_number.unwrap_or(0);
     write_turn_messages(
-        &turn_messages_path(&turns_dir, snapshot.turn.turn_number),
+        &turn_messages_path(&turns_dir, turn_number),
         &snapshot.turn.messages,
     )
     .await?;
     write_turn_meta(
-        &turn_meta_path(&turns_dir, snapshot.turn.turn_number),
+        &turn_meta_path(&turns_dir, turn_number),
         &TurnLogMeta::from(&snapshot.turn),
     )
     .await?;
@@ -260,7 +261,9 @@ pub async fn read_turn_record(
     let meta = read_turn_meta(&meta_path).await?;
 
     Ok(Some(TurnRecord {
-        turn_number: meta.turn_number,
+        seq: 0,
+        kind: TurnRecordKind::UserTurn,
+        turn_number: Some(meta.turn_number),
         state: meta.state,
         messages,
         token_usage: meta.token_usage,
@@ -420,7 +423,7 @@ mod tests {
             .await
             .expect("record should read")
             .expect("record should exist");
-        assert_eq!(record.turn_number, 1);
+        assert_eq!(record.turn_number, Some(1));
         assert_eq!(record.messages.len(), 2);
         assert_eq!(record.messages[0].content, "hi");
         assert_eq!(record.messages[1].content, "hello");
@@ -432,7 +435,9 @@ mod tests {
         let temp_dir = tempdir().expect("temp dir should exist");
         let base_dir = temp_dir.path().join("thread");
         let turn = TurnRecord {
-            turn_number: 1,
+            seq: 1,
+            kind: TurnRecordKind::UserTurn,
+            turn_number: Some(1),
             state: TurnState::Completed,
             messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
             token_usage: Some(TokenUsage {
@@ -469,7 +474,7 @@ mod tests {
         assert_eq!(recovered.system_messages.len(), 1);
         assert_eq!(recovered.system_messages[0].content, "persisted system");
         assert_eq!(recovered.turns.len(), 1);
-        assert_eq!(recovered.turns[0].turn_number, 1);
+        assert_eq!(recovered.turns[0].turn_number, Some(1));
         assert_eq!(recovered.turns[0].messages.len(), 2);
         assert_eq!(
             recovered.turns[0].messages[0].content,
@@ -503,7 +508,9 @@ mod tests {
         let recovered = RecoveredThreadLogState {
             system_messages: Vec::new(),
             turns: vec![TurnRecord {
-                turn_number: 1,
+                seq: 1,
+                kind: TurnRecordKind::UserTurn,
+                turn_number: Some(1),
                 state: TurnState::Completed,
                 messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
                 token_usage: Some(TokenUsage {

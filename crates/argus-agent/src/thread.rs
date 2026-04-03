@@ -580,7 +580,7 @@ impl Thread {
             context_messages.extend(
                 self.turns
                     .iter()
-                    .filter(|turn| turn.turn_number > checkpoint.summarized_through_turn)
+                    .filter(|turn| turn.turn_number.is_some_and(|tn| tn > checkpoint.summarized_through_turn))
                     .flat_map(|turn| turn.messages.iter().cloned()),
             );
             Arc::new(context_messages)
@@ -602,7 +602,7 @@ impl Thread {
         self.turn_count.max(
             self.turns
                 .iter()
-                .map(|turn| turn.turn_number)
+                .filter_map(|turn| turn.turn_number)
                 .max()
                 .unwrap_or(0),
         )
@@ -759,7 +759,9 @@ impl Thread {
         }
 
         self.turns.push(TurnRecord {
-            turn_number: current_turn.turn_number,
+            seq: self.turns.len() as u64,
+            kind: crate::history::TurnRecordKind::UserTurn,
+            turn_number: Some(current_turn.turn_number),
             state,
             messages: committed_messages.clone(),
             token_usage,
@@ -1463,7 +1465,7 @@ impl Thread {
     fn derive_next_turn_number(turns: &[TurnRecord]) -> u32 {
         turns
             .iter()
-            .map(|turn| turn.turn_number)
+            .filter_map(|turn| turn.turn_number)
             .max()
             .map_or(1, |turn_number| turn_number.saturating_add(1))
     }
@@ -1475,7 +1477,7 @@ impl Thread {
         self.turn_count = self
             .turns
             .iter()
-            .map(|turn| turn.turn_number)
+            .filter_map(|turn| turn.turn_number)
             .max()
             .unwrap_or(0);
         self.next_turn_number = Self::derive_next_turn_number(&self.turns);
@@ -1949,7 +1951,8 @@ mod tests {
     #[tokio::test]
     async fn history_reads_from_cached_committed_messages() {
         let mut thread = build_test_thread();
-        thread.hydrate_turn_history_for_test(vec![TurnRecord::completed(
+        thread.hydrate_turn_history_for_test(vec![TurnRecord::user_completed(
+            1,
             1,
             vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
         )]);
@@ -1961,7 +1964,8 @@ mod tests {
     #[test]
     fn shared_history_build_turn_context_prefers_cached_committed_messages() {
         let mut thread = build_test_thread();
-        thread.hydrate_turn_history_for_test(vec![TurnRecord::completed(
+        thread.hydrate_turn_history_for_test(vec![TurnRecord::user_completed(
+            1,
             1,
             vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
         )]);
@@ -2043,7 +2047,8 @@ mod tests {
                 ChatMessage::user("stale"),
                 ChatMessage::assistant("history"),
             ])
-            .turns(vec![TurnRecord::completed(
+            .turns(vec![TurnRecord::user_completed(
+                1,
                 1,
                 vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
             )])
@@ -2065,7 +2070,8 @@ mod tests {
             .compactor(compactor)
             .agent_record(test_agent_record())
             .session_id(SessionId::new())
-            .turns(vec![TurnRecord::completed(
+            .turns(vec![TurnRecord::user_completed(
+                4,
                 4,
                 vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
             )])
@@ -2997,7 +3003,9 @@ mod tests {
             token_count_stale: false,
         };
         let turn_one = TurnRecord {
-            turn_number: 1,
+            seq: 1,
+            kind: crate::history::TurnRecordKind::UserTurn,
+            turn_number: Some(1),
             state: crate::history::TurnState::Completed,
             messages: vec![
                 ChatMessage::user("old question"),
@@ -3015,7 +3023,9 @@ mod tests {
             error: None,
         };
         let turn_two = TurnRecord {
-            turn_number: 2,
+            seq: 2,
+            kind: crate::history::TurnRecordKind::UserTurn,
+            turn_number: Some(2),
             state: crate::history::TurnState::Completed,
             messages: vec![
                 ChatMessage::user("latest question"),
