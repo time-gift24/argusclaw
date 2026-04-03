@@ -81,8 +81,11 @@ impl RecoveredThreadLogState {
     #[must_use]
     pub fn turn_count(&self) -> u32 {
         self.turns
-            .last()
-            .map_or(0, |turn| turn.turn_number.unwrap_or(0))
+            .iter()
+            .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
+            .filter_map(|turn| turn.turn_number)
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -112,6 +115,16 @@ pub fn turns_dir(base_dir: &Path) -> PathBuf {
 
 pub fn meta_jsonl_path(base_dir: &Path) -> PathBuf {
     turns_dir(base_dir).join("meta.jsonl")
+}
+
+fn same_message_sequence(lhs: &[ChatMessage], rhs: &[ChatMessage]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs.iter().zip(rhs.iter()).all(|(left, right)| {
+            match (serde_json::to_string(left), serde_json::to_string(right)) {
+                (Ok(left_json), Ok(right_json)) => left_json == right_json,
+                _ => false,
+            }
+        })
 }
 
 pub async fn write_turn_messages(path: &Path, messages: &[ChatMessage]) -> std::io::Result<()> {
@@ -245,6 +258,7 @@ pub async fn recover_thread_log_state(
     let mut last_seq: u64 = 0;
     let mut last_user_turn_number: u32 = 0;
     let mut max_turn_number: u32 = 0;
+    let mut saw_first_record = false;
 
     for (index, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -258,14 +272,14 @@ pub async fn recover_thread_log_state(
             })?;
 
         // Validate first record is SystemBootstrap
-        if index == 0 {
+        if !saw_first_record {
             if !matches!(record.kind, TurnRecordKind::SystemBootstrap) {
                 return Err(TurnLogError::MalformedEvent {
-                    line: 1,
+                    line: index + 1,
                     reason: "first record must be SystemBootstrap".to_string(),
                 });
             }
-            // For bootstrap, just record seq and skip remaining validations
+            saw_first_record = true;
             last_seq = record.seq;
             turns.push(record);
             continue;
@@ -335,6 +349,74 @@ pub async fn persist_turn_log_snapshot(
     if let Some(checkpoint) = snapshot.checkpoint.as_ref() {
         write_checkpoint(&checkpoint_path(&snapshot.base_dir), checkpoint).await?;
     }
+
+    // New canonical persistence stream: append-only turns/meta.jsonl.
+    let mut recovered = recover_thread_log_state(&snapshot.base_dir)
+        .await
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+
+    if recovered.turns.is_empty() {
+        let bootstrap = TurnRecord::system_bootstrap(0, snapshot.system_messages.clone());
+        append_turn_record(&snapshot.base_dir, &bootstrap)
+            .await
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?;
+        recovered.turns.push(bootstrap);
+    }
+
+    let mut next_seq = recovered
+        .turns
+        .last()
+        .map_or(0, |record| record.seq.saturating_add(1));
+
+    let user_turn_number = snapshot.turn.turn_number;
+    let user_turn_already_persisted = recovered.turns.iter().any(|record| {
+        matches!(record.kind, TurnRecordKind::UserTurn) && record.turn_number == user_turn_number
+    });
+
+    if !user_turn_already_persisted {
+        let mut persisted_turn = snapshot.turn.clone();
+        persisted_turn.kind = TurnRecordKind::UserTurn;
+        persisted_turn.seq = next_seq;
+        append_turn_record(&snapshot.base_dir, &persisted_turn)
+            .await
+            .map_err(|error| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+            })?;
+        recovered.turns.push(persisted_turn);
+        next_seq = next_seq.saturating_add(1);
+    }
+
+    if let Some(checkpoint) = snapshot.checkpoint.as_ref() {
+        let latest_checkpoint = recovered.turns.iter().rev().find_map(|record| {
+            if let TurnRecordKind::Checkpoint { through_turn } = record.kind {
+                Some((through_turn, record.messages.as_slice()))
+            } else {
+                None
+            }
+        });
+
+        let checkpoint_already_persisted =
+            latest_checkpoint.is_some_and(|(through_turn, messages)| {
+                through_turn == checkpoint.summarized_through_turn
+                    && same_message_sequence(messages, checkpoint.summary_messages.as_slice())
+            });
+
+        if !checkpoint_already_persisted {
+            let checkpoint_record = TurnRecord::checkpoint(
+                next_seq,
+                checkpoint.summarized_through_turn,
+                checkpoint.summary_messages.clone(),
+            );
+            append_turn_record(&snapshot.base_dir, &checkpoint_record)
+                .await
+                .map_err(|error| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                })?;
+        }
+    }
+
     Ok(())
 }
 
@@ -475,6 +557,54 @@ mod tests {
         assert_eq!(recovered.token_count(), 3);
     }
 
+    #[test]
+    fn recovered_turn_count_uses_latest_user_turn_when_tail_is_checkpoint() {
+        let recovered = RecoveredThreadLogState {
+            turns: vec![
+                TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
+                TurnRecord::user_completed(
+                    1,
+                    1,
+                    vec![ChatMessage::user("u1"), ChatMessage::assistant("a1")],
+                ),
+                TurnRecord::checkpoint(2, 1, vec![ChatMessage::assistant("summary")]),
+            ],
+        };
+
+        assert_eq!(recovered.turn_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn persist_turn_log_snapshot_writes_meta_jsonl_replay_stream() {
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let base_dir = temp_dir.path().join("thread");
+        let snapshot = TurnLogPersistenceSnapshot {
+            base_dir: base_dir.clone(),
+            turn: TurnRecord::user_completed(
+                0,
+                1,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            ),
+            system_messages: vec![ChatMessage::system("sys")],
+            checkpoint: None,
+        };
+
+        persist_turn_log_snapshot(&snapshot)
+            .await
+            .expect("snapshot should persist");
+
+        let recovered = recover_thread_log_state(&base_dir)
+            .await
+            .expect("meta.jsonl replay should recover");
+        assert_eq!(recovered.turns.len(), 2);
+        assert!(matches!(
+            recovered.turns[0].kind,
+            TurnRecordKind::SystemBootstrap
+        ));
+        assert!(matches!(recovered.turns[1].kind, TurnRecordKind::UserTurn));
+        assert_eq!(recovered.turns[1].turn_number, Some(1));
+    }
+
     #[tokio::test]
     async fn append_and_recover_meta_jsonl_roundtrip() {
         // append system, user, checkpoint; recover and assert same sequence
@@ -567,8 +697,16 @@ mod tests {
         assert!(matches!(err, TurnLogError::OutOfOrderSeq { .. }));
         let err_str = err.to_string();
         // Error format is "out-of-order seq at line X: expected Y but found Z"
-        assert!(err_str.contains("expected 2"), "expected 'expected 2' in: {}", err_str);
-        assert!(err_str.contains("found 0"), "expected 'found 0' in: {}", err_str);
+        assert!(
+            err_str.contains("expected 2"),
+            "expected 'expected 2' in: {}",
+            err_str
+        );
+        assert!(
+            err_str.contains("found 0"),
+            "expected 'found 0' in: {}",
+            err_str
+        );
     }
 
     #[tokio::test]
@@ -613,8 +751,7 @@ mod tests {
             .expect("bootstrap should append");
 
         // Write checkpoint through turn 5, but only turn 1 exists - should fail
-        let checkpoint =
-            TurnRecord::checkpoint(1, 5, vec![ChatMessage::assistant("summary")]);
+        let checkpoint = TurnRecord::checkpoint(1, 5, vec![ChatMessage::assistant("summary")]);
         append_turn_record(base_dir, &checkpoint)
             .await
             .expect("checkpoint should append");

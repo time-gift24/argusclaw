@@ -576,7 +576,10 @@ impl Thread {
     /// Iterate over committed message history from turn records.
     /// Only reads from `turns` - does not use cached flattened messages.
     pub fn history_iter(&self) -> impl Iterator<Item = &ChatMessage> + '_ {
-        self.turns.iter().flat_map(|turn| turn.messages.iter())
+        self.turns
+            .iter()
+            .filter(|turn| !matches!(turn.kind, crate::history::TurnRecordKind::Checkpoint { .. }))
+            .flat_map(|turn| turn.messages.iter())
     }
 
     fn build_turn_context(&self) -> Arc<Vec<ChatMessage>> {
@@ -2071,6 +2074,20 @@ mod tests {
         let thread = seeded_thread_with_system_and_one_user_turn();
         let history: Vec<_> = thread.history_iter().map(|m| m.content.clone()).collect();
         assert_eq!(history, vec!["sys", "hi", "hello"]);
+    }
+
+    #[test]
+    fn history_iter_skips_checkpoint_records() {
+        let mut thread = seeded_thread_with_system_and_one_user_turn();
+        thread.hydrate_turn_history_for_test(vec![
+            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
+            TurnRecord::user_completed(1, 1, vec![ChatMessage::user("turn1")]),
+            TurnRecord::checkpoint(2, 1, vec![ChatMessage::assistant("summary")]),
+            TurnRecord::user_completed(3, 2, vec![ChatMessage::user("turn2")]),
+        ]);
+
+        let history: Vec<_> = thread.history_iter().map(|m| m.content.clone()).collect();
+        assert_eq!(history, vec!["sys", "turn1", "turn2"]);
     }
 
     #[tokio::test]
