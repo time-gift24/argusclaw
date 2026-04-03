@@ -158,6 +158,7 @@ export type ThreadEventPayload =
       input_tokens: number;
       output_tokens: number;
       total_tokens: number;
+      context_token_count?: number | null;
     }
   | { type: "turn_failed"; error: string }
   | { type: "idle" }

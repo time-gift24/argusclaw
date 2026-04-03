@@ -2699,6 +2699,7 @@ mod tests {
                     output_tokens: total_tokens.saturating_sub(total_tokens / 2),
                     total_tokens,
                 }),
+                context_token_count: Some(total_tokens),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -3973,7 +3974,7 @@ mod tests {
                 .iter()
                 .any(|message| message.content == "second reply")
         );
-        assert_eq!(recovered.token_count, 8);
+        assert_eq!(recovered.token_count, 22);
     }
 
     #[tokio::test]

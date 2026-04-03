@@ -38,9 +38,9 @@ Provide a detailed prompt for continuing our conversation above.\n\
 pub struct CompactResult {
     /// Summary messages to use in a compaction checkpoint.
     pub summary_messages: Vec<ChatMessage>,
-    /// Estimated token count after compaction.
-    /// The authoritative count will come from the next LLM response.
-    pub token_count: u32,
+    /// Authoritative token count after compaction when the compactor can provide it.
+    /// `None` means the next provider response must refresh the thread token count.
+    pub token_count: Option<u32>,
 }
 
 /// Compactor trait — responsible for deciding when and how to compact.
@@ -183,23 +183,11 @@ impl Compactor for LlmCompactor {
 
         let summary_messages = vec![synthetic_prompt, synthetic_summary, synthetic_replay];
 
-        // Estimate new token count proportionally.
-        let original_len = messages.len();
-        let new_token_count = if original_len > 0 {
-            (token_count as usize * summary_messages.len() / original_len) as u32
-        } else {
-            0
-        };
-
-        tracing::debug!(
-            compactor = self.name(),
-            new_token_count,
-            "LLM compaction completed"
-        );
+        tracing::debug!(compactor = self.name(), "LLM compaction completed");
 
         Ok(Some(CompactResult {
             summary_messages,
-            token_count: new_token_count,
+            token_count: None,
         }))
     }
 

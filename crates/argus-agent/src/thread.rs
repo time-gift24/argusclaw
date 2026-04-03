@@ -28,7 +28,6 @@ use super::history::{
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
-use super::token_estimate::estimate_token_count;
 use super::turn_log_store::{
     RecoveredThreadLogState, TurnLogPersistenceSnapshot, persist_turn_log_snapshot,
 };
@@ -284,6 +283,10 @@ pub struct Thread {
     #[builder(default)]
     token_count: u32,
 
+    /// Whether the stored token count predates a compaction and must be refreshed by provider usage.
+    #[builder(default)]
+    token_count_stale: bool,
+
     /// Turn count (internal).
     #[builder(default)]
     turn_count: u32,
@@ -338,6 +341,7 @@ impl std::fmt::Debug for Thread {
             )
             .field("turns", &self.turns.len())
             .field("token_count", &self.token_count)
+            .field("token_count_stale", &self.token_count_stale)
             .field("turn_count", &self.turn_count)
             .field("runtime_state", &self.runtime_snapshot.state)
             .field("runtime_queue_depth", &self.runtime_snapshot.queue_depth)
@@ -429,6 +433,7 @@ impl ThreadBuilder {
             hooks,
             config: self.config.unwrap_or_default(),
             token_count: 0,
+            token_count_stale: false,
             turn_count: 0,
             next_turn_number,
             runtime_snapshot: ThreadRuntimeSnapshot::default(),
@@ -636,6 +641,7 @@ impl Thread {
     /// Set the token count (for Compactor).
     pub fn set_token_count(&mut self, count: u32) {
         self.token_count = count;
+        self.token_count_stale = false;
     }
 
     /// Hydrate thread runtime state from persisted history.
@@ -665,8 +671,8 @@ impl Thread {
         self.current_turn = None;
         self.compaction_checkpoint = None;
         self.cached_committed_messages = Some(Arc::clone(&self.messages));
-        let _ = token_count;
-        self.token_count = estimate_token_count(self.messages.as_slice());
+        self.token_count = token_count;
+        self.token_count_stale = false;
         self.turn_count = turn_count;
         self.next_turn_number = turn_count.saturating_add(1);
         self.updated_at = updated_at;
@@ -700,16 +706,15 @@ impl Thread {
         self.cached_committed_messages = Some(Arc::clone(&committed_messages));
         self.messages = committed_messages;
         self.token_count = token_count;
+        self.token_count_stale = self
+            .compaction_checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.token_count_stale);
         self.turn_count = turn_count;
         self.next_turn_number = Self::derive_next_turn_number(&self.turns);
         self.active_turn_cancellation = None;
         self.runtime_snapshot = ThreadRuntimeSnapshot::default();
         self.updated_at = updated_at;
-    }
-
-    fn refresh_token_count_from_context(&mut self) {
-        let context = self.build_turn_context();
-        self.token_count = estimate_token_count(context.as_slice());
     }
 
     fn start_current_turn(
@@ -734,6 +739,7 @@ impl Thread {
         state: TurnState,
         committed_messages: Option<Vec<ChatMessage>>,
         token_usage: Option<TokenUsage>,
+        context_token_count: Option<u32>,
         error: Option<String>,
     ) -> Result<(), ThreadError> {
         let current_turn = self.current_turn.take().ok_or_else(|| {
@@ -757,6 +763,7 @@ impl Thread {
             state,
             messages: committed_messages.clone(),
             token_usage,
+            context_token_count,
             started_at: current_turn.started_at,
             finished_at: Some(Utc::now()),
             model: current_turn.model,
@@ -1146,6 +1153,7 @@ impl Thread {
                         thread_id: thread_id.clone(),
                         turn_number: settled_turn_number.unwrap_or_default(),
                         token_usage: output.token_usage.clone(),
+                        context_token_count: output.context_token_count,
                     });
                 }
                 Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
@@ -1252,33 +1260,40 @@ impl Thread {
         cancellation: TurnCancellation,
     ) -> Result<crate::Turn, ThreadError> {
         let turn_context = self.build_turn_context();
-        let turn_context_token_count = estimate_token_count(turn_context.as_slice());
-        self.token_count = turn_context_token_count;
-        match self
-            .compactor
-            .compact(
-                self.provider.as_ref(),
-                turn_context.as_slice(),
-                turn_context_token_count,
-            )
-            .await
-        {
-            Ok(Some(result)) => {
-                self.compaction_checkpoint = Some(CompactionCheckpoint {
-                    summarized_through_turn: self.turn_count(),
-                    summary_messages: result.summary_messages,
-                    created_at: Utc::now(),
-                });
-                self.token_count = result.token_count;
-                self.broadcast_to_self(ThreadEvent::Compacted {
-                    thread_id: self.id.to_string(),
-                    new_token_count: self.token_count,
-                });
+        if !self.token_count_stale {
+            match self
+                .compactor
+                .compact(
+                    self.provider.as_ref(),
+                    turn_context.as_slice(),
+                    self.token_count,
+                )
+                .await
+            {
+                Ok(Some(result)) => {
+                    let token_count_stale = result.token_count.is_none();
+                    self.compaction_checkpoint = Some(CompactionCheckpoint {
+                        summarized_through_turn: self.turn_count(),
+                        summary_messages: result.summary_messages,
+                        created_at: Utc::now(),
+                        token_count_stale,
+                    });
+                    self.token_count_stale = token_count_stale;
+                    if let Some(new_token_count) = result.token_count {
+                        self.token_count = new_token_count;
+                        self.broadcast_to_self(ThreadEvent::Compacted {
+                            thread_id: self.id.to_string(),
+                            new_token_count: self.token_count,
+                        });
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("Compact failed: {}", e);
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("Compact failed: {}", e);
-            }
+        } else {
+            tracing::debug!("Skipping compaction because thread token count is stale");
         }
 
         // Apply message-level override in-place if provided.
@@ -1329,24 +1344,34 @@ impl Thread {
 
         match result {
             Ok(output) => {
+                if let Some(context_token_count) = output.context_token_count {
+                    self.token_count = context_token_count;
+                    self.token_count_stale = false;
+                    if let Some(checkpoint) = self.compaction_checkpoint.as_mut() {
+                        checkpoint.token_count_stale = false;
+                    }
+                } else {
+                    self.token_count_stale = true;
+                    if let Some(checkpoint) = self.compaction_checkpoint.as_mut() {
+                        checkpoint.token_count_stale = true;
+                    }
+                }
                 self.settle_current_turn(
                     TurnState::Completed,
                     Some(output.appended_messages),
                     Some(output.token_usage),
+                    output.context_token_count,
                     None,
                 )?;
-                self.refresh_token_count_from_context();
                 Ok(())
             }
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
-                self.settle_current_turn(TurnState::Cancelled, None, None, None)?;
-                self.refresh_token_count_from_context();
+                self.settle_current_turn(TurnState::Cancelled, None, None, None, None)?;
                 Ok(())
             }
             Err(error) => {
                 let error_message = error.to_string();
-                self.settle_current_turn(TurnState::Failed, None, None, Some(error_message))?;
-                self.refresh_token_count_from_context();
+                self.settle_current_turn(TurnState::Failed, None, None, None, Some(error_message))?;
                 Err(error)
             }
         }
@@ -1583,35 +1608,6 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "failing"
-        }
-    }
-
-    struct ThresholdSensitiveCompactor {
-        threshold: u32,
-        observed_token_counts: Arc<Mutex<Vec<u32>>>,
-    }
-
-    #[async_trait]
-    impl Compactor for ThresholdSensitiveCompactor {
-        async fn compact(
-            &self,
-            _provider: &dyn LlmProvider,
-            _messages: &[ChatMessage],
-            token_count: u32,
-        ) -> Result<Option<CompactResult>, CompactError> {
-            self.observed_token_counts.lock().unwrap().push(token_count);
-            if token_count >= self.threshold {
-                Ok(Some(CompactResult {
-                    summary_messages: vec![ChatMessage::assistant("threshold-compact")],
-                    token_count: 1,
-                }))
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn name(&self) -> &'static str {
-            "threshold_sensitive"
         }
     }
 
@@ -1953,10 +1949,7 @@ mod tests {
         assert_eq!(thread.history()[0].role, argus_protocol::llm::Role::System);
         assert_eq!(thread.history()[1].content, "历史问题");
         assert_eq!(thread.history()[2].content, "历史回答");
-        assert_eq!(
-            thread.token_count(),
-            token_count_for_messages(thread.history())
-        );
+        assert_eq!(thread.token_count(), 42);
         assert_eq!(thread.turn_count(), 3);
         assert_eq!(thread.updated_at(), updated_at);
     }
@@ -2532,7 +2525,7 @@ mod tests {
         ) -> Result<Option<CompactResult>, CompactError> {
             Ok(Some(CompactResult {
                 summary_messages: vec![ChatMessage::user("compacted")],
-                token_count: 10,
+                token_count: Some(10),
             }))
         }
 
@@ -2746,43 +2739,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn begin_turn_uses_current_context_token_count_for_compaction_decision() {
-        let observed_token_counts = Arc::new(Mutex::new(Vec::new()));
-        let compactor: Arc<dyn Compactor> = Arc::new(ThresholdSensitiveCompactor {
-            threshold: 80,
-            observed_token_counts: Arc::clone(&observed_token_counts),
-        });
-        let mut thread = ThreadBuilder::new()
-            .provider(Arc::new(SmallContextProvider {
-                context_window: 100,
-            }))
-            .compactor(compactor)
-            .agent_record(test_agent_record_without_system_prompt())
-            .session_id(SessionId::new())
-            .build()
-            .expect("thread should build");
-        let persisted_messages = vec![ChatMessage::user("tiny history")];
-        let authoritative_token_count = token_count_for_messages(&persisted_messages);
-        thread.hydrate_from_persisted_state(persisted_messages, 90, 0, Utc::now());
-
-        let mut rx = thread.subscribe();
-        let _turn = thread
-            .begin_turn("next".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
-
-        let no_event = timeout(Duration::from_millis(50), rx.recv()).await;
-        assert!(
-            no_event.is_err(),
-            "small context should not compact just because persisted total_tokens was large",
-        );
-        assert_eq!(
-            observed_token_counts.lock().unwrap().as_slice(),
-            &[authoritative_token_count],
-        );
-    }
-
-    #[tokio::test]
     async fn finish_turn_moves_current_turn_into_turns() {
         let mut thread = build_test_thread();
         let turn = thread
@@ -2797,6 +2753,7 @@ mod tests {
                 output_tokens: 1,
                 total_tokens: 2,
             },
+            context_token_count: Some(2),
         };
 
         assert_eq!(thread.history().len(), 1);
@@ -2851,10 +2808,7 @@ mod tests {
         ));
         assert_eq!(thread.turns[0].messages.len(), 1);
         assert_eq!(thread.turns[0].messages[0].content, next_message);
-        assert_eq!(
-            thread.token_count(),
-            token_count_for_messages(thread.history())
-        );
+        assert_eq!(thread.token_count(), authoritative_token_count);
     }
 
     #[tokio::test]
@@ -2891,12 +2845,59 @@ mod tests {
                     output_tokens: 20,
                     total_tokens: 120,
                 },
+                context_token_count: Some(7),
             }))
             .expect("turn should settle");
 
-        let expected_token_count = token_count_for_messages(thread.history());
-        assert_eq!(thread.token_count(), expected_token_count);
-        assert_eq!(expected_token_count, 5);
+        assert_eq!(thread.token_count(), 7);
+    }
+
+    #[tokio::test]
+    async fn finish_turn_without_context_token_count_preserves_last_provider_count() {
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(test_agent_record_without_system_prompt())
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        thread.hydrate_from_persisted_state(
+            vec![ChatMessage::assistant("earlier")],
+            9,
+            1,
+            Utc::now(),
+        );
+        thread.compaction_checkpoint = Some(CompactionCheckpoint {
+            summarized_through_turn: 1,
+            summary_messages: vec![ChatMessage::assistant("summary")],
+            created_at: Utc::now(),
+            token_count_stale: false,
+        });
+
+        let _turn = thread
+            .begin_turn("next".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        thread
+            .finish_turn(Ok(TurnOutput {
+                appended_messages: vec![ChatMessage::assistant("done")],
+                token_usage: argus_protocol::TokenUsage {
+                    input_tokens: 40,
+                    output_tokens: 5,
+                    total_tokens: 45,
+                },
+                context_token_count: None,
+            }))
+            .expect("turn should settle");
+
+        assert_eq!(thread.token_count(), 9);
+        assert!(thread.token_count_stale);
+        assert!(
+            thread
+                .compaction_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.token_count_stale)
+        );
     }
 
     #[tokio::test]
@@ -2923,6 +2924,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                 },
+                context_token_count: Some(2),
             }))
             .expect("turn should settle");
 
@@ -2962,6 +2964,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                 },
+                context_token_count: Some(2),
             }))
             .expect("turn should settle");
 
@@ -3000,6 +3003,7 @@ mod tests {
             summarized_through_turn: 1,
             summary_messages: vec![ChatMessage::assistant("summary of turn one")],
             created_at: Utc::now(),
+            token_count_stale: false,
         };
         let turn_one = TurnRecord {
             turn_number: 1,
@@ -3013,6 +3017,7 @@ mod tests {
                 output_tokens: 6,
                 total_tokens: 10,
             }),
+            context_token_count: Some(10),
             started_at: Utc::now(),
             finished_at: Some(Utc::now()),
             model: Some("dummy".to_string()),
@@ -3030,6 +3035,7 @@ mod tests {
                 output_tokens: 12,
                 total_tokens: 22,
             }),
+            context_token_count: Some(22),
             started_at: Utc::now(),
             finished_at: Some(Utc::now()),
             model: Some("dummy".to_string()),
@@ -3078,7 +3084,7 @@ mod tests {
         assert_eq!(context[1].content, "summary of turn one");
         assert_eq!(context[2].content, "latest question");
         assert_eq!(context[3].content, "latest answer");
-        assert_eq!(thread.token_count(), token_count_for_messages(&context));
+        assert_eq!(thread.token_count(), 22);
 
         let _turn = thread
             .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
@@ -3126,9 +3132,6 @@ mod tests {
         ));
         assert_eq!(thread.turns[0].messages.len(), 1);
         assert_eq!(thread.turns[0].messages[0].content, "hi");
-        assert_eq!(
-            thread.token_count(),
-            token_count_for_messages(thread.history())
-        );
+        assert_eq!(thread.token_count(), 0);
     }
 }

@@ -1749,6 +1749,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                 }),
+                context_token_count: Some(2),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1805,6 +1806,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                 }),
+                context_token_count: Some(2),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1829,6 +1831,7 @@ mod tests {
                     output_tokens: 4,
                     total_tokens: 6,
                 }),
+                context_token_count: Some(6),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1890,6 +1893,7 @@ mod tests {
                     output_tokens: 5,
                     total_tokens: 15,
                 }),
+                context_token_count: Some(15),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1917,6 +1921,7 @@ mod tests {
                     output_tokens: 8,
                     total_tokens: 28,
                 }),
+                context_token_count: Some(28),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -1973,6 +1978,7 @@ mod tests {
                     output_tokens: 5,
                     total_tokens: 15,
                 }),
+                context_token_count: Some(15),
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
                 model: Some("test-model".to_string()),
@@ -2022,6 +2028,7 @@ mod tests {
                         output_tokens: total_tokens - (total_tokens / 2),
                         total_tokens,
                     }),
+                    context_token_count: Some(total_tokens),
                     started_at: Utc::now(),
                     finished_at: Some(Utc::now()),
                     model: Some("test-model".to_string()),
@@ -2075,6 +2082,7 @@ mod tests {
                         output_tokens: total_tokens - (total_tokens / 2),
                         total_tokens,
                     }),
+                    context_token_count: Some(total_tokens),
                     started_at: Utc::now(),
                     finished_at: Some(Utc::now()),
                     model: Some("test-model".to_string()),
@@ -2091,7 +2099,7 @@ mod tests {
                 .expect("committed log recovery should succeed");
 
         assert_eq!(recovered.turn_count, 2);
-        assert_eq!(recovered.token_count, 5);
+        assert_eq!(recovered.token_count, 28);
         assert_eq!(recovered.messages.len(), 4);
         assert_eq!(recovered.messages[0].content, "hi");
         assert_eq!(recovered.messages[3].content, "welcome back");
