@@ -54,10 +54,6 @@ pub enum TurnProgress {
         turn_number: u32,
         response: argus_protocol::ApprovalResponse,
     },
-    /// The turn completed successfully.
-    Completed(TurnOutput),
-    /// The turn failed or was cancelled.
-    Failed { error: String },
 }
 
 /// Handle for observing turn progress as it happens and awaiting the final result.
@@ -298,31 +294,6 @@ impl StreamingAccumulator {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct TurnSharedContext {
-    state: Arc<InFlightTurnShared>,
-}
-
-impl TurnSharedContext {
-    pub(crate) fn for_thread(state: Arc<InFlightTurnShared>) -> Self {
-        Self { state }
-    }
-
-    fn resolved_tools(&self) -> Vec<Arc<dyn NamedTool>> {
-        self.state.tools.iter().cloned().collect()
-    }
-
-    fn resolved_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
-        self.state.hooks.iter().cloned().collect()
-    }
-
-    fn find_tool(&self, tool_name: &str) -> Option<Arc<dyn NamedTool>> {
-        self.resolved_tools()
-            .into_iter()
-            .find(|tool| tool.name() == tool_name)
-    }
-}
-
 /// A Turn represents a single execution cycle in a conversation.
 ///
 /// The Turn owns its resources (tools and hooks) directly and is responsible
@@ -380,8 +351,8 @@ pub struct Turn {
     session_id: Option<argus_protocol::SessionId>,
 
     /// Shared thread-owned context consulted during execution.
-    #[builder(setter(custom), default = "Arc::new(TurnSharedContext::default())")]
-    shared: Arc<TurnSharedContext>,
+    #[builder(setter(custom), default = "Arc::new(InFlightTurnShared::default())")]
+    shared: Arc<InFlightTurnShared>,
 
     /// Messages appended during this turn.
     #[builder(default)]
@@ -409,7 +380,7 @@ pub struct Turn {
 }
 
 impl TurnBuilder {
-    fn update_shared(mut self, update: impl FnOnce(&mut TurnSharedContext)) -> Self {
+    fn update_shared(mut self, update: impl FnOnce(&mut InFlightTurnShared)) -> Self {
         let mut shared = self
             .shared
             .take()
@@ -423,7 +394,7 @@ impl TurnBuilder {
     /// Set the base message history for this turn.
     pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
         self = self.update_shared(|shared| {
-            Arc::make_mut(&mut shared.state).history = Arc::new(value);
+            shared.history = Arc::new(value);
         });
         self
     }
@@ -431,7 +402,7 @@ impl TurnBuilder {
     /// Share an existing history buffer with this turn.
     pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
         self = self.update_shared(|shared| {
-            Arc::make_mut(&mut shared.state).history = value;
+            shared.history = value;
         });
         self
     }
@@ -439,7 +410,7 @@ impl TurnBuilder {
     /// Set the tool list for this turn.
     pub fn tools(mut self, value: Vec<Arc<dyn NamedTool>>) -> Self {
         self = self.update_shared(|shared| {
-            Arc::make_mut(&mut shared.state).tools = Arc::new(value);
+            shared.tools = Arc::new(value);
         });
         self
     }
@@ -447,7 +418,7 @@ impl TurnBuilder {
     /// Share an existing tool list with this turn.
     pub fn shared_tools(mut self, value: Arc<Vec<Arc<dyn NamedTool>>>) -> Self {
         self = self.update_shared(|shared| {
-            Arc::make_mut(&mut shared.state).tools = value;
+            shared.tools = value;
         });
         self
     }
@@ -455,7 +426,7 @@ impl TurnBuilder {
     /// Set the hook list for this turn.
     pub fn hooks(mut self, value: Vec<Arc<dyn HookHandler>>) -> Self {
         self = self.update_shared(|shared| {
-            Arc::make_mut(&mut shared.state).hooks = Arc::new(value);
+            shared.hooks = Arc::new(value);
         });
         self
     }
@@ -463,13 +434,13 @@ impl TurnBuilder {
     /// Share an existing hook list with this turn.
     pub fn shared_hooks(mut self, value: Arc<Vec<Arc<dyn HookHandler>>>) -> Self {
         self = self.update_shared(|shared| {
-            Arc::make_mut(&mut shared.state).hooks = value;
+            shared.hooks = value;
         });
         self
     }
 
     /// Share a prebuilt thread-owned execution context with this turn.
-    pub(crate) fn shared(mut self, value: Arc<TurnSharedContext>) -> Self {
+    pub(crate) fn shared(mut self, value: Arc<InFlightTurnShared>) -> Self {
         self.shared = Some(value);
         self
     }
@@ -499,7 +470,7 @@ impl std::fmt::Debug for Turn {
             .field("id", &self.id)
             .field("turn_number", &self.turn_number)
             .field("thread_id", &self.thread_id)
-            .field("messages", &self.shared.state.history.len())
+            .field("messages", &self.shared.history.len())
             .field("provider", &self.provider.model_name())
             .field("tools", &self.shared.resolved_tools().len())
             .field("hooks", &self.shared.resolved_hooks().len())
@@ -512,7 +483,7 @@ impl Turn {
     #[allow(dead_code)]
     #[cfg(test)]
     pub(crate) fn shared_snapshot_ptr(&self) -> *const InFlightTurnShared {
-        Arc::as_ptr(&self.shared.state)
+        Arc::as_ptr(&self.shared)
     }
 
     fn emit_progress(
@@ -603,12 +574,11 @@ impl Turn {
     fn materialize_messages(&self, pending_messages: &[ChatMessage]) -> Vec<ChatMessage> {
         let mut messages = Vec::with_capacity(
             self.shared
-                .state
                 .history
                 .len()
                 .saturating_add(pending_messages.len()),
         );
-        messages.extend(self.shared.state.history.iter().cloned());
+        messages.extend(self.shared.history.iter().cloned());
         messages.extend(pending_messages.iter().cloned());
         messages
     }
@@ -644,17 +614,6 @@ impl Turn {
             };
 
             Self::drain_approval_progress(&mut approval_rx, &progress_tx);
-
-            match &result {
-                Ok(output) => {
-                    let _ = progress_tx.send(TurnProgress::Completed(output.clone()));
-                }
-                Err(error) => {
-                    let _ = progress_tx.send(TurnProgress::Failed {
-                        error: error.to_string(),
-                    });
-                }
-            }
 
             let _ = result_tx.send(result);
             drop(progress_tx);
@@ -2109,7 +2068,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_progress_normal_completion_emits_terminal_completed_progress() {
+    async fn turn_progress_normal_completion_omits_terminal_progress_items() {
         let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
             content: Some("Hello, progress!".to_string()),
             reasoning_content: None,
@@ -2127,12 +2086,16 @@ mod tests {
 
         assert_eq!(output.appended_messages.len(), 1);
         assert_eq!(output.appended_messages[0].content, "Hello, progress!");
-        assert!(matches!(
-            execution.progress.last(),
-            Some(TurnProgress::Completed(final_output))
-                if final_output.appended_messages.len() == 1
-                    && final_output.appended_messages[0].content == "Hello, progress!"
-        ));
+        assert!(execution.progress.iter().all(|item| {
+            matches!(
+                item,
+                TurnProgress::LlmEvent(_)
+                    | TurnProgress::ToolStarted { .. }
+                    | TurnProgress::ToolCompleted { .. }
+                    | TurnProgress::WaitingForApproval { .. }
+                    | TurnProgress::ApprovalResolved { .. }
+            )
+        }));
     }
 
     #[tokio::test]
@@ -2233,7 +2196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_progress_cancellation_returns_failed_progress() {
+    async fn turn_progress_cancellation_closes_without_terminal_progress_item() {
         let provider = Arc::new(HangingStreamingProvider);
         let cancellation = TurnCancellation::new();
 
@@ -2267,7 +2230,6 @@ mod tests {
         ));
 
         cancellation.cancel();
-        let mut saw_failed_progress = false;
         loop {
             let progress =
                 tokio::time::timeout(std::time::Duration::from_millis(500), execution.recv())
@@ -2276,14 +2238,21 @@ mod tests {
             let Some(progress) = progress else {
                 break;
             };
-            if matches!(&progress, TurnProgress::Failed { error } if error.contains("cancelled")) {
-                saw_failed_progress = true;
-            }
+            assert!(
+                matches!(
+                    &progress,
+                    TurnProgress::LlmEvent(_)
+                        | TurnProgress::ToolStarted { .. }
+                        | TurnProgress::ToolCompleted { .. }
+                        | TurnProgress::WaitingForApproval { .. }
+                        | TurnProgress::ApprovalResolved { .. }
+                ),
+                "terminal progress should not be duplicated in the progress stream"
+            );
         }
 
         let result = execution.finish().await;
         assert!(matches!(result, Err(TurnError::Cancelled)));
-        assert!(saw_failed_progress);
     }
 
     #[tokio::test]

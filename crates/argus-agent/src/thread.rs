@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::turn::{TurnCancellation, TurnExecution, TurnProgress, TurnSharedContext};
+use crate::turn::{TurnCancellation, TurnExecution, TurnProgress};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
@@ -892,9 +892,7 @@ impl Thread {
             }
             TurnProgress::LlmEvent(_)
             | TurnProgress::ToolStarted { .. }
-            | TurnProgress::ToolCompleted { .. }
-            | TurnProgress::Completed(_)
-            | TurnProgress::Failed { .. } => {}
+            | TurnProgress::ToolCompleted { .. } => {}
         }
     }
 
@@ -1108,7 +1106,6 @@ impl Thread {
             .current_turn
             .as_ref()
             .map_or_else(Vec::new, |turn| turn.pending_messages.clone());
-        let shared = Arc::new(TurnSharedContext::for_thread(shared_state));
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
@@ -1118,7 +1115,7 @@ impl Thread {
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
             .session_id(self.session_id)
-            .shared(shared)
+            .shared(shared_state)
             .pending_messages(pending_messages)
             .provider(self.provider.clone())
             .config(self.config.turn_config.clone())

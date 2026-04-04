@@ -88,6 +88,22 @@ impl std::fmt::Debug for InFlightTurnShared {
     }
 }
 
+impl InFlightTurnShared {
+    pub(crate) fn resolved_tools(&self) -> Vec<Arc<dyn NamedTool>> {
+        self.tools.iter().cloned().collect()
+    }
+
+    pub(crate) fn resolved_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
+        self.hooks.iter().cloned().collect()
+    }
+
+    pub(crate) fn find_tool(&self, tool_name: &str) -> Option<Arc<dyn NamedTool>> {
+        self.resolved_tools()
+            .into_iter()
+            .find(|tool| tool.name() == tool_name)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InFlightTurn {
     pub turn_number: u32,
