@@ -6,15 +6,16 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
-use super::history::InFlightTurnShared;
+use super::history::TurnRecord;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
-use super::{TurnConfig, TurnError, TurnOutput, TurnStreamEvent};
+use super::{TurnConfig, TurnError, TurnStreamEvent};
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, LlmStreamEvent,
     ToolCall, ToolDefinition,
@@ -60,14 +61,14 @@ pub enum TurnProgress {
 #[derive(Debug)]
 pub struct TurnExecution {
     progress_rx: mpsc::UnboundedReceiver<TurnProgress>,
-    result_rx: oneshot::Receiver<Result<TurnOutput, TurnError>>,
+    result_rx: oneshot::Receiver<Result<TurnRecord, TurnError>>,
 }
 
 /// Fully collected progress plus the final turn result.
 #[derive(Debug)]
 pub struct CollectedTurnExecution {
     pub progress: Vec<TurnProgress>,
-    pub result: Result<TurnOutput, TurnError>,
+    pub result: Result<TurnRecord, TurnError>,
 }
 
 impl TurnExecution {
@@ -77,7 +78,7 @@ impl TurnExecution {
     }
 
     /// Wait for the terminal turn result.
-    pub async fn finish(self) -> Result<TurnOutput, TurnError> {
+    pub async fn finish(self) -> Result<TurnRecord, TurnError> {
         let TurnExecution {
             progress_rx,
             result_rx,
@@ -171,8 +172,8 @@ fn generate_turn_id(thread_id: &str, turn_number: u32) -> String {
 
 /// Result of processing an LLM response's finish_reason.
 enum NextAction {
-    /// Turn is complete, return the output.
-    Return(TurnOutput),
+    /// Turn is complete and can return a record unless a hook continues it.
+    Return,
     /// Continue with tool execution.
     ContinueWithTools { tool_calls: Vec<ToolCall> },
     /// Context length exceeded.
@@ -297,7 +298,7 @@ impl StreamingAccumulator {
 ///
 /// 1. **Construction**: Built via `TurnBuilder` with all required fields
 /// 2. **Execution**: Call `.execute()` to run the turn (consumes self)
-/// 3. **Completion**: Returns `TurnOutput` with appended messages and token usage
+/// 3. **Completion**: Returns `TurnRecord` for the completed user turn
 ///
 /// # Example
 ///
@@ -317,7 +318,7 @@ impl StreamingAccumulator {
 ///     .thread_event_tx(thread_event_tx)
 ///     .build()?;
 ///
-/// let output = turn.execute().await?;
+/// let record = turn.execute().await?;
 /// ```
 #[derive(Builder)]
 #[builder(pattern = "owned", build_fn(error = "TurnError"), name = "TurnBuilder")]
@@ -344,13 +345,25 @@ pub struct Turn {
     #[builder(default, setter(strip_option))]
     session_id: Option<argus_protocol::SessionId>,
 
-    /// Shared thread-owned context consulted during execution.
-    #[builder(setter(custom), default = "Arc::new(InFlightTurnShared::default())")]
-    shared: Arc<InFlightTurnShared>,
+    /// Immutable conversation history preceding this turn.
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    history: Arc<Vec<ChatMessage>>,
 
-    /// Messages appended during this turn.
-    #[builder(default)]
-    pending_messages: Vec<ChatMessage>,
+    /// Messages belonging to this turn.
+    #[builder(setter(custom), default)]
+    messages: Vec<ChatMessage>,
+
+    /// Tool registry snapshot for this turn.
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    tools: Arc<Vec<Arc<dyn NamedTool>>>,
+
+    /// Hook registry snapshot for this turn.
+    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
+    hooks: Arc<Vec<Arc<dyn HookHandler>>>,
+
+    /// Start timestamp for the resulting turn record.
+    #[builder(default = "Utc::now()")]
+    started_at: DateTime<Utc>,
 
     /// LLM provider for completion requests.
     provider: Arc<dyn LlmProvider>,
@@ -374,68 +387,45 @@ pub struct Turn {
 }
 
 impl TurnBuilder {
-    fn update_shared(mut self, update: impl FnOnce(&mut InFlightTurnShared)) -> Self {
-        let mut shared = self
-            .shared
-            .take()
-            .map(|shared| (*shared).clone())
-            .unwrap_or_default();
-        update(&mut shared);
-        self.shared = Some(Arc::new(shared));
+    /// Set turn-local messages for this turn.
+    pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
+        self.messages = Some(value);
         self
     }
 
-    /// Set the base message history for this turn.
-    pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
-        self = self.update_shared(|shared| {
-            shared.history = Arc::new(value);
-        });
+    /// Set the prior conversation history for this turn.
+    pub fn history(mut self, value: Vec<ChatMessage>) -> Self {
+        self.history = Some(Arc::new(value));
         self
     }
 
     /// Share an existing history buffer with this turn.
-    pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
-        self = self.update_shared(|shared| {
-            shared.history = value;
-        });
+    pub fn shared_history(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
+        self.history = Some(value);
         self
     }
 
     /// Set the tool list for this turn.
     pub fn tools(mut self, value: Vec<Arc<dyn NamedTool>>) -> Self {
-        self = self.update_shared(|shared| {
-            shared.tools = Arc::new(value);
-        });
+        self.tools = Some(Arc::new(value));
         self
     }
 
     /// Share an existing tool list with this turn.
     pub fn shared_tools(mut self, value: Arc<Vec<Arc<dyn NamedTool>>>) -> Self {
-        self = self.update_shared(|shared| {
-            shared.tools = value;
-        });
+        self.tools = Some(value);
         self
     }
 
     /// Set the hook list for this turn.
     pub fn hooks(mut self, value: Vec<Arc<dyn HookHandler>>) -> Self {
-        self = self.update_shared(|shared| {
-            shared.hooks = Arc::new(value);
-        });
+        self.hooks = Some(Arc::new(value));
         self
     }
 
     /// Share an existing hook list with this turn.
     pub fn shared_hooks(mut self, value: Arc<Vec<Arc<dyn HookHandler>>>) -> Self {
-        self = self.update_shared(|shared| {
-            shared.hooks = value;
-        });
-        self
-    }
-
-    /// Share a prebuilt thread-owned execution context with this turn.
-    pub(crate) fn shared(mut self, value: Arc<InFlightTurnShared>) -> Self {
-        self.shared = Some(value);
+        self.hooks = Some(value);
         self
     }
 
@@ -464,22 +454,17 @@ impl std::fmt::Debug for Turn {
             .field("id", &self.id)
             .field("turn_number", &self.turn_number)
             .field("thread_id", &self.thread_id)
-            .field("messages", &self.shared.history.len())
+            .field("history", &self.history.len())
+            .field("messages", &self.messages.len())
             .field("provider", &self.provider.model_name())
-            .field("tools", &self.shared.resolved_tools().len())
-            .field("hooks", &self.shared.resolved_hooks().len())
+            .field("tools", &self.tools.len())
+            .field("hooks", &self.hooks.len())
             .field("config", &self.config)
             .finish()
     }
 }
 
 impl Turn {
-    #[allow(dead_code)]
-    #[cfg(test)]
-    pub(crate) fn shared_snapshot_ptr(&self) -> *const InFlightTurnShared {
-        Arc::as_ptr(&self.shared)
-    }
-
     fn emit_progress(
         progress_tx: &Option<mpsc::UnboundedSender<TurnProgress>>,
         progress: TurnProgress,
@@ -534,12 +519,12 @@ impl Turn {
     async fn execute_internal(
         mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
-    ) -> Result<TurnOutput, TurnError> {
+    ) -> Result<TurnRecord, TurnError> {
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
-            tool_count = %self.shared.resolved_tools().len(),
-            hook_count = %self.shared.resolved_hooks().len(),
+            tool_count = %self.tools.len(),
+            hook_count = %self.hooks.len(),
             "Turn execution started"
         );
 
@@ -565,16 +550,62 @@ impl Turn {
         result
     }
 
-    fn materialize_messages(&self, pending_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    fn prompt_message(&self) -> Option<ChatMessage> {
+        (self.turn_number == 1 && !self.agent_record.system_prompt.is_empty())
+            .then(|| ChatMessage::system(&self.agent_record.system_prompt))
+    }
+
+    fn materialize_messages(&self, turn_messages: &[ChatMessage]) -> Vec<ChatMessage> {
         let mut messages = Vec::with_capacity(
-            self.shared
-                .history
+            self.history
                 .len()
-                .saturating_add(pending_messages.len()),
+                .saturating_add(turn_messages.len())
+                .saturating_add(usize::from(self.prompt_message().is_some())),
         );
-        messages.extend(self.shared.history.iter().cloned());
-        messages.extend(pending_messages.iter().cloned());
+        if let Some(prompt) = self.prompt_message() {
+            messages.push(prompt);
+        }
+        messages.extend(self.history.iter().cloned());
+        messages.extend(turn_messages.iter().cloned());
         messages
+    }
+
+    fn build_record_messages(&self, turn_messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+        let mut messages =
+            Vec::with_capacity(turn_messages.len() + usize::from(self.prompt_message().is_some()));
+        if let Some(prompt) = self.prompt_message() {
+            messages.push(prompt);
+        }
+        messages.extend(turn_messages);
+        messages
+    }
+
+    fn build_turn_record(
+        &self,
+        turn_messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+    ) -> TurnRecord {
+        TurnRecord::user_turn_with_times(
+            self.turn_number,
+            self.build_record_messages(turn_messages),
+            token_usage,
+            self.started_at,
+            Utc::now(),
+        )
+    }
+
+    fn resolved_tools(&self) -> Vec<Arc<dyn NamedTool>> {
+        self.tools.iter().cloned().collect()
+    }
+
+    fn resolved_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
+        self.hooks.iter().cloned().collect()
+    }
+
+    fn find_tool(&self, tool_name: &str) -> Option<Arc<dyn NamedTool>> {
+        self.resolved_tools()
+            .into_iter()
+            .find(|tool| tool.name() == tool_name)
     }
 
     /// Execute the turn and return a handle for observing incremental progress.
@@ -619,14 +650,14 @@ impl Turn {
         }
     }
 
-    /// Execute the turn and return the final output.
-    pub async fn execute(self) -> Result<TurnOutput, TurnError> {
+    /// Execute the turn and return the completed turn record.
+    pub async fn execute(self) -> Result<TurnRecord, TurnError> {
         self.execute_progress().finish().await
     }
 
     /// Internal method: trigger hooks and return the action.
     async fn fire_hooks(&self, ctx: &ToolHookContext) -> Result<HookAction, TurnError> {
-        for hook in self.shared.resolved_hooks() {
+        for hook in self.resolved_hooks() {
             let action = hook.on_tool_event(ctx).await;
 
             if let HookAction::Block(reason) = action {
@@ -647,8 +678,8 @@ impl Turn {
     async fn execute_loop(
         &mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
-    ) -> Result<TurnOutput, TurnError> {
-        let mut pending_messages = std::mem::take(&mut self.pending_messages);
+    ) -> Result<TurnRecord, TurnError> {
+        let mut turn_messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
@@ -660,8 +691,8 @@ impl Turn {
                 return Err(TurnError::Cancelled);
             }
 
-            let available_tools = self.shared.resolved_tools();
-            let mut request_messages = self.materialize_messages(&pending_messages);
+            let available_tools = self.resolved_tools();
+            let mut request_messages = self.materialize_messages(&turn_messages);
             if let Some(max) = max_tool_calls
                 && !available_tools.is_empty()
             {
@@ -722,13 +753,12 @@ impl Turn {
 
             // Process response
             let next_action =
-                match self.process_finish_reason(response, &mut pending_messages, &mut token_usage)
-                {
+                match self.process_finish_reason(response, &mut turn_messages, &mut token_usage) {
                     Ok(next_action) => next_action,
                     Err(error) => return Err(error),
                 };
             match next_action {
-                NextAction::Return(output) => {
+                NextAction::Return => {
                     // Fire TurnEnd hook
                     let ctx = ToolHookContext {
                         event: HookEvent::TurnEnd,
@@ -744,7 +774,6 @@ impl Turn {
                     };
                     let turn_end_action = self.fire_hooks(&ctx).await;
 
-                    let mut output = output;
                     let continue_message = match turn_end_action {
                         Ok(HookAction::ContinueWithMessage(message)) => Some(message),
                         Ok(HookAction::Continue) => None,
@@ -765,8 +794,7 @@ impl Turn {
                     };
 
                     if let Some(message) = continue_message {
-                        pending_messages = std::mem::take(&mut output.appended_messages);
-                        pending_messages.push(ChatMessage::user(&message));
+                        turn_messages.push(ChatMessage::user(&message));
 
                         tracing::debug!(
                             thread_id = %self.thread_id,
@@ -777,7 +805,10 @@ impl Turn {
                         continue;
                     }
 
-                    return Ok(output);
+                    return Ok(self.build_turn_record(
+                        std::mem::take(&mut turn_messages),
+                        token_usage.clone(),
+                    ));
                 }
                 NextAction::ContinueWithTools { tool_calls } => {
                     tracing::debug!(
@@ -833,7 +864,7 @@ impl Turn {
                             result_preview = %preview,
                             "Tool result added to history"
                         );
-                        pending_messages.push(ChatMessage::tool_result(
+                        turn_messages.push(ChatMessage::tool_result(
                             result.tool_call_id,
                             result.name,
                             sanitized_content,
@@ -943,7 +974,7 @@ impl Turn {
     fn process_finish_reason(
         &self,
         response: CompletionResponse,
-        pending_messages: &mut Vec<ChatMessage>,
+        turn_messages: &mut Vec<ChatMessage>,
         token_usage: &mut TokenUsage,
     ) -> Result<NextAction, TurnError> {
         let CompletionResponse {
@@ -968,16 +999,13 @@ impl Turn {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
                 {
-                    pending_messages.push(ChatMessage::assistant_with_reasoning(
+                    turn_messages.push(ChatMessage::assistant_with_reasoning(
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
                 }
 
-                Ok(NextAction::Return(TurnOutput {
-                    appended_messages: std::mem::take(pending_messages),
-                    token_usage: token_usage.clone(),
-                }))
+                Ok(NextAction::Return)
             }
             FinishReason::ToolUse => {
                 // Limit tool calls based on max_tool_calls config
@@ -999,7 +1027,7 @@ impl Turn {
                     tool_calls.clone(),
                     reasoning_content,
                 );
-                pending_messages.push(assistant_msg);
+                turn_messages.push(assistant_msg);
 
                 Ok(NextAction::ContinueWithTools { tool_calls })
             }
@@ -1025,7 +1053,7 @@ impl Turn {
                         tool_calls.clone(),
                         reasoning_content,
                     );
-                    pending_messages.push(assistant_msg);
+                    turn_messages.push(assistant_msg);
 
                     Ok(NextAction::ContinueWithTools { tool_calls })
                 } else if content.as_deref().is_some_and(|value| !value.is_empty())
@@ -1033,20 +1061,14 @@ impl Turn {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
                 {
-                    pending_messages.push(ChatMessage::assistant_with_reasoning(
+                    turn_messages.push(ChatMessage::assistant_with_reasoning(
                         content.unwrap_or_default(),
                         reasoning_content,
                     ));
 
-                    Ok(NextAction::Return(TurnOutput {
-                        appended_messages: std::mem::take(pending_messages),
-                        token_usage: token_usage.clone(),
-                    }))
+                    Ok(NextAction::Return)
                 } else {
-                    Ok(NextAction::Return(TurnOutput {
-                        appended_messages: std::mem::take(pending_messages),
-                        token_usage: token_usage.clone(),
-                    }))
+                    Ok(NextAction::Return)
                 }
             }
         }
@@ -1080,8 +1102,8 @@ impl Turn {
         let tool_name = tool_call.name.clone();
         let tool_input = tool_call.arguments.clone();
 
-        // Find the tool in the shared thread-owned context.
-        let tool = self.shared.find_tool(&tool_name);
+        // Find the tool in the turn-local registry snapshot.
+        let tool = self.find_tool(&tool_name);
 
         // Fire BeforeToolCall hook
         let ctx = ToolHookContext {
@@ -1179,7 +1201,7 @@ impl Turn {
                         turn_number = %self.turn_number,
                         tool_call_id = %tool_call_id,
                         tool_name = %tool_name,
-                        available_tools = ?self.shared.resolved_tools().iter().map(|t| t.name()).collect::<Vec<_>>(),
+                        available_tools = ?self.resolved_tools().iter().map(|t| t.name()).collect::<Vec<_>>(),
                         "Tool not found in registry"
                     );
                     Err(argus_protocol::tool::ToolError::NotFound {
@@ -1727,15 +1749,14 @@ mod tests {
     }
 
     fn versioned_tool_description(turn: &Turn) -> Option<String> {
-        turn.shared
-            .resolved_tools()
+        turn.resolved_tools()
             .into_iter()
             .find(|tool| tool.name() == "late_echo")
             .map(|tool| tool.definition().description)
     }
 
     fn resolved_hook_count(turn: &Turn) -> usize {
-        turn.shared.resolved_hooks().len()
+        turn.resolved_hooks().len()
     }
 
     fn build_thread_with_live_sources(
@@ -1778,10 +1799,15 @@ mod tests {
         let first_hook_count = resolved_hook_count(&first_turn);
 
         thread
-            .finish_turn(Ok(TurnOutput {
-                appended_messages: vec![ChatMessage::assistant("done")],
-                token_usage: TokenUsage::default(),
-            }))
+            .finish_turn(Ok(TurnRecord::user_turn(
+                1,
+                vec![
+                    ChatMessage::system("You are a test agent."),
+                    ChatMessage::user("first"),
+                    ChatMessage::assistant("done"),
+                ],
+                TokenUsage::default(),
+            )))
             .expect("first turn should settle");
 
         tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
@@ -1841,7 +1867,7 @@ mod tests {
 
         tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
 
-        let output = thread
+        let record = thread
             .begin_turn("start".to_string(), None, TurnCancellation::default())
             .await
             .expect("turn should build")
@@ -1849,8 +1875,8 @@ mod tests {
             .await
             .expect("turn should execute");
 
-        let tool_results = output
-            .appended_messages
+        let tool_results = record
+            .messages
             .iter()
             .filter(|message| message.role == argus_protocol::llm::Role::Tool)
             .map(|message| message.content.clone())
@@ -1894,7 +1920,7 @@ mod tests {
 
         hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
 
-        let output = thread
+        let record = thread
             .begin_turn("start".to_string(), None, TurnCancellation::default())
             .await
             .expect("turn should build")
@@ -1903,8 +1929,8 @@ mod tests {
             .expect("turn should execute");
 
         assert!(
-            output
-                .appended_messages
+            record
+                .messages
                 .iter()
                 .any(|message| message.content == "second")
         );
@@ -1962,14 +1988,14 @@ mod tests {
         hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
         release_first_call.notify_waiters();
 
-        let output = execution
+        let record = execution
             .await
             .expect("turn task should complete")
             .expect("turn should execute");
 
         assert!(
-            output
-                .appended_messages
+            record
+                .messages
                 .iter()
                 .all(|message| message.content != "second")
         );
@@ -2001,26 +2027,11 @@ mod tests {
         ]));
 
         let turn = make_turn(provider, vec![Arc::new(ContinueOnceTurnEndHook::new())], 5);
-        let output = turn.execute().await.expect("turn should succeed");
+        let record = turn.execute().await.expect("turn should succeed");
 
-        assert!(
-            output
-                .appended_messages
-                .iter()
-                .any(|m| m.content == "first")
-        );
-        assert!(
-            output
-                .appended_messages
-                .iter()
-                .any(|m| m.content == "continue")
-        );
-        assert!(
-            output
-                .appended_messages
-                .iter()
-                .any(|m| m.content == "second")
-        );
+        assert!(record.messages.iter().any(|m| m.content == "first"));
+        assert!(record.messages.iter().any(|m| m.content == "continue"));
+        assert!(record.messages.iter().any(|m| m.content == "second"));
     }
 
     #[tokio::test]
@@ -2057,10 +2068,11 @@ mod tests {
         let turn = make_turn(provider, vec![], 5);
 
         let execution = turn.execute_progress().collect().await;
-        let output = execution.result.expect("turn should succeed");
+        let record = execution.result.expect("turn should succeed");
 
-        assert_eq!(output.appended_messages.len(), 1);
-        assert_eq!(output.appended_messages[0].content, "Hello, progress!");
+        assert_eq!(record.messages.len(), 3);
+        assert_eq!(record.messages[0].role, argus_protocol::llm::Role::System);
+        assert_eq!(record.messages[2].content, "Hello, progress!");
         assert!(execution.progress.iter().all(|item| {
             matches!(
                 item,
@@ -2163,11 +2175,11 @@ mod tests {
         ]));
 
         let turn = make_turn(provider, vec![], 5);
-        let output = turn.execute().await.expect("turn should succeed");
+        let record = turn.execute().await.expect("turn should succeed");
 
-        assert_eq!(output.token_usage.input_tokens, 17);
-        assert_eq!(output.token_usage.output_tokens, 5);
-        assert_eq!(output.token_usage.total_tokens, 22);
+        assert_eq!(record.token_usage.input_tokens, 17);
+        assert_eq!(record.token_usage.output_tokens, 5);
+        assert_eq!(record.token_usage.total_tokens, 22);
     }
 
     #[tokio::test]

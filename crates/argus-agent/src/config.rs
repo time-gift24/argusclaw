@@ -116,17 +116,17 @@ pub enum TurnStreamEvent {
 /// Input for a Turn execution.
 ///
 /// Contains all the data needed to execute a single turn in a conversation,
-/// including message history, system prompt, LLM provider, and tools.
-///
-/// Note: `system_prompt` is not automatically added to messages. The caller
-/// should include system instructions in the `messages` field if needed.
+/// including prompt configuration, message history, LLM provider, and tools.
 #[derive(Builder)]
 #[builder(pattern = "owned", build_fn(skip))]
 pub struct TurnInput {
-    /// Historical messages for the conversation.
+    /// Messages for this first turn execution.
     #[builder(default)]
     pub messages: Vec<ChatMessage>,
-    /// System prompt for this turn (caller should include in messages if needed).
+    /// System prompt for this turn.
+    ///
+    /// When set on the first turn, `Turn` injects it into the request context
+    /// and the resulting [`crate::TurnRecord`].
     #[builder(default, setter(into))]
     pub system_prompt: String,
     /// LLM provider instance.
@@ -204,19 +204,6 @@ impl TurnInputBuilder {
     }
 }
 
-/// Output from a Turn execution.
-///
-/// Contains the results of executing a turn, including the newly appended
-/// messages and token usage statistics.
-#[derive(Debug, Clone, Builder)]
-pub struct TurnOutput {
-    /// Messages produced during this turn, in append order.
-    pub appended_messages: Vec<ChatMessage>,
-    /// Token usage statistics.
-    #[builder(default)]
-    pub token_usage: argus_protocol::TokenUsage,
-}
-
 // ---------------------------------------------------------------------------
 // ThreadConfig
 // ---------------------------------------------------------------------------
@@ -285,30 +272,5 @@ mod tests {
         assert_eq!(config.max_tool_calls, Some(3));
         assert_eq!(config.tool_timeout_secs, Some(120)); // default
         assert_eq!(config.max_iterations, Some(50)); // default
-    }
-
-    #[test]
-    fn test_turn_output_builder() {
-        let output = TurnOutputBuilder::default()
-            .appended_messages(Vec::new())
-            .build()
-            .unwrap();
-        assert!(output.appended_messages.is_empty());
-        assert_eq!(output.token_usage.input_tokens, 0);
-    }
-
-    #[test]
-    fn test_turn_output_with_token_usage() {
-        let token_usage = argus_protocol::TokenUsage {
-            input_tokens: 100,
-            output_tokens: 50,
-            total_tokens: 150,
-        };
-        let output = TurnOutputBuilder::default()
-            .appended_messages(Vec::new())
-            .token_usage(token_usage.clone())
-            .build()
-            .unwrap();
-        assert_eq!(output.token_usage, token_usage);
     }
 }

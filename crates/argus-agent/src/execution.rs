@@ -11,7 +11,8 @@ use tokio::sync::broadcast;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::tool::NamedTool;
 
-use super::{Turn, TurnBuilder, TurnConfig, TurnError, TurnInput, TurnOutput};
+use super::history::TurnRecord;
+use super::{Turn, TurnBuilder, TurnConfig, TurnError, TurnInput};
 
 /// Execution mode for turn processing.
 #[derive(Debug, Clone, Copy)]
@@ -33,7 +34,7 @@ pub enum ExecutionMode {
 /// - LLM failures
 /// - Max iterations exceeded
 /// - Tool call blocked by hooks
-pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOutput, TurnError> {
+pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnRecord, TurnError> {
     execute_turn_with_mode(input, config, ExecutionMode::NonStreaming).await
 }
 
@@ -48,7 +49,7 @@ pub async fn execute_turn(input: TurnInput, config: TurnConfig) -> Result<TurnOu
 pub async fn execute_turn_streaming(
     input: TurnInput,
     config: TurnConfig,
-) -> Result<TurnOutput, TurnError> {
+) -> Result<TurnRecord, TurnError> {
     execute_turn_with_mode(input, config, ExecutionMode::Streaming).await
 }
 
@@ -59,7 +60,7 @@ async fn execute_turn_with_mode(
     input: TurnInput,
     config: TurnConfig,
     _mode: ExecutionMode,
-) -> Result<TurnOutput, TurnError> {
+) -> Result<TurnRecord, TurnError> {
     // Convert TurnInput to Turn
     let turn = turn_input_to_turn(input, config)?;
 
@@ -72,15 +73,27 @@ async fn execute_turn_with_mode(
 /// This function handles the conversion from the old API (TurnInput with ToolManager and HookRegistry)
 /// to the new API (Turn with direct tool and hook ownership).
 fn turn_input_to_turn(input: TurnInput, config: TurnConfig) -> Result<Turn, TurnError> {
+    let TurnInput {
+        messages,
+        system_prompt,
+        provider,
+        tool_manager,
+        tool_ids,
+        hooks,
+        thread_event_sender,
+        thread_id,
+        stream_sender: _,
+        agent_record,
+    } = input;
+
     // Extract tools from ToolManager
-    let tools: Vec<Arc<dyn NamedTool>> = input
-        .tool_ids
+    let tools: Vec<Arc<dyn NamedTool>> = tool_ids
         .iter()
-        .filter_map(|id| input.tool_manager.get(id))
+        .filter_map(|id| tool_manager.get(id))
         .collect();
 
     // Extract hooks from HookRegistry (if present)
-    let hooks: Vec<Arc<dyn argus_protocol::HookHandler>> = if let Some(registry) = input.hooks {
+    let hooks: Vec<Arc<dyn argus_protocol::HookHandler>> = if let Some(registry) = hooks {
         registry.all_handlers()
     } else {
         Vec::new()
@@ -90,23 +103,26 @@ fn turn_input_to_turn(input: TurnInput, config: TurnConfig) -> Result<Turn, Turn
     let (stream_tx, _) = broadcast::channel(256);
 
     // Get thread_event_tx and thread_id
-    let thread_event_tx = input.thread_event_sender.unwrap_or_else(|| {
+    let thread_event_tx = thread_event_sender.unwrap_or_else(|| {
         // Create a dummy channel if not provided
         broadcast::channel(1).0
     });
 
-    let thread_id = input.thread_id.unwrap_or_else(|| "unknown".to_string());
+    let thread_id = thread_id.unwrap_or_else(|| "unknown".to_string());
 
     // Generate turn number (default to 1 if not specified)
     let turn_number = 1; // TODO: Pass turn_number in TurnInput or derive from context
+
+    let mut agent_record = (*agent_record).clone();
+    agent_record.system_prompt = system_prompt;
 
     // Build Turn using TurnBuilder
     TurnBuilder::default()
         .turn_number(turn_number)
         .thread_id(thread_id)
-        .messages(input.messages)
-        .provider(input.provider)
-        .agent_record(input.agent_record)
+        .messages(messages)
+        .provider(provider)
+        .agent_record(Arc::new(agent_record))
         .tools(tools)
         .hooks(hooks)
         .config(config)
@@ -230,15 +246,17 @@ mod tests {
         let input = create_test_input(provider);
         let config = TurnConfig::default();
 
-        let output = execute_turn(input, config).await.unwrap();
+        let record = execute_turn(input, config).await.unwrap();
 
-        assert_eq!(output.appended_messages.len(), 1);
-        assert_eq!(output.appended_messages[0].role, Role::Assistant);
-        assert_eq!(output.appended_messages[0].content, "Hello, world!");
+        assert_eq!(record.messages.len(), 2);
+        assert_eq!(record.messages[0].role, Role::User);
+        assert_eq!(record.messages[0].content, "Hello");
+        assert_eq!(record.messages[1].role, Role::Assistant);
+        assert_eq!(record.messages[1].content, "Hello, world!");
 
         // Token usage should be tracked
-        assert_eq!(output.token_usage.input_tokens, 10);
-        assert_eq!(output.token_usage.output_tokens, 5);
-        assert_eq!(output.token_usage.total_tokens, 15);
+        assert_eq!(record.token_usage.input_tokens, 10);
+        assert_eq!(record.token_usage.output_tokens, 5);
+        assert_eq!(record.token_usage.total_tokens, 15);
     }
 }

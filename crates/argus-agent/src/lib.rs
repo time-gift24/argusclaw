@@ -32,7 +32,7 @@
 //!     .thread_event_tx(thread_event_tx)
 //!     .build()?;
 //!
-//! let output = turn.execute().await?;
+//! let record = turn.execute().await?;
 //! ```
 //!
 //! # Example (Thread)
@@ -72,11 +72,11 @@ pub mod types;
 
 // Turn (low-level)
 pub use config::{
-    OnTurnComplete, TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnOutput,
-    TurnOutputBuilder, TurnStreamEvent,
+    OnTurnComplete, TurnConfig, TurnConfigBuilder, TurnInput, TurnInputBuilder, TurnStreamEvent,
 };
 pub use error::{TurnError, TurnLogError};
 pub use execution::{ExecutionMode, execute_turn, execute_turn_streaming};
+pub use history::{TurnRecord, TurnRecordKind};
 pub use trace::TraceConfig;
 pub use turn::{Turn, TurnBuilder, TurnCancellation};
 

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::TurnCancellation;
 #[cfg(test)]
-use argus_agent::TurnOutput;
+use argus_agent::TurnRecord;
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
@@ -365,8 +365,8 @@ impl JobManager {
 
     /// Summarize turn output into a brief result message.
     #[cfg(test)]
-    fn summarize_output(output: &TurnOutput) -> String {
-        for msg in output.appended_messages.iter().rev() {
+    fn summarize_output(output: &TurnRecord) -> String {
+        for msg in output.messages.iter().rev() {
             if let ChatMessage {
                 role: Role::Assistant,
                 content,
@@ -377,10 +377,7 @@ impl JobManager {
                 return Self::truncate_summary(content);
             }
         }
-        format!(
-            "job completed, {} messages in turn",
-            output.appended_messages.len()
-        )
+        format!("job completed, {} messages in turn", output.messages.len())
     }
 
     #[cfg(test)]
@@ -753,11 +750,12 @@ mod tests {
         )
     }
 
-    fn assistant_output(content: &str) -> TurnOutput {
-        TurnOutput {
-            appended_messages: vec![ChatMessage::assistant(content)],
-            token_usage: TokenUsage::default(),
-        }
+    fn assistant_output(content: &str) -> TurnRecord {
+        TurnRecord::user_turn(
+            1,
+            vec![ChatMessage::assistant(content)],
+            TokenUsage::default(),
+        )
     }
 
     fn sample_job_result(job_id: impl Into<String>) -> ThreadJobResult {

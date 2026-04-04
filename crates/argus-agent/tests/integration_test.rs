@@ -6,6 +6,7 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::{Mutex as TokioMutex, broadcast, oneshot};
 
+use argus_agent::history::TurnRecordKind;
 use argus_agent::turn::{TurnCancellation, TurnProgress};
 use argus_agent::{TurnBuilder, TurnConfig};
 use argus_llm::retry::{RetryConfig, RetryProvider};
@@ -29,6 +30,17 @@ use rust_decimal::Decimal;
 struct MockProvider {
     /// Responses to return in sequence
     responses: Mutex<Vec<MockResponse>>,
+}
+
+struct RequestCapturingProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    response: CompletionResponse,
+}
+
+impl RequestCapturingProvider {
+    fn new(requests: Arc<Mutex<Vec<CompletionRequest>>>, response: CompletionResponse) -> Self {
+        Self { requests, response }
+    }
 }
 
 /// A single mock response
@@ -116,6 +128,22 @@ impl LlmProvider for MockProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RequestCapturingProvider {
+    fn model_name(&self) -> &str {
+        "capturing"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(self.response.clone())
     }
 }
 
@@ -379,11 +407,72 @@ async fn test_turn_integration_simple() {
         .build()
         .unwrap();
 
-    let output = turn.execute().await.unwrap();
+    let record = turn.execute().await.unwrap();
 
-    assert_eq!(output.appended_messages.len(), 1);
-    assert_eq!(output.appended_messages[0].role, Role::Assistant);
-    assert_eq!(output.appended_messages[0].content, "Hello, world!");
+    assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.messages.len(), 2);
+    assert_eq!(record.messages[0].role, Role::User);
+    assert_eq!(record.messages[0].content, "Hello");
+    assert_eq!(record.messages[1].role, Role::Assistant);
+    assert_eq!(record.messages[1].content, "Hello, world!");
+}
+
+#[tokio::test]
+async fn first_turn_injects_system_prompt_into_request_and_record() {
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RequestCapturingProvider::new(
+        Arc::clone(&captured_requests),
+        CompletionResponse {
+            content: Some("Hello, world!".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+    ));
+
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a helpful assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let record = turn.execute().await.unwrap();
+
+    let requests = captured_requests.lock().unwrap();
+    let first_request = requests
+        .first()
+        .expect("provider should capture first request");
+    assert_eq!(first_request.messages[0].role, Role::System);
+    assert_eq!(
+        first_request.messages[0].content,
+        "You are a helpful assistant."
+    );
+    assert_eq!(first_request.messages[1].role, Role::User);
+    assert_eq!(first_request.messages[1].content, "Hello");
+
+    assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.messages[0].role, Role::System);
+    assert_eq!(record.messages[0].content, "You are a helpful assistant.");
+    assert_eq!(record.messages[1].role, Role::User);
+    assert_eq!(record.messages[1].content, "Hello");
 }
 
 struct HangingStreamingProvider;
@@ -559,14 +648,14 @@ async fn test_turn_integration_with_tool_call() {
         .build()
         .unwrap();
 
-    let output = turn.execute().await.unwrap();
+    let record = turn.execute().await.unwrap();
 
-    assert!(output.appended_messages.len() >= 3);
+    assert!(record.messages.len() >= 3);
     // Should have tracked tokens
-    assert!(output.token_usage.total_tokens > 0);
+    assert!(record.token_usage.total_tokens > 0);
     // First assistant message should have tool calls
-    let assistant_msgs: Vec<_> = output
-        .appended_messages
+    let assistant_msgs: Vec<_> = record
+        .messages
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .collect();

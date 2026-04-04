@@ -1,7 +1,3 @@
-use std::sync::Arc;
-
-use argus_protocol::HookHandler;
-use argus_protocol::tool::NamedTool;
 use argus_protocol::{TokenUsage, llm::ChatMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -69,46 +65,6 @@ impl TurnRecord {
             finished_at,
         }
     }
-}
-
-#[derive(Clone, Default)]
-pub struct InFlightTurnShared {
-    pub history: Arc<Vec<ChatMessage>>,
-    pub tools: Arc<Vec<Arc<dyn NamedTool>>>,
-    pub hooks: Arc<Vec<Arc<dyn HookHandler>>>,
-}
-
-impl std::fmt::Debug for InFlightTurnShared {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InFlightTurnShared")
-            .field("history_len", &self.history.len())
-            .field("tool_count", &self.tools.len())
-            .field("hook_count", &self.hooks.len())
-            .finish()
-    }
-}
-
-impl InFlightTurnShared {
-    pub(crate) fn resolved_tools(&self) -> Vec<Arc<dyn NamedTool>> {
-        self.tools.iter().cloned().collect()
-    }
-
-    pub(crate) fn resolved_hooks(&self) -> Vec<Arc<dyn HookHandler>> {
-        self.hooks.iter().cloned().collect()
-    }
-
-    pub(crate) fn find_tool(&self, tool_name: &str) -> Option<Arc<dyn NamedTool>> {
-        self.resolved_tools()
-            .into_iter()
-            .find(|tool| tool.name() == tool_name)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct InFlightTurn {
-    pub turn_number: u32,
-    pub pending_messages: Vec<ChatMessage>,
-    pub started_at: DateTime<Utc>,
 }
 
 pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {

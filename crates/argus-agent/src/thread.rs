@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+use crate::TurnBuilder;
 use crate::turn::{TurnCancellation, TurnExecution, TurnProgress};
-use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -19,9 +19,7 @@ use argus_tool::ToolManager;
 use super::compact::Compactor;
 use super::config::ThreadConfig;
 use super::error::{ThreadError, TurnLogError};
-use super::history::{
-    InFlightTurn, InFlightTurnShared, TurnRecord, TurnRecordKind, derive_next_user_turn_number,
-};
+use super::history::{TurnRecord, TurnRecordKind, derive_next_user_turn_number};
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
@@ -106,10 +104,6 @@ pub struct Thread {
     /// Settled turn history — single source of truth.
     #[builder(default)]
     turns: Vec<TurnRecord>,
-
-    /// The single in-flight turn, if any.
-    #[builder(default)]
-    current_turn: Option<InFlightTurn>,
 
     /// LLM provider (required, injected by Session).
     provider: Arc<dyn LlmProvider>,
@@ -199,8 +193,6 @@ impl ThreadBuilder {
         let hooks = self.hooks.flatten();
         let plan_store = self.plan_store.unwrap_or_default();
         let turns = self.turns.unwrap_or_default();
-        let current_turn = self.current_turn.flatten();
-
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             agent_record,
@@ -209,7 +201,6 @@ impl ThreadBuilder {
             created_at: self.created_at.unwrap_or_else(Utc::now),
             updated_at: self.updated_at.unwrap_or_else(Utc::now),
             turns,
-            current_turn,
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
             tool_manager,
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
@@ -508,54 +499,9 @@ impl Thread {
         updated_at: DateTime<Utc>,
     ) {
         self.turns = recovered.turns;
-        self.current_turn = None;
         self.active_turn_cancellation = None;
         self.runtime_state = ThreadRuntimeState::Idle;
         self.updated_at = updated_at;
-    }
-
-    fn start_current_turn(&mut self, turn_number: u32, user_input: String) {
-        self.current_turn = Some(InFlightTurn {
-            turn_number,
-            pending_messages: vec![ChatMessage::user(user_input)],
-            started_at: Utc::now(),
-        });
-    }
-
-    fn settle_current_turn(
-        &mut self,
-        committed_messages: Vec<ChatMessage>,
-        token_usage: TokenUsage,
-    ) -> Result<(), ThreadError> {
-        let current_turn = self.current_turn.take().ok_or_else(|| {
-            ThreadError::TurnBuildFailed("missing in-flight turn during settle".to_string())
-        })?;
-        let mut committed_messages = committed_messages;
-        if !current_turn.pending_messages.is_empty()
-            && !Self::starts_with_pending_messages(
-                committed_messages.as_slice(),
-                current_turn.pending_messages.as_slice(),
-            )
-        {
-            let mut normalized_messages = current_turn.pending_messages.clone();
-            normalized_messages.extend(committed_messages);
-            committed_messages = normalized_messages;
-        }
-
-        if current_turn.turn_number == 1 && !self.agent_record.system_prompt.is_empty() {
-            committed_messages.insert(0, ChatMessage::system(&self.agent_record.system_prompt));
-        }
-
-        self.turns.push(TurnRecord::user_turn_with_times(
-            current_turn.turn_number,
-            committed_messages,
-            token_usage,
-            current_turn.started_at,
-            Utc::now(),
-        ));
-        self.updated_at = Utc::now();
-
-        Ok(())
     }
 
     /// Append a checkpoint record to the turn history.
@@ -630,19 +576,6 @@ impl Thread {
         Ok(())
     }
 
-    fn starts_with_pending_messages(
-        messages: &[ChatMessage],
-        pending_messages: &[ChatMessage],
-    ) -> bool {
-        pending_messages.len() <= messages.len()
-            && messages
-                .iter()
-                .zip(pending_messages.iter())
-                .all(|(message, pending_message)| {
-                    message.role == pending_message.role
-                        && message.content == pending_message.content
-                })
-    }
     /// Spawn the thread-owned reactor loop that coordinates queued control events.
     pub fn spawn_reactor(thread: Arc<RwLock<Self>>) {
         tokio::spawn(async move {
@@ -880,7 +813,7 @@ impl Thread {
 
     async fn settle_active_turn(
         thread: &Arc<RwLock<Self>>,
-        result: Result<TurnOutput, ThreadError>,
+        result: Result<TurnRecord, ThreadError>,
         active_turn: &mut Option<TurnExecution>,
         shutdown_requested: bool,
     ) {
@@ -899,11 +832,11 @@ impl Thread {
         {
             let guard = thread.read().await;
             match &result {
-                Ok(output) => {
+                Ok(record) => {
                     guard.broadcast_to_self(ThreadEvent::TurnCompleted {
                         thread_id: thread_id.clone(),
                         turn_number: settled_turn_number.unwrap_or_default(),
-                        token_usage: output.token_usage.clone(),
+                        token_usage: record.token_usage.clone(),
                     });
                 }
                 Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
@@ -1035,18 +968,11 @@ impl Thread {
             self.agent_record.clone()
         };
 
-        let shared = Arc::new(InFlightTurnShared {
-            history: self.build_turn_context(),
-            tools: Arc::new(self.build_shared_turn_tools(effective_record.as_ref())),
-            hooks: Arc::new(self.build_shared_turn_hooks()),
-        });
-        self.start_current_turn(turn_number, user_input);
         self.active_turn_cancellation = Some(cancellation.clone());
 
-        match self.build_turn(turn_number, effective_record, cancellation, shared) {
+        match self.build_turn(turn_number, user_input, effective_record, cancellation) {
             Ok(turn) => Ok(turn),
             Err(error) => {
-                self.current_turn = None;
                 self.active_turn_cancellation = None;
                 Err(error)
             }
@@ -1056,38 +982,32 @@ impl Thread {
     /// Finish a previously started turn and apply its output to thread state.
     pub fn finish_turn(
         &mut self,
-        result: Result<TurnOutput, ThreadError>,
+        result: Result<TurnRecord, ThreadError>,
     ) -> Result<(), ThreadError> {
         self.active_turn_cancellation = None;
 
         match result {
-            Ok(output) => {
-                self.settle_current_turn(output.appended_messages, output.token_usage)?;
+            Ok(record) => {
+                self.turns.push(record);
+                self.updated_at = Utc::now();
                 Ok(())
             }
-            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
-                self.current_turn = None;
-                Ok(())
-            }
-            Err(error) => {
-                self.current_turn = None;
-                Err(error)
-            }
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
     fn build_turn(
         &mut self,
         turn_number: u32,
+        user_input: String,
         agent_record: Arc<AgentRecord>,
         cancellation: TurnCancellation,
-        shared_state: Arc<InFlightTurnShared>,
     ) -> Result<crate::Turn, ThreadError> {
         let thread_id = self.id.to_string();
-        let pending_messages = self
-            .current_turn
-            .as_ref()
-            .map_or_else(Vec::new, |turn| turn.pending_messages.clone());
+        let turn_history = self.build_turn_context();
+        let turn_tools = Arc::new(self.build_shared_turn_tools(agent_record.as_ref()));
+        let turn_hooks = Arc::new(self.build_shared_turn_hooks());
         // Create internal stream channel
         let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
 
@@ -1097,8 +1017,10 @@ impl Thread {
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
             .session_id(self.session_id)
-            .shared(shared_state)
-            .pending_messages(pending_messages)
+            .shared_history(turn_history)
+            .messages(vec![ChatMessage::user(user_input)])
+            .shared_tools(turn_tools)
+            .shared_hooks(turn_hooks)
             .provider(self.provider.clone())
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
@@ -1143,7 +1065,6 @@ impl Thread {
     #[cfg(test)]
     fn hydrate_turn_history_for_test(&mut self, turns: Vec<TurnRecord>) {
         self.turns = turns;
-        self.current_turn = None;
         self.runtime_state = ThreadRuntimeState::Idle;
         self.active_turn_cancellation = None;
     }
@@ -1333,51 +1254,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_turn_prepends_system_prompt_only_on_first_successful_turn() {
+    async fn finish_turn_appends_first_record_without_rewriting_messages() {
         let mut thread = build_test_thread();
         let _turn = thread
             .begin_turn("hello".to_string(), None, TurnCancellation::new())
             .await
             .expect("turn should build");
+        let record = TurnRecord::user_turn(
+            1,
+            vec![
+                ChatMessage::system("You are a test agent."),
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("world"),
+            ],
+            usage(6),
+        );
 
         thread
-            .finish_turn(Ok(TurnOutput {
-                appended_messages: vec![
-                    ChatMessage::user("hello"),
-                    ChatMessage::assistant("world"),
-                ],
-                token_usage: usage(6),
-            }))
+            .finish_turn(Ok(record.clone()))
             .expect("turn should settle");
 
         assert_eq!(thread.turns.len(), 1);
         assert_eq!(thread.turns[0].turn_number, 1);
-        assert_eq!(thread.turns[0].messages[0].role, Role::System);
-        assert_eq!(thread.turns[0].messages[0].content, "You are a test agent.");
-        assert_eq!(thread.turns[0].messages[1].content, "hello");
+        let stored_messages: Vec<_> = thread.turns[0]
+            .messages
+            .iter()
+            .map(|message| (message.role, message.content.clone()))
+            .collect();
+        let expected_messages: Vec<_> = record
+            .messages
+            .iter()
+            .map(|message| (message.role, message.content.clone()))
+            .collect();
+        assert_eq!(stored_messages, expected_messages);
     }
 
     #[tokio::test]
-    async fn finish_turn_without_system_prompt_keeps_first_turn_transcript_only() {
+    async fn finish_turn_without_system_prompt_keeps_record_messages_unchanged() {
         let mut thread = build_test_thread_without_system_prompt();
         let _turn = thread
             .begin_turn("hello".to_string(), None, TurnCancellation::new())
             .await
             .expect("turn should build");
+        let record = TurnRecord::user_turn(
+            1,
+            vec![ChatMessage::user("hello"), ChatMessage::assistant("world")],
+            usage(5),
+        );
 
         thread
-            .finish_turn(Ok(TurnOutput {
-                appended_messages: vec![
-                    ChatMessage::user("hello"),
-                    ChatMessage::assistant("world"),
-                ],
-                token_usage: usage(5),
-            }))
+            .finish_turn(Ok(record.clone()))
             .expect("turn should settle");
 
         assert_eq!(thread.turns.len(), 1);
-        assert_eq!(thread.turns[0].messages.len(), 2);
-        assert_eq!(thread.turns[0].messages[0].role, Role::User);
+        let stored_messages: Vec<_> = thread.turns[0]
+            .messages
+            .iter()
+            .map(|message| (message.role, message.content.clone()))
+            .collect();
+        let expected_messages: Vec<_> = record
+            .messages
+            .iter()
+            .map(|message| (message.role, message.content.clone()))
+            .collect();
+        assert_eq!(stored_messages, expected_messages);
     }
 
     #[tokio::test]
@@ -1393,7 +1333,7 @@ mod tests {
             .expect("cancelled turn should settle");
 
         assert!(thread.turns.is_empty());
-        assert!(thread.current_turn.is_none());
+        assert!(thread.active_turn_cancellation.is_none());
     }
 
     #[tokio::test]
@@ -1413,7 +1353,7 @@ mod tests {
 
         assert!(matches!(result, Err(ThreadError::TurnFailed(_))));
         assert!(thread.turns.is_empty());
-        assert!(thread.current_turn.is_none());
+        assert!(thread.active_turn_cancellation.is_none());
     }
 
     #[test]
@@ -1602,13 +1542,11 @@ mod tests {
             .await
             .expect("turn should build");
         thread
-            .finish_turn(Ok(TurnOutput {
-                appended_messages: vec![
-                    ChatMessage::user("second"),
-                    ChatMessage::assistant("done"),
-                ],
-                token_usage: usage(7),
-            }))
+            .finish_turn(Ok(TurnRecord::user_turn(
+                3,
+                vec![ChatMessage::user("second"), ChatMessage::assistant("done")],
+                usage(7),
+            )))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
@@ -1636,10 +1574,11 @@ mod tests {
             .await
             .expect("turn should build");
         thread
-            .finish_turn(Ok(TurnOutput {
-                appended_messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("there")],
-                token_usage: usage(4),
-            }))
+            .finish_turn(Ok(TurnRecord::user_turn(
+                1,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("there")],
+                usage(4),
+            )))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
