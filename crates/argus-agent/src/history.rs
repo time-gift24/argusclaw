@@ -6,81 +6,67 @@ use argus_protocol::{TokenUsage, llm::ChatMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TurnState {
-    Completed,
-    Failed,
-    Cancelled,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TurnRecordKind {
-    SystemBootstrap,
     UserTurn,
-    Checkpoint { through_turn: u32 },
+    Checkpoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
-    pub seq: u64,
     pub kind: TurnRecordKind,
-    pub turn_number: Option<u32>,
-    pub state: TurnState,
+    pub turn_number: u32,
     pub messages: Vec<ChatMessage>,
-    pub token_usage: Option<TokenUsage>,
-    pub context_token_count: Option<u32>,
+    pub token_usage: TokenUsage,
     pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    pub model: Option<String>,
-    pub error: Option<String>,
+    pub finished_at: DateTime<Utc>,
 }
 
 impl TurnRecord {
-    pub fn system_bootstrap(seq: u64, messages: Vec<ChatMessage>) -> Self {
-        Self {
-            seq,
-            kind: TurnRecordKind::SystemBootstrap,
-            turn_number: None,
-            state: TurnState::Completed,
-            messages,
-            token_usage: None,
-            context_token_count: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            model: None,
-            error: None,
-        }
+    pub fn user_turn(
+        turn_number: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+    ) -> Self {
+        let now = Utc::now();
+        Self::user_turn_with_times(turn_number, messages, token_usage, now, now)
     }
 
-    pub fn user_completed(seq: u64, turn_number: u32, messages: Vec<ChatMessage>) -> Self {
+    pub fn user_turn_with_times(
+        turn_number: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    ) -> Self {
         Self {
-            seq,
             kind: TurnRecordKind::UserTurn,
-            turn_number: Some(turn_number),
-            state: TurnState::Completed,
+            turn_number,
             messages,
-            token_usage: None,
-            context_token_count: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            model: None,
-            error: None,
+            token_usage,
+            started_at,
+            finished_at,
         }
     }
 
-    pub fn checkpoint(seq: u64, through_turn: u32, messages: Vec<ChatMessage>) -> Self {
+    pub fn checkpoint(messages: Vec<ChatMessage>, token_usage: TokenUsage) -> Self {
+        let now = Utc::now();
+        Self::checkpoint_with_times(messages, token_usage, now, now)
+    }
+
+    pub fn checkpoint_with_times(
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    ) -> Self {
         Self {
-            seq,
-            kind: TurnRecordKind::Checkpoint { through_turn },
-            turn_number: None,
-            state: TurnState::Completed,
+            kind: TurnRecordKind::Checkpoint,
+            turn_number: 0,
             messages,
-            token_usage: None,
-            context_token_count: None,
-            started_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-            model: None,
-            error: None,
+            token_usage,
+            started_at,
+            finished_at,
         }
     }
 }
@@ -120,20 +106,11 @@ pub struct InFlightTurn {
     pub shared: Arc<InFlightTurnShared>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionCheckpoint {
-    pub summarized_through_turn: u32,
-    pub summary_messages: Vec<ChatMessage>,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub token_count_stale: bool,
-}
-
 pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
     turns
         .iter()
         .filter(|t| matches!(t.kind, TurnRecordKind::UserTurn))
-        .filter_map(|t| t.turn_number)
+        .map(|t| t.turn_number)
         .max()
         .unwrap_or(0)
         .saturating_add(1)
@@ -142,32 +119,49 @@ pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
 pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {
     turns
         .iter()
-        .filter(|turn| !matches!(turn.kind, TurnRecordKind::Checkpoint { .. }))
+        .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
         .flat_map(|turn| turn.messages.iter().cloned())
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use argus_protocol::TokenUsage;
     use argus_protocol::llm::ChatMessage;
 
     use super::{TurnRecord, derive_next_user_turn_number, flatten_turn_messages};
 
     #[test]
-    fn flatten_committed_messages_skips_inflight_turn() {
+    fn flatten_committed_messages_skips_checkpoint_records() {
         let turns = vec![
-            TurnRecord::user_completed(
-                1,
+            TurnRecord::user_turn(
                 1,
                 vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+                TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                },
             ),
-            TurnRecord::user_completed(
-                2,
+            TurnRecord::checkpoint(
+                vec![ChatMessage::assistant("summary")],
+                TokenUsage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    total_tokens: 7,
+                },
+            ),
+            TurnRecord::user_turn(
                 2,
                 vec![
                     ChatMessage::user("search"),
                     ChatMessage::assistant("working"),
                 ],
+                TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    total_tokens: 4,
+                },
             ),
         ];
 
@@ -181,9 +175,23 @@ mod tests {
     #[test]
     fn user_turn_number_derivation_ignores_checkpoint_records() {
         let records = vec![
-            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
-            TurnRecord::user_completed(1, 1, vec![ChatMessage::user("u1")]),
-            TurnRecord::checkpoint(2, 1, vec![ChatMessage::assistant("summary")]),
+            TurnRecord::user_turn(
+                1,
+                vec![ChatMessage::system("sys"), ChatMessage::user("u1")],
+                TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                },
+            ),
+            TurnRecord::checkpoint(
+                vec![ChatMessage::assistant("summary")],
+                TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: 1,
+                    total_tokens: 5,
+                },
+            ),
         ];
 
         assert_eq!(derive_next_user_turn_number(&records), 2);

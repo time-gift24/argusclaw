@@ -442,15 +442,12 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
         .iter()
         .find(|t| matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn))
         .expect("should have user turn");
-    assert_eq!(user_turn.messages.len(), 2);
-    assert_eq!(user_turn.messages[0].content, "Hello");
-    assert_eq!(user_turn.messages[1].content, "Hello, world!");
-    assert_eq!(user_turn.turn_number, Some(1));
-    assert!(matches!(
-        user_turn.state,
-        argus_agent::history::TurnState::Completed
-    ));
-    assert!(user_turn.token_usage.is_some());
+    assert_eq!(user_turn.messages.len(), 3);
+    assert_eq!(user_turn.messages[0].content, "You are a test assistant.");
+    assert_eq!(user_turn.messages[1].content, "Hello");
+    assert_eq!(user_turn.messages[2].content, "Hello, world!");
+    assert_eq!(user_turn.turn_number, 1);
+    assert_eq!(user_turn.token_usage.total_tokens, 0);
 }
 
 #[tokio::test]
@@ -578,13 +575,9 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
             .iter()
             .find(|t| {
                 matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn)
-                    && t.turn_number == Some(expected_turn_number)
+                    && t.turn_number == expected_turn_number
             })
             .expect("should have user turn");
-        assert_eq!(user_turn.turn_number, Some(expected_turn_number));
-        assert!(matches!(
-            user_turn.state,
-            argus_agent::history::TurnState::Completed
-        ));
+        assert_eq!(user_turn.turn_number, expected_turn_number);
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - `Compactor`: Async trait for implementing compaction strategies.
-//! - `CompactResult`: Result type carrying checkpoint summary messages and token estimate.
+//! - `CompactResult`: Result type carrying checkpoint summary messages and token usage.
 //! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
 
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
+use argus_protocol::token_usage::TokenUsage;
 use async_trait::async_trait;
 
 use super::error::CompactError;
@@ -37,11 +38,12 @@ Provide a detailed prompt for continuing our conversation above.\n\
   ---";
 
 /// Result of a successful compaction.
+#[derive(Debug, Clone)]
 pub struct CompactResult {
     /// Summary messages to use in a compaction checkpoint.
     pub summary_messages: Vec<ChatMessage>,
     /// Authoritative token count for the compaction request + summary response.
-    pub token_count: u32,
+    pub token_usage: TokenUsage,
 }
 
 /// Compactor trait — responsible for deciding when and how to compact.
@@ -175,7 +177,11 @@ impl Compactor for LlmCompactor {
 
         Ok(Some(CompactResult {
             summary_messages,
-            token_count: response.input_tokens + response.output_tokens,
+            token_usage: TokenUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                total_tokens: response.input_tokens + response.output_tokens,
+            },
         }))
     }
 
@@ -357,7 +363,7 @@ mod tests {
         assert_eq!(result.summary_messages.len(), 1);
         assert_eq!(result.summary_messages[0].role, Role::Assistant);
         assert_eq!(result.summary_messages[0].content, "历史摘要");
-        assert_eq!(result.token_count, 20);
+        assert_eq!(result.token_usage.total_tokens, 20);
     }
 
     #[tokio::test]
