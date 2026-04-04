@@ -25,7 +25,7 @@ pub use events::{
     MailboxMessage, MailboxMessageType, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
     ThreadEvent, ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
     ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeSnapshot, ThreadRuntimeState, ThreadRuntimeStatus,
+    ThreadRuntimeSnapshot, ThreadRuntimeStatus,
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};

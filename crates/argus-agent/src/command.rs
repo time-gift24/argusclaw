@@ -1,14 +1,34 @@
 //! Thread runtime snapshot glue.
 
-use argus_protocol::ThreadRuntimeState;
+/// Internal runtime state for a loaded thread actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThreadRuntimeState {
+    /// Runtime is idle and ready for work.
+    Idle,
+    /// Runtime is executing a turn.
+    Running {
+        /// Active turn number.
+        turn_number: u32,
+    },
+    /// Runtime is stopping an active turn.
+    Stopping {
+        /// Active turn number being stopped.
+        turn_number: u32,
+    },
+    /// Runtime is paused waiting for an approval decision.
+    WaitingForApproval {
+        /// Turn number blocked on approval.
+        turn_number: u32,
+    },
+}
 
 /// Snapshot of lightweight thread runtime state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ThreadRuntimeSnapshot {
+pub(crate) struct ThreadRuntimeSnapshot {
     /// Current runtime state.
-    pub state: ThreadRuntimeState,
+    pub(crate) state: ThreadRuntimeState,
     /// Number of queued items waiting while a turn is running.
-    pub queue_depth: usize,
+    pub(crate) queue_depth: usize,
 }
 
 impl Default for ThreadRuntimeSnapshot {

@@ -6,15 +6,14 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::command::ThreadRuntimeSnapshot;
+use crate::command::{ThreadRuntimeSnapshot, ThreadRuntimeState};
 use crate::turn::{TurnCancellation, TurnExecution, TurnProgress, TurnSharedContext};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, MessageOverride, QueuedUserMessage, SessionId,
-    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadRuntimeState,
-    TokenUsage,
+    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -114,10 +113,6 @@ pub struct Thread {
     #[builder(default)]
     runtime_state: ThreadRuntimeState,
 
-    /// Next user-turn number to assign.
-    #[builder(default = "1")]
-    next_turn_number: u32,
-
     /// Number of queued items waiting to run.
     #[builder(default)]
     queue_depth: usize,
@@ -191,8 +186,6 @@ impl ThreadBuilder {
         let turns = self.turns.unwrap_or_default();
         let current_turn = self.current_turn.flatten();
 
-        let next_turn_number = derive_next_user_turn_number(&turns);
-
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             agent_record,
@@ -208,7 +201,6 @@ impl ThreadBuilder {
             hooks,
             config: self.config.unwrap_or_default(),
             runtime_state: ThreadRuntimeState::Idle,
-            next_turn_number,
             queue_depth: 0,
             active_turn_cancellation: None,
             pipe_tx,
@@ -363,12 +355,9 @@ impl Thread {
 
     fn complete_runtime_turn(
         &mut self,
-        committed: bool,
+        _committed: bool,
         mailbox: &mut ThreadMailbox,
     ) -> ThreadLoopAction {
-        if committed {
-            self.next_turn_number = self.next_turn_number.saturating_add(1);
-        }
         self.runtime_state = ThreadRuntimeState::Idle;
         self.queue_depth = mailbox.pending_len();
         self.try_start_next_turn(mailbox)
@@ -422,7 +411,7 @@ impl Thread {
     }
 
     fn start_runtime_turn(&mut self, message: QueuedUserMessage) -> ThreadLoopAction {
-        let turn_number = self.next_turn_number;
+        let turn_number = derive_next_user_turn_number(&self.turns);
         self.runtime_state = ThreadRuntimeState::Running { turn_number };
 
         ThreadLoopAction::StartTurn {
@@ -533,7 +522,6 @@ impl Thread {
         self.current_turn = None;
         self.active_turn_cancellation = None;
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.next_turn_number = derive_next_user_turn_number(&self.turns);
         self.queue_depth = 0;
         self.updated_at = updated_at;
     }
@@ -1181,7 +1169,6 @@ impl Thread {
         self.turns = turns;
         self.current_turn = None;
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.next_turn_number = derive_next_user_turn_number(&self.turns);
         self.queue_depth = 0;
         self.active_turn_cancellation = None;
     }
@@ -1203,7 +1190,7 @@ mod tests {
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
+    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
@@ -1583,8 +1570,8 @@ mod tests {
         assert_eq!(info.token_count, 5);
     }
 
-    #[test]
-    fn thread_reuses_turn_number_after_uncommitted_turn() {
+    #[tokio::test]
+    async fn thread_reuses_turn_number_after_uncommitted_turn() {
         let mut thread = build_test_thread_without_system_prompt();
         thread.hydrate_turn_history_for_test(vec![
             TurnRecord::user_turn(
@@ -1621,6 +1608,13 @@ mod tests {
         );
         assert_eq!(mailbox.pending_len(), 1);
 
+        let _turn = thread
+            .begin_turn_with_number(3, "first".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        thread
+            .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
+            .expect("cancelled turn should settle");
         thread.complete_runtime_turn(false, &mut mailbox);
         assert_eq!(
             thread.runtime_snapshot().state,
@@ -1628,12 +1622,25 @@ mod tests {
         );
         assert_eq!(mailbox.pending_len(), 0);
 
+        let _turn = thread
+            .begin_turn_with_number(3, "second".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        thread
+            .finish_turn(Ok(TurnOutput {
+                appended_messages: vec![
+                    ChatMessage::user("second"),
+                    ChatMessage::assistant("done"),
+                ],
+                token_usage: usage(7),
+            }))
+            .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(thread.runtime_snapshot().state, ThreadRuntimeState::Idle);
     }
 
-    #[test]
-    fn thread_runtime_advances_turn_numbers_after_committed_turns() {
+    #[tokio::test]
+    async fn thread_runtime_advances_turn_numbers_after_committed_turns() {
         let mut thread = build_test_thread_without_system_prompt();
         let mut mailbox = ThreadMailbox::default();
 
@@ -1649,6 +1656,16 @@ mod tests {
             ThreadRuntimeState::Running { turn_number: 1 }
         );
 
+        let _turn = thread
+            .begin_turn_with_number(1, "hi".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        thread
+            .finish_turn(Ok(TurnOutput {
+                appended_messages: vec![ChatMessage::user("hi"), ChatMessage::assistant("there")],
+                token_usage: usage(4),
+            }))
+            .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(thread.runtime_snapshot().state, ThreadRuntimeState::Idle);
 

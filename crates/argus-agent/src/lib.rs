@@ -50,7 +50,7 @@
 //! thread.send_message("Hello!".to_string()).await.unwrap();
 //! ```
 
-pub mod command;
+mod command;
 pub mod compact;
 pub mod config;
 pub mod error;
@@ -82,7 +82,6 @@ pub use trace::TraceConfig;
 pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)
-pub use command::ThreadRuntimeSnapshot;
 pub use compact::{CompactResult, Compactor, LlmCompactor};
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};

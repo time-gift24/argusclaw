@@ -28,28 +28,6 @@ pub enum ThreadCommand {
     CancelActiveTurn,
 }
 
-/// High-level state for the thread runtime actor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThreadRuntimeState {
-    /// Runtime is idle and ready for work.
-    Idle,
-    /// Runtime is executing a turn.
-    Running {
-        /// Active turn number.
-        turn_number: u32,
-    },
-    /// Runtime is stopping an active turn.
-    Stopping {
-        /// Active turn number being stopped.
-        turn_number: u32,
-    },
-    /// Runtime is paused waiting for an approval decision.
-    WaitingForApproval {
-        /// Turn number blocked on approval.
-        turn_number: u32,
-    },
-}
-
 /// Internal control-plane event used to wake or shut down a thread runtime.
 #[derive(Debug)]
 pub enum ThreadControlEvent {
