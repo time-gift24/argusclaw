@@ -416,12 +416,14 @@ impl ThreadPool {
             }
         };
 
-        {
+        let mailbox = {
             let guard = thread.read().await;
-            guard
-                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(message.clone()))
-                .map_err(|error| JobError::ExecutionFailed(error.to_string()))?;
-        }
+            guard.mailbox()
+        };
+        mailbox
+            .lock()
+            .await
+            .enqueue_mailbox_message(message.clone());
 
         if let Some(sender) = self
             .store
@@ -2274,4 +2276,3 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
         context: None,
     }
 }
-

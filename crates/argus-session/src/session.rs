@@ -1,11 +1,13 @@
 use std::sync::{Arc, Weak};
 
 use argus_agent::Thread;
-use argus_protocol::{SessionId, ThreadControlEvent, ThreadEvent, ThreadId};
+use argus_protocol::{
+    MailboxMessage, MessageOverride, SessionId, ThreadEvent, ThreadId, ThreadMailbox,
+};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Summary of a session for listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,7 @@ pub struct Session {
     pub id: SessionId,
     pub name: String,
     threads: DashMap<ThreadId, Weak<RwLock<Thread>>>,
+    mailboxes: DashMap<ThreadId, Arc<Mutex<ThreadMailbox>>>,
 }
 
 impl Session {
@@ -39,15 +42,23 @@ impl Session {
             id,
             name,
             threads: DashMap::new(),
+            mailboxes: DashMap::new(),
         }
     }
 
     pub fn add_thread(&self, thread: Arc<RwLock<Thread>>) {
-        let thread_id = thread.try_read().map(|t| t.id()).unwrap_or_default();
-        self.threads.insert(thread_id, Arc::downgrade(&thread));
+        let thread_arc = Arc::clone(&thread);
+        let Ok(thread_guard) = thread.try_read() else {
+            return;
+        };
+        let thread_id = thread_guard.id();
+        let mailbox = thread_guard.mailbox();
+        self.threads.insert(thread_id, Arc::downgrade(&thread_arc));
+        self.mailboxes.insert(thread_id, mailbox);
     }
 
     pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
+        self.mailboxes.remove(thread_id);
         self.threads
             .remove(thread_id)
             .and_then(|pair| pair.1.upgrade())
@@ -60,8 +71,61 @@ impl Session {
             .and_then(|r| r.value().upgrade());
         if thread.is_none() {
             self.threads.remove(thread_id);
+            self.mailboxes.remove(thread_id);
         }
         thread
+    }
+
+    pub fn mailbox(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<ThreadMailbox>>> {
+        self.mailboxes
+            .get(thread_id)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    pub async fn enqueue_user_message(
+        &self,
+        thread_id: &ThreadId,
+        content: String,
+        msg_override: Option<MessageOverride>,
+    ) -> bool {
+        let Some(mailbox) = self.mailbox(thread_id) else {
+            return false;
+        };
+        mailbox
+            .lock()
+            .await
+            .enqueue_user_message(content, msg_override);
+        true
+    }
+
+    pub async fn enqueue_mailbox_message(
+        &self,
+        thread_id: &ThreadId,
+        message: MailboxMessage,
+    ) -> bool {
+        let Some(mailbox) = self.mailbox(thread_id) else {
+            return false;
+        };
+        mailbox.lock().await.enqueue_mailbox_message(message);
+        true
+    }
+
+    pub async fn interrupt_thread(&self, thread_id: &ThreadId) -> bool {
+        let Some(mailbox) = self.mailbox(thread_id) else {
+            return false;
+        };
+        mailbox.lock().await.interrupt_stop();
+        true
+    }
+
+    pub async fn claim_job_result(
+        &self,
+        thread_id: &ThreadId,
+        job_id: &str,
+    ) -> Option<MailboxMessage> {
+        let mailbox = self.mailbox(thread_id)?;
+        let claimed = mailbox.lock().await.claim_job_result(job_id);
+        claimed
     }
 
     pub fn thread_ids(&self) -> Vec<ThreadId> {
@@ -74,14 +138,18 @@ impl Session {
         for entry in self.threads.iter() {
             let thread = entry.value().upgrade();
             if let Some(thread) = thread {
-                if let Ok(t) = thread.try_read() {
-                    match &event {
-                        ThreadEvent::UserInterrupt { content } => {
-                            let _ = t.send_control_event(ThreadControlEvent::UserInterrupt {
-                                content: content.clone(),
-                            });
+                match &event {
+                    ThreadEvent::UserInterrupt { .. } => {
+                        if let Some(mailbox) = self.mailboxes.get(entry.key()) {
+                            if let Ok(mut mailbox) = mailbox.try_lock() {
+                                mailbox.interrupt_stop();
+                            }
                         }
-                        _ => t.broadcast_to_self(event.clone()),
+                    }
+                    _ => {
+                        if let Ok(t) = thread.try_read() {
+                            t.broadcast_to_self(event.clone());
+                        }
                     }
                 }
             } else {
@@ -91,6 +159,7 @@ impl Session {
 
         for thread_id in stale_thread_ids {
             self.threads.remove(&thread_id);
+            self.mailboxes.remove(&thread_id);
         }
     }
 
@@ -115,6 +184,7 @@ impl Session {
 
         for thread_id in stale_thread_ids {
             self.threads.remove(&thread_id);
+            self.mailboxes.remove(&thread_id);
         }
         summaries
     }
