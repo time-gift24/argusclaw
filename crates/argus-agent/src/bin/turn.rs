@@ -204,7 +204,7 @@ fn resolve_config(
     })
 }
 
-async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
+async fn run_execute_command(args: ExecuteArgs, config: &Config) -> Result<()> {
     let resolved = resolve_config(
         config,
         args.base_url.as_deref(),
@@ -447,7 +447,7 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Execute(args) => execute_turn(args, &config).await?,
+        Commands::Execute(args) => run_execute_command(args, &config).await?,
         Commands::ToolTest(args) => tool_test(args, &config).await?,
         Commands::MockTest(args) => mock_test_turn(args).await?,
     }

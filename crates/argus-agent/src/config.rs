@@ -1,4 +1,4 @@
-//! Turn configuration, input, and output types.
+//! Turn configuration and stream event types.
 //!
 //! This module defines the configuration options and data structures used
 //! for turn-based LLM conversation execution with tool support.
@@ -6,11 +6,8 @@
 use std::sync::Arc;
 
 use derive_builder::Builder;
-use tokio::sync::broadcast;
 
-use argus_protocol::llm::{ChatMessage, LlmProvider, LlmStreamEvent};
-use argus_protocol::{AgentRecord, HookRegistry, SafetyConfig, ThreadEvent};
-use argus_tool::ToolManager;
+use argus_protocol::{SafetyConfig, llm::LlmStreamEvent};
 
 use super::TraceConfig;
 
@@ -111,97 +108,6 @@ pub enum TurnStreamEvent {
         /// Tool result (Ok for success, Err for failure).
         result: Result<serde_json::Value, String>,
     },
-}
-
-/// Input for a Turn execution.
-///
-/// Contains all the data needed to execute a single turn in a conversation,
-/// including prompt configuration, message history, LLM provider, and tools.
-#[derive(Builder)]
-#[builder(pattern = "owned", build_fn(skip))]
-pub struct TurnInput {
-    /// Messages for this first turn execution.
-    #[builder(default)]
-    pub messages: Vec<ChatMessage>,
-    /// System prompt for this turn.
-    ///
-    /// When set on the first turn, `Turn` injects it into the request context
-    /// and the resulting [`crate::TurnRecord`].
-    #[builder(default, setter(into))]
-    pub system_prompt: String,
-    /// LLM provider instance.
-    pub provider: Arc<dyn LlmProvider>,
-    /// Tool manager for registry.
-    #[builder(default = "Arc::new(ToolManager::new())")]
-    pub tool_manager: Arc<ToolManager>,
-    /// Tool IDs to use (resolved via ToolManager).
-    #[builder(default)]
-    pub tool_ids: Vec<String>,
-    /// Optional hook registry for lifecycle events.
-    #[builder(default, setter(strip_option))]
-    pub hooks: Option<Arc<HookRegistry>>,
-    /// Thread event sender for broadcasting approval events.
-    #[builder(default, setter(strip_option))]
-    pub thread_event_sender: Option<broadcast::Sender<ThreadEvent>>,
-    /// Thread ID for event context.
-    #[builder(default, setter(strip_option))]
-    pub thread_id: Option<String>,
-    /// Stream event sender for real-time updates during streaming execution.
-    #[builder(default, setter(strip_option))]
-    pub stream_sender: Option<broadcast::Sender<TurnStreamEvent>>,
-    /// Agent record for LLM configuration (max_tokens, temperature, thinking_config).
-    #[builder(default)]
-    pub agent_record: Arc<AgentRecord>,
-}
-
-impl std::fmt::Debug for TurnInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TurnInput")
-            .field("messages", &self.messages.len())
-            .field("system_prompt", &self.system_prompt)
-            .field("provider", &self.provider.model_name())
-            .field("tool_manager", &"ToolManager")
-            .field("tool_ids", &self.tool_ids)
-            .field("hooks", &self.hooks.is_some())
-            .field("thread_event_sender", &self.thread_event_sender.is_some())
-            .field("thread_id", &self.thread_id)
-            .field("stream_sender", &self.stream_sender.is_some())
-            .finish()
-    }
-}
-
-impl TurnInputBuilder {
-    /// Create a new builder.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Build the TurnInput.
-    ///
-    /// # Errors
-    ///
-    /// Returns `TurnError` if the required `provider` field is not set.
-    pub fn build(self) -> Result<TurnInput, super::TurnError> {
-        Ok(TurnInput {
-            messages: self.messages.unwrap_or_default(),
-            system_prompt: self.system_prompt.unwrap_or_default(),
-            provider: self
-                .provider
-                .ok_or(super::TurnError::ProviderNotConfigured)?,
-            tool_manager: self
-                .tool_manager
-                .unwrap_or_else(|| Arc::new(ToolManager::new())),
-            tool_ids: self.tool_ids.unwrap_or_default(),
-            hooks: self.hooks.flatten(),
-            thread_event_sender: self.thread_event_sender.flatten(),
-            thread_id: self.thread_id.flatten(),
-            stream_sender: self.stream_sender.flatten(),
-            agent_record: self
-                .agent_record
-                .unwrap_or_else(|| Arc::new(AgentRecord::default())),
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
