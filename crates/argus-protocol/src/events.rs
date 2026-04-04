@@ -4,14 +4,12 @@
 
 use std::collections::VecDeque;
 
-use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
-
 use crate::TokenUsage;
 use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::ids::{AgentId, SessionId, ThreadId};
 use crate::llm::LlmStreamEvent;
 use crate::message_override::MessageOverride;
+use serde::{Deserialize, Serialize};
 
 /// Internal control-plane event for thread orchestration.
 #[allow(clippy::large_enum_variant)]
@@ -52,48 +50,9 @@ pub enum ThreadRuntimeState {
     },
 }
 
-/// Legacy compatibility control event surface for pre-runtime callers.
-#[allow(clippy::large_enum_variant)]
+/// Internal control-plane event used to wake or shut down a thread runtime.
 #[derive(Debug)]
 pub enum ThreadControlEvent {
-    /// A new user message entered the thread control plane.
-    ///
-    /// Production semantics: if a turn is currently running, the thread runtime actor
-    /// enqueues the message (FIFO) for a subsequent turn. Frontends typically render
-    /// this as "queued" work.
-    UserMessage {
-        /// Message content.
-        content: String,
-        /// Optional per-message overrides (temperature, max_tokens, etc.).
-        msg_override: Option<MessageOverride>,
-    },
-    /// A user interrupt control signal.
-    ///
-    /// Production semantics: this is treated as an immediate "stop active turn" signal
-    /// (CancelActiveTurn). The `content` is not currently used as redirect text.
-    ///
-    /// Legacy semantics: callers may still inject interrupts into a running turn via
-    /// [`ThreadMailbox`] / [`TurnControlInput`], but this is considered a compatibility
-    /// path and not the primary production model.
-    UserInterrupt {
-        /// Interrupt content (e.g. "stop", "cancel", or a new instruction).
-        content: String,
-    },
-    /// Deliver a mailbox message to the thread runtime.
-    ///
-    /// Production semantics: if a turn is currently running, the thread runtime actor
-    /// enqueues the mailbox message (FIFO) for a subsequent turn. Frontends typically
-    /// render this as "queued" work.
-    DeliverMailboxMessage(MailboxMessage),
-    /// Claim a queued job result by job ID so it is not replayed as a future turn.
-    ///
-    /// This is an internal runtime-actor query path used by `get_job_result(consume=true)`.
-    ClaimQueuedJobResult {
-        /// Job ID to remove from the runtime inbox.
-        job_id: String,
-        /// One-shot reply channel containing the removed queued result, if any.
-        reply_tx: oneshot::Sender<Option<MailboxMessage>>,
-    },
     /// Wake the runtime to inspect its mailbox state.
     MailboxUpdated,
     /// Request the runtime actor to stop and release its owned thread state.
@@ -251,154 +210,6 @@ pub struct QueuedUserMessage {
     pub msg_override: Option<MessageOverride>,
 }
 
-/// A control item that can be injected into a running turn as a user message.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub enum TurnControlInput {
-    /// User interrupt content.
-    UserInterrupt { content: String },
-    /// User follow-up content.
-    UserMessage {
-        /// Message content.
-        content: String,
-        /// Optional per-message overrides (temperature, max_tokens, etc.).
-        msg_override: Option<MessageOverride>,
-    },
-    /// Mailbox message.
-    MailboxMessage(MailboxMessage),
-}
-
-impl TurnControlInput {
-    /// Render the control item into the synthetic user message text that should
-    /// be appended before the next LLM call.
-    #[must_use]
-    pub fn into_message_text(self) -> String {
-        match self {
-            Self::UserInterrupt { content } => content,
-            Self::UserMessage { content, .. } => content,
-            Self::MailboxMessage(message) => message.into_message_text(),
-        }
-    }
-}
-
-/// Thread-level inbox shared between the orchestrator and active turns.
-#[derive(Debug, Default)]
-pub struct ThreadInbox {
-    items: VecDeque<ThreadInboxItem>,
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-enum ThreadInboxItem {
-    UserMessage(QueuedUserMessage),
-    MailboxMessage(MailboxMessage),
-}
-
-impl ThreadInbox {
-    /// Queue a user message.
-    pub fn enqueue_user_message(&mut self, content: String, msg_override: Option<MessageOverride>) {
-        self.items
-            .push_back(ThreadInboxItem::UserMessage(QueuedUserMessage {
-                content,
-                msg_override,
-            }));
-    }
-
-    /// Queue a mailbox message.
-    pub fn deliver_mailbox_message(&mut self, message: MailboxMessage) {
-        self.items
-            .push_back(ThreadInboxItem::MailboxMessage(message));
-    }
-
-    /// Remove a queued job result by job ID while preserving FIFO order for remaining items.
-    pub fn claim_job_result(&mut self, job_id: &str) -> Option<MailboxMessage> {
-        let index = self.items.iter().position(|item| match item {
-            ThreadInboxItem::MailboxMessage(message) => message.job_id() == Some(job_id),
-            ThreadInboxItem::UserMessage(_) => false,
-        })?;
-
-        match self.items.remove(index) {
-            Some(ThreadInboxItem::MailboxMessage(message)) => Some(message),
-            Some(ThreadInboxItem::UserMessage(_)) | None => None,
-        }
-    }
-
-    /// Drain items for a running turn.
-    ///
-    /// Ordering is global FIFO across queued user messages and job results.
-    #[must_use]
-    pub fn drain_for_turn(&mut self) -> Vec<TurnControlInput> {
-        let mut drained = Vec::new();
-
-        while let Some(item) = self.items.pop_front() {
-            match item {
-                ThreadInboxItem::UserMessage(message) => {
-                    drained.push(TurnControlInput::UserMessage {
-                        content: message.content,
-                        msg_override: message.msg_override,
-                    });
-                }
-                ThreadInboxItem::MailboxMessage(message) => {
-                    drained.push(TurnControlInput::MailboxMessage(message));
-                }
-            }
-        }
-
-        drained
-    }
-
-    /// Determine which queued work should start the next idle turn.
-    ///
-    /// Ordering is global FIFO across queued user messages and job results.
-    pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
-        match self.items.pop_front() {
-            Some(ThreadInboxItem::UserMessage(message)) => Some(message),
-            Some(ThreadInboxItem::MailboxMessage(message)) => {
-                Some(message.into_queued_user_message())
-            }
-            None => None,
-        }
-    }
-
-    /// Return the number of queued inbox items.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Returns true when no pending control items remain.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    /// Return unread mailbox messages that are still queued.
-    #[must_use]
-    pub fn unread_mailbox_messages(&self) -> Vec<MailboxMessage> {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                ThreadInboxItem::MailboxMessage(message) if !message.read => Some(message.clone()),
-                ThreadInboxItem::UserMessage(_) | ThreadInboxItem::MailboxMessage(_) => None,
-            })
-            .collect()
-    }
-
-    /// Mark a queued mailbox message as read by message ID.
-    pub fn mark_mailbox_message_read(&mut self, message_id: &str) -> bool {
-        for item in &mut self.items {
-            if let ThreadInboxItem::MailboxMessage(message) = item
-                && message.id == message_id
-            {
-                message.mark_read();
-                return true;
-            }
-        }
-
-        false
-    }
-}
-
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum ThreadMailboxItem {
@@ -407,14 +218,9 @@ enum ThreadMailboxItem {
 }
 
 /// Thread-level mailbox for queued user messages and mailbox messages.
-///
-/// Temporary compatibility helpers:
-/// `push(...)` and `drain_for_turn()` keep supporting the current runtime callers
-/// while the thread runtime migrates to the direct mailbox API.
 #[derive(Debug, Default)]
 pub struct ThreadMailbox {
     items: VecDeque<ThreadMailboxItem>,
-    legacy_interrupts: VecDeque<String>,
     stop_requested: bool,
 }
 
@@ -460,7 +266,6 @@ impl ThreadMailbox {
     /// Determine which queued work should start the next idle turn.
     #[must_use]
     pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
-        self.legacy_interrupts.clear();
         match self.items.pop_front() {
             Some(ThreadMailboxItem::UserMessage(message)) => Some(message),
             Some(ThreadMailboxItem::MailboxMessage(message)) => {
@@ -470,51 +275,16 @@ impl ThreadMailbox {
         }
     }
 
-    /// Drain control inputs for a running turn.
-    ///
-    /// Temporary compatibility helper for current runtime callers while the thread
-    /// loop is migrated to mailbox-only routing.
-    #[must_use]
-    pub fn drain_for_turn(&mut self) -> Vec<TurnControlInput> {
-        let mut drained = Vec::new();
-
-        while let Some(content) = self.legacy_interrupts.pop_front() {
-            drained.push(TurnControlInput::UserInterrupt { content });
-        }
-
-        while let Some(item) = self.items.pop_front() {
-            match item {
-                ThreadMailboxItem::UserMessage(message) => {
-                    drained.push(TurnControlInput::UserMessage {
-                        content: message.content,
-                        msg_override: message.msg_override,
-                    });
-                }
-                ThreadMailboxItem::MailboxMessage(message) => {
-                    drained.push(TurnControlInput::MailboxMessage(message));
-                }
-            }
-        }
-
-        drained
-    }
-
-    /// Clear pending stop requests without disturbing queued work.
-    pub fn clear_interrupts_for_idle_handoff(&mut self) {
-        self.legacy_interrupts.clear();
-        self.stop_requested = false;
-    }
-
     /// Return the number of pending mailbox items, including a pending stop request.
     #[must_use]
     pub fn pending_len(&self) -> usize {
-        self.items.len() + self.legacy_interrupts.len() + self.stop_requested as usize
+        self.items.len() + self.stop_requested as usize
     }
 
     /// Returns true when no pending control items remain.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        !self.stop_requested && self.legacy_interrupts.is_empty() && self.items.is_empty()
+        !self.stop_requested && self.items.is_empty()
     }
 
     /// Return unread mailbox messages that remain queued.
@@ -523,7 +293,9 @@ impl ThreadMailbox {
         self.items
             .iter()
             .filter_map(|item| match item {
-                ThreadMailboxItem::MailboxMessage(message) if !message.read => Some(message.clone()),
+                ThreadMailboxItem::MailboxMessage(message) if !message.read => {
+                    Some(message.clone())
+                }
                 ThreadMailboxItem::UserMessage(_) | ThreadMailboxItem::MailboxMessage(_) => None,
             })
             .collect()
@@ -541,27 +313,6 @@ impl ThreadMailbox {
         }
 
         false
-    }
-
-    /// Temporary compatibility helper for current runtime callers.
-    ///
-    /// Push a legacy control event into the mailbox.
-    pub fn push(&mut self, event: ThreadControlEvent) {
-        match event {
-            ThreadControlEvent::UserMessage {
-                content,
-                msg_override,
-            } => self.enqueue_user_message(content, msg_override),
-            ThreadControlEvent::UserInterrupt { content } => self.legacy_interrupts.push_back(content),
-            ThreadControlEvent::DeliverMailboxMessage(message) => {
-                self.enqueue_mailbox_message(message)
-            }
-            ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } => {
-                let _ = reply_tx.send(None);
-            }
-            ThreadControlEvent::MailboxUpdated => {}
-            ThreadControlEvent::ShutdownRuntime => {}
-        }
     }
 }
 
@@ -930,35 +681,8 @@ mod tests {
     }
 
     #[test]
-    fn thread_inbox_claim_job_result_mailbox_removes_only_matching_job() {
-        let mut inbox = ThreadInbox::default();
-        inbox.enqueue_user_message("first".to_string(), None);
-        inbox.deliver_mailbox_message(job_result_message("job-1"));
-        inbox.deliver_mailbox_message(job_result_message("job-2"));
-
-        let claimed = inbox.claim_job_result("job-1");
-        assert_eq!(
-            claimed.as_ref().and_then(MailboxMessage::job_id),
-            Some("job-1")
-        );
-
-        let remaining = inbox.drain_for_turn();
-        assert_eq!(remaining.len(), 2);
-        assert!(matches!(
-            &remaining[0],
-            TurnControlInput::UserMessage { content, .. } if content == "first"
-        ));
-        assert!(matches!(
-            &remaining[1],
-            TurnControlInput::MailboxMessage(message)
-                if message.job_id() == Some("job-2")
-        ));
-    }
-
-    #[test]
     fn mailbox_job_result_renders_as_synthetic_message_text() {
-        let rendered =
-            TurnControlInput::MailboxMessage(job_result_message("job-render")).into_message_text();
+        let rendered = job_result_message("job-render").into_message_text();
 
         assert!(rendered.contains("Job: job-render"));
         assert!(rendered.contains("Subagent: Worker"));
@@ -981,6 +705,47 @@ mod tests {
 
         assert_eq!(first.content, "first");
         assert!(second.content.contains("Job: job-1"));
+    }
+
+    #[test]
+    fn thread_mailbox_claim_job_result_preserves_remaining_fifo_order() {
+        let mut mailbox = ThreadMailbox::default();
+        mailbox.enqueue_user_message("first".to_string(), None);
+        mailbox.enqueue_mailbox_message(job_result_message("job-1"));
+        mailbox.enqueue_mailbox_message(job_result_message("job-2"));
+
+        let claimed = mailbox.claim_job_result("job-1");
+        assert_eq!(
+            claimed.as_ref().and_then(MailboxMessage::job_id),
+            Some("job-1")
+        );
+
+        let next = mailbox
+            .take_next_turn_message()
+            .expect("remaining user message should stay at the head of the queue");
+        let final_message = mailbox
+            .take_next_turn_message()
+            .expect("remaining job result should preserve FIFO order");
+
+        assert_eq!(next.content, "first");
+        assert!(final_message.content.contains("Job: job-2"));
+    }
+
+    #[test]
+    fn thread_mailbox_messages_remain_unread_until_marked_read() {
+        let mut mailbox = ThreadMailbox::default();
+        let message = job_result_message("job-unread");
+        mailbox.enqueue_mailbox_message(message.clone());
+
+        let unread = mailbox.unread_mailbox_messages();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].id, message.id);
+
+        assert!(mailbox.mark_mailbox_message_read(&message.id));
+        assert!(
+            mailbox.unread_mailbox_messages().is_empty(),
+            "queued mailbox messages should remain unread until mark_read is called"
+        );
     }
 
     #[test]

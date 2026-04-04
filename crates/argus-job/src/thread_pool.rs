@@ -580,11 +580,17 @@ impl ThreadPool {
             snapshot: self.collect_metrics(),
         });
 
-        thread
-            .read()
-            .await
-            .send_user_message(message, None)
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+        mailbox.lock().await.enqueue_user_message(message, None);
+        {
+            let guard = thread.read().await;
+            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+        }
+
+        Ok(())
     }
 
     /// Ensure a chat runtime is resident and ready for message delivery.
@@ -771,10 +777,13 @@ impl ThreadPool {
                         let cancellation_signal = cancellation.clone();
                         let cancellation_forwarder = tokio::spawn(async move {
                             cancellation_signal.cancelled().await;
+                            let mailbox = {
+                                let guard = cancellation_thread.read().await;
+                                guard.mailbox()
+                            };
+                            mailbox.lock().await.interrupt_stop();
                             let guard = cancellation_thread.read().await;
-                            let _ = guard.send_control_event(ThreadControlEvent::UserInterrupt {
-                                content: "cancel active job".to_string(),
-                            });
+                            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
                         });
 
                         let result = self

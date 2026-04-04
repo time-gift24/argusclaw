@@ -12,9 +12,9 @@ use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, MailboxMessage, MessageOverride, QueuedUserMessage,
-    SessionId, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox,
-    ThreadRuntimeState, TokenUsage,
+    AgentRecord, HookHandler, HookRegistry, MessageOverride, QueuedUserMessage, SessionId,
+    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadRuntimeState,
+    TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -348,15 +348,12 @@ impl Thread {
                 content,
                 msg_override,
             } => {
-                mailbox.push(ThreadControlEvent::UserMessage {
-                    content,
-                    msg_override,
-                });
+                mailbox.enqueue_user_message(content, msg_override);
                 self.queue_depth = mailbox.pending_len();
                 self.try_start_next_turn(mailbox)
             }
             ThreadCommand::EnqueueMailboxMessage(message) => {
-                mailbox.push(ThreadControlEvent::DeliverMailboxMessage(message));
+                mailbox.enqueue_mailbox_message(message);
                 self.queue_depth = mailbox.pending_len();
                 self.try_start_next_turn(mailbox)
             }
@@ -377,18 +374,6 @@ impl Thread {
         self.try_start_next_turn(mailbox)
     }
 
-    fn claim_queued_job_result(
-        &mut self,
-        mailbox: &mut ThreadMailbox,
-        job_id: &str,
-    ) -> Option<MailboxMessage> {
-        let claimed = mailbox.claim_job_result(job_id);
-        if claimed.is_some() {
-            self.queue_depth = mailbox.pending_len();
-        }
-        claimed
-    }
-
     fn inspect_runtime_mailbox(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
         if mailbox.take_stop_signal() {
             if matches!(
@@ -398,7 +383,6 @@ impl Thread {
                 return self.cancel_active_turn();
             }
 
-            mailbox.clear_interrupts_for_idle_handoff();
             self.queue_depth = mailbox.pending_len();
             return ThreadLoopAction::Noop;
         }
@@ -692,33 +676,6 @@ impl Thread {
                         && message.content == pending_message.content
                 })
     }
-    /// Send a user message into the pipe for processing.
-    ///
-    /// This is the entry point for external callers (CLI, Tauri).
-    /// The message is written to the pipe; Thread.run() picks it up.
-    pub fn send_user_message(
-        &self,
-        content: String,
-        msg_override: Option<MessageOverride>,
-    ) -> Result<(), ThreadError> {
-        let event = ThreadControlEvent::UserMessage {
-            content,
-            msg_override,
-        };
-        if self.control_tx.send(event).is_err() {
-            tracing::warn!("control send failed in send_user_message");
-        }
-        Ok(())
-    }
-
-    /// Send a low-volume control event into this thread.
-    pub fn send_control_event(&self, event: ThreadControlEvent) -> Result<(), ThreadError> {
-        if self.control_tx.send(event).is_err() {
-            tracing::warn!("control send failed in send_control_event");
-        }
-        Ok(())
-    }
-
     /// Spawn the thread-owned reactor loop that coordinates queued control events.
     pub fn spawn_reactor(thread: Arc<RwLock<Self>>) {
         tokio::spawn(async move {
@@ -747,47 +704,10 @@ impl Thread {
             tokio::select! {
                 Some(control_event) = control_rx.recv() => {
                     if shutdown_requested {
-                        if let ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } = control_event {
-                            let _ = reply_tx.send(None);
-                        }
                         continue;
                     }
 
                     let runtime_action = match control_event {
-                        ThreadControlEvent::UserMessage { content, msg_override } => {
-                            let mut mailbox = mailbox.lock().await;
-                            let mut guard = thread.write().await;
-                            guard.dispatch_runtime_command(
-                                ThreadCommand::EnqueueUserMessage {
-                                    content,
-                                    msg_override,
-                                },
-                                &mut mailbox,
-                            )
-                        }
-                        ThreadControlEvent::DeliverMailboxMessage(message) => {
-                            let mut mailbox = mailbox.lock().await;
-                            let mut guard = thread.write().await;
-                            guard.dispatch_runtime_command(
-                                ThreadCommand::EnqueueMailboxMessage(message),
-                                &mut mailbox,
-                            )
-                        }
-                        ThreadControlEvent::UserInterrupt { content } => {
-                            let _ = content;
-                            let mut mailbox = mailbox.lock().await;
-                            let mut guard = thread.write().await;
-                            guard.dispatch_runtime_command(ThreadCommand::CancelActiveTurn, &mut mailbox)
-                        }
-                        ThreadControlEvent::ClaimQueuedJobResult { job_id, reply_tx } => {
-                            let claimed = {
-                                let mut mailbox = mailbox.lock().await;
-                                let mut guard = thread.write().await;
-                                guard.claim_queued_job_result(&mut mailbox, &job_id)
-                            };
-                            let _ = reply_tx.send(claimed);
-                            ThreadLoopAction::Noop
-                        }
                         ThreadControlEvent::MailboxUpdated => {
                             let mut mailbox = mailbox.lock().await;
                             let mut guard = thread.write().await;
@@ -1056,15 +976,6 @@ impl Thread {
                     "failed to persist committed turn records"
                 );
             }
-        }
-
-        {
-            let mailbox = {
-                let guard = thread.read().await;
-                guard.mailbox()
-            };
-            let mut guard = mailbox.lock().await;
-            guard.clear_interrupts_for_idle_handoff();
         }
 
         if let Some(turn_number) = settled_turn_number {

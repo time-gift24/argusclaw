@@ -21,6 +21,18 @@ use argus_protocol::{AgentRecord, SessionId, ThreadEvent};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
+async fn enqueue_thread_message(thread: &Arc<RwLock<Thread>>, message: String) {
+    let mailbox = {
+        let guard = thread.read().await;
+        guard.mailbox()
+    };
+    mailbox.lock().await.enqueue_user_message(message, None);
+    let guard = thread.read().await;
+    let _ = guard
+        .control_tx()
+        .send(argus_protocol::ThreadControlEvent::MailboxUpdated);
+}
+
 /// Mock provider that returns a simple response
 struct SimpleMockProvider {
     response: String,
@@ -400,12 +412,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
 
     Thread::spawn_reactor(Arc::clone(&thread));
 
-    {
-        let guard = thread.read().await;
-        guard
-            .send_user_message("Hello".to_string(), None)
-            .expect("message should queue");
-    }
+    enqueue_thread_message(&thread, "Hello".to_string()).await;
 
     wait_for_turn_settled_event(rx).await;
 
@@ -484,21 +491,11 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
 
     Thread::spawn_reactor(Arc::clone(&thread));
 
-    {
-        let guard = thread.read().await;
-        guard
-            .send_user_message("first".to_string(), None)
-            .expect("first message should queue");
-    }
+    enqueue_thread_message(&thread, "first".to_string()).await;
 
     wait_for_provider_inputs(&provider, 1).await;
 
-    {
-        let guard = thread.read().await;
-        guard
-            .send_user_message("second".to_string(), None)
-            .expect("second message should queue");
-    }
+    enqueue_thread_message(&thread, "second".to_string()).await;
 
     let terminal_events = collect_terminal_events_until_final_idle(rx, 2).await;
     let filtered_events = terminal_events

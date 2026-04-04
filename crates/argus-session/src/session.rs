@@ -121,6 +121,12 @@ impl Session {
     }
 
     pub async fn interrupt_thread(&self, thread_id: &ThreadId) -> bool {
+        let Some(thread) = self.get_thread(thread_id) else {
+            return self.mailbox(thread_id).is_some();
+        };
+        if !thread.read().await.is_turn_running() {
+            return true;
+        }
         let Some(mailbox) = self.mailbox(thread_id) else {
             return false;
         };
@@ -155,9 +161,12 @@ impl Session {
                             let mailbox = Arc::clone(mailbox.value());
                             let thread = Arc::clone(&thread);
                             tokio::spawn(async move {
-                                mailbox.lock().await.interrupt_stop();
-                                let guard = thread.read().await;
-                                let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+                                if thread.read().await.is_turn_running() {
+                                    mailbox.lock().await.interrupt_stop();
+                                    let guard = thread.read().await;
+                                    let _ =
+                                        guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+                                }
                             });
                         }
                     }

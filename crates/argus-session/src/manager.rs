@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
+use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -561,11 +561,14 @@ impl SessionManager {
                     let Some(session_id) = summary.runtime.session_id else {
                         return false;
                     };
-                    let Some(session) = sessions.get(&session_id).map(|entry| entry.value().clone()) else {
+                    let Some(session) =
+                        sessions.get(&session_id).map(|entry| entry.value().clone())
+                    else {
                         return false;
                     };
                     thread_pool.register_chat_thread(session_id, thread_id);
-                    let Ok(thread) = thread_pool.ensure_chat_runtime(session_id, thread_id).await else {
+                    let Ok(thread) = thread_pool.ensure_chat_runtime(session_id, thread_id).await
+                    else {
                         return false;
                     };
                     session.add_thread(thread);
@@ -1085,7 +1088,8 @@ impl SessionManager {
     ) -> Result<()> {
         let session = self.load(session_id).await?;
         self.ensure_thread_in_session(session_id, thread_id).await?;
-        self.thread_pool.register_chat_thread(session_id, *thread_id);
+        self.thread_pool
+            .register_chat_thread(session_id, *thread_id);
         let thread = self
             .thread_pool
             .ensure_chat_runtime(session_id, *thread_id)
@@ -1349,7 +1353,7 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use super::{SessionManager, recover_messages_from_trace, recover_thread_state_from_trace};
+    use super::{recover_messages_from_trace, recover_thread_state_from_trace, SessionManager};
     use argus_agent::history::TurnRecord;
     use argus_agent::turn_log_store::append_turn_record;
     use argus_protocol::llm::ChatMessage;
@@ -1361,15 +1365,15 @@ mod tests {
         AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
         ThinkingConfig, ThreadId, TokenUsage,
     };
-    use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
+    use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
     use async_trait::async_trait;
     use futures_util::stream;
     use sqlx::SqlitePool;
     use tempfile::TempDir;
-    use tokio::time::{sleep, Duration, timeout};
+    use tokio::time::{sleep, timeout, Duration};
     use uuid::Uuid;
 
     #[derive(Debug)]
@@ -1606,7 +1610,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_thread_sets_stop_signal_without_queueing_new_turn_input() {
+    async fn cancel_thread_when_idle_is_a_noop() {
         let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
 
         manager
@@ -1621,8 +1625,8 @@ mod tests {
         let mut mailbox = mailbox.lock().await;
 
         assert!(
-            mailbox.take_stop_signal(),
-            "cancel_thread should set a pure stop signal on the thread mailbox"
+            !mailbox.take_stop_signal(),
+            "cancel_thread should be a no-op for an idle thread mailbox"
         );
         assert!(
             mailbox.take_next_turn_message().is_none(),
@@ -1838,6 +1842,53 @@ mod tests {
         assert_eq!(unread.len(), 1);
         assert_eq!(unread[0].id, message.id);
         assert_eq!(unread[0].text, message.text);
+    }
+
+    #[tokio::test]
+    async fn mark_read_removes_message_from_unread_listing_only_after_explicit_request() {
+        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+        let session = manager.load(session_id).await.expect("session should load");
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+        let message = MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: thread_id,
+            from_label: "sender".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: "mark me read".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: None,
+        };
+
+        assert!(
+            session
+                .enqueue_mailbox_message(&thread_id, message.clone())
+                .await,
+            "session should enqueue the mailbox message"
+        );
+        {
+            let unread = mailbox.lock().await.unread_mailbox_messages();
+            assert_eq!(unread.len(), 1);
+            assert_eq!(unread[0].id, message.id);
+        }
+
+        assert!(
+            manager
+                .thread_pool
+                .mark_mailbox_message_read(thread_id, &message.id)
+                .await
+                .expect("mark_mailbox_message_read should succeed"),
+            "queued mailbox message should be markable as read"
+        );
+
+        let unread = mailbox.lock().await.unread_mailbox_messages();
+        assert!(
+            unread.is_empty(),
+            "mailbox message should stay unread until mark_read is called"
+        );
     }
 
     #[tokio::test]
