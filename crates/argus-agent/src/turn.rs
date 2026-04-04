@@ -174,20 +174,14 @@ enum NextAction {
     /// Turn is complete, return the output.
     Return(TurnOutput),
     /// Continue with tool execution.
-    ContinueWithTools {
-        tool_calls: Vec<ToolCall>,
-        content: Option<String>,
-    },
+    ContinueWithTools { tool_calls: Vec<ToolCall> },
     /// Context length exceeded.
     LengthExceeded,
 }
 
 enum StreamingCallOutcome {
     Completed(CompletionResponse),
-    Failed {
-        partial_response: CompletionResponse,
-        error: argus_protocol::llm::LlmError,
-    },
+    Failed(argus_protocol::llm::LlmError),
 }
 
 /// Result of a tool execution.
@@ -716,13 +710,7 @@ impl Turn {
             );
             let response = match self.call_llm_streaming(request, progress_tx.clone()).await {
                 Ok(StreamingCallOutcome::Completed(response)) => response,
-                Ok(StreamingCallOutcome::Failed {
-                    partial_response,
-                    error,
-                }) => {
-                    let _ = partial_response;
-                    return Err(TurnError::LlmFailed(error));
-                }
+                Ok(StreamingCallOutcome::Failed(error)) => return Err(TurnError::LlmFailed(error)),
                 Err(error) => return Err(error),
             };
             tracing::debug!(
@@ -791,16 +779,12 @@ impl Turn {
 
                     return Ok(output);
                 }
-                NextAction::ContinueWithTools {
-                    tool_calls,
-                    content,
-                } => {
+                NextAction::ContinueWithTools { tool_calls } => {
                     tracing::debug!(
                         thread_id = %self.thread_id,
                         turn_number = %self.turn_number,
                         iteration = %iteration,
                         tool_count = %tool_calls.len(),
-                        content_preview = %content.as_ref().map(|c| c.chars().take(100).collect::<String>()).unwrap_or_default(),
                         "Tool calls detected, executing tools"
                     );
 
@@ -906,10 +890,7 @@ impl Turn {
                             let event = match event_result {
                                 Ok(event) => event,
                                 Err(error) => {
-                                    return Ok(StreamingCallOutcome::Failed {
-                                        partial_response: accumulator.into_response(),
-                                        error,
-                                    });
+                                    return Ok(StreamingCallOutcome::Failed(error));
                                 }
                             };
                             Self::emit_progress(
@@ -1020,10 +1001,7 @@ impl Turn {
                 );
                 pending_messages.push(assistant_msg);
 
-                Ok(NextAction::ContinueWithTools {
-                    tool_calls,
-                    content,
-                })
+                Ok(NextAction::ContinueWithTools { tool_calls })
             }
             FinishReason::Length => Ok(NextAction::LengthExceeded),
             FinishReason::ContentFilter | FinishReason::Unknown => {
@@ -1049,10 +1027,7 @@ impl Turn {
                     );
                     pending_messages.push(assistant_msg);
 
-                    Ok(NextAction::ContinueWithTools {
-                        tool_calls,
-                        content,
-                    })
+                    Ok(NextAction::ContinueWithTools { tool_calls })
                 } else if content.as_deref().is_some_and(|value| !value.is_empty())
                     || reasoning_content
                         .as_deref()

@@ -133,10 +133,6 @@ pub struct Thread {
     #[builder(default)]
     runtime_state: ThreadRuntimeState,
 
-    /// Number of queued items waiting to run.
-    #[builder(default)]
-    queue_depth: usize,
-
     /// Cancellation handle for the active turn, if any.
     #[builder(default)]
     active_turn_cancellation: Option<TurnCancellation>,
@@ -173,7 +169,6 @@ impl std::fmt::Debug for Thread {
             .field("token_count", &self.token_count())
             .field("turn_count", &self.turn_count())
             .field("runtime_state", &self.runtime_state)
-            .field("runtime_queue_depth", &self.queue_depth)
             .field("plan_items", &self.plan_store.store().read().unwrap().len())
             .field("config", &self.config)
             .finish()
@@ -221,7 +216,6 @@ impl ThreadBuilder {
             hooks,
             config: self.config.unwrap_or_default(),
             runtime_state: ThreadRuntimeState::Idle,
-            queue_depth: 0,
             active_turn_cancellation: None,
             pipe_tx,
             control_tx,
@@ -328,17 +322,8 @@ impl Thread {
         }
     }
 
-    pub(crate) fn active_turn_cancellation(&self) -> Option<TurnCancellation> {
-        self.active_turn_cancellation.clone()
-    }
-
-    pub(crate) fn set_active_turn_cancellation(&mut self, cancellation: Option<TurnCancellation>) {
-        self.active_turn_cancellation = cancellation;
-    }
-
     fn reset_runtime_loop_state(&mut self) {
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.queue_depth = 0;
         self.active_turn_cancellation = None;
     }
 
@@ -353,12 +338,10 @@ impl Thread {
                 msg_override,
             } => {
                 mailbox.enqueue_user_message(content, msg_override);
-                self.queue_depth = mailbox.pending_len();
                 self.try_start_next_turn(mailbox)
             }
             ThreadCommand::EnqueueMailboxMessage(message) => {
                 mailbox.enqueue_mailbox_message(message);
-                self.queue_depth = mailbox.pending_len();
                 self.try_start_next_turn(mailbox)
             }
             ThreadCommand::CancelActiveTurn => self.cancel_active_turn(),
@@ -371,7 +354,6 @@ impl Thread {
         mailbox: &mut ThreadMailbox,
     ) -> ThreadLoopAction {
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.queue_depth = mailbox.pending_len();
         self.try_start_next_turn(mailbox)
     }
 
@@ -384,16 +366,13 @@ impl Thread {
                 return self.cancel_active_turn();
             }
 
-            self.queue_depth = mailbox.pending_len();
             return ThreadLoopAction::Noop;
         }
 
         if matches!(self.runtime_state, ThreadRuntimeState::Idle) {
-            self.queue_depth = mailbox.pending_len();
             return self.try_start_next_turn(mailbox);
         }
 
-        self.queue_depth = mailbox.pending_len();
         ThreadLoopAction::Noop
     }
 
@@ -447,9 +426,7 @@ impl Thread {
     }
 
     fn take_next_turn_message(&mut self, mailbox: &mut ThreadMailbox) -> Option<QueuedUserMessage> {
-        let message = mailbox.take_next_turn_message();
-        self.queue_depth = mailbox.pending_len();
-        message
+        mailbox.take_next_turn_message()
     }
 
     /// Returns true when committed history contains visible transcript beyond system prompts.
@@ -534,7 +511,6 @@ impl Thread {
         self.current_turn = None;
         self.active_turn_cancellation = None;
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.queue_depth = 0;
         self.updated_at = updated_at;
     }
 
@@ -790,7 +766,13 @@ impl Thread {
                             let guard = thread.read().await;
                             guard.id().inner().to_string()
                         };
-                        let queue_depth = { thread.read().await.queue_depth };
+                        let queue_depth = {
+                            let mailbox = {
+                                let guard = thread.read().await;
+                                guard.mailbox()
+                            };
+                            mailbox.lock().await.pending_len()
+                        };
                         {
                             let guard = thread.read().await;
                             guard.broadcast_to_self(ThreadEvent::TurnFailed {
@@ -813,7 +795,7 @@ impl Thread {
                 ThreadLoopAction::StopTurn { turn_number } => {
                     let cancellation = {
                         let guard = thread.read().await;
-                        guard.active_turn_cancellation()
+                        guard.active_turn_cancellation.clone()
                     };
                     if let Some(cancellation) = cancellation {
                         tracing::info!(turn_number, "cancelling active turn");
@@ -937,7 +919,7 @@ impl Thread {
 
         let finish_result = {
             let mut guard = thread.write().await;
-            guard.set_active_turn_cancellation(None);
+            guard.active_turn_cancellation = None;
             guard.finish_turn(result)
         };
 
@@ -1059,13 +1041,13 @@ impl Thread {
             hooks: Arc::new(self.build_shared_turn_hooks()),
         });
         self.start_current_turn(turn_number, user_input);
-        self.set_active_turn_cancellation(Some(cancellation.clone()));
+        self.active_turn_cancellation = Some(cancellation.clone());
 
         match self.build_turn(turn_number, effective_record, cancellation, shared) {
             Ok(turn) => Ok(turn),
             Err(error) => {
                 self.current_turn = None;
-                self.set_active_turn_cancellation(None);
+                self.active_turn_cancellation = None;
                 Err(error)
             }
         }
@@ -1076,7 +1058,7 @@ impl Thread {
         &mut self,
         result: Result<TurnOutput, ThreadError>,
     ) -> Result<(), ThreadError> {
-        self.set_active_turn_cancellation(None);
+        self.active_turn_cancellation = None;
 
         match result {
             Ok(output) => {
@@ -1163,7 +1145,6 @@ impl Thread {
         self.turns = turns;
         self.current_turn = None;
         self.runtime_state = ThreadRuntimeState::Idle;
-        self.queue_depth = 0;
         self.active_turn_cancellation = None;
     }
 }
