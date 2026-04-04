@@ -12,8 +12,7 @@ use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::events::{
-    MailboxMessage, MailboxMessageType, ThreadControlEvent, ThreadEvent, ThreadInbox,
-    ThreadMailbox, TurnControlInput,
+    MailboxMessage, MailboxMessageType, ThreadEvent, ThreadInbox, ThreadMailbox, TurnControlInput,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
@@ -38,6 +37,27 @@ struct MockProvider {
 struct MockResponse {
     content: String,
     tool_calls: Vec<ToolCall>,
+}
+
+fn sample_mailbox_message(job_id: &str) -> MailboxMessage {
+    MailboxMessage {
+        id: format!("msg-{job_id}"),
+        from_thread_id: ThreadId::new(),
+        to_thread_id: ThreadId::new(),
+        from_label: "Worker".to_string(),
+        message_type: MailboxMessageType::JobResult {
+            job_id: job_id.to_string(),
+            success: true,
+            token_usage: None,
+            agent_id: AgentId::new(42),
+            agent_display_name: "Worker".to_string(),
+            agent_description: "Background worker".to_string(),
+        },
+        text: format!("result for {job_id}"),
+        timestamp: "2026-04-01T00:00:00Z".to_string(),
+        read: false,
+        summary: Some(format!("summary {job_id}")),
+    }
 }
 
 impl MockProvider {
@@ -768,32 +788,12 @@ fn thread_inbox_drains_items_in_global_fifo_order() {
 fn thread_mailbox_preserves_fifo_user_messages() {
     let mut mailbox = ThreadMailbox::default();
 
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "first user message".to_string(),
-        msg_override: None,
-    });
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "second user message".to_string(),
-        msg_override: Some(MessageOverride::default()),
-    });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-        id: "msg-job-3".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Verifier".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-3".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(9),
-            agent_display_name: "Verifier".to_string(),
-            agent_description: "Validates state transitions".to_string(),
-        },
-        text: "job result".to_string(),
-        timestamp: "2026-04-01T00:00:02Z".to_string(),
-        read: false,
-        summary: None,
-    }));
+    mailbox.enqueue_user_message("first user message".to_string(), None);
+    mailbox.enqueue_user_message(
+        "second user message".to_string(),
+        Some(MessageOverride::default()),
+    );
+    mailbox.enqueue_mailbox_message(sample_mailbox_message("job-3"));
 
     let drained = mailbox.drain_for_turn();
     let rendered = drained
@@ -808,105 +808,30 @@ fn thread_mailbox_preserves_fifo_user_messages() {
 }
 
 #[test]
-fn thread_mailbox_take_next_turn_message_clears_interrupts_and_preserves_fifo_and_override() {
+fn thread_mailbox_take_next_turn_message_preserves_global_fifo() {
     let mut mailbox = ThreadMailbox::default();
-
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "interrupt-before-idle".to_string(),
-    });
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "first-user".to_string(),
-        msg_override: Some(MessageOverride::default()),
-    });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-        id: "msg-job-handoff-mailbox".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "MailboxHandoff".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-handoff-mailbox".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(12),
-            agent_display_name: "MailboxHandoff".to_string(),
-            agent_description: "Covers legacy idle handoff".to_string(),
-        },
-        text: "job-second".to_string(),
-        timestamp: "2026-04-01T00:00:03Z".to_string(),
-        read: false,
-        summary: None,
-    }));
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "interrupt-after-work".to_string(),
-    });
+    mailbox.enqueue_user_message("first".to_string(), None);
+    mailbox.enqueue_mailbox_message(sample_mailbox_message("job-1"));
 
     let first = mailbox
         .take_next_turn_message()
-        .expect("first handoff item should exist");
+        .expect("first queued message should exist");
     let second = mailbox
         .take_next_turn_message()
-        .expect("second handoff item should exist");
+        .expect("second queued message should exist");
 
-    assert_eq!(first.content, "first-user");
-    assert!(
-        first.msg_override.is_some(),
-        "compatibility path should preserve msg_override",
-    );
-    assert!(
-        second.content.contains("Job: job-handoff-mailbox"),
-        "queued work should preserve FIFO order for idle handoff",
-    );
-    assert!(
-        second.msg_override.is_none(),
-        "job handoff should not carry user msg_override",
-    );
-    assert!(mailbox.take_next_turn_message().is_none());
-    assert!(
-        mailbox.drain_for_turn().is_empty(),
-        "interrupts should be cleared when idling into handoff",
-    );
+    assert_eq!(first.content, "first");
+    assert!(second.content.contains("Job: job-1"));
 }
 
 #[test]
-fn thread_mailbox_legacy_interrupts_are_drained_before_inbox_items() {
+fn thread_mailbox_interrupt_stop_is_not_enqueued() {
     let mut mailbox = ThreadMailbox::default();
+    mailbox.interrupt_stop();
 
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "follow-up".to_string(),
-        msg_override: None,
-    });
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "interrupt now".to_string(),
-    });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-        id: "msg-job-legacy".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Legacy".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-legacy".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(10),
-            agent_display_name: "Legacy".to_string(),
-            agent_description: "Legacy caller path".to_string(),
-        },
-        text: "legacy job".to_string(),
-        timestamp: "2026-04-01T00:00:04Z".to_string(),
-        read: false,
-        summary: None,
-    }));
-
-    let drained = mailbox
-        .drain_for_turn()
-        .into_iter()
-        .map(TurnControlInput::into_message_text)
-        .collect::<Vec<_>>();
-
-    assert_eq!(drained.len(), 3);
-    assert_eq!(drained[0], "interrupt now");
-    assert_eq!(drained[1], "follow-up");
-    assert!(drained[2].contains("Job: job-legacy"));
+    assert!(mailbox.take_next_turn_message().is_none());
+    assert!(mailbox.take_stop_signal());
+    assert!(!mailbox.take_stop_signal());
 }
 
 #[test]
