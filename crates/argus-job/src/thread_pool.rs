@@ -646,7 +646,6 @@ impl ThreadPool {
         request: ThreadPoolJobRequest,
         execution_thread_id: ThreadId,
         pipe_tx: broadcast::Sender<ThreadEvent>,
-        _control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
         cancellation: TurnCancellation,
     ) -> ThreadJobResult {
         let fallback_job_id = request.job_id.clone();

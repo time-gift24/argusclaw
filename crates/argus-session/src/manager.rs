@@ -361,7 +361,6 @@ impl SchedulerBackend for SessionSchedulerBackend {
                 request.prompt,
                 request.context,
                 request.pipe_tx,
-                request.control_tx,
             )
             .await
             .map_err(|error| ToolError::ExecutionFailed {

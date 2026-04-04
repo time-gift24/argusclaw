@@ -16,14 +16,14 @@ use argus_agent::TurnOutput;
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
-    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadControlEvent, ThreadEvent,
-    ThreadId, ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadEvent, ThreadId,
+    ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
     ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::error::JobError;
@@ -288,7 +288,6 @@ impl JobManager {
         prompt: String,
         context: Option<serde_json::Value>,
         pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> Result<(), JobError> {
         if prompt.trim().is_empty() {
             return Err(JobError::ExecutionFailed(
@@ -341,7 +340,6 @@ impl JobManager {
                     request,
                     execution_thread_id,
                     pipe_tx_clone.clone(),
-                    control_tx.clone(),
                     spawn_cancellation,
                 )
                 .await;
@@ -906,7 +904,6 @@ mod tests {
         let manager = test_job_manager();
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, _pipe_rx) = broadcast::channel(16);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let job_id = "job-bound".to_string();
 
         manager
@@ -917,7 +914,6 @@ mod tests {
                 "run this".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("job should enqueue even if execution later fails");
@@ -945,7 +941,6 @@ mod tests {
         let manager = test_job_manager();
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let job_id = "alpha-job-event-flow".to_string();
 
         manager
@@ -956,7 +951,6 @@ mod tests {
                 "run alpha event flow".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("job should enqueue even if execution later fails");
@@ -1023,7 +1017,6 @@ mod tests {
         let manager = test_persistent_job_manager_without_default_provider().await;
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, _pipe_rx) = broadcast::channel(16);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let job_id = "job-enqueue-failure".to_string();
 
         let dispatch_result = manager
@@ -1034,7 +1027,6 @@ mod tests {
                 "run this".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await;
 
@@ -1100,7 +1092,6 @@ mod tests {
         let originating_thread_id = ThreadId::new();
         let job_id = "job-stop-end-to-end".to_string();
         let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         manager
             .dispatch_job(
@@ -1110,7 +1101,6 @@ mod tests {
                 "please take your time".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("dispatch should succeed");

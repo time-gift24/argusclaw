@@ -846,7 +846,9 @@ fn thread_mailbox_legacy_interrupts_drain_before_inbox_items() {
     mailbox.push(ThreadControlEvent::UserInterrupt {
         content: "interrupt now".to_string(),
     });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(sample_mailbox_message("job-legacy")));
+    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(
+        sample_mailbox_message("job-legacy"),
+    ));
 
     let drained = mailbox
         .drain_for_turn()
@@ -861,7 +863,8 @@ fn thread_mailbox_legacy_interrupts_drain_before_inbox_items() {
 }
 
 #[test]
-fn thread_mailbox_idle_handoff_clears_legacy_interrupts_without_turning_them_into_next_turn_input() {
+fn thread_mailbox_idle_handoff_clears_legacy_interrupts_without_turning_them_into_next_turn_input()
+{
     let mut mailbox = ThreadMailbox::default();
 
     mailbox.push(ThreadControlEvent::UserInterrupt {
@@ -871,9 +874,9 @@ fn thread_mailbox_idle_handoff_clears_legacy_interrupts_without_turning_them_int
         content: "first-user".to_string(),
         msg_override: Some(MessageOverride::default()),
     });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(sample_mailbox_message(
-        "job-handoff-mailbox",
-    )));
+    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(
+        sample_mailbox_message("job-handoff-mailbox"),
+    ));
     mailbox.push(ThreadControlEvent::UserInterrupt {
         content: "interrupt-after-work".to_string(),
     });
@@ -971,7 +974,6 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
 
     let (stream_tx, _) = broadcast::channel(32);
     let (thread_event_tx, _) = broadcast::channel(32);
-    let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let turn = TurnBuilder::default()
         .turn_number(1)
@@ -985,8 +987,6 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
         .config(TurnConfig::default())
         .stream_tx(stream_tx)
         .thread_event_tx(thread_event_tx)
-        .control_tx(control_tx)
-        .mailbox(Arc::new(tokio::sync::Mutex::new(ThreadMailbox::default())))
         .build()
         .unwrap();
 

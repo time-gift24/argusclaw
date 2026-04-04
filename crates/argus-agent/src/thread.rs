@@ -1228,9 +1228,7 @@ impl Thread {
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
-            .thread_event_tx(self.pipe_tx.clone())
-            .control_tx(self.control_tx.clone())
-            .mailbox(Arc::clone(&self.mailbox));
+            .thread_event_tx(self.pipe_tx.clone());
 
         turn_builder
             .cancellation(cancellation)

@@ -90,12 +90,10 @@ mod tests {
 
     fn make_ctx() -> Arc<argus_protocol::ToolExecutionContext> {
         let (pipe_tx, _) = broadcast::channel(16);
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(argus_protocol::ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx,
-            control_tx,
         })
     }
 

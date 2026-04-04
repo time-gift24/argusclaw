@@ -4,7 +4,7 @@ use std::sync::Arc;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::ids::ThreadId;
 use argus_tool::{ChromeTool, ToolManager};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 fn chrome_binary_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -63,12 +63,10 @@ fn local_chrome_binary() -> Option<PathBuf> {
 
 fn make_ctx() -> Arc<ToolExecutionContext> {
     let (pipe_tx, _) = broadcast::channel(16);
-    let (control_tx, _control_rx) = mpsc::unbounded_channel();
     Arc::new(ToolExecutionContext {
         thread_id: ThreadId::new(),
         agent_id: None,
         pipe_tx,
-        control_tx,
     })
 }
 

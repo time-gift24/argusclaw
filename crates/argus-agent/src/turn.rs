@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use futures_util::{StreamExt, future::join_all};
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
@@ -21,8 +21,8 @@ use argus_protocol::llm::{
 };
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookAction, HookEvent, HookHandler, ThreadEvent, ThreadMailbox, TokenUsage,
-    ToolExecutionContext, ToolHookContext, ids::ThreadId, sanitize_tool_output,
+    AgentRecord, HookAction, HookEvent, HookHandler, ThreadEvent, TokenUsage, ToolExecutionContext,
+    ToolHookContext, ids::ThreadId, sanitize_tool_output,
 };
 
 /// Progress emitted while a turn is executing.
@@ -171,15 +171,6 @@ impl Default for TurnCancellation {
 /// Turn identifier generator (simple counter for now).
 fn generate_turn_id(thread_id: &str, turn_number: u32) -> String {
     format!("{}-turn-{}", thread_id, turn_number)
-}
-
-fn dummy_control_tx() -> mpsc::UnboundedSender<argus_protocol::ThreadControlEvent> {
-    let (tx, _rx) = mpsc::unbounded_channel();
-    tx
-}
-
-fn default_mailbox() -> Arc<Mutex<ThreadMailbox>> {
-    Arc::new(Mutex::new(ThreadMailbox::default()))
 }
 
 /// Result of processing an LLM response's finish_reason.
@@ -411,18 +402,6 @@ pub struct Turn {
 
     /// Thread event sender for broadcasting to subscribers.
     thread_event_tx: broadcast::Sender<ThreadEvent>,
-
-    /// Control sender used by nested tool executions.
-    #[builder(default = "dummy_control_tx()")]
-    control_tx: mpsc::UnboundedSender<argus_protocol::ThreadControlEvent>,
-
-    /// Shared thread mailbox consulted before each loop iteration.
-    ///
-    /// Note: this mailbox is a legacy compatibility path for in-turn injected control
-    /// inputs (e.g. interrupts). The primary production queue model for user messages
-    /// and job results is the thread runtime actor's FIFO inbox.
-    #[builder(default = "default_mailbox()")]
-    mailbox: Arc<Mutex<ThreadMailbox>>,
 
     /// Cancellation primitive used to stop this turn.
     #[builder(default)]
@@ -726,17 +705,6 @@ impl Turn {
         for iteration in 0..max_iterations {
             if self.cancellation.is_cancelled() {
                 return Err(TurnError::Cancelled);
-            }
-
-            let pending_inputs = {
-                let mut mailbox = self.mailbox.lock().await;
-                mailbox.drain_for_turn()
-            };
-
-            for input in pending_inputs {
-                let content = input.into_message_text();
-                tracing::debug!("injecting control input into turn: {}", content);
-                pending_messages.push(ChatMessage::user(&content));
             }
 
             let available_tools = self.shared.resolved_tools();
@@ -1269,7 +1237,6 @@ impl Turn {
                         thread_id: self.originating_thread_id,
                         agent_id: Some(self.agent_record.id),
                         pipe_tx: self.thread_event_tx.clone(),
-                        control_tx: self.control_tx.clone(),
                     });
                     tool.execute(tool_input.clone(), ctx).await
                 } else {

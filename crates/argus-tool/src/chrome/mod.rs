@@ -39,16 +39,12 @@ mod tests {
     use argus_protocol::ids::ThreadId;
     use argus_protocol::tool::ToolError;
     use tokio::sync::broadcast;
-    use tokio::sync::mpsc;
-
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (pipe_tx, _) = broadcast::channel(16);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx,
-            control_tx,
         })
     }
 

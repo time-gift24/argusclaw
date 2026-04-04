@@ -214,12 +214,10 @@ mod tests {
 
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (tx, _) = broadcast::channel(16);
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx: tx,
-            control_tx,
         })
     }
 
