@@ -5,7 +5,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::TurnCancellation;
@@ -69,7 +71,12 @@ pub enum JobLookup {
 pub struct JobManager {
     thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<TrackedJobsStore>>,
+    chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
 }
+
+type ChatMailboxForwarderFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+type ChatMailboxForwarder =
+    dyn Fn(ThreadId, MailboxMessage) -> ChatMailboxForwarderFuture + Send + Sync;
 
 impl fmt::Debug for JobManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -117,6 +124,7 @@ impl JobManager {
         Self {
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(TrackedJobsStore::default())),
+            chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -152,6 +160,23 @@ impl JobManager {
     /// Return the shared unified thread pool.
     pub fn thread_pool(&self) -> Arc<ThreadPool> {
         Arc::clone(&self.thread_pool)
+    }
+
+    pub fn set_chat_mailbox_forwarder<F, Fut>(&self, forwarder: F)
+    where
+        F: Fn(ThreadId, MailboxMessage) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = bool> + Send + 'static,
+    {
+        let forwarder = Arc::new(
+            move |thread_id: ThreadId, message: MailboxMessage| -> ChatMailboxForwarderFuture {
+                Box::pin(forwarder(thread_id, message))
+            },
+        ) as Arc<ChatMailboxForwarder>;
+        let mut slot = self
+            .chat_mailbox_forwarder
+            .lock()
+            .expect("chat mailbox forwarder mutex poisoned");
+        *slot = Some(forwarder);
     }
 
     /// Collect a point-in-time thread-pool snapshot.
@@ -307,6 +332,7 @@ impl JobManager {
 
         let thread_pool = Arc::clone(&self.thread_pool);
         let tracked_jobs = Arc::clone(&self.tracked_jobs);
+        let chat_mailbox_forwarder = Arc::clone(&self.chat_mailbox_forwarder);
         let pipe_tx_clone = pipe_tx.clone();
 
         tokio::spawn(async move {
@@ -322,6 +348,7 @@ impl JobManager {
 
             Self::forward_job_result_to_runtime(
                 &thread_pool,
+                &chat_mailbox_forwarder,
                 originating_thread_id,
                 execution_thread_id,
                 result.clone(),
@@ -452,6 +479,7 @@ impl JobManager {
 
     async fn forward_job_result_to_runtime(
         thread_pool: &ThreadPool,
+        chat_mailbox_forwarder: &Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
         originating_thread_id: ThreadId,
         execution_thread_id: ThreadId,
         result: ThreadJobResult,
@@ -474,9 +502,19 @@ impl JobManager {
             read: false,
             summary: None,
         };
-        let _ = thread_pool
-            .deliver_mailbox_message(originating_thread_id, mailbox_message)
-            .await;
+        let forwarder = chat_mailbox_forwarder
+            .lock()
+            .expect("chat mailbox forwarder mutex poisoned")
+            .clone();
+        let forwarded = match forwarder {
+            Some(forwarder) => forwarder(originating_thread_id, mailbox_message.clone()).await,
+            None => false,
+        };
+        if !forwarded {
+            let _ = thread_pool
+                .deliver_mailbox_message(originating_thread_id, mailbox_message)
+                .await;
+        }
     }
 
     pub fn is_job_pending(&self, job_id: &str) -> bool {

@@ -80,6 +80,7 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
 struct SessionSchedulerBackend {
     template_manager: Arc<TemplateManager>,
     job_manager: Arc<JobManager>,
+    sessions: Arc<DashMap<SessionId, Arc<Session>>>,
 }
 
 impl std::fmt::Debug for SessionSchedulerBackend {
@@ -89,10 +90,15 @@ impl std::fmt::Debug for SessionSchedulerBackend {
 }
 
 impl SessionSchedulerBackend {
-    fn new(template_manager: Arc<TemplateManager>, job_manager: Arc<JobManager>) -> Self {
+    fn new(
+        template_manager: Arc<TemplateManager>,
+        job_manager: Arc<JobManager>,
+        sessions: Arc<DashMap<SessionId, Arc<Session>>>,
+    ) -> Self {
         Self {
             template_manager,
             job_manager,
+            sessions,
         }
     }
 
@@ -141,12 +147,20 @@ impl SessionSchedulerBackend {
             return Ok(());
         };
 
-        let mailbox = {
+        let session_id = {
             let guard = thread.read().await;
-            guard.mailbox()
+            guard.session_id()
+        };
+        let Some(session) = self
+            .sessions
+            .get(&session_id)
+            .map(|session| session.value().clone())
+        else {
+            tracing::warn!(job_id, thread_id = %thread_id, session_id = %session_id, "failed to claim queued job result: session not loaded");
+            return Ok(());
         };
 
-        let _ = mailbox.lock().await.claim_job_result(job_id);
+        let _ = session.claim_job_result(&thread_id, job_id).await;
 
         Ok(())
     }
@@ -425,10 +439,44 @@ impl SchedulerBackend for SessionSchedulerBackend {
                 summary: request.summary.clone(),
             };
 
-            thread_pool
-                .deliver_mailbox_message(*target, message)
-                .await
-                .map_err(|error| Self::scheduler_error(error.to_string()))?;
+            match thread_pool.runtime_summary(target) {
+                Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
+                    let session_id = summary.runtime.session_id.ok_or_else(|| {
+                        Self::scheduler_error(format!(
+                            "chat thread {} is missing a session binding",
+                            target
+                        ))
+                    })?;
+                    let session = self
+                        .sessions
+                        .get(&session_id)
+                        .map(|entry| entry.value().clone())
+                        .ok_or_else(|| {
+                            Self::scheduler_error(format!(
+                                "session {} is not loaded for thread {}",
+                                session_id, target
+                            ))
+                        })?;
+                    thread_pool.register_chat_thread(session_id, *target);
+                    let thread = thread_pool
+                        .ensure_chat_runtime(session_id, *target)
+                        .await
+                        .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                    session.add_thread(thread);
+                    if !session.enqueue_mailbox_message(target, message).await {
+                        return Err(Self::scheduler_error(format!(
+                            "thread {} is not registered in loaded session {}",
+                            target, session_id
+                        )));
+                    }
+                }
+                _ => {
+                    thread_pool
+                        .deliver_mailbox_message(*target, message)
+                        .await
+                        .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                }
+            }
         }
 
         Ok(SendMessageResponse {
@@ -470,7 +518,7 @@ pub struct SessionManager {
     session_repo: Arc<dyn SessionRepository>,
     thread_repo: Arc<dyn ThreadRepository>,
     llm_provider_repo: Arc<dyn LlmProviderRepository>,
-    sessions: DashMap<SessionId, Arc<Session>>,
+    sessions: Arc<DashMap<SessionId, Arc<Session>>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     trace_dir: PathBuf,
@@ -491,17 +539,47 @@ impl SessionManager {
         thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
     ) -> Self {
+        let sessions = Arc::new(DashMap::new());
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             template_manager.clone(),
             job_manager.clone(),
+            Arc::clone(&sessions),
         ));
         tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
+        {
+            let sessions = Arc::clone(&sessions);
+            let thread_pool = Arc::clone(&thread_pool);
+            job_manager.set_chat_mailbox_forwarder(move |thread_id, message| {
+                let sessions = Arc::clone(&sessions);
+                let thread_pool = Arc::clone(&thread_pool);
+                async move {
+                    let Some(summary) = thread_pool.runtime_summary(&thread_id) else {
+                        return false;
+                    };
+                    if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
+                        return false;
+                    }
+                    let Some(session_id) = summary.runtime.session_id else {
+                        return false;
+                    };
+                    let Some(session) = sessions.get(&session_id).map(|entry| entry.value().clone()) else {
+                        return false;
+                    };
+                    thread_pool.register_chat_thread(session_id, thread_id);
+                    let Ok(thread) = thread_pool.ensure_chat_runtime(session_id, thread_id).await else {
+                        return false;
+                    };
+                    session.add_thread(thread);
+                    session.enqueue_mailbox_message(&thread_id, message).await
+                }
+            });
+        }
 
         Self {
             session_repo,
             thread_repo,
             llm_provider_repo,
-            sessions: DashMap::new(),
+            sessions,
             template_manager,
             provider_resolver,
             trace_dir,
@@ -601,7 +679,11 @@ impl SessionManager {
 
     /// Unload a session from memory.
     pub async fn unload(&self, session_id: SessionId) -> Result<()> {
-        self.sessions.remove(&session_id);
+        if let Some((_, session)) = self.sessions.remove(&session_id) {
+            for thread_id in session.thread_ids() {
+                self.thread_pool.remove_runtime(&thread_id);
+            }
+        }
         Ok(())
     }
 
@@ -1004,6 +1086,15 @@ impl SessionManager {
     ) -> Result<()> {
         let session = self.load(session_id).await?;
         self.ensure_thread_in_session(session_id, thread_id).await?;
+        self.thread_pool.register_chat_thread(session_id, *thread_id);
+        let thread = self
+            .thread_pool
+            .ensure_chat_runtime(session_id, *thread_id)
+            .await
+            .map_err(|error| ArgusError::LlmError {
+                reason: error.to_string(),
+            })?;
+        session.add_thread(thread);
         if session.enqueue_user_message(thread_id, message, None).await {
             Ok(())
         } else {
@@ -1264,7 +1355,8 @@ mod tests {
     use argus_agent::turn_log_store::append_turn_record;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
-        CompletionRequest, CompletionResponse, LlmError, LlmProvider, LlmProviderRepository,
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+        LlmProviderRepository,
     };
     use argus_protocol::{
         AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
@@ -1275,9 +1367,10 @@ mod tests {
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
+    use futures_util::stream;
     use sqlx::SqlitePool;
     use tempfile::TempDir;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{sleep, Duration, timeout};
     use uuid::Uuid;
 
     #[derive(Debug)]
@@ -1309,10 +1402,88 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: self.model_name.clone(),
+                capability: "stream_complete".to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct DelayedProvider {
+        model_name: String,
+        response: String,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DelayedProvider {
+        fn model_name(&self) -> &str {
+            &self.model_name
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            sleep(self.delay).await;
+            Ok(CompletionResponse {
+                content: Some(self.response.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
             Err(LlmError::RequestFailed {
                 provider: self.model_name.clone(),
                 reason: "not used in routing tests".to_string(),
             })
+        }
+    }
+
+    #[derive(Debug)]
+    struct HangingStreamingProvider {
+        model_name: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for HangingStreamingProvider {
+        fn model_name(&self) -> &str {
+            &self.model_name
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: self.model_name.clone(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            Ok(Box::pin(stream::pending()))
         }
     }
 
@@ -1351,7 +1522,9 @@ mod tests {
         }
     }
 
-    async fn test_session_manager() -> (SessionManager, TempDir, SessionId, ThreadId) {
+    async fn test_session_manager_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (SessionManager, TempDir, SessionId, ThreadId) {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
@@ -1383,9 +1556,6 @@ mod tests {
             .await
             .expect("agent upsert should succeed");
 
-        let provider = Arc::new(FixedProvider {
-            model_name: "routing-test".to_string(),
-        });
         let provider_resolver = Arc::new(FixedProviderResolver::new(provider));
         let tool_manager = Arc::new(argus_tool::ToolManager::new());
         let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
@@ -1421,6 +1591,13 @@ mod tests {
         (session_manager, temp_dir, session_id, thread_id)
     }
 
+    async fn test_session_manager() -> (SessionManager, TempDir, SessionId, ThreadId) {
+        test_session_manager_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await
+    }
+
     fn usage(total_tokens: u32) -> TokenUsage {
         TokenUsage {
             input_tokens: total_tokens.saturating_sub(1),
@@ -1442,9 +1619,7 @@ mod tests {
         let mailbox = session
             .mailbox(&thread_id)
             .expect("session should own the thread mailbox");
-        let mut mailbox = timeout(Duration::from_secs(1), mailbox.lock())
-            .await
-            .expect("mailbox lock should complete");
+        let mut mailbox = mailbox.lock().await;
 
         assert!(
             mailbox.take_stop_signal(),
@@ -1457,9 +1632,186 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_mailbox_message_uses_session_owned_mailbox() {
-        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+    async fn send_message_wakes_existing_runtime_loop() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(DelayedProvider {
+                model_name: "routing-delay".to_string(),
+                response: "bridge".to_string(),
+                delay: Duration::from_millis(200),
+            }))
+            .await;
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should succeed");
+
         let session = manager.load(session_id).await.expect("session should load");
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if mailbox.lock().await.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should wake and consume the queued turn input");
+
+        let mut mailbox = mailbox.lock().await;
+        assert!(
+            mailbox.take_next_turn_message().is_none(),
+            "runtime should consume the queued user message after waking"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_rehydrates_evicted_chat_runtime_before_enqueueing() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(DelayedProvider {
+                model_name: "routing-delay".to_string(),
+                response: "bridge".to_string(),
+                delay: Duration::from_millis(200),
+            }))
+            .await;
+
+        let session = manager.load(session_id).await.expect("session should load");
+        assert!(
+            manager.thread_pool.remove_runtime(&thread_id),
+            "chat runtime should be removable for rehydrate coverage"
+        );
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should reload the evicted runtime");
+
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should refresh the thread mailbox after reload");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if mailbox.lock().await.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("reloaded runtime should consume the queued user message");
+
+        assert!(
+            session.get_thread(&thread_id).is_some(),
+            "session should refresh its thread handle after runtime reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn unload_evicts_loaded_chat_runtimes() {
+        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+
+        assert!(
+            manager.thread_pool.loaded_chat_thread(&thread_id).is_some(),
+            "test setup should leave the chat runtime loaded"
+        );
+
+        manager
+            .unload(session_id)
+            .await
+            .expect("session unload should succeed");
+
+        assert!(
+            manager.thread_pool.loaded_chat_thread(&thread_id).is_none(),
+            "unload should evict loaded chat runtimes alongside the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_thread_wakes_running_turn_and_reaches_idle() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(HangingStreamingProvider {
+                model_name: "routing-hanging".to_string(),
+            }))
+            .await;
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should succeed");
+
+        let session = manager.load(session_id).await.expect("session should load");
+        let thread = session
+            .get_thread(&thread_id)
+            .expect("thread should be present in session");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start a turn before cancellation");
+
+        manager
+            .cancel_thread(session_id, &thread_id)
+            .await
+            .expect("cancel should succeed");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should return to idle after cancellation");
+
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+        let mut mailbox = mailbox.lock().await;
+        assert!(
+            mailbox.take_next_turn_message().is_none(),
+            "cancellation should not queue a new turn input"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_mailbox_message_uses_session_owned_mailbox() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(HangingStreamingProvider {
+                model_name: "routing-hanging".to_string(),
+            }))
+            .await;
+        let session = manager.load(session_id).await.expect("session should load");
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should succeed");
+
+        let thread = session
+            .get_thread(&thread_id)
+            .expect("thread should be present in session");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start before mailbox delivery");
 
         let message = MailboxMessage {
             id: Uuid::new_v4().to_string(),

@@ -2,7 +2,8 @@ use std::sync::{Arc, Weak};
 
 use argus_agent::Thread;
 use argus_protocol::{
-    MailboxMessage, MessageOverride, SessionId, ThreadEvent, ThreadId, ThreadMailbox,
+    MailboxMessage, MessageOverride, SessionId, ThreadControlEvent, ThreadEvent, ThreadId,
+    ThreadMailbox,
 };
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -82,6 +83,13 @@ impl Session {
             .map(|entry| Arc::clone(entry.value()))
     }
 
+    async fn wake_runtime(&self, thread_id: &ThreadId) {
+        if let Some(thread) = self.get_thread(thread_id) {
+            let guard = thread.read().await;
+            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+        }
+    }
+
     pub async fn enqueue_user_message(
         &self,
         thread_id: &ThreadId,
@@ -95,6 +103,7 @@ impl Session {
             .lock()
             .await
             .enqueue_user_message(content, msg_override);
+        self.wake_runtime(thread_id).await;
         true
     }
 
@@ -107,6 +116,7 @@ impl Session {
             return false;
         };
         mailbox.lock().await.enqueue_mailbox_message(message);
+        self.wake_runtime(thread_id).await;
         true
     }
 
@@ -115,6 +125,7 @@ impl Session {
             return false;
         };
         mailbox.lock().await.interrupt_stop();
+        self.wake_runtime(thread_id).await;
         true
     }
 
@@ -141,9 +152,13 @@ impl Session {
                 match &event {
                     ThreadEvent::UserInterrupt { .. } => {
                         if let Some(mailbox) = self.mailboxes.get(entry.key()) {
-                            if let Ok(mut mailbox) = mailbox.try_lock() {
-                                mailbox.interrupt_stop();
-                            }
+                            let mailbox = Arc::clone(mailbox.value());
+                            let thread = Arc::clone(&thread);
+                            tokio::spawn(async move {
+                                mailbox.lock().await.interrupt_stop();
+                                let guard = thread.read().await;
+                                let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+                            });
                         }
                     }
                     _ => {

@@ -94,6 +94,8 @@ pub enum ThreadControlEvent {
         /// One-shot reply channel containing the removed queued result, if any.
         reply_tx: oneshot::Sender<Option<MailboxMessage>>,
     },
+    /// Wake the runtime to inspect its mailbox state.
+    MailboxUpdated,
     /// Request the runtime actor to stop and release its owned thread state.
     ///
     /// This is an internal control-plane event used by the thread pool when a
@@ -557,6 +559,7 @@ impl ThreadMailbox {
             ThreadControlEvent::ClaimQueuedJobResult { reply_tx, .. } => {
                 let _ = reply_tx.send(None);
             }
+            ThreadControlEvent::MailboxUpdated => {}
             ThreadControlEvent::ShutdownRuntime => {}
         }
     }

@@ -156,6 +156,29 @@ impl ThreadReactor {
         claimed
     }
 
+    pub(crate) fn inspect_mailbox(&mut self, mailbox: &mut ThreadMailbox) -> ThreadReactorAction {
+        if mailbox.take_stop_signal() {
+            if matches!(
+                self.state,
+                ThreadRuntimeState::Running { .. } | ThreadRuntimeState::WaitingForApproval { .. }
+            ) {
+                return self.cancel_active_turn();
+            }
+
+            mailbox.clear_interrupts_for_idle_handoff();
+            self.queue_depth = mailbox.pending_len();
+            return ThreadReactorAction::Noop;
+        }
+
+        if matches!(self.state, ThreadRuntimeState::Idle) {
+            self.queue_depth = mailbox.pending_len();
+            return self.try_start_next_turn(mailbox);
+        }
+
+        self.queue_depth = mailbox.pending_len();
+        ThreadReactorAction::Noop
+    }
+
     pub(crate) fn mark_waiting_for_approval(&mut self, turn_number: u32) {
         if matches!(self.state, ThreadRuntimeState::Running { turn_number: active } if active == turn_number)
         {
@@ -804,6 +827,13 @@ impl Thread {
                             Self::sync_runtime_snapshot_async(&thread, &runtime).await;
                             let _ = reply_tx.send(claimed);
                             ThreadReactorAction::Noop
+                        }
+                        ThreadControlEvent::MailboxUpdated => {
+                            let mut mailbox = mailbox.lock().await;
+                            let action = runtime.inspect_mailbox(&mut mailbox);
+                            drop(mailbox);
+                            Self::sync_runtime_snapshot_async(&thread, &runtime).await;
+                            action
                         }
                         ThreadControlEvent::ShutdownRuntime => {
                             shutdown_requested = true;

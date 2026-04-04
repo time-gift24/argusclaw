@@ -424,6 +424,10 @@ impl ThreadPool {
             .lock()
             .await
             .enqueue_mailbox_message(message.clone());
+        {
+            let guard = thread.read().await;
+            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+        }
 
         if let Some(sender) = self
             .store
