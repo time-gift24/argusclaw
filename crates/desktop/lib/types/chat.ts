@@ -139,7 +139,12 @@ export type ThreadEventPayload =
       name?: string | null;
       arguments_delta?: string | null;
     }
-  | { type: "llm_usage"; input_tokens: number; output_tokens: number }
+  | {
+      type: "llm_usage";
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+    }
   | {
       type: "tool_started";
       tool_call_id: string;
@@ -158,7 +163,6 @@ export type ThreadEventPayload =
       input_tokens: number;
       output_tokens: number;
       total_tokens: number;
-      context_token_count?: number | null;
     }
   | { type: "turn_failed"; error: string }
   | { type: "idle" }

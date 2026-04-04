@@ -1187,16 +1187,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ...state.sessionsByKey,
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
-              tokenCount:
-                payload.context_token_count ??
-                state.sessionsByKey[sessionKey]?.tokenCount ??
-                0,
+              tokenCount: payload.total_tokens,
               pendingAssistant: state.sessionsByKey[sessionKey]?.pendingAssistant
                 ? {
                     ...state.sessionsByKey[sessionKey].pendingAssistant!,
                     retry: null,
                   }
                 : null,
+            },
+          },
+        }));
+        break;
+
+      case "llm_usage":
+        set((state) => ({
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...state.sessionsByKey[sessionKey],
+              tokenCount: payload.total_tokens,
             },
           },
         }));

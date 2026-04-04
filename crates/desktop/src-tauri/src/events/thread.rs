@@ -81,7 +81,6 @@ impl ThreadEventEnvelope {
                 thread_id,
                 turn_number,
                 token_usage,
-                context_token_count,
             } => Some(Self {
                 session_id,
                 thread_id,
@@ -90,7 +89,6 @@ impl ThreadEventEnvelope {
                     input_tokens: token_usage.input_tokens,
                     output_tokens: token_usage.output_tokens,
                     total_tokens: token_usage.total_tokens,
-                    context_token_count,
                 },
             }),
             ThreadEvent::TurnFailed {
@@ -277,6 +275,7 @@ pub enum ThreadEventPayload {
     LlmUsage {
         input_tokens: u32,
         output_tokens: u32,
+        total_tokens: u32,
     },
     RetryAttempt {
         attempt: u32,
@@ -298,7 +297,6 @@ pub enum ThreadEventPayload {
         input_tokens: u32,
         output_tokens: u32,
         total_tokens: u32,
-        context_token_count: Option<u32>,
     },
     TurnFailed {
         error: String,
@@ -377,6 +375,7 @@ impl ThreadEventPayload {
             } => Some(Self::LlmUsage {
                 input_tokens,
                 output_tokens,
+                total_tokens: input_tokens + output_tokens,
             }),
             LlmStreamEvent::RetryAttempt {
                 attempt,

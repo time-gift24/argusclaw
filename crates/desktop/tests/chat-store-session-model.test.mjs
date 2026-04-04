@@ -27,6 +27,7 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /thread_id|threadId/);
   assert.match(storeSource, /case "content_delta"/);
   assert.match(storeSource, /case "reasoning_delta"/);
+  assert.match(storeSource, /case "llm_usage"/);
   assert.match(storeSource, /case "turn_completed"/);
   assert.match(storeSource, /case "job_dispatched"/);
   assert.match(storeSource, /case "job_result"/);
@@ -153,6 +154,21 @@ test("chat store waits for idle before refreshing the persisted snapshot", () =>
     storeSource,
     /case "idle":[\s\S]*?refreshSnapshot\(sessionKey\)/,
     "idle should trigger the final snapshot refresh",
+  );
+});
+
+test("chat store updates token count from llm usage and final turn usage", () => {
+  assert.match(
+    storeSource,
+    /case "llm_usage":[\s\S]*?tokenCount:\s*payload\.total_tokens/,
+  );
+  assert.match(
+    storeSource,
+    /case "turn_completed":[\s\S]*?tokenCount:\s*payload\.total_tokens/,
+  );
+  assert.doesNotMatch(
+    storeSource,
+    /context_token_count/,
   );
 });
 

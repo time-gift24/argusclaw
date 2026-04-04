@@ -1041,7 +1041,6 @@ impl Thread {
                         thread_id: thread_id.clone(),
                         turn_number: settled_turn_number.unwrap_or_default(),
                         token_usage: output.token_usage.clone(),
-                        context_token_count: Some(output.token_usage.total_tokens),
                     });
                 }
                 Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
