@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-#[cfg(test)]
-use argus_agent::Compactor;
+use crate::error::JobError;
+use crate::types::ThreadPoolJobRequest;
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
@@ -34,14 +34,6 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, 
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
-#[cfg(test)]
-use argus_agent::turn_log_store::RecoveredThreadLogState;
-#[cfg(test)]
-use std::io;
-
-use crate::error::JobError;
-use crate::types::ThreadPoolJobRequest;
-
 const DEFAULT_MAX_THREADS: u32 = 8;
 
 #[derive(Clone)]
@@ -55,15 +47,6 @@ impl std::fmt::Debug for ChatRuntimeConfig {
             .field("trace_dir", &self.trace_dir)
             .finish()
     }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-#[derive(Debug)]
-struct RecoveredThreadState {
-    messages: Vec<ChatMessage>,
-    turn_count: u32,
-    token_count: u32,
 }
 
 #[derive(Debug)]
@@ -2152,46 +2135,6 @@ impl ThreadPool {
         });
         tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    async fn recover_thread_state_from_trace(
-        trace_dir: &Path,
-        session_id: &SessionId,
-        thread_id: &ThreadId,
-    ) -> Result<RecoveredThreadState, io::Error> {
-        let base_dir = trace_dir
-            .join(session_id.to_string())
-            .join(thread_id.to_string());
-        let recovered = recover_thread_log_state(&base_dir)
-            .await
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-        Ok(Self::flatten_recovered_thread_state(recovered))
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    async fn recover_job_thread_state_from_trace(
-        trace_dir: &Path,
-        thread_id: &ThreadId,
-    ) -> Result<RecoveredThreadState, io::Error> {
-        let base_dir = trace_dir.join(thread_id.to_string());
-        let recovered = recover_thread_log_state(&base_dir)
-            .await
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-        Ok(Self::flatten_recovered_thread_state(recovered))
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn flatten_recovered_thread_state(recovered: RecoveredThreadLogState) -> RecoveredThreadState {
-        RecoveredThreadState {
-            messages: recovered.committed_messages(),
-            turn_count: recovered.turn_count(),
-            token_count: recovered.token_count(),
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn test_pool() -> Self {
         use argus_protocol::{LlmProvider, ProviderId};
@@ -2238,31 +2181,6 @@ impl ThreadPool {
             std::env::temp_dir().join("argus-thread-pool-tests"),
         )
     }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn noop_compactor() -> Arc<dyn Compactor> {
-    #[derive(Debug)]
-    struct NoopCompactor;
-
-    #[async_trait::async_trait]
-    impl Compactor for NoopCompactor {
-        async fn compact(
-            &self,
-            _messages: &[argus_protocol::llm::ChatMessage],
-            _token_count: u32,
-        ) -> std::result::Result<Option<argus_agent::CompactResult>, argus_agent::CompactError>
-        {
-            Ok(None)
-        }
-
-        fn name(&self) -> &'static str {
-            "noop"
-        }
-    }
-
-    Arc::new(NoopCompactor)
 }
 
 #[cfg(test)]

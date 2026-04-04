@@ -73,7 +73,6 @@ pub struct ArgusWing {
     session_manager: Arc<SessionManager>,
     approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
-    #[allow(dead_code)]
     job_manager: Arc<JobManager>,
     pub account_manager: Arc<AccountManager>,
     knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository>,

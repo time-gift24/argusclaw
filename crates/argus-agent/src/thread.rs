@@ -315,7 +315,6 @@ impl Thread {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn active_turn_cancellation(&self) -> Option<TurnCancellation> {
         self.active_turn_cancellation.clone()
     }
