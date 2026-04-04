@@ -12,7 +12,8 @@ use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::events::{
-    MailboxMessage, MailboxMessageType, ThreadEvent, ThreadInbox, ThreadMailbox, TurnControlInput,
+    MailboxMessage, MailboxMessageType, ThreadControlEvent, ThreadEvent, ThreadInbox,
+    ThreadMailbox, TurnControlInput,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
@@ -832,6 +833,76 @@ fn thread_mailbox_interrupt_stop_is_not_enqueued() {
     assert!(mailbox.take_next_turn_message().is_none());
     assert!(mailbox.take_stop_signal());
     assert!(!mailbox.take_stop_signal());
+}
+
+#[test]
+fn thread_mailbox_legacy_interrupts_drain_before_inbox_items() {
+    let mut mailbox = ThreadMailbox::default();
+
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "follow-up".to_string(),
+        msg_override: None,
+    });
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "interrupt now".to_string(),
+    });
+    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(sample_mailbox_message("job-legacy")));
+
+    let drained = mailbox
+        .drain_for_turn()
+        .into_iter()
+        .map(TurnControlInput::into_message_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(drained.len(), 3);
+    assert_eq!(drained[0], "interrupt now");
+    assert_eq!(drained[1], "follow-up");
+    assert!(drained[2].contains("Job: job-legacy"));
+}
+
+#[test]
+fn thread_mailbox_idle_handoff_clears_legacy_interrupts_without_turning_them_into_next_turn_input() {
+    let mut mailbox = ThreadMailbox::default();
+
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "interrupt-before-idle".to_string(),
+    });
+    mailbox.push(ThreadControlEvent::UserMessage {
+        content: "first-user".to_string(),
+        msg_override: Some(MessageOverride::default()),
+    });
+    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(sample_mailbox_message(
+        "job-handoff-mailbox",
+    )));
+    mailbox.push(ThreadControlEvent::UserInterrupt {
+        content: "interrupt-after-work".to_string(),
+    });
+
+    let first = mailbox
+        .take_next_turn_message()
+        .expect("first handoff item should exist");
+    let second = mailbox
+        .take_next_turn_message()
+        .expect("second handoff item should exist");
+
+    assert_eq!(first.content, "first-user");
+    assert!(
+        first.msg_override.is_some(),
+        "compatibility path should preserve msg_override",
+    );
+    assert!(
+        second.content.contains("Job: job-handoff-mailbox"),
+        "queued work should preserve FIFO order for idle handoff",
+    );
+    assert!(
+        second.msg_override.is_none(),
+        "job handoff should not carry user msg_override",
+    );
+    assert!(mailbox.take_next_turn_message().is_none());
+    assert!(
+        mailbox.drain_for_turn().is_empty(),
+        "interrupts should be cleared when idling into handoff",
+    );
 }
 
 #[test]

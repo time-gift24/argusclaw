@@ -405,9 +405,14 @@ enum ThreadMailboxItem {
 }
 
 /// Thread-level mailbox for queued user messages and mailbox messages.
+///
+/// Temporary compatibility helpers:
+/// `push(...)` and `drain_for_turn()` keep supporting the current runtime callers
+/// while the thread runtime migrates to the direct mailbox API.
 #[derive(Debug, Default)]
 pub struct ThreadMailbox {
     items: VecDeque<ThreadMailboxItem>,
+    legacy_interrupts: VecDeque<String>,
     stop_requested: bool,
 }
 
@@ -453,6 +458,7 @@ impl ThreadMailbox {
     /// Determine which queued work should start the next idle turn.
     #[must_use]
     pub fn take_next_turn_message(&mut self) -> Option<QueuedUserMessage> {
+        self.legacy_interrupts.clear();
         match self.items.pop_front() {
             Some(ThreadMailboxItem::UserMessage(message)) => Some(message),
             Some(ThreadMailboxItem::MailboxMessage(message)) => {
@@ -464,16 +470,14 @@ impl ThreadMailbox {
 
     /// Drain control inputs for a running turn.
     ///
-    /// Compatibility path retained for current runtime callers while the thread
+    /// Temporary compatibility helper for current runtime callers while the thread
     /// loop is migrated to mailbox-only routing.
     #[must_use]
     pub fn drain_for_turn(&mut self) -> Vec<TurnControlInput> {
         let mut drained = Vec::new();
 
-        if self.take_stop_signal() {
-            drained.push(TurnControlInput::UserInterrupt {
-                content: "stop".to_string(),
-            });
+        while let Some(content) = self.legacy_interrupts.pop_front() {
+            drained.push(TurnControlInput::UserInterrupt { content });
         }
 
         while let Some(item) = self.items.pop_front() {
@@ -495,19 +499,20 @@ impl ThreadMailbox {
 
     /// Clear pending stop requests without disturbing queued work.
     pub fn clear_interrupts_for_idle_handoff(&mut self) {
+        self.legacy_interrupts.clear();
         self.stop_requested = false;
     }
 
     /// Return the number of pending mailbox items, including a pending stop request.
     #[must_use]
     pub fn pending_len(&self) -> usize {
-        self.items.len() + self.stop_requested as usize
+        self.items.len() + self.legacy_interrupts.len() + self.stop_requested as usize
     }
 
     /// Returns true when no pending control items remain.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        !self.stop_requested && self.items.is_empty()
+        !self.stop_requested && self.legacy_interrupts.is_empty() && self.items.is_empty()
     }
 
     /// Return unread mailbox messages that remain queued.
@@ -536,6 +541,8 @@ impl ThreadMailbox {
         false
     }
 
+    /// Temporary compatibility helper for current runtime callers.
+    ///
     /// Push a legacy control event into the mailbox.
     pub fn push(&mut self, event: ThreadControlEvent) {
         match event {
@@ -543,10 +550,7 @@ impl ThreadMailbox {
                 content,
                 msg_override,
             } => self.enqueue_user_message(content, msg_override),
-            ThreadControlEvent::UserInterrupt { content } => {
-                let _ = content;
-                self.interrupt_stop();
-            }
+            ThreadControlEvent::UserInterrupt { content } => self.legacy_interrupts.push_back(content),
             ThreadControlEvent::DeliverMailboxMessage(message) => {
                 self.enqueue_mailbox_message(message)
             }
