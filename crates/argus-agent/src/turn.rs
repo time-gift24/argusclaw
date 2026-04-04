@@ -1048,10 +1048,10 @@ impl Turn {
             ..
         } = response;
 
-        // Track token usage
-        token_usage.input_tokens += input_tokens;
-        token_usage.output_tokens += output_tokens;
-        token_usage.total_tokens += input_tokens + output_tokens;
+        // Keep the latest provider usage for the current turn.
+        token_usage.input_tokens = input_tokens;
+        token_usage.output_tokens = output_tokens;
+        token_usage.total_tokens = input_tokens + output_tokens;
 
         match finish_reason {
             FinishReason::Stop => {
@@ -2229,7 +2229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_accumulates_token_usage_from_provider_responses() {
+    async fn execute_keeps_only_latest_token_usage_from_provider_responses() {
         let provider = Arc::new(SequencedProvider::new(vec![
             CompletionResponse {
                 content: Some("first".to_string()),
@@ -2260,9 +2260,9 @@ mod tests {
         let turn = make_turn(provider, vec![], 5);
         let output = turn.execute().await.expect("turn should succeed");
 
-        assert_eq!(output.token_usage.input_tokens, 28);
-        assert_eq!(output.token_usage.output_tokens, 12);
-        assert_eq!(output.token_usage.total_tokens, 40);
+        assert_eq!(output.token_usage.input_tokens, 17);
+        assert_eq!(output.token_usage.output_tokens, 5);
+        assert_eq!(output.token_usage.total_tokens, 22);
     }
 
     #[tokio::test]
