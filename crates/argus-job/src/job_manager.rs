@@ -546,15 +546,22 @@ impl JobManager {
 mod tests {
     use std::sync::Arc;
 
+    use argus_agent::thread_trace_store::{
+        ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
+    };
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentRecord, AgentType, LlmProvider, ProviderId, ThinkingConfig, ThreadRuntimeStatus,
+        AgentRecord, AgentType, LlmProvider, ProviderId, SessionId, ThinkingConfig, ThreadId,
+        ThreadRuntimeStatus,
     };
     use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
-    use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
+    use argus_repository::traits::{
+        AgentRepository, JobRepository, SessionRepository, ThreadRepository,
+    };
+    use argus_repository::types::{AgentId as RepoAgentId, ThreadRecord};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
     use rust_decimal::Decimal;
@@ -679,7 +686,7 @@ mod tests {
 
     async fn test_job_manager_with_provider(
         provider: Arc<dyn LlmProvider>,
-    ) -> (JobManager, AgentId) {
+    ) -> (JobManager, AgentId, ThreadId) {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("sqlite memory pool should connect");
@@ -690,33 +697,77 @@ mod tests {
             sqlite.clone(),
         ));
         let agent_id = AgentId::new(7);
+        let agent_record = AgentRecord {
+            id: agent_id,
+            display_name: "Cancellable Job Agent".to_string(),
+            description: "Used to test stop_job cancellation".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: Some("capturing".to_string()),
+            system_prompt: "You are a cancellable test agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        };
         template_manager
-            .upsert(AgentRecord {
-                id: agent_id,
-                display_name: "Cancellable Job Agent".to_string(),
-                description: "Used to test stop_job cancellation".to_string(),
-                version: "1.0.0".to_string(),
-                provider_id: Some(ProviderId::new(1)),
-                model_id: Some("capturing".to_string()),
-                system_prompt: "You are a cancellable test agent.".to_string(),
-                tool_names: vec![],
-                max_tokens: None,
-                temperature: None,
-                thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
-            })
+            .upsert(agent_record.clone())
             .await
             .expect("agent upsert should succeed");
 
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-job-tests-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let parent_session_id = SessionId::new();
+        let parent_thread_id = ThreadId::new();
+        SessionRepository::create(sqlite.as_ref(), &parent_session_id, "job-parent")
+            .await
+            .expect("parent session should persist");
+        ThreadRepository::upsert_thread(
+            sqlite.as_ref(),
+            &ThreadRecord {
+                id: parent_thread_id,
+                provider_id: argus_protocol::LlmProviderId::new(1),
+                title: Some("job-parent".to_string()),
+                token_count: 0,
+                turn_count: 0,
+                session_id: Some(parent_session_id),
+                template_id: Some(RepoAgentId::new(agent_id.inner())),
+                model_override: Some("capturing".to_string()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .await
+        .expect("parent thread should persist");
+        persist_thread_metadata(
+            &chat_thread_base_dir(&trace_dir, parent_session_id, parent_thread_id),
+            &ThreadTraceMetadata {
+                thread_id: parent_thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(parent_session_id),
+                parent_thread_id: None,
+                child_thread_ids: Vec::new(),
+                agent_snapshot: agent_record,
+            },
+        )
+        .await
+        .expect("parent trace metadata should persist");
+
         (
-            JobManager::new(
+            JobManager::new_with_repositories(
                 template_manager,
                 Arc::new(FixedProviderResolver::new(provider)),
                 Arc::new(ToolManager::new()),
-                std::env::temp_dir().join("argus-job-tests"),
+                trace_dir,
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
             ),
             agent_id,
+            parent_thread_id,
         )
     }
 
@@ -1086,8 +1137,8 @@ mod tests {
             Duration::from_secs(5),
             24,
         ));
-        let (manager, agent_id) = test_job_manager_with_provider(provider).await;
-        let originating_thread_id = ThreadId::new();
+        let (manager, agent_id, originating_thread_id) =
+            test_job_manager_with_provider(provider).await;
         let job_id = "job-stop-end-to-end".to_string();
         let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
 

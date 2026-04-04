@@ -515,20 +515,13 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
-    fn trace_base_dir(&self) -> Option<std::path::PathBuf> {
-        let trace_config = self
-            .config
+    pub fn trace_base_dir(&self) -> Option<std::path::PathBuf> {
+        self.config
             .turn_config
             .trace_config
             .as_ref()
-            .filter(|config| config.enabled)?;
-        let session_id = trace_config.session_id.unwrap_or(self.session_id);
-        Some(
-            trace_config
-                .trace_dir
-                .join(session_id.to_string())
-                .join(self.id.to_string()),
-        )
+            .filter(|config| config.enabled)
+            .map(|config| config.thread_base_dir.clone())
     }
 
     async fn persist_trace_turns(
@@ -1082,6 +1075,7 @@ mod tests {
     use crate::compact::CompactResult;
     use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
+    use crate::thread_trace_store::chat_thread_base_dir;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
@@ -1405,8 +1399,11 @@ mod tests {
     async fn begin_turn_uses_last_record_usage_for_compaction_and_persists_checkpoint() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
-        let trace_config =
-            TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+        let thread_id = ThreadId::new();
+        let trace_config = TraceConfig::new(
+            true,
+            chat_thread_base_dir(temp_dir.path(), session_id, thread_id),
+        );
         let seen_token_counts = Arc::new(Mutex::new(Vec::new()));
         let compactor = RecordingCompactor {
             seen_token_counts: Arc::clone(&seen_token_counts),
@@ -1416,6 +1413,7 @@ mod tests {
             }]))),
         };
         let mut thread = ThreadBuilder::new()
+            .id(thread_id)
             .provider(Arc::new(DummyProvider))
             .compactor(Arc::new(compactor))
             .agent_record(test_agent_record_without_system_prompt())
@@ -1433,7 +1431,6 @@ mod tests {
             )])
             .build()
             .expect("thread should build");
-        let thread_id = thread.id();
 
         let _turn = thread
             .begin_turn("next".to_string(), None, TurnCancellation::new())
@@ -1446,12 +1443,11 @@ mod tests {
             Some(TurnRecordKind::Checkpoint)
         ));
 
-        let persisted = recover_thread_log_state(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        )
+        let persisted = recover_thread_log_state(&chat_thread_base_dir(
+            temp_dir.path(),
+            session_id,
+            thread_id,
+        ))
         .await
         .expect("checkpoint should be persisted");
         assert_eq!(persisted.turns.len(), 2);

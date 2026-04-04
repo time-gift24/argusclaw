@@ -7,10 +7,8 @@ use std::path::PathBuf;
 pub struct TraceConfig {
     /// Whether committed turn-log persistence is enabled.
     pub enabled: bool,
-    /// Root directory where turn logs are written.
-    pub trace_dir: PathBuf,
-    /// Session ID (included in path: `{trace_dir}/{session_id}/{thread_id}/`).
-    pub session_id: Option<argus_protocol::SessionId>,
+    /// Explicit directory for this thread node.
+    pub thread_base_dir: PathBuf,
     /// Optional model name persisted into turn metadata.
     pub model: Option<String>,
 }
@@ -18,20 +16,12 @@ pub struct TraceConfig {
 impl TraceConfig {
     /// Create a new TraceConfig.
     #[must_use]
-    pub fn new(enabled: bool, trace_dir: PathBuf) -> Self {
+    pub fn new(enabled: bool, thread_base_dir: PathBuf) -> Self {
         Self {
             enabled,
-            trace_dir,
-            session_id: None,
+            thread_base_dir,
             model: None,
         }
-    }
-
-    /// Set the session ID for the turn-log path.
-    #[must_use]
-    pub fn with_session_id(mut self, session_id: argus_protocol::SessionId) -> Self {
-        self.session_id = Some(session_id);
-        self
     }
 
     /// Set the model name persisted into turn metadata.
@@ -46,8 +36,7 @@ impl TraceConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            trace_dir: PathBuf::new(),
-            session_id: None,
+            thread_base_dir: PathBuf::new(),
             model: None,
         }
     }

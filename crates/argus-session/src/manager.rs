@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use argus_agent::thread_trace_store::{persist_thread_snapshot, thread_base_dir};
+use argus_agent::thread_trace_store::{
+    chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
+};
 use argus_agent::tool_context::current_agent_id;
 use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
@@ -896,12 +898,22 @@ impl SessionManager {
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
-        let thread_trace_dir = thread_base_dir(&self.trace_dir, Some(session_id), thread_id);
-        persist_thread_snapshot(&thread_trace_dir, &agent_record)
-            .await
-            .map_err(|error| ArgusError::DatabaseError {
-                reason: error.to_string(),
-            })?;
+        let thread_trace_dir = chat_thread_base_dir(&self.trace_dir, session_id, thread_id);
+        persist_thread_metadata(
+            &thread_trace_dir,
+            &ThreadTraceMetadata {
+                thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(session_id),
+                parent_thread_id: None,
+                child_thread_ids: Vec::new(),
+                agent_snapshot: agent_record.clone(),
+            },
+        )
+        .await
+        .map_err(|error| ArgusError::DatabaseError {
+            reason: error.to_string(),
+        })?;
 
         // Insert into DB
         use argus_repository::types::ThreadRecord;
@@ -1319,9 +1331,7 @@ async fn recover_thread_state_from_trace(
     session_id: &SessionId,
     thread_id: &ThreadId,
 ) -> Result<RecoveredThreadState> {
-    let base_dir = trace_dir
-        .join(session_id.to_string())
-        .join(thread_id.to_string());
+    let base_dir = chat_thread_base_dir(trace_dir, *session_id, *thread_id);
     let recovered =
         recover_thread_log_state(&base_dir)
             .await
@@ -1369,6 +1379,9 @@ mod tests {
 
     use super::{recover_messages_from_trace, recover_thread_state_from_trace, SessionManager};
     use argus_agent::history::TurnRecord;
+    use argus_agent::thread_trace_store::{
+        chat_thread_base_dir, ThreadTraceKind, ThreadTraceMetadata,
+    };
     use argus_agent::turn_log_store::append_turn_record;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
@@ -1739,9 +1752,14 @@ mod tests {
 
         let snapshot_content =
             fs::read_to_string(&snapshot_path).expect("thread snapshot should be persisted");
-        let snapshot: AgentRecord =
+        let snapshot: ThreadTraceMetadata =
             serde_json::from_str(&snapshot_content).expect("thread snapshot should deserialize");
-        assert_eq!(snapshot.system_prompt, "You are a routing test agent.");
+        assert_eq!(snapshot.kind, ThreadTraceKind::ChatRoot);
+        assert_eq!(snapshot.root_session_id, Some(session_id));
+        assert_eq!(
+            snapshot.agent_snapshot.system_prompt,
+            "You are a routing test agent."
+        );
 
         manager
             .template_manager
@@ -2070,14 +2088,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let base_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&base_dir).expect("turns dir should exist");
+        let base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
+        fs::create_dir_all(&base_dir).expect("thread dir should exist");
         fs::write(
-            base_dir.join("meta.jsonl"),
+            base_dir.join("turns.jsonl"),
             "{\"kind\":\"Checkpoint\",\"turn_number\":0}\n",
         )
         .expect("invalid meta should write");

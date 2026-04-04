@@ -71,14 +71,14 @@ pub enum TurnLogError {
     #[error("turn file not found: {0}")]
     TurnNotFound(PathBuf),
 
-    #[error("thread snapshot not found: {0}")]
-    ThreadSnapshotNotFound(PathBuf),
+    #[error("thread metadata not found: {0}")]
+    ThreadMetadataNotFound(PathBuf),
 
-    #[error("thread snapshot I/O failed at {path}: {reason}")]
-    ThreadSnapshotIo { path: PathBuf, reason: String },
+    #[error("thread metadata I/O failed at {path}: {reason}")]
+    ThreadMetadataIo { path: PathBuf, reason: String },
 
-    #[error("thread snapshot malformed at {path}: {reason}")]
-    ThreadSnapshotMalformed { path: PathBuf, reason: String },
+    #[error("thread metadata malformed at {path}: {reason}")]
+    ThreadMetadataMalformed { path: PathBuf, reason: String },
 
     #[error("malformed JSON event at line {line}: {reason}")]
     MalformedEvent { line: usize, reason: String },

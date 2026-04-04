@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, sleep, timeout};
 
+use argus_agent::thread_trace_store::chat_thread_base_dir;
 use argus_agent::trace::TraceConfig;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
@@ -386,8 +387,11 @@ async fn test_failed_turn_does_not_write_legacy_partial_trace_file() {
 async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     let temp_dir = tempfile::tempdir().unwrap();
     let session_id = SessionId::new();
-    let trace_config =
-        TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+    let thread_id = argus_protocol::ThreadId::new();
+    let trace_config = TraceConfig::new(
+        true,
+        chat_thread_base_dir(temp_dir.path(), session_id, thread_id),
+    );
     let thread_config = ThreadConfig {
         turn_config: TurnConfigBuilder::default()
             .trace_config(trace_config)
@@ -396,6 +400,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     };
     let thread = Arc::new(RwLock::new(
         ThreadBuilder::new()
+            .id(thread_id)
             .provider(Arc::new(SimpleMockProvider::new("Hello, world!")))
             .compactor(Arc::new(NoopCompactor))
             .agent_record(Arc::new(AgentRecord {
@@ -407,7 +412,6 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
             .build()
             .unwrap(),
     ));
-    let thread_id = { thread.read().await.id() };
     let rx = { thread.read().await.subscribe() };
 
     Thread::spawn_reactor(Arc::clone(&thread));
@@ -416,10 +420,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
 
     wait_for_turn_settled_event(rx).await;
 
-    let persisted_base_dir = temp_dir
-        .path()
-        .join(session_id.to_string())
-        .join(thread_id.to_string());
+    let persisted_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -460,8 +461,11 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
 async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between_settlements() {
     let temp_dir = tempfile::tempdir().unwrap();
     let session_id = SessionId::new();
-    let trace_config =
-        TraceConfig::new(true, temp_dir.path().to_path_buf()).with_session_id(session_id);
+    let thread_id = argus_protocol::ThreadId::new();
+    let trace_config = TraceConfig::new(
+        true,
+        chat_thread_base_dir(temp_dir.path(), session_id, thread_id),
+    );
     let thread_config = ThreadConfig {
         turn_config: TurnConfigBuilder::default()
             .trace_config(trace_config)
@@ -474,6 +478,7 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
     ));
     let thread = Arc::new(RwLock::new(
         ThreadBuilder::new()
+            .id(thread_id)
             .provider(provider.clone())
             .compactor(Arc::new(NoopCompactor))
             .agent_record(Arc::new(AgentRecord {
@@ -485,7 +490,6 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
             .build()
             .unwrap(),
     ));
-    let thread_id = { thread.read().await.id() };
     let rx = { thread.read().await.subscribe() };
 
     Thread::spawn_reactor(Arc::clone(&thread));
@@ -538,10 +542,7 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
         vec!["first".to_string(), "second".to_string()],
     );
 
-    let persisted_base_dir = temp_dir
-        .path()
-        .join(session_id.to_string())
-        .join(thread_id.to_string());
+    let persisted_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
 
     timeout(Duration::from_secs(5), async {
         loop {
