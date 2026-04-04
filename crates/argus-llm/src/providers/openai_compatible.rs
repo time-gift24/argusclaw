@@ -600,6 +600,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 })?;
         let usage = payload.usage.unwrap_or_default();
 
+        tracing::info!(
+            provider = "openai-compatible",
+            input_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens,
+            total_tokens = usage.prompt_tokens + usage.completion_tokens,
+            "openai-compatible token usage"
+        );
+
         // Log the raw response for debugging
         tracing::debug!(
             content = ?choice.message.content,
@@ -884,6 +892,13 @@ fn parse_stream_frame_impl(
     let mut events = Vec::new();
 
     if let Some(usage) = chunk.usage {
+        tracing::info!(
+            provider = "openai-compatible",
+            input_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens,
+            total_tokens = usage.prompt_tokens + usage.completion_tokens,
+            "openai-compatible stream token usage"
+        );
         events.push(Ok(LlmStreamEvent::Usage {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
