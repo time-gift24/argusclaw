@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
+use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1046,21 +1046,16 @@ impl SessionManager {
         if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
             if thread.has_non_system_history() || thread.turn_count() > 0 {
-                return Ok(thread.history().to_vec());
+                return Ok(thread.history_iter().cloned().collect());
             }
-            let recovered = recover_messages_from_trace(
-                &self.trace_dir,
-                &session_id,
-                thread_id,
-                thread.turn_count(),
-            )
-            .await?;
+            let recovered =
+                recover_messages_from_trace(&self.trace_dir, &session_id, thread_id).await?;
             if !recovered.is_empty() {
                 return Ok(recovered);
             }
-            return Ok(thread.history().to_vec());
+            return Ok(thread.history_iter().cloned().collect());
         }
-        let thread_record = self
+        let _thread_record = self
             .thread_repo
             .get_thread_in_session(thread_id, &session_id)
             .await
@@ -1068,13 +1063,7 @@ impl SessionManager {
                 reason: e.to_string(),
             })?
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        recover_messages_from_trace(
-            &self.trace_dir,
-            &session_id,
-            thread_id,
-            thread_record.turn_count as u32,
-        )
-        .await
+        recover_messages_from_trace(&self.trace_dir, &session_id, thread_id).await
     }
 
     /// Get a thread snapshot without forcing the runtime to become resident.
@@ -1089,18 +1078,14 @@ impl SessionManager {
             let (messages, turn_count, token_count) =
                 if thread.has_non_system_history() || thread.turn_count() > 0 {
                     (
-                        thread.history().to_vec(),
+                        thread.history_iter().cloned().collect(),
                         thread.turn_count(),
                         thread.token_count(),
                     )
                 } else {
-                    let recovered = recover_thread_state_from_trace(
-                        &self.trace_dir,
-                        &session_id,
-                        thread_id,
-                        Some(thread.turn_count()),
-                    )
-                    .await?;
+                    let recovered =
+                        recover_thread_state_from_trace(&self.trace_dir, &session_id, thread_id)
+                            .await?;
                     if recovered.turn_count > 0 {
                         (
                             recovered.messages,
@@ -1109,7 +1094,7 @@ impl SessionManager {
                         )
                     } else {
                         (
-                            thread.history().to_vec(),
+                            thread.history_iter().cloned().collect(),
                             thread.turn_count(),
                             thread.token_count(),
                         )
@@ -1131,13 +1116,8 @@ impl SessionManager {
                 reason: e.to_string(),
             })?
             .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
-        let recovered = recover_thread_state_from_trace(
-            &self.trace_dir,
-            &session_id,
-            thread_id,
-            (thread_record.turn_count > 0).then_some(thread_record.turn_count),
-        )
-        .await?;
+        let recovered =
+            recover_thread_state_from_trace(&self.trace_dir, &session_id, thread_id).await?;
 
         Ok(if recovered.turn_count > 0 {
             (
@@ -1230,10 +1210,9 @@ async fn recover_messages_from_trace(
     trace_dir: &std::path::Path,
     session_id: &SessionId,
     thread_id: &ThreadId,
-    turn_count: u32,
 ) -> Result<Vec<ChatMessage>> {
     Ok(
-        recover_thread_state_from_trace(trace_dir, session_id, thread_id, Some(turn_count))
+        recover_thread_state_from_trace(trace_dir, session_id, thread_id)
             .await?
             .messages,
     )
@@ -1243,16 +1222,16 @@ async fn recover_thread_state_from_trace(
     trace_dir: &std::path::Path,
     session_id: &SessionId,
     thread_id: &ThreadId,
-    turn_count_hint: Option<u32>,
 ) -> Result<RecoveredThreadState> {
     let base_dir = trace_dir
         .join(session_id.to_string())
         .join(thread_id.to_string());
-    let recovered = recover_thread_log_state(&base_dir, turn_count_hint)
-        .await
-        .map_err(|error| ArgusError::DatabaseError {
-            reason: format_turn_log_recovery_error(thread_id, &error),
-        })?;
+    let recovered =
+        recover_thread_log_state(&base_dir)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: format_turn_log_recovery_error(thread_id, &error),
+            })?;
 
     Ok(flatten_recovered_thread_state(recovered))
 }
@@ -1287,1205 +1266,153 @@ fn format_turn_log_recovery_error(
     }
 }
 
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fs;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
-    use argus_agent::history::TurnState;
-    use argus_agent::turn_log_store::{
-        TurnLogMeta, turn_messages_path, turn_meta_path, turns_dir, write_turn_messages,
-        write_turn_meta,
-    };
-    use argus_agent::{CompactResult, Compactor, ThreadBuilder};
-    use argus_protocol::llm::{
-        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError,
-    };
-    use argus_protocol::{
-        AgentId, AgentRecord, AgentType, LlmProviderKind, LlmProviderRecord, MailboxMessage,
-        MailboxMessageType, ProviderId, ProviderResolver, ProviderSecretStatus, Role, SecretString,
-        SessionId, ThinkingConfig, ThreadControlEvent, ThreadEvent, ThreadId,
-    };
-    use argus_repository::traits::{
-        AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
-    };
-    use argus_repository::{ArgusSqlite, migrate};
-    use argus_template::TemplateManager;
-    use argus_tool::{
-        CheckInboxRequest, MarkReadRequest, SchedulerBackend, SendMessageRequest, ToolManager,
-    };
-    use async_trait::async_trait;
-    use chrono::Utc;
-    use rust_decimal::Decimal;
-    use sqlx::SqlitePool;
-    use tokio::time::{sleep, timeout};
+    use super::{recover_messages_from_trace, recover_thread_state_from_trace};
+    use argus_agent::history::TurnRecord;
+    use argus_agent::turn_log_store::append_turn_record;
+    use argus_protocol::llm::ChatMessage;
+    use argus_protocol::TokenUsage;
+    use argus_protocol::{SessionId, ThreadId};
 
-    use super::{
-        Session, SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
-        recover_thread_state_from_trace,
-    };
-
-    struct NoopCompactor;
-
-    #[async_trait]
-    impl Compactor for NoopCompactor {
-        async fn compact(
-            &self,
-            _messages: &[ChatMessage],
-            _token_count: u32,
-        ) -> Result<Option<CompactResult>, argus_agent::CompactError> {
-            Ok(None)
-        }
-
-        fn name(&self) -> &'static str {
-            "noop"
+    fn usage(total_tokens: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: total_tokens.saturating_sub(1),
+            output_tokens: 1,
+            total_tokens,
         }
     }
 
-    #[derive(Debug)]
-    struct CapturingProvider {
-        response: String,
-        delay: Duration,
-        captured_user_inputs: Arc<Mutex<Vec<String>>>,
-    }
+    #[tokio::test]
+    async fn recover_messages_from_trace_flattens_typed_turn_records() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let thread_id = ThreadId::new();
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        fs::create_dir_all(base_dir.join("turns")).expect("turns dir should exist");
 
-    impl CapturingProvider {
-        fn new(response: &str, delay: Duration) -> Self {
-            Self {
-                response: response.to_string(),
-                delay,
-                captured_user_inputs: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn captured_user_inputs(&self) -> Vec<String> {
-            self.captured_user_inputs.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl argus_protocol::LlmProvider for CapturingProvider {
-        fn model_name(&self) -> &str {
-            "capturing"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        async fn complete(
-            &self,
-            request: CompletionRequest,
-        ) -> std::result::Result<CompletionResponse, LlmError> {
-            let last_user_input = request
-                .messages
-                .iter()
-                .rev()
-                .find(|message| message.role == argus_protocol::Role::User)
-                .map(|message| message.content.clone())
-                .unwrap_or_default();
-            self.captured_user_inputs
-                .lock()
-                .unwrap()
-                .push(last_user_input);
-
-            sleep(self.delay).await;
-
-            Ok(CompletionResponse {
-                content: Some(self.response.clone()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 12,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            })
-        }
-    }
-
-    struct FixedProviderResolver {
-        provider: Arc<dyn argus_protocol::LlmProvider>,
-    }
-
-    impl FixedProviderResolver {
-        fn new(provider: Arc<dyn argus_protocol::LlmProvider>) -> Self {
-            Self { provider }
-        }
-    }
-
-    #[async_trait]
-    impl ProviderResolver for FixedProviderResolver {
-        async fn resolve(
-            &self,
-            _id: ProviderId,
-        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
-            Ok(Arc::clone(&self.provider))
-        }
-
-        async fn default_provider(
-            &self,
-        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
-            Ok(Arc::clone(&self.provider))
-        }
-
-        async fn resolve_with_model(
-            &self,
-            _id: ProviderId,
-            _model: &str,
-        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
-            Ok(Arc::clone(&self.provider))
-        }
-    }
-
-    fn sample_provider_record(is_default: bool) -> LlmProviderRecord {
-        LlmProviderRecord {
-            id: argus_protocol::LlmProviderId::new(0),
-            display_name: "session-manager-provider".to_string(),
-            kind: LlmProviderKind::OpenAiCompatible,
-            base_url: "http://localhost:11434/v1".to_string(),
-            api_key: SecretString::new("test-key"),
-            models: vec!["capturing".to_string()],
-            model_config: HashMap::new(),
-            default_model: "capturing".to_string(),
-            is_default,
-            extra_headers: HashMap::new(),
-            secret_status: ProviderSecretStatus::Ready,
-            meta_data: HashMap::new(),
-        }
-    }
-
-    async fn test_session_manager() -> SessionManager {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("sqlite memory pool should connect");
-        migrate(&pool).await.expect("migration should succeed");
-        let sqlite = Arc::new(ArgusSqlite::new(pool));
-        let provider_id =
-            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
-                .await
-                .expect("provider upsert should succeed");
-
-        let template_manager = Arc::new(TemplateManager::new(
-            sqlite.clone() as Arc<dyn AgentRepository>,
-            sqlite.clone(),
-        ));
-        template_manager
-            .upsert(AgentRecord {
-                id: AgentId::new(7),
-                display_name: "Session Test Agent".to_string(),
-                description: "Used to verify session loading".to_string(),
-                version: "1.0.0".to_string(),
-                provider_id: Some(ProviderId::new(provider_id.into_inner())),
-                model_id: Some("capturing".to_string()),
-                system_prompt: "You are a test session agent.".to_string(),
-                tool_names: vec![],
-                max_tokens: None,
-                temperature: None,
-                thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
-            })
-            .await
-            .expect("agent upsert should succeed");
-
-        let provider = Arc::new(CapturingProvider::new("hello", Duration::from_millis(5)));
-        let provider_resolver =
-            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
-        let tool_manager = Arc::new(ToolManager::new());
-        let trace_dir =
-            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
-        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
-            template_manager.clone(),
-            Arc::clone(&provider_resolver),
-            tool_manager.clone(),
-            trace_dir.clone(),
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite.clone() as Arc<dyn LlmProviderRepository>,
-        ));
-
-        SessionManager::new(
-            sqlite.clone() as Arc<dyn SessionRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
-            template_manager,
-            provider_resolver,
-            tool_manager,
-            trace_dir,
-            job_manager.thread_pool(),
-            job_manager,
-        )
-    }
-
-    async fn test_session_manager_with_tool_manager() -> (SessionManager, Arc<ToolManager>) {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("sqlite memory pool should connect");
-        migrate(&pool).await.expect("migration should succeed");
-        let sqlite = Arc::new(ArgusSqlite::new(pool));
-        let provider_id =
-            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
-                .await
-                .expect("provider upsert should succeed");
-
-        let template_manager = Arc::new(TemplateManager::new(
-            sqlite.clone() as Arc<dyn AgentRepository>,
-            sqlite.clone(),
-        ));
-        template_manager
-            .upsert(AgentRecord {
-                id: AgentId::new(7),
-                display_name: "Session Test Agent".to_string(),
-                description: "Used to verify session loading".to_string(),
-                version: "1.0.0".to_string(),
-                provider_id: Some(ProviderId::new(provider_id.into_inner())),
-                model_id: Some("capturing".to_string()),
-                system_prompt: "You are a test session agent.".to_string(),
-                tool_names: vec![],
-                max_tokens: None,
-                temperature: None,
-                thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
-            })
-            .await
-            .expect("agent upsert should succeed");
-
-        let provider = Arc::new(CapturingProvider::new("hello", Duration::from_millis(5)));
-        let provider_resolver =
-            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
-        let tool_manager = Arc::new(ToolManager::new());
-        let trace_dir =
-            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
-        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
-            template_manager.clone(),
-            Arc::clone(&provider_resolver),
-            tool_manager.clone(),
-            trace_dir.clone(),
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite.clone() as Arc<dyn LlmProviderRepository>,
-        ));
-
-        (
-            SessionManager::new(
-                sqlite.clone() as Arc<dyn SessionRepository>,
-                sqlite.clone() as Arc<dyn ThreadRepository>,
-                sqlite as Arc<dyn LlmProviderRepository>,
-                template_manager,
-                provider_resolver,
-                tool_manager.clone(),
-                trace_dir,
-                job_manager.thread_pool(),
-                job_manager,
+        append_turn_record(
+            &base_dir,
+            &TurnRecord::user_turn(
+                1,
+                vec![
+                    ChatMessage::system("sys"),
+                    ChatMessage::user("hi"),
+                    ChatMessage::assistant("hello"),
+                ],
+                usage(3),
             ),
-            tool_manager,
         )
-    }
-
-    async fn test_session_manager_with_provider_delay(
-        delay: Duration,
-    ) -> (SessionManager, SessionSchedulerBackend) {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .expect("sqlite memory pool should connect");
-        migrate(&pool).await.expect("migration should succeed");
-        let sqlite = Arc::new(ArgusSqlite::new(pool));
-        let provider_id =
-            LlmProviderRepository::upsert_provider(sqlite.as_ref(), &sample_provider_record(true))
-                .await
-                .expect("provider upsert should succeed");
-
-        let template_manager = Arc::new(TemplateManager::new(
-            sqlite.clone() as Arc<dyn AgentRepository>,
-            sqlite.clone(),
-        ));
-        template_manager
-            .upsert(AgentRecord {
-                id: AgentId::new(7),
-                display_name: "Session Test Agent".to_string(),
-                description: "Used to verify session loading".to_string(),
-                version: "1.0.0".to_string(),
-                provider_id: Some(ProviderId::new(provider_id.into_inner())),
-                model_id: Some("capturing".to_string()),
-                system_prompt: "You are a test session agent.".to_string(),
-                tool_names: vec![],
-                max_tokens: None,
-                temperature: None,
-                thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
-            })
-            .await
-            .expect("agent upsert should succeed");
-
-        let provider = Arc::new(CapturingProvider::new("hello", delay));
-        let provider_resolver =
-            Arc::new(FixedProviderResolver::new(provider)) as Arc<dyn ProviderResolver>;
-        let tool_manager = Arc::new(ToolManager::new());
-        let trace_dir =
-            std::env::temp_dir().join(format!("argus-session-manager-tests-{}", SessionId::new()));
-        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
-            template_manager.clone(),
-            Arc::clone(&provider_resolver),
-            tool_manager.clone(),
-            trace_dir.clone(),
-            sqlite.clone() as Arc<dyn JobRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite.clone() as Arc<dyn LlmProviderRepository>,
-        ));
-
-        let backend =
-            SessionSchedulerBackend::new(template_manager.clone(), Arc::clone(&job_manager));
-        let manager = SessionManager::new(
-            sqlite.clone() as Arc<dyn SessionRepository>,
-            sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
-            template_manager,
-            provider_resolver,
-            tool_manager,
-            trace_dir,
-            job_manager.thread_pool(),
-            job_manager,
-        );
-
-        (manager, backend)
-    }
-
-    fn test_agent_record() -> Arc<AgentRecord> {
-        Arc::new(AgentRecord {
-            id: AgentId::new(1),
-            display_name: "Main Agent".to_string(),
-            description: "Main orchestration agent".to_string(),
-            version: "1.0.0".to_string(),
-            provider_id: Some(ProviderId::new(1)),
-            model_id: None,
-            system_prompt: "You are a test orchestrator.".to_string(),
-            tool_names: vec![],
-            max_tokens: None,
-            temperature: None,
-            thinking_config: None,
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
-        })
-    }
-
-    fn build_test_thread(
-        session_id: SessionId,
-        provider: Arc<CapturingProvider>,
-    ) -> Arc<tokio::sync::RwLock<argus_agent::Thread>> {
-        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
-        Arc::new(tokio::sync::RwLock::new(
-            ThreadBuilder::new()
-                .provider(provider)
-                .compactor(compactor)
-                .agent_record(test_agent_record())
-                .session_id(session_id)
-                .build()
-                .expect("thread should build"),
-        ))
-    }
-
-    async fn wait_for_idle(
-        thread: &Arc<tokio::sync::RwLock<argus_agent::Thread>>,
-        expected_count: usize,
-    ) {
-        let mut rx = {
-            let guard = thread.read().await;
-            guard.subscribe()
-        };
-        let mut idle_count = 0usize;
-        timeout(Duration::from_secs(5), async {
-            loop {
-                match rx.recv().await {
-                    Ok(ThreadEvent::Idle { .. }) => {
-                        idle_count += 1;
-                        if idle_count >= expected_count {
-                            break;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => {}
-                }
-            }
-        })
         .await
-        .expect("thread should emit idle");
+        .expect("turn1 should append");
+        append_turn_record(
+            &base_dir,
+            &TurnRecord::checkpoint(vec![ChatMessage::assistant("summary")], usage(7)),
+        )
+        .await
+        .expect("checkpoint should append");
+        append_turn_record(
+            &base_dir,
+            &TurnRecord::user_turn(
+                2,
+                vec![ChatMessage::user("next"), ChatMessage::assistant("reply")],
+                usage(5),
+            ),
+        )
+        .await
+        .expect("turn2 should append");
+
+        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id)
+            .await
+            .expect("messages should recover");
+        let contents: Vec<_> = messages
+            .into_iter()
+            .map(|message| message.content)
+            .collect();
+        assert_eq!(contents, vec!["sys", "hi", "hello", "next", "reply"]);
     }
 
     #[tokio::test]
-    async fn recover_turns_from_messages_jsonl() {
+    async fn recover_thread_state_from_trace_uses_last_record_usage_and_turn_count() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string());
+        fs::create_dir_all(base_dir.join("turns")).expect("turns dir should exist");
 
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 1),
-            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+        append_turn_record(
+            &base_dir,
+            &TurnRecord::user_turn(
+                1,
+                vec![
+                    ChatMessage::system("sys"),
+                    ChatMessage::user("turn1"),
+                    ChatMessage::assistant("answer1"),
+                ],
+                usage(15),
+            ),
         )
         .await
-        .expect("messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    total_tokens: 2,
-                }),
-                context_token_count: Some(2),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
+        .expect("turn1 should append");
+        append_turn_record(
+            &base_dir,
+            &TurnRecord::checkpoint(vec![ChatMessage::assistant("summary")], usage(9)),
         )
         .await
-        .expect("meta should write");
+        .expect("checkpoint should append");
+        append_turn_record(
+            &base_dir,
+            &TurnRecord::user_turn(
+                2,
+                vec![
+                    ChatMessage::user("turn2"),
+                    ChatMessage::assistant("answer2"),
+                ],
+                usage(28),
+            ),
+        )
+        .await
+        .expect("turn2 should append");
 
-        let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, Some(1))
-                .await
-                .expect("new-format turn logs should recover");
-
-        assert_eq!(recovered.turn_count, 1);
-        assert_eq!(recovered.token_count, 2);
-        assert_eq!(recovered.messages.len(), 2);
-        assert_eq!(recovered.messages[0].content, "hi");
-        assert_eq!(recovered.messages[1].content, "hello");
-    }
-
-    #[tokio::test]
-    async fn get_thread_snapshot_flattens_turns_for_existing_callers() {
-        let manager = test_session_manager().await;
-        let session_id = manager
-            .create("snapshot compatibility".to_string())
+        let recovered = recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id)
             .await
-            .expect("session should create");
-        let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None)
-            .await
-            .expect("thread should create");
-        let trace_turns_dir = turns_dir(
-            &manager
-                .trace_dir
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        fs::create_dir_all(&trace_turns_dir).expect("turns dir should exist");
-
-        write_turn_messages(
-            &turn_messages_path(&trace_turns_dir, 1),
-            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        )
-        .await
-        .expect("first turn messages should write");
-        write_turn_meta(
-            &turn_meta_path(&trace_turns_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    total_tokens: 2,
-                }),
-                context_token_count: Some(2),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("first turn meta should write");
-        write_turn_messages(
-            &turn_messages_path(&trace_turns_dir, 2),
-            &[ChatMessage::user("again"), ChatMessage::assistant("done")],
-        )
-        .await
-        .expect("second turn messages should write");
-        write_turn_meta(
-            &turn_meta_path(&trace_turns_dir, 2),
-            &TurnLogMeta {
-                turn_number: 2,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 2,
-                    output_tokens: 4,
-                    total_tokens: 6,
-                }),
-                context_token_count: Some(6),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("second turn meta should write");
-
-        manager
-            .unload(session_id)
-            .await
-            .expect("session should unload");
-
-        let (messages, turn_count, token_count, _) = manager
-            .get_thread_snapshot(session_id, &thread_id)
-            .await
-            .expect("snapshot should recover");
-
-        assert_eq!(turn_count, 2);
-        assert_eq!(token_count, 6);
-        assert_eq!(messages.len(), 4);
-        assert_eq!(
-            messages.last().map(|message| message.content.as_str()),
-            Some("done")
-        );
-    }
-
-    #[tokio::test]
-    async fn recover_messages_from_trace_restores_full_turn_history() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
-
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 1),
-            &[
-                ChatMessage::user("用户问题一"),
-                ChatMessage::assistant("总结一"),
-                ChatMessage::tool_result("call_1", "bash", "'/tmp'"),
-            ],
-        )
-        .await
-        .expect("turn one messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                }),
-                context_token_count: Some(15),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("turn one meta should write");
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 2),
-            &[
-                ChatMessage::user("用户问题二"),
-                ChatMessage::assistant("总结二"),
-            ],
-        )
-        .await
-        .expect("turn two messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 2),
-            &TurnLogMeta {
-                turn_number: 2,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 20,
-                    output_tokens: 8,
-                    total_tokens: 28,
-                }),
-                context_token_count: Some(28),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("turn two meta should write");
-
-        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
-            .await
-            .expect("committed log recovery should succeed");
-
-        assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[0].content, "用户问题一");
-        assert_eq!(messages[1].role, Role::Assistant);
-        assert_eq!(messages[1].content, "总结一");
-        assert_eq!(messages[2].role, Role::Tool);
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(messages[2].name.as_deref(), Some("bash"));
-        assert_eq!(messages[3].role, Role::User);
-        assert_eq!(messages[3].content, "用户问题二");
-        assert_eq!(messages[4].role, Role::Assistant);
-        assert_eq!(messages[4].content, "总结二");
-    }
-
-    #[tokio::test]
-    async fn recover_messages_from_trace_fails_when_turn_file_is_missing() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
-
-        write_turn_messages(
-            &turn_messages_path(&turn_logs_dir, 1),
-            &[ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        )
-        .await
-        .expect("turn one messages should write");
-        write_turn_meta(
-            &turn_meta_path(&turn_logs_dir, 1),
-            &TurnLogMeta {
-                turn_number: 1,
-                state: TurnState::Completed,
-                token_usage: Some(argus_protocol::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                }),
-                context_token_count: Some(15),
-                started_at: Utc::now(),
-                finished_at: Some(Utc::now()),
-                model: Some("test-model".to_string()),
-                error: None,
-            },
-        )
-        .await
-        .expect("turn one meta should write");
-
-        let error = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 2)
-            .await
-            .expect_err("missing turn file should fail");
-
-        assert!(error.to_string().contains("missing turn trace file 2"));
-    }
-
-    #[tokio::test]
-    async fn recover_messages_from_trace_uses_turns_beyond_persisted_count_hint() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
-
-        for (turn_number, user, assistant, total_tokens) in [
-            (1, "用户问题一", "回答一", 15),
-            (2, "用户问题二", "回答二", 28),
-        ] {
-            write_turn_messages(
-                &turn_messages_path(&turn_logs_dir, turn_number),
-                &[ChatMessage::user(user), ChatMessage::assistant(assistant)],
-            )
-            .await
-            .expect("turn messages should write");
-            write_turn_meta(
-                &turn_meta_path(&turn_logs_dir, turn_number),
-                &TurnLogMeta {
-                    turn_number,
-                    state: TurnState::Completed,
-                    token_usage: Some(argus_protocol::TokenUsage {
-                        input_tokens: total_tokens / 2,
-                        output_tokens: total_tokens - (total_tokens / 2),
-                        total_tokens,
-                    }),
-                    context_token_count: Some(total_tokens),
-                    started_at: Utc::now(),
-                    finished_at: Some(Utc::now()),
-                    model: Some("test-model".to_string()),
-                    error: None,
-                },
-            )
-            .await
-            .expect("turn meta should write");
-        }
-
-        let messages = recover_messages_from_trace(temp_dir.path(), &session_id, &thread_id, 1)
-            .await
-            .expect("recovery should discover committed turns beyond the persisted count hint");
-
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].content, "用户问题一");
-        assert_eq!(messages[1].content, "回答一");
-        assert_eq!(messages[2].content, "用户问题二");
-        assert_eq!(messages[3].content, "回答二");
-    }
-
-    #[tokio::test]
-    async fn recover_thread_state_from_trace_infers_counts_from_files_when_db_counts_are_missing() {
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let session_id = SessionId::new();
-        let thread_id = ThreadId::new();
-        let turn_logs_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        fs::create_dir_all(&turn_logs_dir).expect("turns dir should exist");
-
-        for (turn_number, user, assistant, total_tokens) in
-            [(1, "hi", "hello", 15), (2, "again", "welcome back", 28)]
-        {
-            write_turn_messages(
-                &turn_messages_path(&turn_logs_dir, turn_number),
-                &[ChatMessage::user(user), ChatMessage::assistant(assistant)],
-            )
-            .await
-            .expect("turn messages should write");
-            write_turn_meta(
-                &turn_meta_path(&turn_logs_dir, turn_number),
-                &TurnLogMeta {
-                    turn_number,
-                    state: TurnState::Completed,
-                    token_usage: Some(argus_protocol::TokenUsage {
-                        input_tokens: total_tokens / 2,
-                        output_tokens: total_tokens - (total_tokens / 2),
-                        total_tokens,
-                    }),
-                    context_token_count: Some(total_tokens),
-                    started_at: Utc::now(),
-                    finished_at: Some(Utc::now()),
-                    model: Some("test-model".to_string()),
-                    error: None,
-                },
-            )
-            .await
-            .expect("turn meta should write");
-        }
-
-        let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
-                .await
-                .expect("committed log recovery should succeed");
+            .expect("thread state should recover");
 
         assert_eq!(recovered.turn_count, 2);
         assert_eq!(recovered.token_count, 28);
-        assert_eq!(recovered.messages.len(), 4);
-        assert_eq!(recovered.messages[0].content, "hi");
-        assert_eq!(recovered.messages[3].content, "welcome back");
+        assert_eq!(recovered.messages.len(), 5);
     }
 
     #[tokio::test]
-    async fn recover_thread_state_from_trace_returns_empty_when_turns_dir_is_missing() {
+    async fn recover_thread_state_from_trace_reports_meta_jsonl_errors() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
+        let base_dir = temp_dir
+            .path()
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("turns");
+        fs::create_dir_all(&base_dir).expect("turns dir should exist");
+        fs::write(
+            base_dir.join("meta.jsonl"),
+            "{\"kind\":\"Checkpoint\",\"turn_number\":0}\n",
+        )
+        .expect("invalid meta should write");
 
-        let recovered =
-            recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id, None)
-                .await
-                .expect("missing turns dir should be treated as empty history");
-
-        assert_eq!(recovered.turn_count, 0);
-        assert_eq!(recovered.token_count, 0);
-        assert!(recovered.messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn busy_thread_remains_visible_while_orchestrator_runs_turn() {
-        let session_id = SessionId::new();
-        let session = Arc::new(Session::new(session_id, "Test".to_string()));
-        let provider = Arc::new(CapturingProvider::new("done", Duration::from_millis(150)));
-        let thread = build_test_thread(session_id, Arc::clone(&provider));
-        let thread_id = thread.read().await.id();
-
-        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
-        session.add_thread(Arc::clone(&thread));
-
-        {
-            let guard = thread.read().await;
-            guard
-                .send_user_message("hello".to_string(), None)
-                .expect("message should queue");
-        }
-
-        sleep(Duration::from_millis(30)).await;
-
-        let summaries = session.list_threads().await;
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].id, thread_id);
-
-        wait_for_idle(&thread, 1).await;
-    }
-
-    #[tokio::test]
-    async fn idle_job_result_triggers_new_turn_with_synthetic_user_message() {
-        let session_id = SessionId::new();
-        let provider = Arc::new(CapturingProvider::new(
-            "job consumed",
-            Duration::from_millis(10),
-        ));
-        let thread = build_test_thread(session_id, Arc::clone(&provider));
-        let thread_id = thread.read().await.id();
-
-        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
-
-        {
-            let guard = thread.read().await;
-            guard
-                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-                    id: "msg-job-42".to_string(),
-                    from_thread_id: ThreadId::new(),
-                    to_thread_id: thread_id,
-                    from_label: "Researcher".to_string(),
-                    message_type: MailboxMessageType::JobResult {
-                        job_id: "job-42".to_string(),
-                        success: true,
-                        token_usage: None,
-                        agent_id: AgentId::new(99),
-                        agent_display_name: "Researcher".to_string(),
-                        agent_description: "Investigates background context".to_string(),
-                    },
-                    text: "completed successfully".to_string(),
-                    timestamp: "2026-04-01T00:00:00Z".to_string(),
-                    read: false,
-                    summary: None,
-                }))
-                .expect("job result should queue");
-        }
-
-        wait_for_idle(&thread, 1).await;
-
-        let captured = provider.captured_user_inputs();
-        assert_eq!(captured.len(), 1);
-        assert!(captured[0].contains("Job: job-42"));
-        assert!(captured[0].contains("Subagent: Researcher"));
-        assert!(captured[0].contains("Description: Investigates background context"));
-        assert!(captured[0].contains("Result: completed successfully"));
-    }
-
-    #[tokio::test]
-    async fn running_turn_consumes_job_result_after_idle_if_no_next_iteration_happens() {
-        let session_id = SessionId::new();
-        let provider = Arc::new(CapturingProvider::new(
-            "turn complete",
-            Duration::from_millis(120),
-        ));
-        let thread = build_test_thread(session_id, Arc::clone(&provider));
-        let thread_id = thread.read().await.id();
-
-        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
-
-        {
-            let guard = thread.read().await;
-            guard
-                .send_user_message("initial request".to_string(), None)
-                .expect("message should queue");
-        }
-
-        sleep(Duration::from_millis(20)).await;
-
-        {
-            let guard = thread.read().await;
-            guard
-                .send_control_event(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-                    id: "msg-job-late".to_string(),
-                    from_thread_id: ThreadId::new(),
-                    to_thread_id: thread_id,
-                    from_label: "Builder".to_string(),
-                    message_type: MailboxMessageType::JobResult {
-                        job_id: "job-late".to_string(),
-                        success: true,
-                        token_usage: None,
-                        agent_id: AgentId::new(100),
-                        agent_display_name: "Builder".to_string(),
-                        agent_description: "Builds follow-up plans".to_string(),
-                    },
-                    text: "late background answer".to_string(),
-                    timestamp: "2026-04-01T00:00:01Z".to_string(),
-                    read: false,
-                    summary: None,
-                }))
-                .expect("job result should queue");
-        }
-
-        wait_for_idle(&thread, 1).await;
-
-        let captured = provider.captured_user_inputs();
-        assert_eq!(captured.len(), 2);
-        assert_eq!(captured[0], "initial request");
-        assert!(captured[1].contains("Job: job-late"));
-        assert!(captured[1].contains("Subagent: Builder"));
-    }
-
-    #[tokio::test]
-    async fn scheduler_backend_resolves_parent_route_to_direct_parent_thread() {
-        let (manager, backend) =
-            test_session_manager_with_provider_delay(Duration::from_millis(5)).await;
-        let session_id = manager
-            .create("parent-route".to_string())
+        let error = recover_thread_state_from_trace(temp_dir.path(), &session_id, &thread_id)
             .await
-            .expect("session should create");
-        let parent_thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None)
-            .await
-            .expect("parent thread should create");
-        let job_id = "job-parent-route".to_string();
-
-        backend
-            .job_manager
-            .record_dispatched_job(parent_thread_id, job_id.clone());
-        let child_thread_id = manager
-            .thread_pool
-            .enqueue_job(argus_job::types::ThreadPoolJobRequest {
-                originating_thread_id: parent_thread_id,
-                job_id,
-                agent_id: AgentId::new(7),
-                prompt: "route test".to_string(),
-                context: None,
-            })
-            .await
-            .expect("child job should enqueue");
-
-        let targets = backend
-            .resolve_message_targets(child_thread_id, "parent")
-            .await
-            .expect("parent target should resolve");
-
-        assert_eq!(targets, vec![parent_thread_id]);
-    }
-
-    #[tokio::test]
-    async fn scheduler_backend_check_inbox_and_mark_read_use_message_ids() {
-        let (manager, backend) =
-            test_session_manager_with_provider_delay(Duration::from_millis(150)).await;
-        let session_id = manager
-            .create("mailbox check".to_string())
-            .await
-            .expect("session should create");
-        let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None)
-            .await
-            .expect("thread should create");
-
-        manager
-            .thread_pool
-            .register_chat_thread(session_id, thread_id);
-        let thread = manager
-            .thread_pool
-            .ensure_chat_runtime(session_id, thread_id)
-            .await
-            .expect("chat runtime should load");
-        manager
-            .thread_pool
-            .send_chat_message(session_id, thread_id, "long running request".to_string())
-            .await
-            .expect("chat message should start a turn");
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if thread.read().await.is_turn_running() {
-                    break;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("chat thread should become active");
-
-        let mailbox_message = MailboxMessage {
-            id: "msg-session-mailbox".to_string(),
-            from_thread_id: ThreadId::new(),
-            to_thread_id: thread_id,
-            from_label: "Planner".to_string(),
-            message_type: MailboxMessageType::Plain,
-            text: "queued follow-up".to_string(),
-            timestamp: "2026-04-01T00:00:00Z".to_string(),
-            read: false,
-            summary: Some("queued".to_string()),
-        };
-        manager
-            .thread_pool
-            .deliver_mailbox_message(thread_id, mailbox_message.clone())
-            .await
-            .expect("mailbox message should queue");
-
-        let unread = timeout(Duration::from_secs(1), async {
-            loop {
-                let unread = backend
-                    .check_inbox(CheckInboxRequest { thread_id })
-                    .await
-                    .expect("check_inbox should succeed");
-                if !unread.is_empty() {
-                    break unread;
-                }
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("mailbox message should become visible in inbox");
-        assert_eq!(unread.len(), 1);
-        assert_eq!(unread[0].id, mailbox_message.id);
-
-        backend
-            .mark_read(MarkReadRequest {
-                thread_id,
-                message_id: mailbox_message.id.clone(),
-            })
-            .await
-            .expect("mark_read should succeed");
-
-        let unread = backend
-            .check_inbox(CheckInboxRequest { thread_id })
-            .await
-            .expect("check_inbox should succeed after mark_read");
-        assert!(unread.is_empty());
-    }
-
-    #[tokio::test]
-    async fn scheduler_backend_rejects_thread_route_outside_direct_topology() {
-        let (manager, backend) =
-            test_session_manager_with_provider_delay(Duration::from_millis(5)).await;
-        let session_a = manager
-            .create("mailbox-topology-a".to_string())
-            .await
-            .expect("first session should create");
-        let thread_a = manager
-            .create_thread(session_a, AgentId::new(7), None, None)
-            .await
-            .expect("first thread should create");
-        let session_b = manager
-            .create("mailbox-topology-b".to_string())
-            .await
-            .expect("second session should create");
-        let thread_b = manager
-            .create_thread(session_b, AgentId::new(7), None, None)
-            .await
-            .expect("second thread should create");
-
-        let error = backend
-            .send_message(SendMessageRequest {
-                thread_id: thread_a,
-                to: format!("thread:{thread_b}"),
-                message: "hello from elsewhere".to_string(),
-                summary: None,
-            })
-            .await
-            .expect_err("unrelated thread route should be rejected");
-
-        assert!(
-            error
-                .to_string()
-                .contains("not reachable from the current thread"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn scheduler_backend_rejects_job_route_until_child_runtime_is_loaded() {
-        let (manager, backend) =
-            test_session_manager_with_provider_delay(Duration::from_millis(150)).await;
-        let session_id = manager
-            .create("mailbox-job-route".to_string())
-            .await
-            .expect("session should create");
-        let parent_thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None)
-            .await
-            .expect("parent thread should create");
-        let job_id = "job-mailbox-unloaded-child".to_string();
-
-        backend
-            .job_manager
-            .record_dispatched_job(parent_thread_id, job_id.clone());
-        manager
-            .thread_pool
-            .enqueue_job(argus_job::types::ThreadPoolJobRequest {
-                originating_thread_id: parent_thread_id,
-                job_id: job_id.clone(),
-                agent_id: AgentId::new(7),
-                prompt: "not started yet".to_string(),
-                context: None,
-            })
-            .await
-            .expect("child job should enqueue");
-
-        let error = backend
-            .send_message(SendMessageRequest {
-                thread_id: parent_thread_id,
-                to: format!("job:{job_id}"),
-                message: "hello queued child".to_string(),
-                summary: None,
-            })
-            .await
-            .expect_err("queued child should not accept mailbox traffic yet");
-
-        assert!(
-            error
-                .to_string()
-                .contains("not ready to receive mailbox messages"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn load_restores_persisted_threads_into_session_runtime_map() {
-        let manager = test_session_manager().await;
-        let session_id = manager
-            .create("restorable session".to_string())
-            .await
-            .expect("session should create");
-        let thread_id = manager
-            .create_thread(session_id, AgentId::new(7), None, None)
-            .await
-            .expect("thread should create");
-
-        manager
-            .unload(session_id)
-            .await
-            .expect("session should unload");
-        let session = manager.load(session_id).await.expect("session should load");
-
-        assert!(
-            session.get_thread(&thread_id).is_some(),
-            "loaded session should expose persisted live threads"
-        );
-    }
-
-    #[tokio::test]
-    async fn session_manager_registers_unified_scheduler_tool() {
-        let (_manager, tool_manager) = test_session_manager_with_tool_manager().await;
-        let tool_ids = tool_manager.list_ids();
-
-        assert!(tool_ids.iter().any(|id| id == "scheduler"));
-        assert!(!tool_ids.iter().any(|id| id == "dispatch_job"));
-        assert!(!tool_ids.iter().any(|id| id == "dispath_job"));
-        assert!(!tool_ids.iter().any(|id| id == "get_job_result"));
-        assert!(!tool_ids.iter().any(|id| id == "list_subagents"));
+            .expect_err("invalid first checkpoint should fail");
+        let message = error.to_string();
+        assert!(message.contains("failed to recover committed turn log"));
     }
 }

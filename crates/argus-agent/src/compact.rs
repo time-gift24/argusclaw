@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - `Compactor`: Async trait for implementing compaction strategies.
-//! - `CompactResult`: Result type carrying checkpoint summary messages and token estimate.
+//! - `CompactResult`: Result type carrying checkpoint summary messages and token usage.
 //! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
 
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
+use argus_protocol::token_usage::TokenUsage;
 use async_trait::async_trait;
 
 use super::error::CompactError;
@@ -37,11 +38,12 @@ Provide a detailed prompt for continuing our conversation above.\n\
   ---";
 
 /// Result of a successful compaction.
+#[derive(Debug, Clone)]
 pub struct CompactResult {
     /// Summary messages to use in a compaction checkpoint.
     pub summary_messages: Vec<ChatMessage>,
     /// Authoritative token count for the compaction request + summary response.
-    pub token_count: u32,
+    pub token_usage: TokenUsage,
 }
 
 /// Compactor trait — responsible for deciding when and how to compact.
@@ -97,11 +99,8 @@ impl LlmCompactor {
         DEFAULT_COMPACTION_PROMPT
     }
 
-    fn build_compaction_request_messages(
-        compactable_messages: &[ChatMessage],
-    ) -> Vec<ChatMessage> {
-        let mut request_messages =
-            Vec::with_capacity(compactable_messages.len() + 1);
+    fn build_compaction_request_messages(compactable_messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let mut request_messages = Vec::with_capacity(compactable_messages.len() + 1);
         request_messages.extend(compactable_messages.iter().cloned());
         request_messages.push(ChatMessage::user(Self::compaction_prompt()));
         request_messages
@@ -154,18 +153,17 @@ impl Compactor for LlmCompactor {
             return Ok(None);
         };
 
-        let request_messages =
-            Self::build_compaction_request_messages(&compactable_messages);
+        let request_messages = Self::build_compaction_request_messages(&compactable_messages);
 
         let request = CompletionRequest::new(request_messages);
 
-        let response = self
-            .provider
-            .complete(request)
-            .await
-            .map_err(|error| CompactError::Failed {
-                reason: error.to_string(),
-            })?;
+        let response =
+            self.provider
+                .complete(request)
+                .await
+                .map_err(|error| CompactError::Failed {
+                    reason: error.to_string(),
+                })?;
         let summary = response.content.unwrap_or_default();
 
         let synthetic_summary = ChatMessage::assistant(&summary).with_metadata(
@@ -179,7 +177,11 @@ impl Compactor for LlmCompactor {
 
         Ok(Some(CompactResult {
             summary_messages,
-            token_count: response.input_tokens + response.output_tokens,
+            token_usage: TokenUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                total_tokens: response.input_tokens + response.output_tokens,
+            },
         }))
     }
 
@@ -361,7 +363,7 @@ mod tests {
         assert_eq!(result.summary_messages.len(), 1);
         assert_eq!(result.summary_messages[0].role, Role::Assistant);
         assert_eq!(result.summary_messages[0].content, "历史摘要");
-        assert_eq!(result.token_count, 20);
+        assert_eq!(result.token_usage.total_tokens, 20);
     }
 
     #[tokio::test]

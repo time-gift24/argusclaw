@@ -6,39 +6,67 @@ use argus_protocol::{TokenUsage, llm::ChatMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TurnState {
-    Completed,
-    Failed,
-    Cancelled,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TurnRecordKind {
+    UserTurn,
+    Checkpoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
+    pub kind: TurnRecordKind,
     pub turn_number: u32,
-    pub state: TurnState,
     pub messages: Vec<ChatMessage>,
-    pub token_usage: Option<TokenUsage>,
-    pub context_token_count: Option<u32>,
+    pub token_usage: TokenUsage,
     pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-    pub model: Option<String>,
-    pub error: Option<String>,
+    pub finished_at: DateTime<Utc>,
 }
 
 impl TurnRecord {
-    pub fn completed(turn_number: u32, messages: Vec<ChatMessage>) -> Self {
-        let started_at = Utc::now();
+    pub fn user_turn(
+        turn_number: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+    ) -> Self {
+        let now = Utc::now();
+        Self::user_turn_with_times(turn_number, messages, token_usage, now, now)
+    }
+
+    pub fn user_turn_with_times(
+        turn_number: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    ) -> Self {
         Self {
+            kind: TurnRecordKind::UserTurn,
             turn_number,
-            state: TurnState::Completed,
             messages,
-            token_usage: None,
-            context_token_count: None,
+            token_usage,
             started_at,
-            finished_at: Some(Utc::now()),
-            model: None,
-            error: None,
+            finished_at,
+        }
+    }
+
+    pub fn checkpoint(messages: Vec<ChatMessage>, token_usage: TokenUsage) -> Self {
+        let now = Utc::now();
+        Self::checkpoint_with_times(messages, token_usage, now, now)
+    }
+
+    pub fn checkpoint_with_times(
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            kind: TurnRecordKind::Checkpoint,
+            turn_number: 0,
+            messages,
+            token_usage,
+            started_at,
+            finished_at,
         }
     }
 }
@@ -78,50 +106,62 @@ pub struct InFlightTurn {
     pub shared: Arc<InFlightTurnShared>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionCheckpoint {
-    pub summarized_through_turn: u32,
-    pub summary_messages: Vec<ChatMessage>,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub token_count_stale: bool,
+pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
+    turns
+        .iter()
+        .filter(|t| matches!(t.kind, TurnRecordKind::UserTurn))
+        .map(|t| t.turn_number)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
 }
 
 pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {
     turns
         .iter()
+        .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
         .flat_map(|turn| turn.messages.iter().cloned())
         .collect()
 }
 
-pub fn shared_history<'a>(
-    flat_messages: &'a Arc<Vec<ChatMessage>>,
-    cached_committed_messages: Option<&'a Arc<Vec<ChatMessage>>>,
-) -> &'a Arc<Vec<ChatMessage>> {
-    cached_committed_messages.unwrap_or(flat_messages)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use argus_protocol::TokenUsage;
     use argus_protocol::llm::ChatMessage;
 
-    use super::{TurnRecord, flatten_turn_messages, shared_history};
+    use super::{TurnRecord, derive_next_user_turn_number, flatten_turn_messages};
 
     #[test]
-    fn flatten_committed_messages_skips_inflight_turn() {
+    fn flatten_committed_messages_skips_checkpoint_records() {
         let turns = vec![
-            TurnRecord::completed(
+            TurnRecord::user_turn(
                 1,
                 vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+                TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                },
             ),
-            TurnRecord::completed(
+            TurnRecord::checkpoint(
+                vec![ChatMessage::assistant("summary")],
+                TokenUsage {
+                    input_tokens: 5,
+                    output_tokens: 2,
+                    total_tokens: 7,
+                },
+            ),
+            TurnRecord::user_turn(
                 2,
                 vec![
                     ChatMessage::user("search"),
                     ChatMessage::assistant("working"),
                 ],
+                TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 1,
+                    total_tokens: 4,
+                },
             ),
         ];
 
@@ -133,12 +173,27 @@ mod tests {
     }
 
     #[test]
-    fn shared_history_prefers_cached_committed_messages() {
-        let flat_messages = Arc::new(vec![ChatMessage::user("stale")]);
-        let cached_messages = Arc::new(vec![ChatMessage::user("fresh")]);
+    fn user_turn_number_derivation_ignores_checkpoint_records() {
+        let records = vec![
+            TurnRecord::user_turn(
+                1,
+                vec![ChatMessage::system("sys"), ChatMessage::user("u1")],
+                TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                },
+            ),
+            TurnRecord::checkpoint(
+                vec![ChatMessage::assistant("summary")],
+                TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: 1,
+                    total_tokens: 5,
+                },
+            ),
+        ];
 
-        let history = shared_history(&flat_messages, Some(&cached_messages));
-
-        assert_eq!(history[0].content, "fresh");
+        assert_eq!(derive_next_user_turn_number(&records), 2);
     }
 }

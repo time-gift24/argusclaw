@@ -475,9 +475,9 @@ impl OpenAiCompatibleProvider {
     ) -> reqwest::RequestBuilder {
         match serde_json::to_string_pretty(body) {
             Ok(json) => eprintln!("[openai-compatible] outgoing request json:\n{json}"),
-            Err(error) => eprintln!(
-                "[openai-compatible] failed to serialize outgoing request json: {error}"
-            ),
+            Err(error) => {
+                eprintln!("[openai-compatible] failed to serialize outgoing request json: {error}")
+            }
         }
 
         let client = if body.stream {
@@ -599,6 +599,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     reason: "response had no choices".to_string(),
                 })?;
         let usage = payload.usage.unwrap_or_default();
+
+        tracing::info!(
+            provider = "openai-compatible",
+            input_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens,
+            total_tokens = usage.prompt_tokens + usage.completion_tokens,
+            "openai-compatible token usage"
+        );
 
         // Log the raw response for debugging
         tracing::debug!(
@@ -884,6 +892,13 @@ fn parse_stream_frame_impl(
     let mut events = Vec::new();
 
     if let Some(usage) = chunk.usage {
+        tracing::info!(
+            provider = "openai-compatible",
+            input_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens,
+            total_tokens = usage.prompt_tokens + usage.completion_tokens,
+            "openai-compatible stream token usage"
+        );
         events.push(Ok(LlmStreamEvent::Usage {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,

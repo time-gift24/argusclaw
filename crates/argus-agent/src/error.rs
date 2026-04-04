@@ -79,6 +79,31 @@ pub enum TurnLogError {
 
     #[error("truncated event at line {line}: {reason}")]
     TruncatedEvent { line: usize, reason: String },
+
+    #[error("out-of-order seq at line {line}: expected {expected} but found {found}")]
+    OutOfOrderSeq {
+        line: usize,
+        expected: u64,
+        found: u64,
+    },
+
+    #[error(
+        "non-monotonic user turn numbers at line {line}: expected turn {expected} but found {found}"
+    )]
+    NonMonotonicTurnNumber {
+        line: usize,
+        expected: u32,
+        found: u32,
+    },
+
+    #[error(
+        "checkpoint through_turn {through_turn} exceeds history turn count {turn_count} at line {line}"
+    )]
+    CheckpointBeyondHistory {
+        line: usize,
+        through_turn: u32,
+        turn_count: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------

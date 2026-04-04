@@ -36,8 +36,9 @@ impl ThreadHandle {
     }
 
     /// Mark the active turn finished so runtime can pick queued work.
-    pub(crate) fn finish_active_turn(&mut self) -> ThreadRuntimeAction {
-        self.runtime.finish_active_turn(&mut self.mailbox)
+    pub(crate) fn finish_active_turn(&mut self, committed: bool) -> ThreadRuntimeAction {
+        self.runtime
+            .finish_active_turn(committed, &mut self.mailbox)
     }
 
     /// Claim a queued job result from the runtime inbox.

@@ -8,9 +8,9 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use argus_agent::TurnCancellation;
 #[cfg(test)]
 use argus_agent::TurnOutput;
-use argus_agent::TurnCancellation;
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
@@ -720,7 +720,6 @@ mod tests {
         TurnOutput {
             appended_messages: vec![ChatMessage::assistant(content)],
             token_usage: TokenUsage::default(),
-            context_token_count: None,
         }
     }
 

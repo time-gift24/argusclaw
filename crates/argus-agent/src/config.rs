@@ -215,9 +215,6 @@ pub struct TurnOutput {
     /// Token usage statistics.
     #[builder(default)]
     pub token_usage: argus_protocol::TokenUsage,
-    /// Exact context token count reported by the provider for the final LLM call in this turn.
-    #[builder(default)]
-    pub context_token_count: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +295,6 @@ mod tests {
             .unwrap();
         assert!(output.appended_messages.is_empty());
         assert_eq!(output.token_usage.input_tokens, 0);
-        assert_eq!(output.context_token_count, None);
     }
 
     #[test]
@@ -311,10 +307,8 @@ mod tests {
         let output = TurnOutputBuilder::default()
             .appended_messages(Vec::new())
             .token_usage(token_usage.clone())
-            .context_token_count(Some(120))
             .build()
             .unwrap();
         assert_eq!(output.token_usage, token_usage);
-        assert_eq!(output.context_token_count, Some(120));
     }
 }

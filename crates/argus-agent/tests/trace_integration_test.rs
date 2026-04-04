@@ -8,9 +8,7 @@ use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, sleep, timeout};
 
 use argus_agent::trace::TraceConfig;
-use argus_agent::turn_log_store::{
-    read_turn_messages, read_turn_meta, turn_messages_path, turn_meta_path, turns_dir,
-};
+use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
     TurnConfigBuilder,
@@ -388,7 +386,10 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
         ThreadBuilder::new()
             .provider(Arc::new(SimpleMockProvider::new("Hello, world!")))
             .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord::default()))
+            .agent_record(Arc::new(AgentRecord {
+                system_prompt: "You are a test assistant.".to_string(),
+                ..AgentRecord::default()
+            }))
             .session_id(session_id)
             .config(thread_config)
             .build()
@@ -408,20 +409,21 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
 
     wait_for_turn_settled_event(rx).await;
 
-    let persisted_turns_dir = turns_dir(
-        &temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string()),
-    );
-    let messages_path = turn_messages_path(&persisted_turns_dir, 1);
-    let meta_path = turn_meta_path(&persisted_turns_dir, 1);
+    let persisted_base_dir = temp_dir
+        .path()
+        .join(session_id.to_string())
+        .join(thread_id.to_string());
 
     timeout(Duration::from_secs(5), async {
         loop {
-            let messages_exists = tokio::fs::try_exists(&messages_path).await.unwrap_or(false);
-            let meta_exists = tokio::fs::try_exists(&meta_path).await.unwrap_or(false);
-            if messages_exists && meta_exists {
+            let recovered = recover_thread_log_state(&persisted_base_dir)
+                .await
+                .expect("recovery should work");
+            if recovered
+                .turns
+                .iter()
+                .any(|t| matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn))
+            {
                 break;
             }
             sleep(Duration::from_millis(20)).await;
@@ -432,20 +434,20 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
 
     assert_eq!(thread.read().await.turn_count(), 1);
 
-    let messages = read_turn_messages(&messages_path)
+    let recovered = recover_thread_log_state(&persisted_base_dir)
         .await
-        .expect("messages should read");
-    let meta = read_turn_meta(&meta_path).await.expect("meta should read");
-
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].content, "Hello");
-    assert_eq!(messages[1].content, "Hello, world!");
-    assert_eq!(meta.turn_number, 1);
-    assert!(matches!(
-        meta.state,
-        argus_agent::history::TurnState::Completed
-    ));
-    assert!(meta.token_usage.is_some());
+        .expect("recovery should work");
+    let user_turn = recovered
+        .turns
+        .iter()
+        .find(|t| matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn))
+        .expect("should have user turn");
+    assert_eq!(user_turn.messages.len(), 3);
+    assert_eq!(user_turn.messages[0].content, "You are a test assistant.");
+    assert_eq!(user_turn.messages[1].content, "Hello");
+    assert_eq!(user_turn.messages[2].content, "Hello, world!");
+    assert_eq!(user_turn.turn_number, 1);
+    assert_eq!(user_turn.token_usage.total_tokens, 0);
 }
 
 #[tokio::test]
@@ -468,7 +470,10 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
         ThreadBuilder::new()
             .provider(provider.clone())
             .compactor(Arc::new(NoopCompactor))
-            .agent_record(Arc::new(AgentRecord::default()))
+            .agent_record(Arc::new(AgentRecord {
+                system_prompt: "You are a test assistant.".to_string(),
+                ..AgentRecord::default()
+            }))
             .session_id(session_id)
             .config(thread_config)
             .build()
@@ -537,34 +542,42 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
         vec!["first".to_string(), "second".to_string()],
     );
 
-    for turn_number in [1_u32, 2_u32] {
-        let persisted_turns_dir = turns_dir(
-            &temp_dir
-                .path()
-                .join(session_id.to_string())
-                .join(thread_id.to_string()),
-        );
-        let messages_path = turn_messages_path(&persisted_turns_dir, turn_number);
-        let meta_path = turn_meta_path(&persisted_turns_dir, turn_number);
+    let persisted_base_dir = temp_dir
+        .path()
+        .join(session_id.to_string())
+        .join(thread_id.to_string());
 
-        timeout(Duration::from_secs(5), async {
-            loop {
-                let messages_exists = tokio::fs::try_exists(&messages_path).await.unwrap_or(false);
-                let meta_exists = tokio::fs::try_exists(&meta_path).await.unwrap_or(false);
-                if messages_exists && meta_exists {
-                    break;
-                }
-                sleep(Duration::from_millis(20)).await;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let recovered = recover_thread_log_state(&persisted_base_dir)
+                .await
+                .expect("recovery should work");
+            let user_turn_count = recovered
+                .turns
+                .iter()
+                .filter(|t| matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn))
+                .count();
+            if user_turn_count == 2 {
+                break;
             }
-        })
-        .await
-        .expect("committed turn logs should be persisted");
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("committed turn logs should be persisted");
 
-        let meta = read_turn_meta(&meta_path).await.expect("meta should read");
-        assert_eq!(meta.turn_number, turn_number);
-        assert!(matches!(
-            meta.state,
-            argus_agent::history::TurnState::Completed
-        ));
+    let recovered = recover_thread_log_state(&persisted_base_dir)
+        .await
+        .expect("recovery should work");
+    for expected_turn_number in [1_u32, 2_u32] {
+        let user_turn = recovered
+            .turns
+            .iter()
+            .find(|t| {
+                matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn)
+                    && t.turn_number == expected_turn_number
+            })
+            .expect("should have user turn");
+        assert_eq!(user_turn.turn_number, expected_turn_number);
     }
 }
