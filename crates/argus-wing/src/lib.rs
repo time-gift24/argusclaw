@@ -1645,7 +1645,7 @@ mod tests {
         use argus_repository::traits::{JobRepository, ThreadRepository};
         use argus_repository::types::JobId;
         use argus_repository::ArgusSqlite;
-        use tokio::sync::{broadcast, mpsc};
+        use tokio::sync::broadcast;
 
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
@@ -1676,7 +1676,6 @@ mod tests {
         let originating_thread_id = ThreadId::new();
         let job_id = "job-binding-recoverable".to_string();
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         wing.job_manager
             .dispatch_job(
@@ -1686,7 +1685,6 @@ mod tests {
                 "execute a recoverable job".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("dispatch should enqueue");
@@ -1743,7 +1741,7 @@ mod tests {
         use argus_repository::traits::ThreadRepository;
         use argus_repository::ArgusSqlite;
         use std::collections::HashMap;
-        use tokio::sync::{broadcast, mpsc};
+        use tokio::sync::broadcast;
 
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
@@ -1806,7 +1804,6 @@ mod tests {
 
         let job_id = "job-agent-provider-without-default".to_string();
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
 
         wing.job_manager
             .dispatch_job(
@@ -1816,7 +1813,6 @@ mod tests {
                 "execute a recoverable job".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("dispatch should succeed using agent-specific provider");

@@ -33,7 +33,7 @@ fn user_turn_number_derivation_ignores_checkpoint_records() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p argus-agent history::tests::user_turn_number_derivation_ignores_checkpoint_records -- --exact`  
+Run: `cargo test -p argus-agent history::tests::user_turn_number_derivation_ignores_checkpoint_records -- --exact`
 Expected: FAIL because new record kinds/helpers do not exist yet.
 
 **Step 3: Write minimal implementation**
@@ -59,7 +59,7 @@ pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p argus-agent history::tests::user_turn_number_derivation_ignores_checkpoint_records -- --exact`  
+Run: `cargo test -p argus-agent history::tests::user_turn_number_derivation_ignores_checkpoint_records -- --exact`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -91,7 +91,7 @@ async fn recover_fails_when_first_record_is_not_system_bootstrap() {
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p argus-agent turn_log_store::tests::append_and_recover_meta_jsonl_roundtrip turn_log_store::tests::recover_fails_when_first_record_is_not_system_bootstrap -- --exact`  
+Run: `cargo test -p argus-agent turn_log_store::tests::append_and_recover_meta_jsonl_roundtrip turn_log_store::tests::recover_fails_when_first_record_is_not_system_bootstrap -- --exact`
 Expected: FAIL because append-only API and strict validation are not implemented.
 
 **Step 3: Write minimal implementation**
@@ -110,7 +110,7 @@ Also remove legacy `thread.meta.json`, checkpoint file, and per-turn `messages/m
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p argus-agent turn_log_store::tests -- --nocapture`  
+Run: `cargo test -p argus-agent turn_log_store::tests -- --nocapture`
 Expected: PASS with new `meta.jsonl` roundtrip + strict error tests.
 
 **Step 5: Commit**
@@ -140,7 +140,7 @@ fn history_iter_reads_from_turn_records_without_cached_flattened_messages() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p argus-agent thread::tests::history_iter_reads_from_turn_records_without_cached_flattened_messages -- --exact`  
+Run: `cargo test -p argus-agent thread::tests::history_iter_reads_from_turn_records_without_cached_flattened_messages -- --exact`
 Expected: FAIL because `history_iter` does not exist and old fields are still authoritative.
 
 **Step 3: Write minimal implementation**
@@ -161,7 +161,7 @@ Update `info().message_count` and all history call sites to use iterator countin
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p argus-agent thread::tests::history_iter_reads_from_turn_records_without_cached_flattened_messages -- --exact`  
+Run: `cargo test -p argus-agent thread::tests::history_iter_reads_from_turn_records_without_cached_flattened_messages -- --exact`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -193,7 +193,7 @@ async fn build_turn_context_uses_latest_checkpoint_plus_following_user_turns() {
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p argus-agent thread::tests::compaction_appends_checkpoint_record_without_consuming_turn_number thread::tests::build_turn_context_uses_latest_checkpoint_plus_following_user_turns -- --exact`  
+Run: `cargo test -p argus-agent thread::tests::compaction_appends_checkpoint_record_without_consuming_turn_number thread::tests::build_turn_context_uses_latest_checkpoint_plus_following_user_turns -- --exact`
 Expected: FAIL because checkpoint still relies on dedicated field.
 
 **Step 3: Write minimal implementation**
@@ -211,7 +211,7 @@ Update `build_turn_context()` to:
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p argus-agent thread::tests::compaction_appends_checkpoint_record_without_consuming_turn_number thread::tests::build_turn_context_uses_latest_checkpoint_plus_following_user_turns -- --exact`  
+Run: `cargo test -p argus-agent thread::tests::compaction_appends_checkpoint_record_without_consuming_turn_number thread::tests::build_turn_context_uses_latest_checkpoint_plus_following_user_turns -- --exact`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -240,7 +240,7 @@ async fn recover_messages_from_meta_jsonl_replays_typed_turn_records() {
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p argus-session manager::tests::recover_messages_from_meta_jsonl_replays_typed_turn_records -- --exact`  
+Run: `cargo test -p argus-session manager::tests::recover_messages_from_meta_jsonl_replays_typed_turn_records -- --exact`
 Expected: FAIL because integration still expects old recovered shape/APIs.
 
 **Step 3: Write minimal implementation**
@@ -255,7 +255,7 @@ thread.history_iter().cloned().collect::<Vec<_>>()
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p argus-session manager::tests::recover_messages_from_meta_jsonl_replays_typed_turn_records -- --exact`  
+Run: `cargo test -p argus-session manager::tests::recover_messages_from_meta_jsonl_replays_typed_turn_records -- --exact`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -286,7 +286,7 @@ async fn recover_fails_on_checkpoint_through_turn_ahead_of_history() {}
 
 **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p argus-agent turn_log_store::tests::recover_fails_on_out_of_order_seq turn_log_store::tests::recover_fails_on_non_monotonic_user_turn_numbers turn_log_store::tests::recover_fails_on_checkpoint_through_turn_ahead_of_history -- --exact`  
+Run: `cargo test -p argus-agent turn_log_store::tests::recover_fails_on_out_of_order_seq turn_log_store::tests::recover_fails_on_non_monotonic_user_turn_numbers turn_log_store::tests::recover_fails_on_checkpoint_through_turn_ahead_of_history -- --exact`
 Expected: FAIL before validators are implemented.
 
 **Step 3: Write minimal implementation**
@@ -296,7 +296,7 @@ Expected: FAIL before validators are implemented.
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p argus-agent turn_log_store::tests -- --nocapture`  
+Run: `cargo test -p argus-agent turn_log_store::tests -- --nocapture`
 Expected: PASS and deterministic strict failures.
 
 **Step 5: Commit**
@@ -324,7 +324,7 @@ async fn failed_turn_emits_turn_settled_before_idle_after_refactor() {}
 
 **Step 2: Run tests to verify they fail or expose regressions**
 
-Run: `cargo test -p argus-agent thread::tests::completed_turn_emits_turn_settled_before_idle_after_refactor thread::tests::failed_turn_emits_turn_settled_before_idle_after_refactor -- --exact`  
+Run: `cargo test -p argus-agent thread::tests::completed_turn_emits_turn_settled_before_idle_after_refactor thread::tests::failed_turn_emits_turn_settled_before_idle_after_refactor -- --exact`
 Expected: FAIL if regressions exist, otherwise convert to guardrail tests and keep.
 
 **Step 3: Write minimal implementation/fixes**
@@ -334,7 +334,7 @@ Expected: FAIL if regressions exist, otherwise convert to guardrail tests and ke
 
 **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p argus-agent thread::tests -- --nocapture`  
+Run: `cargo test -p argus-agent thread::tests -- --nocapture`
 Expected: PASS for lifecycle and ordering tests.
 
 **Step 5: Commit**
