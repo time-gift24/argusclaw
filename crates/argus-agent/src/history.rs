@@ -147,20 +147,11 @@ pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {
         .collect()
 }
 
-pub fn shared_history<'a>(
-    flat_messages: &'a Arc<Vec<ChatMessage>>,
-    cached_committed_messages: Option<&'a Arc<Vec<ChatMessage>>>,
-) -> &'a Arc<Vec<ChatMessage>> {
-    cached_committed_messages.unwrap_or(flat_messages)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use argus_protocol::llm::ChatMessage;
 
-    use super::{TurnRecord, derive_next_user_turn_number, flatten_turn_messages, shared_history};
+    use super::{TurnRecord, derive_next_user_turn_number, flatten_turn_messages};
 
     #[test]
     fn flatten_committed_messages_skips_inflight_turn() {
@@ -185,16 +176,6 @@ mod tests {
         assert_eq!(flattened.len(), 4);
         assert_eq!(flattened[0].content, "hi");
         assert_eq!(flattened[3].content, "working");
-    }
-
-    #[test]
-    fn shared_history_prefers_cached_committed_messages() {
-        let flat_messages = Arc::new(vec![ChatMessage::user("stale")]);
-        let cached_messages = Arc::new(vec![ChatMessage::user("fresh")]);
-
-        let history = shared_history(&flat_messages, Some(&cached_messages));
-
-        assert_eq!(history[0].content, "fresh");
     }
 
     #[test]

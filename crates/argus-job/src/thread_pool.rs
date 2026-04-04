@@ -1385,8 +1385,9 @@ impl ThreadPool {
         let summary = {
             let guard = thread.read().await;
             guard
-                .history()
-                .iter()
+                .history_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
                 .rev()
                 .find_map(|message| match message {
                     ChatMessage {
@@ -1805,8 +1806,7 @@ impl ThreadPool {
     async fn estimate_thread_memory(thread: &Arc<RwLock<argus_agent::Thread>>) -> u64 {
         let guard = thread.read().await;
         let history_bytes = guard
-            .history()
-            .iter()
+            .history_iter()
             .map(|message| message.content.len() as u64)
             .sum::<u64>();
         let plan_bytes = guard.plan().len() as u64 * 128;

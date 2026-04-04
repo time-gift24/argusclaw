@@ -69,7 +69,7 @@ pub enum TurnRecordKind {
 
 Notes:
 
-- `SystemBootstrap` uses `turn_number = Some(0)`.
+- `SystemBootstrap` uses `turn_number = None`.
 - `UserTurn` uses `turn_number = Some(n)`, where `n >= 1` and strictly increasing.
 - `Checkpoint` uses `turn_number = None` and does not consume user turn numbers.
 - `seq` is global append order for all record kinds.
@@ -176,7 +176,7 @@ Process:
 1. Read `turns/meta.jsonl` linearly.
 2. Deserialize each line as `TurnRecord`.
 3. Validate invariants while replaying:
-   - first record is `SystemBootstrap` with `turn_number=0`
+   - first record is `SystemBootstrap` with `turn_number=None`
    - `seq` strictly increasing
    - user turn numbers strictly increasing from 1
    - checkpoint `through_turn` is not greater than known max user turn

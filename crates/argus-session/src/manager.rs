@@ -1046,7 +1046,7 @@ impl SessionManager {
         if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
             if thread.has_non_system_history() || thread.turn_count() > 0 {
-                return Ok(thread.history().to_vec());
+                return Ok(thread.history_iter().cloned().collect());
             }
             let recovered = recover_messages_from_trace(
                 &self.trace_dir,
@@ -1057,7 +1057,7 @@ impl SessionManager {
             if !recovered.is_empty() {
                 return Ok(recovered);
             }
-            return Ok(thread.history().to_vec());
+            return Ok(thread.history_iter().cloned().collect());
         }
         let _thread_record = self
             .thread_repo
@@ -1087,7 +1087,7 @@ impl SessionManager {
             let (messages, turn_count, token_count) =
                 if thread.has_non_system_history() || thread.turn_count() > 0 {
                     (
-                        thread.history().to_vec(),
+                        thread.history_iter().cloned().collect(),
                         thread.turn_count(),
                         thread.token_count(),
                     )
@@ -1106,7 +1106,7 @@ impl SessionManager {
                         )
                     } else {
                         (
-                            thread.history().to_vec(),
+                            thread.history_iter().cloned().collect(),
                             thread.turn_count(),
                             thread.token_count(),
                         )

@@ -21,10 +21,7 @@ use argus_tool::ToolManager;
 use super::compact::Compactor;
 use super::config::ThreadConfig;
 use super::error::ThreadError;
-use super::history::{
-    CompactionCheckpoint, InFlightTurn, InFlightTurnPhase, InFlightTurnShared, TurnRecord,
-    TurnState, flatten_turn_messages, shared_history,
-};
+use super::history::{InFlightTurn, InFlightTurnPhase, InFlightTurnShared, TurnRecord, TurnState};
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
 use super::plan_tool::UpdatePlanTool;
@@ -237,29 +234,13 @@ pub struct Thread {
     #[builder(default = "Utc::now()")]
     updated_at: DateTime<Utc>,
 
-    /// Initial message history (for restoring sessions).
-    #[builder(setter(custom), default = "Arc::new(Vec::new())")]
-    messages: Arc<Vec<ChatMessage>>,
-
-    /// System messages that prefix the committed history view.
-    #[builder(default)]
-    system_messages: Vec<ChatMessage>,
-
-    /// Settled turn history. This becomes authoritative as migration proceeds.
+    /// Settled turn history — single source of truth.
     #[builder(default)]
     turns: Vec<TurnRecord>,
 
     /// The single in-flight turn, if any.
     #[builder(default)]
     current_turn: Option<InFlightTurn>,
-
-    /// Compatibility cache for committed message history.
-    #[builder(default)]
-    cached_committed_messages: Option<Arc<Vec<ChatMessage>>>,
-
-    /// Compaction checkpoint metadata for future context construction.
-    #[builder(default)]
-    compaction_checkpoint: Option<CompactionCheckpoint>,
 
     /// LLM provider (required, injected by Session).
     provider: Arc<dyn LlmProvider>,
@@ -331,14 +312,6 @@ impl std::fmt::Debug for Thread {
             .field("session_id", &self.session_id)
             .field("agent_id", &self.agent_record.id)
             .field("title", &self.title)
-            .field("messages", &self.messages.len())
-            .field(
-                "cached_committed_messages",
-                &self
-                    .cached_committed_messages
-                    .as_ref()
-                    .map_or(0, |messages| messages.len()),
-            )
             .field("turns", &self.turns.len())
             .field("token_count", &self.token_count)
             .field("token_count_stale", &self.token_count_stale)
@@ -358,18 +331,6 @@ impl ThreadBuilder {
         Self::default()
     }
 
-    /// Set the initial message history.
-    pub fn messages(mut self, value: Vec<ChatMessage>) -> Self {
-        self.messages = Some(Arc::new(value));
-        self
-    }
-
-    /// Share an existing message history buffer.
-    pub fn shared_messages(mut self, value: Arc<Vec<ChatMessage>>) -> Self {
-        self.messages = Some(value);
-        self
-    }
-
     /// Build the Thread.
     ///
     /// # Errors
@@ -386,34 +347,26 @@ impl ThreadBuilder {
             .unwrap_or_else(|| Arc::new(ToolManager::new()));
         let hooks = self.hooks.flatten();
         let plan_store = self.plan_store.unwrap_or_default();
-        let turns = self.turns.unwrap_or_default();
+        let mut turns = self.turns.unwrap_or_default();
         let current_turn = self.current_turn.flatten();
 
-        // Initialize messages with system prompt if not empty and no existing system message
-        let mut messages = self.messages.unwrap_or_else(|| Arc::new(Vec::new()));
-        let has_system_message = messages
+        // Seed a SystemBootstrap turn when no turns exist and system_prompt is present.
+        let has_bootstrap = turns
             .first()
-            .is_some_and(|m| m.role == argus_protocol::llm::Role::System);
-        if !has_system_message && !agent_record.system_prompt.is_empty() {
-            Arc::make_mut(&mut messages)
-                .insert(0, ChatMessage::system(&agent_record.system_prompt));
+            .is_some_and(|t| matches!(t.kind, crate::history::TurnRecordKind::SystemBootstrap));
+        if !has_bootstrap && !agent_record.system_prompt.is_empty() {
+            turns.insert(
+                0,
+                TurnRecord::system_bootstrap(
+                    0,
+                    vec![ChatMessage::system(&agent_record.system_prompt)],
+                ),
+            );
         }
 
-        let system_messages = Thread::collect_system_messages(messages.as_slice());
-        let cached_committed_messages = if turns.is_empty() {
-            Some(Arc::clone(&messages))
-        } else {
-            Some(Thread::materialize_committed_messages(
-                &system_messages,
-                &turns,
-            ))
-        };
         let next_turn_number = self
             .next_turn_number
             .unwrap_or_else(|| Thread::derive_next_turn_number(&turns));
-        if let Some(committed_messages) = cached_committed_messages.as_ref() {
-            messages = Arc::clone(committed_messages);
-        }
         Ok(Thread {
             id: self.id.unwrap_or_default(),
             agent_record,
@@ -421,12 +374,8 @@ impl ThreadBuilder {
             title: self.title.flatten(),
             created_at: self.created_at.unwrap_or_else(Utc::now),
             updated_at: self.updated_at.unwrap_or_else(Utc::now),
-            messages,
-            system_messages,
             turns,
             current_turn,
-            cached_committed_messages,
-            compaction_checkpoint: self.compaction_checkpoint.flatten(),
             provider: self.provider.ok_or(ThreadError::ProviderNotConfigured)?,
             tool_manager,
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
@@ -489,7 +438,7 @@ impl Thread {
     pub fn info(&self) -> ThreadInfo {
         ThreadInfo {
             id: self.id.to_string(),
-            message_count: self.history().len(),
+            message_count: self.history_iter().count(),
             token_count: self.token_count,
             turn_count: self.turn_count(),
             plan_item_count: self.plan_store.store().read().unwrap().len(),
@@ -561,20 +510,13 @@ impl Thread {
         self.active_turn_cancellation = cancellation;
     }
 
-    /// Get message history (read-only).
-    pub fn history(&self) -> &[ChatMessage] {
-        shared_history(&self.messages, self.cached_committed_messages.as_ref()).as_slice()
-    }
-
     /// Returns true when committed history contains visible transcript beyond system prompts.
     pub fn has_non_system_history(&self) -> bool {
-        self.history()
-            .iter()
+        self.history_iter()
             .any(|message| message.role != Role::System)
     }
 
     /// Iterate over committed message history from turn records.
-    /// Only reads from `turns` - does not use cached flattened messages.
     pub fn history_iter(&self) -> impl Iterator<Item = &ChatMessage> + '_ {
         self.turns
             .iter()
@@ -611,26 +553,8 @@ impl Thread {
                     .flat_map(|turn| turn.messages.iter().cloned()),
             );
             Arc::new(context_messages)
-        } else if let Some(checkpoint) = self.compaction_checkpoint.as_ref() {
-            // Fallback to legacy compaction_checkpoint field for older code paths
-            let mut context_messages = self.system_messages.clone();
-            context_messages.extend(checkpoint.summary_messages.iter().cloned());
-            context_messages.extend(
-                self.turns
-                    .iter()
-                    .filter(|turn| {
-                        turn.turn_number
-                            .is_some_and(|tn| tn > checkpoint.summarized_through_turn)
-                    })
-                    .flat_map(|turn| turn.messages.iter().cloned()),
-            );
-            Arc::new(context_messages)
         } else {
-            // No checkpoint at all: fall back to shared_history for older hydration paths
-            Arc::clone(shared_history(
-                &self.messages,
-                self.cached_committed_messages.as_ref(),
-            ))
+            Arc::new(crate::history::flatten_turn_messages(&self.turns))
         }
     }
 
@@ -674,50 +598,10 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
-    /// Get mutable access to messages (for Compactor).
-    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
-        self.cached_committed_messages = None;
-        Arc::make_mut(&mut self.messages)
-    }
-
     /// Set the token count (for Compactor).
     pub fn set_token_count(&mut self, count: u32) {
         self.token_count = count;
         self.token_count_stale = false;
-    }
-
-    /// Hydrate thread runtime state from persisted history.
-    pub fn hydrate_from_persisted_state(
-        &mut self,
-        mut messages: Vec<ChatMessage>,
-        token_count: u32,
-        turn_count: u32,
-        updated_at: DateTime<Utc>,
-    ) {
-        let existing_system = self
-            .messages
-            .first()
-            .filter(|message| message.role == argus_protocol::llm::Role::System)
-            .cloned();
-        let has_system_message = messages
-            .first()
-            .is_some_and(|message| message.role == argus_protocol::llm::Role::System);
-
-        if !has_system_message && let Some(system_message) = existing_system {
-            messages.insert(0, system_message);
-        }
-
-        self.messages = Arc::new(messages);
-        self.system_messages = Self::collect_system_messages(self.messages.as_slice());
-        self.turns.clear();
-        self.current_turn = None;
-        self.compaction_checkpoint = None;
-        self.cached_committed_messages = Some(Arc::clone(&self.messages));
-        self.token_count = token_count;
-        self.token_count_stale = false;
-        self.turn_count = turn_count;
-        self.next_turn_number = turn_count.saturating_add(1);
-        self.updated_at = updated_at;
     }
 
     pub fn hydrate_from_turn_log_state(
@@ -725,65 +609,17 @@ impl Thread {
         recovered: RecoveredThreadLogState,
         updated_at: DateTime<Utc>,
     ) {
-        // In the new model, system messages are stored in SystemBootstrap TurnRecords
-        // and are included via flatten_turn_messages(turns). We keep system_messages
-        // separate only for build_turn_context when there's a checkpoint.
-        // For the committed history (via history/history_iter), Bootstrap messages
-        // come from flatten_turn_messages.
-        let existing_system = self
-            .messages
-            .first()
-            .filter(|message| message.role == Role::System)
-            .cloned();
-
-        // system_messages is used by build_turn_context for checkpoint-based context.
-        // We extract it from Bootstrap here. The committed history gets Bootstrap
-        // via flatten_turn_messages.
-        let system_messages: Vec<ChatMessage> = recovered
-            .turns
-            .iter()
-            .find(|t| matches!(t.kind, crate::history::TurnRecordKind::SystemBootstrap))
-            .map(|t| t.messages.clone())
-            .unwrap_or_else(|| existing_system.clone().map(|m| vec![m]).unwrap_or_default());
-
-        // Extract latest Checkpoint record
-        let compaction_checkpoint: Option<CompactionCheckpoint> = recovered
-            .turns
-            .iter()
-            .filter_map(|t| {
-                if let crate::history::TurnRecordKind::Checkpoint { through_turn } = t.kind {
-                    Some(CompactionCheckpoint {
-                        summarized_through_turn: through_turn,
-                        summary_messages: t.messages.clone(),
-                        created_at: t.finished_at.unwrap_or_else(chrono::Utc::now),
-                        token_count_stale: false,
-                    })
-                } else {
-                    None
-                }
-            })
-            .next_back();
-
         let token_count = recovered.token_count();
         let turn_count = recovered.turn_count();
+        let has_checkpoint = recovered
+            .turns
+            .iter()
+            .any(|t| matches!(t.kind, crate::history::TurnRecordKind::Checkpoint { .. }));
 
-        self.system_messages = system_messages;
         self.turns = recovered.turns;
         self.current_turn = None;
-        self.compaction_checkpoint = compaction_checkpoint;
-        // In the new model, committed messages come from flatten_turn_messages which
-        // includes Bootstrap and UserTurn records. We set messages directly from
-        // flatten_turn_messages to avoid double-counting Bootstrap (which is already
-        // in self.turns and would be prepended again via system_messages).
-        let committed_messages: Arc<Vec<ChatMessage>> =
-            Arc::new(flatten_turn_messages(&self.turns));
-        self.cached_committed_messages = Some(Arc::clone(&committed_messages));
-        self.messages = committed_messages;
         self.token_count = token_count;
-        self.token_count_stale = self
-            .compaction_checkpoint
-            .as_ref()
-            .is_some_and(|checkpoint| checkpoint.token_count_stale);
+        self.token_count_stale = has_checkpoint;
         self.turn_count = turn_count;
         self.next_turn_number = Self::derive_next_turn_number(&self.turns);
         self.active_turn_cancellation = None;
@@ -845,8 +681,6 @@ impl Thread {
             model: current_turn.model,
             error,
         });
-        Arc::make_mut(&mut self.messages).extend(committed_messages);
-        self.sync_cached_history_from_flat_messages();
         self.updated_at = Utc::now();
 
         Ok(())
@@ -873,18 +707,25 @@ impl Thread {
             .trace_config
             .as_ref()
             .filter(|config| config.enabled)?;
-        let turn = self.turns.last()?.clone();
+        let last_turn = self.turns.last()?.clone();
         let mut base_dir = trace_config.trace_dir.clone();
         let session_id = trace_config.session_id.unwrap_or(self.session_id);
         base_dir = base_dir.join(session_id.to_string());
         base_dir = base_dir.join(self.id.to_string());
 
-        Some(TurnLogPersistenceSnapshot {
-            base_dir,
-            turn,
-            system_messages: self.system_messages.clone(),
-            checkpoint: self.compaction_checkpoint.clone(),
-        })
+        // Include SystemBootstrap + latest turn so persist can write both if needed.
+        let bootstrap = self
+            .turns
+            .iter()
+            .find(|t| matches!(t.kind, crate::history::TurnRecordKind::SystemBootstrap))
+            .cloned();
+        let mut turns = Vec::with_capacity(2);
+        if let Some(bootstrap) = bootstrap {
+            turns.push(bootstrap);
+        }
+        turns.push(last_turn);
+
+        Some(TurnLogPersistenceSnapshot { base_dir, turns })
     }
 
     fn starts_with_pending_messages(
@@ -1273,7 +1114,7 @@ impl Thread {
             && let Err(error) = persist_turn_log_snapshot(&snapshot).await
         {
             tracing::warn!(
-                turn_number = snapshot.turn.turn_number,
+                turn_number = snapshot.turns.last().and_then(|t| t.turn_number),
                 error = %error,
                 "failed to persist committed turn log snapshot"
             );
@@ -1358,12 +1199,7 @@ impl Thread {
             {
                 Ok(Some(result)) => {
                     let new_token_count = result.token_count;
-                    self.compaction_checkpoint = Some(CompactionCheckpoint {
-                        summarized_through_turn: self.turn_count(),
-                        summary_messages: result.summary_messages,
-                        created_at: Utc::now(),
-                        token_count_stale: false,
-                    });
+                    self.append_checkpoint_record(self.turn_count(), result.summary_messages);
                     self.token_count_stale = false;
                     self.token_count = new_token_count;
                     self.broadcast_to_self(ThreadEvent::Compacted {
@@ -1431,14 +1267,8 @@ impl Thread {
                 if let Some(context_token_count) = output.context_token_count {
                     self.token_count = context_token_count;
                     self.token_count_stale = false;
-                    if let Some(checkpoint) = self.compaction_checkpoint.as_mut() {
-                        checkpoint.token_count_stale = false;
-                    }
                 } else {
                     self.token_count_stale = true;
-                    if let Some(checkpoint) = self.compaction_checkpoint.as_mut() {
-                        checkpoint.token_count_stale = true;
-                    }
                 }
                 self.settle_current_turn(
                     TurnState::Completed,
@@ -1528,28 +1358,6 @@ impl Thread {
         hooks
     }
 
-    fn collect_system_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-        messages
-            .iter()
-            .take_while(|message| message.role == argus_protocol::llm::Role::System)
-            .cloned()
-            .collect()
-    }
-
-    fn sync_cached_history_from_flat_messages(&mut self) {
-        self.system_messages = Self::collect_system_messages(self.messages.as_slice());
-        self.cached_committed_messages = Some(Arc::clone(&self.messages));
-    }
-
-    fn materialize_committed_messages(
-        system_messages: &[ChatMessage],
-        turns: &[TurnRecord],
-    ) -> Arc<Vec<ChatMessage>> {
-        let mut messages = system_messages.to_vec();
-        messages.extend(flatten_turn_messages(turns));
-        Arc::new(messages)
-    }
-
     fn derive_next_turn_number(turns: &[TurnRecord]) -> u32 {
         turns
             .iter()
@@ -1569,10 +1377,6 @@ impl Thread {
             .max()
             .unwrap_or(0);
         self.next_turn_number = Self::derive_next_turn_number(&self.turns);
-        let committed_messages =
-            Self::materialize_committed_messages(&self.system_messages, &self.turns);
-        self.cached_committed_messages = Some(Arc::clone(&committed_messages));
-        self.messages = committed_messages;
     }
 }
 
@@ -1594,8 +1398,7 @@ mod tests {
     use crate::thread_handle::ThreadHandle;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::{
-        append_turn_record, persist_turn_log_snapshot, read_turn_messages, read_turn_meta,
-        recover_thread_log_state, turn_messages_path, turn_meta_path, turns_dir,
+        append_turn_record, persist_turn_log_snapshot, recover_thread_log_state,
     };
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand, ThreadRuntimeState};
@@ -1716,6 +1519,51 @@ mod tests {
             system_prompt: String::new(),
             ..(*test_agent_record()).clone()
         })
+    }
+
+    /// Helper: convert flat messages to TurnRecords for test hydration.
+    fn turns_from_flat_messages(messages: Vec<ChatMessage>) -> Vec<TurnRecord> {
+        let mut turns = Vec::new();
+        let mut seq = 0u64;
+        let mut turn_number = 1u32;
+        let mut pending = Vec::new();
+        let mut system_done = false;
+        for msg in messages {
+            if !system_done && msg.role == Role::System {
+                turns.push(TurnRecord::system_bootstrap(seq, vec![msg]));
+                seq += 1;
+                system_done = true;
+                continue;
+            }
+            pending.push(msg);
+            if pending.len() == 2 {
+                turns.push(TurnRecord::user_completed(seq, turn_number, pending));
+                seq += 1;
+                turn_number += 1;
+                pending = Vec::new();
+            }
+        }
+        if !pending.is_empty() {
+            turns.push(TurnRecord::user_completed(seq, turn_number, pending));
+        }
+        turns
+    }
+
+    /// Hydrate thread from flat messages (converting to turns), token/turn counts, and timestamp.
+    fn hydrate_from_flat_messages(
+        thread: &mut Thread,
+        messages: Vec<ChatMessage>,
+        token_count: u32,
+        turn_count: u32,
+        updated_at: DateTime<Utc>,
+    ) {
+        thread.hydrate_turn_history_for_test(turns_from_flat_messages(messages));
+        thread.token_count = token_count;
+        thread.turn_count = turn_count;
+        // Ensure next_turn_number accounts for the authoritative turn_count
+        // (which may exceed what derive_next_turn_number computed from turn records alone).
+        thread.next_turn_number = thread.next_turn_number.max(turn_count.saturating_add(1));
+        thread.updated_at = updated_at;
     }
 
     #[derive(Debug, Clone)]
@@ -2026,7 +1874,7 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_from_persisted_state_preserves_system_prompt_and_updates_runtime_state() {
+    fn hydrate_from_turns_preserves_system_prompt_and_updates_runtime_state() {
         let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
         let updated_at = Utc::now();
         let mut thread = ThreadBuilder::new()
@@ -2037,20 +1885,29 @@ mod tests {
             .build()
             .unwrap();
 
-        thread.hydrate_from_persisted_state(
-            vec![
-                ChatMessage::user("历史问题"),
-                ChatMessage::assistant("历史回答"),
-            ],
-            42,
-            3,
-            updated_at,
-        );
+        thread.hydrate_turn_history_for_test(vec![
+            TurnRecord::system_bootstrap(
+                0,
+                vec![ChatMessage::system("You are a helpful assistant.")],
+            ),
+            TurnRecord::user_completed(
+                1,
+                1,
+                vec![
+                    ChatMessage::user("历史问题"),
+                    ChatMessage::assistant("历史回答"),
+                ],
+            ),
+        ]);
+        thread.token_count = 42;
+        thread.turn_count = 3;
+        thread.updated_at = updated_at;
 
-        assert_eq!(thread.history().len(), 3);
-        assert_eq!(thread.history()[0].role, argus_protocol::llm::Role::System);
-        assert_eq!(thread.history()[1].content, "历史问题");
-        assert_eq!(thread.history()[2].content, "历史回答");
+        let h: Vec<ChatMessage> = thread.history_iter().cloned().collect();
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].role, argus_protocol::llm::Role::System);
+        assert_eq!(h[1].content, "历史问题");
+        assert_eq!(h[2].content, "历史回答");
         assert_eq!(thread.token_count(), 42);
         assert_eq!(thread.turn_count(), 3);
         assert_eq!(thread.updated_at(), updated_at);
@@ -2065,7 +1922,10 @@ mod tests {
             vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
         )]);
 
-        assert_eq!(thread.history().len(), 3);
+        let h: Vec<_> = thread.history_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].content, "hi");
+        assert_eq!(h[1].content, "hello");
         assert_eq!(thread.turn_count(), 1);
     }
 
@@ -2143,22 +2003,20 @@ mod tests {
     }
 
     #[test]
-    fn shared_history_build_turn_context_prefers_cached_committed_messages() {
+    fn shared_history_build_turn_context_reads_from_turn_records() {
         let mut thread = build_test_thread();
-        thread.hydrate_turn_history_for_test(vec![TurnRecord::user_completed(
-            1,
-            1,
-            vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
-        )]);
-
-        thread.messages = Arc::new(vec![
-            ChatMessage::system("You are a stale system message."),
-            ChatMessage::user("stale"),
-            ChatMessage::assistant("history"),
+        thread.hydrate_turn_history_for_test(vec![
+            TurnRecord::system_bootstrap(0, vec![ChatMessage::system("sys")]),
+            TurnRecord::user_completed(
+                1,
+                1,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+            ),
         ]);
 
-        assert_eq!(thread.history()[1].content, "hi");
-        assert_eq!(thread.history()[2].content, "hello");
+        let h: Vec<_> = thread.history_iter().cloned().collect();
+        assert_eq!(h[1].content, "hi");
+        assert_eq!(h[2].content, "hello");
 
         let context = thread.build_turn_context();
         assert_eq!(context.len(), 3);
@@ -2223,11 +2081,6 @@ mod tests {
             .compactor(compactor)
             .agent_record(test_agent_record())
             .session_id(SessionId::new())
-            .messages(vec![
-                ChatMessage::system("You are a stale system message."),
-                ChatMessage::user("stale"),
-                ChatMessage::assistant("history"),
-            ])
             .turns(vec![TurnRecord::user_completed(
                 1,
                 1,
@@ -2236,10 +2089,11 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(thread.history().len(), 3);
-        assert_eq!(thread.history()[0].role, argus_protocol::llm::Role::System);
-        assert_eq!(thread.history()[1].content, "hi");
-        assert_eq!(thread.history()[2].content, "hello");
+        let h: Vec<_> = thread.history_iter().cloned().collect();
+        assert_eq!(h.len(), 3);
+        assert_eq!(h[0].role, argus_protocol::llm::Role::System);
+        assert_eq!(h[1].content, "hi");
+        assert_eq!(h[2].content, "hello");
         assert_eq!(thread.turn_count(), 1);
     }
 
@@ -2597,8 +2451,7 @@ mod tests {
         let assistant_count = {
             let guard = thread.read().await;
             guard
-                .history()
-                .iter()
+                .history_iter()
                 .filter(|message| message.role == argus_protocol::llm::Role::Assistant)
                 .count()
         };
@@ -2610,18 +2463,16 @@ mod tests {
 
         let (user_messages, assistant_messages) = {
             let guard = thread.read().await;
-            let user_messages = guard
-                .history()
-                .iter()
+            let user_messages: Vec<_> = guard
+                .history_iter()
                 .filter(|message| message.role == argus_protocol::llm::Role::User)
                 .map(|message| message.content.clone())
-                .collect::<Vec<_>>();
-            let assistant_messages = guard
-                .history()
-                .iter()
+                .collect();
+            let assistant_messages: Vec<_> = guard
+                .history_iter()
                 .filter(|message| message.role == argus_protocol::llm::Role::Assistant)
                 .map(|message| message.content.clone())
-                .collect::<Vec<_>>();
+                .collect();
             (user_messages, assistant_messages)
         };
 
@@ -2730,7 +2581,8 @@ mod tests {
             ChatMessage::user(repeated.clone()),
             ChatMessage::user(repeated.clone()),
         ];
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             persisted_messages.clone(),
             token_count_for_messages(&persisted_messages),
             0,
@@ -2774,15 +2626,15 @@ mod tests {
             ChatMessage::assistant("history reply"),
             ChatMessage::user(repeated),
         ];
-        thread.hydrate_from_persisted_state(persisted_messages, 90, 0, Utc::now());
-        let before = thread.history().to_vec();
+        hydrate_from_flat_messages(&mut thread, persisted_messages, 90, 0, Utc::now());
+        let before: Vec<_> = thread.history_iter().cloned().collect();
 
         let _turn = thread
             .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
             .await
             .expect("turn should build after compaction");
 
-        let after = thread.history().to_vec();
+        let after: Vec<_> = thread.history_iter().cloned().collect();
         assert_eq!(after.len(), before.len());
         for (after_message, before_message) in after.iter().zip(before.iter()) {
             assert_eq!(after_message.role, before_message.role);
@@ -2806,7 +2658,7 @@ mod tests {
             ChatMessage::user("old question"),
             ChatMessage::assistant("old answer"),
         ];
-        thread.hydrate_from_persisted_state(persisted_messages, 90, 0, Utc::now());
+        hydrate_from_flat_messages(&mut thread, persisted_messages, 90, 0, Utc::now());
 
         let _turn = thread
             .begin_turn("follow-up".to_string(), None, TurnCancellation::default())
@@ -2831,7 +2683,8 @@ mod tests {
             .build()
             .expect("thread should build");
         let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             persisted_messages.clone(),
             token_count_for_messages(&persisted_messages),
             0,
@@ -2867,7 +2720,8 @@ mod tests {
             ChatMessage::user(repeated.clone()),
             ChatMessage::user(repeated),
         ];
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             persisted_messages.clone(),
             token_count_for_messages(&persisted_messages),
             0,
@@ -2901,7 +2755,8 @@ mod tests {
         let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
         let next_message = "next message".to_string();
         let authoritative_token_count = token_count_for_messages(&persisted_messages);
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             persisted_messages.clone(),
             authoritative_token_count,
             0,
@@ -2934,20 +2789,22 @@ mod tests {
             context_token_count: Some(2),
         };
 
-        assert_eq!(thread.history().len(), 1);
-        assert_eq!(thread.history()[0].content, "You are a test agent.");
+        let h: Vec<_> = thread.history_iter().cloned().collect();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].content, "You are a test agent.");
         assert!(thread.current_turn.is_some());
-        assert_eq!(thread.turns.len(), 0);
+        // Builder injected a SystemBootstrap turn
+        assert_eq!(thread.turns.len(), 1);
 
         drop(turn);
         thread.finish_turn(Ok(output)).expect("turn should settle");
 
         assert!(thread.current_turn.is_none());
         assert_eq!(thread.turn_count(), 1);
-        assert_eq!(thread.turns.len(), 1);
-        assert_eq!(thread.turns[0].messages.len(), 2);
-        assert_eq!(thread.turns[0].messages[0].content, "hi");
-        assert_eq!(thread.turns[0].messages[1].content, "hello");
+        assert_eq!(thread.turns.len(), 2);
+        assert_eq!(thread.turns[1].messages.len(), 2);
+        assert_eq!(thread.turns[1].messages[0].content, "hi");
+        assert_eq!(thread.turns[1].messages[1].content, "hello");
     }
 
     #[tokio::test]
@@ -2964,7 +2821,8 @@ mod tests {
         let persisted_messages = vec![ChatMessage::user(repeated_test_message())];
         let next_message = "cancel me".to_string();
         let authoritative_token_count = token_count_for_messages(&persisted_messages);
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             persisted_messages.clone(),
             authoritative_token_count,
             0,
@@ -2979,13 +2837,14 @@ mod tests {
             .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
             .expect("cancelled turn should be ignored");
 
-        assert_eq!(thread.turns.len(), 1);
+        // turns: [hydrated user turn, cancelled turn]
+        assert_eq!(thread.turns.len(), 2);
         assert!(matches!(
-            thread.turns[0].state,
+            thread.turns[1].state,
             crate::history::TurnState::Cancelled
         ));
-        assert_eq!(thread.turns[0].messages.len(), 1);
-        assert_eq!(thread.turns[0].messages[0].content, next_message);
+        assert_eq!(thread.turns[1].messages.len(), 1);
+        assert_eq!(thread.turns[1].messages[0].content, next_message);
         assert_eq!(thread.token_count(), authoritative_token_count);
     }
 
@@ -3002,7 +2861,8 @@ mod tests {
             .expect("thread should build");
         let persisted_messages = vec![ChatMessage::user("small history")];
         let authoritative_token_count = token_count_for_messages(&persisted_messages);
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             persisted_messages,
             authoritative_token_count,
             0,
@@ -3039,18 +2899,13 @@ mod tests {
             .session_id(SessionId::new())
             .build()
             .expect("thread should build");
-        thread.hydrate_from_persisted_state(
+        hydrate_from_flat_messages(
+            &mut thread,
             vec![ChatMessage::assistant("earlier")],
             9,
             1,
             Utc::now(),
         );
-        thread.compaction_checkpoint = Some(CompactionCheckpoint {
-            summarized_through_turn: 1,
-            summary_messages: vec![ChatMessage::assistant("summary")],
-            created_at: Utc::now(),
-            token_count_stale: false,
-        });
 
         let _turn = thread
             .begin_turn("next".to_string(), None, TurnCancellation::new())
@@ -3070,12 +2925,6 @@ mod tests {
 
         assert_eq!(thread.token_count(), 9);
         assert!(thread.token_count_stale);
-        assert!(
-            thread
-                .compaction_checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.token_count_stale)
-        );
     }
 
     #[tokio::test]
@@ -3088,7 +2937,7 @@ mod tests {
             .build()
             .expect("thread should build");
         let persisted_messages = vec![ChatMessage::user("legacy")];
-        thread.hydrate_from_persisted_state(persisted_messages, 1, 5, Utc::now());
+        hydrate_from_flat_messages(&mut thread, persisted_messages, 1, 5, Utc::now());
 
         let _turn = thread
             .begin_turn("next".to_string(), None, TurnCancellation::new())
@@ -3124,7 +2973,7 @@ mod tests {
         let mut thread = ThreadBuilder::new()
             .provider(Arc::new(DummyProvider))
             .compactor(Arc::new(NoopCompactor))
-            .agent_record(test_agent_record_without_system_prompt())
+            .agent_record(test_agent_record())
             .session_id(session_id)
             .config(thread_config)
             .build()
@@ -3153,21 +3002,34 @@ mod tests {
             .await
             .expect("snapshot should persist");
 
-        let persisted_turns_dir = turns_dir(&snapshot.base_dir);
-        let messages = read_turn_messages(&turn_messages_path(&persisted_turns_dir, 1))
+        let recovered = recover_thread_log_state(&snapshot.base_dir)
             .await
-            .expect("messages should read");
-        let meta = read_turn_meta(&turn_meta_path(&persisted_turns_dir, 1))
-            .await
-            .expect("meta should read");
+            .expect("meta.jsonl should recover");
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].content, "hi");
-        assert_eq!(messages[1].content, "hello");
-        assert_eq!(meta.turn_number, 1);
-        assert!(matches!(meta.state, crate::history::TurnState::Completed));
+        // SystemBootstrap + UserTurn
+        assert_eq!(recovered.turns.len(), 2);
+        assert!(matches!(
+            recovered.turns[0].kind,
+            crate::history::TurnRecordKind::SystemBootstrap
+        ));
+        let user_turn = recovered
+            .turns
+            .iter()
+            .find(|t| matches!(t.kind, crate::history::TurnRecordKind::UserTurn))
+            .expect("should have a user turn");
+        assert_eq!(user_turn.messages.len(), 2);
+        assert_eq!(user_turn.messages[0].content, "hi");
+        assert_eq!(user_turn.messages[1].content, "hello");
+        assert_eq!(user_turn.turn_number, Some(1));
+        assert!(matches!(
+            user_turn.state,
+            crate::history::TurnState::Completed
+        ));
         assert_eq!(
-            meta.token_usage.as_ref().map(|usage| usage.total_tokens),
+            user_turn
+                .token_usage
+                .as_ref()
+                .map(|usage| usage.total_tokens),
             Some(2)
         );
     }
@@ -3251,10 +3113,11 @@ mod tests {
             .expect("thread should build");
         thread.hydrate_from_turn_log_state(recovered, Utc::now());
 
-        assert_eq!(thread.history().len(), 5);
-        assert_eq!(thread.history()[0].content, "Persisted system prompt");
-        assert_eq!(thread.history()[1].content, "old question");
-        assert_eq!(thread.history()[4].content, "latest answer");
+        let h: Vec<_> = thread.history_iter().cloned().collect();
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[0].content, "Persisted system prompt");
+        assert_eq!(h[1].content, "old question");
+        assert_eq!(h[4].content, "latest answer");
         assert_eq!(thread.turn_count(), 2);
 
         let context = thread.build_turn_context();
@@ -3304,13 +3167,13 @@ mod tests {
         )));
 
         assert!(matches!(result, Err(ThreadError::TurnFailed(_))));
-        assert_eq!(thread.turns.len(), 1);
+        assert_eq!(thread.turns.len(), 2); // SystemBootstrap + failed turn
         assert!(matches!(
-            thread.turns[0].state,
+            thread.turns[1].state,
             crate::history::TurnState::Failed
         ));
-        assert_eq!(thread.turns[0].messages.len(), 1);
-        assert_eq!(thread.turns[0].messages[0].content, "hi");
+        assert_eq!(thread.turns[1].messages.len(), 1);
+        assert_eq!(thread.turns[1].messages[0].content, "hi");
         assert_eq!(thread.token_count(), 0);
     }
 }
