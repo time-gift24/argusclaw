@@ -6,7 +6,6 @@ use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-use crate::command::{ThreadRuntimeSnapshot, ThreadRuntimeState};
 use crate::turn::{TurnCancellation, TurnExecution, TurnProgress, TurnSharedContext};
 use crate::{TurnBuilder, TurnOutput};
 use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
@@ -21,8 +20,7 @@ use super::compact::Compactor;
 use super::config::ThreadConfig;
 use super::error::{ThreadError, TurnLogError};
 use super::history::{
-    InFlightTurn, InFlightTurnPhase, InFlightTurnShared, TurnRecord, TurnRecordKind,
-    derive_next_user_turn_number,
+    InFlightTurn, InFlightTurnShared, TurnRecord, TurnRecordKind, derive_next_user_turn_number,
 };
 use super::plan_hook::PlanContinuationHook;
 use super::plan_store::FilePlanStore;
@@ -33,6 +31,28 @@ use super::turn_log_store::{
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
+
+/// Internal runtime state for a loaded thread actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThreadRuntimeState {
+    /// Runtime is idle and ready for work.
+    Idle,
+    /// Runtime is executing a turn.
+    Running {
+        /// Active turn number.
+        turn_number: u32,
+    },
+    /// Runtime is stopping an active turn.
+    Stopping {
+        /// Active turn number being stopped.
+        turn_number: u32,
+    },
+    /// Runtime is paused waiting for an approval decision.
+    WaitingForApproval {
+        /// Turn number blocked on approval.
+        turn_number: u32,
+    },
+}
 
 /// Runtime decisions emitted by the thread loop.
 #[derive(Debug, Clone)]
@@ -308,13 +328,6 @@ impl Thread {
         }
     }
 
-    pub(crate) fn runtime_snapshot(&self) -> ThreadRuntimeSnapshot {
-        ThreadRuntimeSnapshot {
-            state: self.runtime_state,
-            queue_depth: self.queue_depth,
-        }
-    }
-
     pub(crate) fn active_turn_cancellation(&self) -> Option<TurnCancellation> {
         self.active_turn_cancellation.clone()
     }
@@ -525,20 +538,11 @@ impl Thread {
         self.updated_at = updated_at;
     }
 
-    fn start_current_turn(
-        &mut self,
-        turn_number: u32,
-        user_input: String,
-        shared: Arc<InFlightTurnShared>,
-    ) {
+    fn start_current_turn(&mut self, turn_number: u32, user_input: String) {
         self.current_turn = Some(InFlightTurn {
             turn_number,
-            state: InFlightTurnPhase::CallingLlm,
             pending_messages: vec![ChatMessage::user(user_input)],
-            token_usage: TokenUsage::default(),
             started_at: Utc::now(),
-            model: Some(self.provider.model_name().to_string()),
-            shared,
         });
     }
 
@@ -702,10 +706,7 @@ impl Thread {
                         }
                         ThreadControlEvent::ShutdownRuntime => {
                             shutdown_requested = true;
-                            let state = {
-                                let guard = thread.read().await;
-                                guard.runtime_snapshot().state
-                            };
+                            let state = { thread.read().await.runtime_state };
                             match state {
                                 ThreadRuntimeState::Idle => break,
                                 _ => {
@@ -789,10 +790,7 @@ impl Thread {
                             let guard = thread.read().await;
                             guard.id().inner().to_string()
                         };
-                        let queue_depth = {
-                            let guard = thread.read().await;
-                            guard.runtime_snapshot().queue_depth
-                        };
+                        let queue_depth = { thread.read().await.queue_depth };
                         {
                             let guard = thread.read().await;
                             guard.broadcast_to_self(ThreadEvent::TurnFailed {
@@ -907,7 +905,7 @@ impl Thread {
         shutdown_requested: bool,
     ) {
         let committed = result.is_ok();
-        let settled_turn_number = match thread.read().await.runtime_snapshot().state {
+        let settled_turn_number = match thread.read().await.runtime_state {
             ThreadRuntimeState::Running { turn_number }
             | ThreadRuntimeState::WaitingForApproval { turn_number }
             | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
@@ -1062,7 +1060,7 @@ impl Thread {
             tools: Arc::new(self.build_shared_turn_tools(effective_record.as_ref())),
             hooks: Arc::new(self.build_shared_turn_hooks()),
         });
-        self.start_current_turn(turn_number, user_input, Arc::clone(&shared));
+        self.start_current_turn(turn_number, user_input);
         self.set_active_turn_cancellation(Some(cancellation.clone()));
 
         match self.build_turn(turn_number, effective_record, cancellation, shared) {
@@ -1594,7 +1592,7 @@ mod tests {
             &mut mailbox,
         );
         assert_eq!(
-            thread.runtime_snapshot().state,
+            thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 3 }
         );
 
@@ -1616,7 +1614,7 @@ mod tests {
             .expect("cancelled turn should settle");
         thread.complete_runtime_turn(false, &mut mailbox);
         assert_eq!(
-            thread.runtime_snapshot().state,
+            thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 3 }
         );
         assert_eq!(mailbox.pending_len(), 0);
@@ -1635,7 +1633,7 @@ mod tests {
             }))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
-        assert_eq!(thread.runtime_snapshot().state, ThreadRuntimeState::Idle);
+        assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
     }
 
     #[tokio::test]
@@ -1651,7 +1649,7 @@ mod tests {
             &mut mailbox,
         );
         assert_eq!(
-            thread.runtime_snapshot().state,
+            thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 1 }
         );
 
@@ -1666,7 +1664,7 @@ mod tests {
             }))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
-        assert_eq!(thread.runtime_snapshot().state, ThreadRuntimeState::Idle);
+        assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
 
         thread.dispatch_runtime_command(
             ThreadCommand::EnqueueUserMessage {
@@ -1676,7 +1674,7 @@ mod tests {
             &mut mailbox,
         );
         assert_eq!(
-            thread.runtime_snapshot().state,
+            thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }
         );
     }

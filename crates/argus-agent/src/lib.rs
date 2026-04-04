@@ -50,7 +50,6 @@
 //! thread.send_message("Hello!".to_string()).await.unwrap();
 //! ```
 
-mod command;
 pub mod compact;
 pub mod config;
 pub mod error;

@@ -71,13 +71,6 @@ impl TurnRecord {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum InFlightTurnPhase {
-    CallingLlm,
-    ExecutingTools,
-    WaitingApproval,
-}
-
 #[derive(Clone, Default)]
 pub struct InFlightTurnShared {
     pub history: Arc<Vec<ChatMessage>>,
@@ -98,12 +91,8 @@ impl std::fmt::Debug for InFlightTurnShared {
 #[derive(Debug, Clone)]
 pub struct InFlightTurn {
     pub turn_number: u32,
-    pub state: InFlightTurnPhase,
     pub pending_messages: Vec<ChatMessage>,
-    pub token_usage: TokenUsage,
     pub started_at: DateTime<Utc>,
-    pub model: Option<String>,
-    pub shared: Arc<InFlightTurnShared>,
 }
 
 pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
