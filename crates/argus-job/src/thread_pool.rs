@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
 use argus_agent::config::ThreadConfigBuilder;
+use argus_agent::thread_trace_store::{
+    persist_thread_snapshot, recover_thread_snapshot, thread_base_dir,
+};
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
@@ -1573,22 +1576,14 @@ impl ThreadPool {
                 JobError::ExecutionFailed(format!("failed to load thread record: {err}"))
             })?
             .ok_or_else(|| JobError::ExecutionFailed(format!("thread {} not found", thread_id)))?;
-        let template_id = thread_record.template_id.ok_or_else(|| {
-            JobError::ExecutionFailed(format!("thread {} is missing template_id", thread_id))
-        })?;
-        let agent_record = self
-            .template_manager
-            .get(AgentId::new(template_id.inner()))
+        let base_dir = thread_base_dir(
+            &self.chat_runtime_config.trace_dir,
+            Some(session_id),
+            thread_id,
+        );
+        let agent_record = recover_thread_snapshot(&base_dir)
             .await
-            .map_err(|err| {
-                JobError::ExecutionFailed(format!(
-                    "failed to load agent {}: {err}",
-                    template_id.inner()
-                ))
-            })?
-            .ok_or_else(|| {
-                JobError::ExecutionFailed(format!("agent {} not found", template_id.inner()))
-            })?;
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
         let requested_model = thread_record
             .model_override
@@ -1655,11 +1650,6 @@ impl ThreadPool {
         let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
-        let base_dir = self
-            .chat_runtime_config
-            .trace_dir
-            .join(session_id.to_string())
-            .join(thread_id.to_string());
         let recovered = recover_thread_log_state(&base_dir)
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
@@ -1689,23 +1679,26 @@ impl ThreadPool {
         } else {
             None
         };
-        let template_id = thread_record
-            .as_ref()
-            .and_then(|record| record.template_id)
-            .unwrap_or_else(|| RepoAgentId::new(request.agent_id.inner()));
-        let agent_record = self
-            .template_manager
-            .get(AgentId::new(template_id.inner()))
-            .await
-            .map_err(|err| {
-                JobError::ExecutionFailed(format!(
-                    "failed to load agent {}: {err}",
-                    template_id.inner()
-                ))
-            })?
-            .ok_or_else(|| {
-                JobError::ExecutionFailed(format!("agent {} not found", template_id.inner()))
-            })?;
+        let base_dir = thread_base_dir(&self.chat_runtime_config.trace_dir, None, thread_id);
+        let agent_record = if thread_record.is_some() {
+            recover_thread_snapshot(&base_dir)
+                .await
+                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?
+        } else {
+            let template_id = RepoAgentId::new(request.agent_id.inner());
+            self.template_manager
+                .get(AgentId::new(template_id.inner()))
+                .await
+                .map_err(|err| {
+                    JobError::ExecutionFailed(format!(
+                        "failed to load agent {}: {err}",
+                        template_id.inner()
+                    ))
+                })?
+                .ok_or_else(|| {
+                    JobError::ExecutionFailed(format!("agent {} not found", template_id.inner()))
+                })?
+        };
         let provider = if let Some(thread_record) = thread_record.as_ref() {
             let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
             match thread_record.model_override.as_deref() {
@@ -1770,10 +1763,6 @@ impl ThreadPool {
             let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
-            let base_dir = self
-                .chat_runtime_config
-                .trace_dir
-                .join(thread_id.to_string());
             let recovered = recover_thread_log_state(&base_dir)
                 .await
                 .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
@@ -1976,7 +1965,7 @@ impl ThreadPool {
                     JobError::ExecutionFailed("default provider is not configured".to_string())
                 })?,
         };
-        let model_override = agent_record.model_id;
+        let model_override = agent_record.model_id.clone();
         let job_id = JobId::new(request.job_id.clone());
         let existing_job = persistence
             .job_repository
@@ -1998,6 +1987,10 @@ impl ThreadPool {
             None
         };
         let thread_id = existing_thread_id.unwrap_or_else(ThreadId::new);
+        let trace_dir = thread_base_dir(&self.chat_runtime_config.trace_dir, None, thread_id);
+        persist_thread_snapshot(&trace_dir, &agent_record)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
 
         let mut thread_record = existing_thread.unwrap_or(ThreadRecord {
             id: thread_id,
@@ -2023,6 +2016,10 @@ impl ThreadPool {
             .upsert_thread(&thread_record)
             .await
             .map_err(|err| {
+                let trace_dir = trace_dir.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::fs::remove_dir_all(trace_dir).await;
+                });
                 JobError::ExecutionFailed(format!("failed to persist thread record: {err}"))
             })?;
 
@@ -2034,6 +2031,7 @@ impl ThreadPool {
             if let Err(err) =
                 Self::persist_existing_job_binding(persistence, &job_id, thread_id).await
             {
+                let _ = tokio::fs::remove_dir_all(&trace_dir).await;
                 return Err(
                     Self::rollback_thread_record(persistence, thread_id, format!("{err}")).await,
                 );
@@ -2064,6 +2062,7 @@ impl ThreadPool {
         };
 
         if let Err(err) = persistence.job_repository.create(&job_record).await {
+            let _ = tokio::fs::remove_dir_all(&trace_dir).await;
             return Err(Self::rollback_thread_record(
                 persistence,
                 thread_id,
@@ -2204,5 +2203,189 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
         agent_id: AgentId::new(7),
         prompt: "run test".to_string(),
         context: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, LlmEventStream};
+    use argus_protocol::{AgentRecord, AgentType, ProviderId, ThinkingConfig};
+    use argus_repository::ArgusSqlite;
+    use argus_repository::migrate;
+    use argus_repository::traits::{
+        AgentRepository, JobRepository, LlmProviderRepository, ThreadRepository,
+    };
+    use argus_template::TemplateManager;
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use sqlx::SqlitePool;
+
+    #[derive(Debug)]
+    struct FixedProvider;
+
+    #[async_trait]
+    impl argus_protocol::LlmProvider for FixedProvider {
+        fn model_name(&self) -> &str {
+            "job-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "job-test".to_string(),
+                reason: "not used in job snapshot test".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<LlmEventStream, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "job-test".to_string(),
+                capability: "stream_complete".to_string(),
+            })
+        }
+    }
+
+    struct FixedProviderResolver {
+        provider: Arc<dyn argus_protocol::LlmProvider>,
+    }
+
+    impl std::fmt::Debug for FixedProviderResolver {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FixedProviderResolver").finish()
+        }
+    }
+
+    #[async_trait]
+    impl argus_protocol::ProviderResolver for FixedProviderResolver {
+        async fn resolve(
+            &self,
+            _id: ProviderId,
+        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn default_provider(
+            &self,
+        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    #[tokio::test]
+    async fn job_thread_rehydrates_from_trace_snapshot_instead_of_latest_template() {
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-thread-pool-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        let agent_id = AgentId::new(7);
+        template_manager
+            .upsert(AgentRecord {
+                id: agent_id,
+                display_name: "Job Snapshot Agent".to_string(),
+                description: "Original job template".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("job-test".to_string()),
+                system_prompt: "You are the original job snapshot agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template upsert should succeed");
+
+        let provider_resolver = Arc::new(FixedProviderResolver {
+            provider: Arc::new(FixedProvider),
+        });
+        let thread_pool = ThreadPool::with_persistence(
+            Arc::clone(&template_manager),
+            provider_resolver,
+            Arc::new(ToolManager::new()),
+            trace_dir.clone(),
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        let request = test_request("job-snapshot");
+        let thread_id = thread_pool
+            .persist_binding(&request, &Utc::now().to_string())
+            .await
+            .expect("job binding should persist");
+
+        let snapshot_path = trace_dir.join(thread_id.to_string()).join("thread.json");
+        let snapshot_content = tokio::fs::read_to_string(&snapshot_path)
+            .await
+            .expect("job thread snapshot should exist");
+        let snapshot: AgentRecord =
+            serde_json::from_str(&snapshot_content).expect("job snapshot should deserialize");
+        assert_eq!(
+            snapshot.system_prompt,
+            "You are the original job snapshot agent."
+        );
+
+        template_manager
+            .upsert(AgentRecord {
+                id: agent_id,
+                display_name: "Job Snapshot Agent Updated".to_string(),
+                description: "Updated job template".to_string(),
+                version: "2.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("job-test-v2".to_string()),
+                system_prompt: "You are the mutated job snapshot agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template update should succeed");
+
+        let thread = thread_pool
+            .build_job_thread(&request, thread_id)
+            .await
+            .expect("job thread should rebuild from trace snapshot");
+        let guard = thread.read().await;
+        assert_eq!(
+            guard.agent_record().system_prompt,
+            "You are the original job snapshot agent."
+        );
+        assert_eq!(guard.agent_record().display_name, "Job Snapshot Agent");
     }
 }

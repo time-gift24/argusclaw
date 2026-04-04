@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::TurnBuilder;
 use crate::turn::{TurnCancellation, TurnExecution, TurnProgress};
-use argus_protocol::llm::{ChatMessage, LlmProvider, Role};
+use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
     AgentRecord, HookHandler, HookRegistry, MessageOverride, QueuedUserMessage, SessionId,
@@ -420,10 +420,9 @@ impl Thread {
         mailbox.take_next_turn_message()
     }
 
-    /// Returns true when committed history contains visible transcript beyond system prompts.
+    /// Returns true when committed history contains any visible transcript.
     pub fn has_non_system_history(&self) -> bool {
-        self.history_iter()
-            .any(|message| message.role != Role::System)
+        self.history_iter().next().is_some()
     }
 
     /// Iterate over committed message history from turn records.

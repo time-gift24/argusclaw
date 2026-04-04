@@ -551,7 +551,7 @@ impl Turn {
     }
 
     fn prompt_message(&self) -> Option<ChatMessage> {
-        (self.turn_number == 1 && !self.agent_record.system_prompt.is_empty())
+        (!self.agent_record.system_prompt.is_empty())
             .then(|| ChatMessage::system(&self.agent_record.system_prompt))
     }
 
@@ -571,13 +571,7 @@ impl Turn {
     }
 
     fn build_record_messages(&self, turn_messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-        let mut messages =
-            Vec::with_capacity(turn_messages.len() + usize::from(self.prompt_message().is_some()));
-        if let Some(prompt) = self.prompt_message() {
-            messages.push(prompt);
-        }
-        messages.extend(turn_messages);
-        messages
+        turn_messages
     }
 
     fn build_turn_record(
@@ -702,7 +696,8 @@ impl Turn {
                     call tools one at a time and wait for the results before calling the next tool.",
                     max
                 );
-                request_messages.insert(0, ChatMessage::system(system_content));
+                let insert_index = usize::from(self.prompt_message().is_some());
+                request_messages.insert(insert_index, ChatMessage::system(system_content));
             }
 
             tracing::debug!(
@@ -2070,9 +2065,9 @@ mod tests {
         let execution = turn.execute_progress().collect().await;
         let record = execution.result.expect("turn should succeed");
 
-        assert_eq!(record.messages.len(), 3);
-        assert_eq!(record.messages[0].role, argus_protocol::llm::Role::System);
-        assert_eq!(record.messages[2].content, "Hello, progress!");
+        assert_eq!(record.messages.len(), 2);
+        assert_eq!(record.messages[0].role, argus_protocol::llm::Role::User);
+        assert_eq!(record.messages[1].content, "Hello, progress!");
         assert!(execution.progress.iter().all(|item| {
             matches!(
                 item,

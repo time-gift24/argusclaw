@@ -57,6 +57,7 @@ pub mod plan_hook;
 pub mod plan_store;
 pub mod plan_tool;
 pub mod thread;
+pub mod thread_trace_store;
 pub mod turn_log_store;
 
 pub mod tool_context;

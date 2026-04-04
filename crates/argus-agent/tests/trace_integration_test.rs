@@ -449,10 +449,9 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
         .iter()
         .find(|t| matches!(t.kind, argus_agent::history::TurnRecordKind::UserTurn))
         .expect("should have user turn");
-    assert_eq!(user_turn.messages.len(), 3);
-    assert_eq!(user_turn.messages[0].content, "You are a test assistant.");
-    assert_eq!(user_turn.messages[1].content, "Hello");
-    assert_eq!(user_turn.messages[2].content, "Hello, world!");
+    assert_eq!(user_turn.messages.len(), 2);
+    assert_eq!(user_turn.messages[0].content, "Hello");
+    assert_eq!(user_turn.messages[1].content, "Hello, world!");
     assert_eq!(user_turn.turn_number, 1);
     assert_eq!(user_turn.token_usage.total_tokens, 0);
 }

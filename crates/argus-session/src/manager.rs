@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use argus_agent::thread_trace_store::{persist_thread_snapshot, thread_base_dir};
 use argus_agent::tool_context::current_agent_id;
 use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
@@ -895,6 +896,12 @@ impl SessionManager {
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
+        let thread_trace_dir = thread_base_dir(&self.trace_dir, Some(session_id), thread_id);
+        persist_thread_snapshot(&thread_trace_dir, &agent_record)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
 
         // Insert into DB
         use argus_repository::types::ThreadRecord;
@@ -913,8 +920,14 @@ impl SessionManager {
         self.thread_repo
             .upsert_thread(&thread_record)
             .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
+            .map_err(|e| {
+                let thread_trace_dir = thread_trace_dir.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::fs::remove_dir_all(thread_trace_dir).await;
+                });
+                ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                }
             })?;
         self.thread_pool.register_chat_thread(session_id, thread_id);
         let thread = match self
@@ -926,6 +939,7 @@ impl SessionManager {
             Err(error) => {
                 self.thread_pool.remove_runtime(&thread_id);
                 let _ = self.thread_repo.delete_thread(&thread_id).await;
+                let _ = tokio::fs::remove_dir_all(&thread_trace_dir).await;
                 return Err(ArgusError::LlmError {
                     reason: error.to_string(),
                 });
@@ -1711,6 +1725,60 @@ mod tests {
             session.get_thread(&thread_id).is_some(),
             "session should refresh its thread handle after runtime reload"
         );
+    }
+
+    #[tokio::test]
+    async fn chat_thread_rehydrates_from_trace_snapshot_instead_of_latest_template() {
+        let (manager, temp_dir, session_id, thread_id) = test_session_manager().await;
+        let snapshot_path = temp_dir
+            .path()
+            .join("trace")
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("thread.json");
+
+        let snapshot_content =
+            fs::read_to_string(&snapshot_path).expect("thread snapshot should be persisted");
+        let snapshot: AgentRecord =
+            serde_json::from_str(&snapshot_content).expect("thread snapshot should deserialize");
+        assert_eq!(snapshot.system_prompt, "You are a routing test agent.");
+
+        manager
+            .template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(11),
+                display_name: "Routing Test Agent Updated".to_string(),
+                description: "Updated template".to_string(),
+                version: "2.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-test-v2".to_string()),
+                system_prompt: "You are a mutated routing test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template upsert should succeed");
+
+        assert!(
+            manager.thread_pool.remove_runtime(&thread_id),
+            "existing runtime should be evicted before rehydration"
+        );
+
+        let thread = manager
+            .thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should rebuild from trace snapshot");
+        let guard = thread.read().await;
+        assert_eq!(
+            guard.agent_record().system_prompt,
+            "You are a routing test agent."
+        );
+        assert_eq!(guard.agent_record().display_name, "Routing Test Agent");
     }
 
     #[tokio::test]

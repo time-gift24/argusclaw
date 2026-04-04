@@ -418,7 +418,7 @@ async fn test_turn_integration_simple() {
 }
 
 #[tokio::test]
-async fn first_turn_injects_system_prompt_into_request_and_record() {
+async fn first_turn_injects_system_prompt_into_request_but_not_record() {
     let captured_requests = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(RequestCapturingProvider::new(
         Arc::clone(&captured_requests),
@@ -469,10 +469,76 @@ async fn first_turn_injects_system_prompt_into_request_and_record() {
     assert_eq!(first_request.messages[1].content, "Hello");
 
     assert!(matches!(record.kind, TurnRecordKind::UserTurn));
-    assert_eq!(record.messages[0].role, Role::System);
-    assert_eq!(record.messages[0].content, "You are a helpful assistant.");
-    assert_eq!(record.messages[1].role, Role::User);
-    assert_eq!(record.messages[1].content, "Hello");
+    assert_eq!(record.messages.len(), 2);
+    assert_eq!(record.messages[0].role, Role::User);
+    assert_eq!(record.messages[0].content, "Hello");
+    assert_eq!(record.messages[1].role, Role::Assistant);
+    assert_eq!(record.messages[1].content, "Hello, world!");
+}
+
+#[tokio::test]
+async fn later_turns_still_inject_system_prompt_into_request_but_not_record() {
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RequestCapturingProvider::new(
+        Arc::clone(&captured_requests),
+        CompletionResponse {
+            content: Some("Second reply".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 12,
+            output_tokens: 6,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+    ));
+
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(2)
+        .thread_id("test-thread".to_string())
+        .history(vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("First reply"),
+        ])
+        .messages(vec![ChatMessage::user("Follow-up")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a helpful assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let record = turn.execute().await.unwrap();
+
+    let requests = captured_requests.lock().unwrap();
+    let first_request = requests.first().expect("provider should capture request");
+    assert_eq!(first_request.messages[0].role, Role::System);
+    assert_eq!(
+        first_request.messages[0].content,
+        "You are a helpful assistant."
+    );
+    assert_eq!(first_request.messages[1].role, Role::User);
+    assert_eq!(first_request.messages[1].content, "Hello");
+    assert_eq!(first_request.messages[2].role, Role::Assistant);
+    assert_eq!(first_request.messages[2].content, "First reply");
+    assert_eq!(first_request.messages[3].role, Role::User);
+    assert_eq!(first_request.messages[3].content, "Follow-up");
+
+    assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.messages.len(), 2);
+    assert_eq!(record.messages[0].role, Role::User);
+    assert_eq!(record.messages[0].content, "Follow-up");
+    assert_eq!(record.messages[1].role, Role::Assistant);
+    assert_eq!(record.messages[1].content, "Second reply");
 }
 
 struct HangingStreamingProvider;
