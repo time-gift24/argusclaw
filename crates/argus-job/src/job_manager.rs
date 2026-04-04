@@ -21,6 +21,7 @@ use argus_protocol::{
     ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
+use argus_repository::types::{JobId, JobStatus};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
 use tokio::sync::broadcast;
@@ -72,6 +73,7 @@ pub struct JobManager {
     thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<TrackedJobsStore>>,
     chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
+    job_repository: Option<Arc<dyn JobRepository>>,
 }
 
 type ChatMailboxForwarderFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
@@ -113,6 +115,9 @@ impl JobManager {
         trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
+        let job_repository = persistence
+            .as_ref()
+            .map(ThreadPoolPersistence::job_repository);
         let thread_pool = Arc::new(ThreadPool::with_persistence(
             template_manager,
             provider_resolver,
@@ -125,6 +130,7 @@ impl JobManager {
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(TrackedJobsStore::default())),
             chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
+            job_repository,
         }
     }
 
@@ -257,24 +263,86 @@ impl JobManager {
             .tracked_jobs
             .lock()
             .expect("job tracking mutex poisoned");
-        let Some(tracked_job) = tracked_jobs.jobs.get_mut(job_id) else {
-            return JobLookup::NotFound;
-        };
+        Self::lookup_job_in_store(&mut tracked_jobs, thread_id, job_id, consume)
+    }
 
-        if tracked_job.thread_id != thread_id {
-            return JobLookup::NotFound;
+    /// Get the current status for a job, recovering persisted state when caches are cold.
+    pub async fn get_job_result_status_persisted(
+        &self,
+        thread_id: ThreadId,
+        job_id: &str,
+        consume: bool,
+    ) -> Result<JobLookup, JobError> {
+        {
+            let mut tracked_jobs = self
+                .tracked_jobs
+                .lock()
+                .expect("job tracking mutex poisoned");
+            let lookup = Self::lookup_job_in_store(&mut tracked_jobs, thread_id, job_id, consume);
+            if !matches!(lookup, JobLookup::NotFound) {
+                return Ok(lookup);
+            }
         }
 
-        match &tracked_job.state {
-            TrackedJobState::Pending | TrackedJobState::Cancelling => JobLookup::Pending,
-            TrackedJobState::Completed(result) => {
-                let result = result.clone();
-                if consume {
-                    tracked_job.state = TrackedJobState::Consumed(result.clone());
-                }
-                JobLookup::Completed(result)
+        let Some(job_repository) = &self.job_repository else {
+            return Ok(JobLookup::NotFound);
+        };
+        let Some(job_record) = job_repository
+            .get(&JobId::new(job_id))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?
+        else {
+            return Ok(JobLookup::NotFound);
+        };
+        let Some(execution_thread_id) = job_record.thread_id else {
+            return Ok(JobLookup::NotFound);
+        };
+        let Some(metadata) = self
+            .thread_pool
+            .recover_job_thread_metadata(execution_thread_id)
+            .await?
+        else {
+            return Ok(JobLookup::NotFound);
+        };
+        if metadata.parent_thread_id != Some(thread_id)
+            || metadata.job_id.as_deref() != Some(job_id)
+        {
+            return Ok(JobLookup::NotFound);
+        }
+
+        match job_record.status {
+            JobStatus::Pending | JobStatus::Queued | JobStatus::Running => Ok(JobLookup::Pending),
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled => {
+                let Some(result) = job_record.result else {
+                    return Ok(JobLookup::NotFound);
+                };
+                let persisted = ThreadJobResult {
+                    job_id: job_id.to_string(),
+                    success: result.success,
+                    message: result.message,
+                    token_usage: result.token_usage,
+                    agent_id: AgentId::new(result.agent_id.inner()),
+                    agent_display_name: result.agent_display_name,
+                    agent_description: result.agent_description,
+                };
+                Self::record_completed_job_result_in_store(
+                    &self.tracked_jobs,
+                    thread_id,
+                    persisted.clone(),
+                );
+                let mut tracked_jobs = self
+                    .tracked_jobs
+                    .lock()
+                    .expect("job tracking mutex poisoned");
+                Ok(Self::lookup_job_in_store(
+                    &mut tracked_jobs,
+                    thread_id,
+                    job_id,
+                    consume,
+                ))
             }
-            TrackedJobState::Consumed(result) => JobLookup::Consumed(result.clone()),
         }
     }
 
@@ -454,6 +522,33 @@ impl JobManager {
         }
     }
 
+    fn lookup_job_in_store(
+        tracked_jobs: &mut TrackedJobsStore,
+        thread_id: ThreadId,
+        job_id: &str,
+        consume: bool,
+    ) -> JobLookup {
+        let Some(tracked_job) = tracked_jobs.jobs.get_mut(job_id) else {
+            return JobLookup::NotFound;
+        };
+
+        if tracked_job.thread_id != thread_id {
+            return JobLookup::NotFound;
+        }
+
+        match &tracked_job.state {
+            TrackedJobState::Pending | TrackedJobState::Cancelling => JobLookup::Pending,
+            TrackedJobState::Completed(result) => {
+                let result = result.clone();
+                if consume {
+                    tracked_job.state = TrackedJobState::Consumed(result.clone());
+                }
+                JobLookup::Completed(result)
+            }
+            TrackedJobState::Consumed(result) => JobLookup::Consumed(result.clone()),
+        }
+    }
+
     fn is_job_runtime_active(&self, job_id: &str) -> bool {
         let Some(thread_id) = self.thread_pool.get_thread_binding(job_id) else {
             return true;
@@ -522,6 +617,39 @@ impl JobManager {
             .jobs
             .get(job_id)
             .is_some_and(|tracked_job| matches!(tracked_job.state, TrackedJobState::Pending))
+    }
+
+    pub async fn is_job_pending_persisted(&self, job_id: &str) -> Result<bool, JobError> {
+        {
+            let tracked_jobs = self
+                .tracked_jobs
+                .lock()
+                .expect("job tracking mutex poisoned");
+            if let Some(tracked_job) = tracked_jobs.jobs.get(job_id) {
+                return Ok(matches!(
+                    tracked_job.state,
+                    TrackedJobState::Pending | TrackedJobState::Cancelling
+                ));
+            }
+        }
+
+        let Some(job_repository) = &self.job_repository else {
+            return Ok(false);
+        };
+        let Some(job_record) = job_repository
+            .get(&JobId::new(job_id))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?
+        else {
+            return Ok(false);
+        };
+
+        Ok(matches!(
+            job_record.status,
+            JobStatus::Pending | JobStatus::Queued | JobStatus::Running
+        ))
     }
 
     fn broadcast_job_result(
@@ -749,7 +877,7 @@ mod tests {
                 kind: ThreadTraceKind::ChatRoot,
                 root_session_id: Some(parent_session_id),
                 parent_thread_id: None,
-                child_thread_ids: Vec::new(),
+                job_id: None,
                 agent_snapshot: agent_record,
             },
         )

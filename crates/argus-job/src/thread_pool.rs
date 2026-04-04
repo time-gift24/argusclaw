@@ -9,8 +9,8 @@ use crate::error::JobError;
 use crate::types::ThreadPoolJobRequest;
 use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::thread_trace_store::{
-    ThreadTraceKind, ThreadTraceMetadata, append_child_thread_id, chat_thread_base_dir,
-    child_thread_base_dir, find_job_thread_base_dir, persist_thread_metadata,
+    ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, child_thread_base_dir,
+    find_job_thread_base_dir, list_direct_child_threads, persist_thread_metadata,
     recover_thread_metadata,
 };
 use argus_agent::turn_log_store::recover_thread_log_state;
@@ -158,6 +158,16 @@ impl ThreadPoolPersistence {
             provider_repository,
         }
     }
+
+    pub(crate) fn job_repository(&self) -> Arc<dyn JobRepository> {
+        Arc::clone(&self.job_repository)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredChildJob {
+    pub thread_id: ThreadId,
+    pub job_id: String,
 }
 
 /// Coordinates job-thread bindings, runtime state transitions, and metrics.
@@ -332,6 +342,89 @@ impl ThreadPool {
             .get(parent_thread_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Recover the direct parent thread for a persisted child job runtime.
+    pub async fn recover_parent_thread_id(
+        &self,
+        child_thread_id: &ThreadId,
+    ) -> Result<Option<ThreadId>, JobError> {
+        if let Some(parent_thread_id) = self.parent_thread_id(child_thread_id) {
+            return Ok(Some(parent_thread_id));
+        }
+
+        Ok(self
+            .recover_job_thread_metadata(*child_thread_id)
+            .await?
+            .and_then(|metadata| metadata.parent_thread_id))
+    }
+
+    /// Recover the bound execution thread for a job from persistence when caches are cold.
+    pub async fn recover_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>, JobError> {
+        if let Some(thread_id) = self.get_thread_binding(job_id) {
+            return Ok(Some(thread_id));
+        }
+
+        let Some(persistence) = &self.persistence else {
+            return Ok(None);
+        };
+        let Some(job_record) = persistence
+            .job_repository
+            .get(&JobId::new(job_id))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?
+        else {
+            return Ok(None);
+        };
+        let Some(thread_id) = job_record.thread_id else {
+            return Ok(None);
+        };
+        let Some(metadata) = self.recover_job_thread_metadata(thread_id).await? else {
+            return Ok(None);
+        };
+        if metadata.job_id.as_deref() != Some(job_id) {
+            return Err(JobError::ExecutionFailed(format!(
+                "job {job_id} is bound to thread {thread_id}, but trace metadata recorded {:?}",
+                metadata.job_id
+            )));
+        }
+
+        self.store
+            .lock()
+            .expect("thread-pool mutex poisoned")
+            .job_bindings
+            .insert(job_id.to_string(), thread_id);
+        Ok(Some(thread_id))
+    }
+
+    /// Recover direct persisted child jobs for a parent thread.
+    pub async fn recover_child_jobs(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> Result<Vec<RecoveredChildJob>, JobError> {
+        let parent_base_dir = self.trace_base_dir_for_thread(parent_thread_id).await?;
+        let metadata = list_direct_child_threads(&parent_base_dir, parent_thread_id)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let mut recovered = Vec::with_capacity(metadata.len());
+
+        for child_metadata in metadata {
+            let job_id = child_metadata.job_id.clone().ok_or_else(|| {
+                JobError::ExecutionFailed(format!(
+                    "job thread {} is missing persisted job_id metadata",
+                    child_metadata.thread_id
+                ))
+            })?;
+            self.sync_relationship_cache(&child_metadata);
+            recovered.push(RecoveredChildJob {
+                thread_id: child_metadata.thread_id,
+                job_id,
+            });
+        }
+
+        Ok(recovered)
     }
 
     /// Return the current runtime summary for a thread.
@@ -1565,6 +1658,12 @@ impl ThreadPool {
     fn sync_relationship_cache(&self, metadata: &ThreadTraceMetadata) {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
 
+        if let Some(job_id) = metadata.job_id.as_deref() {
+            store
+                .job_bindings
+                .insert(job_id.to_string(), metadata.thread_id);
+        }
+
         if let Some(parent_thread_id) = metadata.parent_thread_id {
             store
                 .parent_thread_by_child
@@ -1577,18 +1676,41 @@ impl ThreadPool {
                 children.push(metadata.thread_id);
             }
         }
+    }
 
-        if !metadata.child_thread_ids.is_empty() {
-            let children = store
-                .child_threads_by_parent
-                .entry(metadata.thread_id)
-                .or_default();
-            for child_thread_id in &metadata.child_thread_ids {
-                if !children.contains(child_thread_id) {
-                    children.push(*child_thread_id);
+    pub(crate) async fn recover_job_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Option<ThreadTraceMetadata>, JobError> {
+        let base_dir =
+            match find_job_thread_base_dir(&self.chat_runtime_config.trace_dir, thread_id).await {
+                Ok(base_dir) => base_dir,
+                Err(argus_agent::error::TurnLogError::ThreadMetadataNotFound(_)) => {
+                    return Ok(None);
                 }
-            }
+                Err(error) => {
+                    return Err(JobError::ExecutionFailed(format!(
+                        "failed to locate job trace metadata: {error}"
+                    )));
+                }
+            };
+        let metadata = recover_thread_metadata(&base_dir)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        if metadata.thread_id != thread_id {
+            return Err(JobError::ExecutionFailed(format!(
+                "job trace metadata for {} resolved to {}",
+                thread_id, metadata.thread_id
+            )));
         }
+        if metadata.kind != ThreadTraceKind::Job {
+            return Err(JobError::ExecutionFailed(format!(
+                "thread {} is not recorded as a job thread",
+                thread_id
+            )));
+        }
+        self.sync_relationship_cache(&metadata);
+        Ok(Some(metadata))
     }
 
     async fn trace_base_dir_for_thread(&self, thread_id: ThreadId) -> Result<PathBuf, JobError> {
@@ -1773,6 +1895,12 @@ impl ThreadPool {
             return Err(JobError::ExecutionFailed(format!(
                 "job thread {} is bound to parent {:?}, not {}",
                 thread_id, metadata.parent_thread_id, request.originating_thread_id
+            )));
+        }
+        if metadata.job_id.as_deref() != Some(request.job_id.as_str()) {
+            return Err(JobError::ExecutionFailed(format!(
+                "job thread {} is bound to job {:?}, not {}",
+                thread_id, metadata.job_id, request.job_id
             )));
         }
         let agent_record = metadata.agent_snapshot.clone();
@@ -2060,7 +2188,7 @@ impl ThreadPool {
         let thread_id = existing_thread_id.unwrap_or_else(ThreadId::new);
         let should_cleanup_trace_dir = existing_thread_id.is_none();
         let default_base_dir = child_thread_base_dir(&parent_base_dir, thread_id);
-        let (base_dir, existing_child_metadata) = if existing_thread_id.is_some() {
+        let (base_dir, _existing_child_metadata) = if existing_thread_id.is_some() {
             let existing_base_dir =
                 find_job_thread_base_dir(&self.chat_runtime_config.trace_dir, thread_id)
                     .await
@@ -2080,6 +2208,12 @@ impl ThreadPool {
                     thread_id, metadata.parent_thread_id
                 )));
             }
+            if metadata.job_id.as_deref() != Some(request.job_id.as_str()) {
+                return Err(JobError::ExecutionFailed(format!(
+                    "job thread {} is already bound to job {:?}",
+                    thread_id, metadata.job_id
+                )));
+            }
             (existing_base_dir, Some(metadata))
         } else {
             (default_base_dir, None)
@@ -2090,20 +2224,15 @@ impl ThreadPool {
             kind: ThreadTraceKind::Job,
             root_session_id: parent_metadata.root_session_id,
             parent_thread_id: Some(request.originating_thread_id),
-            child_thread_ids: existing_child_metadata
-                .as_ref()
-                .map(|metadata| metadata.child_thread_ids.clone())
-                .unwrap_or_default(),
+            job_id: Some(request.job_id.clone()),
             agent_snapshot: agent_record.clone(),
         };
         persist_thread_metadata(&base_dir, &metadata)
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        self.sync_relationship_cache(&metadata);
 
         let Some(persistence) = &self.persistence else {
-            append_child_thread_id(&parent_base_dir, thread_id)
-                .await
-                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
             return Ok(thread_id);
         };
 
@@ -2173,9 +2302,6 @@ impl ThreadPool {
                     Self::rollback_thread_record(persistence, thread_id, format!("{err}")).await,
                 );
             }
-            append_child_thread_id(&parent_base_dir, thread_id)
-                .await
-                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
             return Ok(thread_id);
         }
 
@@ -2212,10 +2338,6 @@ impl ThreadPool {
             )
             .await);
         }
-
-        append_child_thread_id(&parent_base_dir, thread_id)
-            .await
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
 
         Ok(thread_id)
     }
@@ -2516,7 +2638,7 @@ mod tests {
                 kind: ThreadTraceKind::ChatRoot,
                 root_session_id: Some(parent_session_id),
                 parent_thread_id: None,
-                child_thread_ids: Vec::new(),
+                job_id: None,
                 agent_snapshot: original_agent_record.clone(),
             },
         )
@@ -2549,12 +2671,13 @@ mod tests {
         );
         assert_eq!(snapshot.parent_thread_id, Some(parent_thread_id));
         assert_eq!(snapshot.root_session_id, Some(parent_session_id));
+        assert_eq!(snapshot.job_id.as_deref(), Some("job-snapshot"));
         let parent_content = tokio::fs::read_to_string(parent_base_dir.join("thread.json"))
             .await
             .expect("parent thread metadata should exist");
         let parent_snapshot: ThreadTraceMetadata =
             serde_json::from_str(&parent_content).expect("parent metadata should deserialize");
-        assert_eq!(parent_snapshot.child_thread_ids, vec![thread_id]);
+        assert_eq!(parent_snapshot.job_id, None);
 
         template_manager
             .upsert(AgentRecord {
@@ -2593,6 +2716,163 @@ mod tests {
         assert_eq!(
             thread_pool.child_thread_ids(&parent_thread_id),
             vec![thread_id]
+        );
+        let recovered_children = thread_pool
+            .recover_child_jobs(parent_thread_id)
+            .await
+            .expect("child jobs should recover from trace");
+        assert_eq!(
+            recovered_children,
+            vec![RecoveredChildJob {
+                thread_id,
+                job_id: "job-snapshot".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_child_jobs_rehydrates_sibling_relationships_without_parent_lists() {
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-thread-pool-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        let agent_id = AgentId::new(7);
+        let agent_record = AgentRecord {
+            id: agent_id,
+            display_name: "Sibling Recovery Agent".to_string(),
+            description: "Tests direct child recovery".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: Some("job-test".to_string()),
+            system_prompt: "You recover child jobs from trace.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: Some(ThinkingConfig::disabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        };
+        template_manager
+            .upsert(agent_record.clone())
+            .await
+            .expect("template upsert should succeed");
+
+        let provider_resolver = Arc::new(FixedProviderResolver {
+            provider: Arc::new(FixedProvider),
+        });
+        let thread_pool = ThreadPool::with_persistence(
+            Arc::clone(&template_manager),
+            provider_resolver.clone(),
+            Arc::new(ToolManager::new()),
+            trace_dir.clone(),
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        let parent_session_id = SessionId::new();
+        let parent_thread_id = ThreadId::new();
+        SessionRepository::create(sqlite.as_ref(), &parent_session_id, "parent")
+            .await
+            .expect("parent session should persist");
+        sqlite
+            .upsert_thread(&ThreadRecord {
+                id: parent_thread_id,
+                provider_id: argus_protocol::LlmProviderId::new(1),
+                title: Some("parent".to_string()),
+                token_count: 0,
+                turn_count: 0,
+                session_id: Some(parent_session_id),
+                template_id: Some(RepoAgentId::new(agent_id.inner())),
+                model_override: Some("job-test".to_string()),
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            })
+            .await
+            .expect("parent thread record should persist");
+        let parent_base_dir = chat_thread_base_dir(&trace_dir, parent_session_id, parent_thread_id);
+        persist_thread_metadata(
+            &parent_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: parent_thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(parent_session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: agent_record,
+            },
+        )
+        .await
+        .expect("parent metadata should persist");
+
+        let first = thread_pool
+            .persist_binding(
+                &ThreadPoolJobRequest {
+                    originating_thread_id: parent_thread_id,
+                    job_id: "job-sibling-a".to_string(),
+                    agent_id,
+                    prompt: "run a".to_string(),
+                    context: None,
+                },
+                &Utc::now().to_string(),
+            )
+            .await
+            .expect("first child binding should persist");
+        let second = thread_pool
+            .persist_binding(
+                &ThreadPoolJobRequest {
+                    originating_thread_id: parent_thread_id,
+                    job_id: "job-sibling-b".to_string(),
+                    agent_id,
+                    prompt: "run b".to_string(),
+                    context: None,
+                },
+                &Utc::now().to_string(),
+            )
+            .await
+            .expect("second child binding should persist");
+
+        let fresh_pool = ThreadPool::with_persistence(
+            template_manager,
+            provider_resolver,
+            Arc::new(ToolManager::new()),
+            trace_dir,
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        let mut recovered = fresh_pool
+            .recover_child_jobs(parent_thread_id)
+            .await
+            .expect("fresh pool should recover persisted direct children");
+        recovered.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+
+        assert_eq!(
+            recovered,
+            vec![
+                RecoveredChildJob {
+                    thread_id: first,
+                    job_id: "job-sibling-a".to_string(),
+                },
+                RecoveredChildJob {
+                    thread_id: second,
+                    job_id: "job-sibling-b".to_string(),
+                },
+            ]
         );
     }
 }

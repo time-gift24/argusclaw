@@ -41,16 +41,17 @@
   - `kind`
   - `root_session_id`
   - `parent_thread_id`
-  - `child_thread_ids`
+  - `job_id`
   - `agent_snapshot`
-- thread 级 agent 配置、job 父子关系、以及 trace 树结构都以 `thread.json` 为 authority。
+- thread 级 agent 配置以 `thread.json` 为 authority。
+- job 父子关系以“树形目录 + 子节点 `thread.json.parent_thread_id` / `job_id`”为 authority。
 
 ### Job Tree Rules
 
 - chat thread 一定是树根，`parent_thread_id = None`。
 - job thread 一定是其派发源 thread 的直接子节点，并持久化到父节点目录下。
-- `child_thread_ids` 只记录直接子节点，不记录整棵子树。
-- `ThreadPool` 中的 `parent_thread_by_child` / `child_threads_by_parent` 只是运行时缓存，不是真相源；恢复时必须从 `thread.json` 回填。
+- job thread 必须持久化自己的 `parent_thread_id` 和 `job_id`；父节点不再维护持久化 child 列表。
+- `ThreadPool` 中的 `parent_thread_by_child` / `child_threads_by_parent` 只是运行时缓存，不是真相源；恢复时必须从目录树和子节点元数据回填。
 - job thread 一旦创建，父节点固定；发现持久化父节点与当前派发源不一致时应直接报错，不做隐式迁移。
 
 ### Simplicity Guardrails

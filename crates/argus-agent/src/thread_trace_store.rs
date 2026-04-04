@@ -21,7 +21,7 @@ pub struct ThreadTraceMetadata {
     pub kind: ThreadTraceKind,
     pub root_session_id: Option<SessionId>,
     pub parent_thread_id: Option<ThreadId>,
-    pub child_thread_ids: Vec<ThreadId>,
+    pub job_id: Option<String>,
     pub agent_snapshot: AgentRecord,
 }
 
@@ -93,18 +93,6 @@ pub async fn recover_thread_metadata(base_dir: &Path) -> Result<ThreadTraceMetad
     })
 }
 
-pub async fn append_child_thread_id(
-    parent_base_dir: &Path,
-    child_thread_id: ThreadId,
-) -> Result<ThreadTraceMetadata, TurnLogError> {
-    let mut metadata = recover_thread_metadata(parent_base_dir).await?;
-    if !metadata.child_thread_ids.contains(&child_thread_id) {
-        metadata.child_thread_ids.push(child_thread_id);
-        persist_thread_metadata(parent_base_dir, &metadata).await?;
-    }
-    Ok(metadata)
-}
-
 pub async fn find_job_thread_base_dir(
     trace_root: &Path,
     thread_id: ThreadId,
@@ -162,10 +150,7 @@ pub async fn find_job_thread_base_dir(
                 continue;
             }
             if metadata.kind != ThreadTraceKind::Job {
-                return Err(TurnLogError::ThreadMetadataMalformed {
-                    path: thread_metadata_path(&base_dir),
-                    reason: format!("thread {thread_id} is not recorded as a job thread"),
-                });
+                continue;
             }
             matches.push(base_dir);
         }
@@ -185,6 +170,60 @@ pub async fn find_job_thread_base_dir(
     }
 }
 
+pub async fn list_direct_child_threads(
+    parent_base_dir: &Path,
+    parent_thread_id: ThreadId,
+) -> Result<Vec<ThreadTraceMetadata>, TurnLogError> {
+    let mut entries = match fs::read_dir(parent_base_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(TurnLogError::ThreadMetadataIo {
+                path: parent_base_dir.to_path_buf(),
+                reason: format!("failed to scan child thread directories: {error}"),
+            });
+        }
+    };
+
+    let mut children = Vec::new();
+    while let Some(entry) =
+        entries
+            .next_entry()
+            .await
+            .map_err(|error| TurnLogError::ThreadMetadataIo {
+                path: parent_base_dir.to_path_buf(),
+                reason: format!("failed to enumerate child thread directories: {error}"),
+            })?
+    {
+        let path = entry.path();
+        let file_type =
+            entry
+                .file_type()
+                .await
+                .map_err(|error| TurnLogError::ThreadMetadataIo {
+                    path: path.clone(),
+                    reason: format!("failed to inspect child thread entry type: {error}"),
+                })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let metadata = match recover_thread_metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(TurnLogError::ThreadMetadataNotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.kind == ThreadTraceKind::Job
+            && metadata.parent_thread_id == Some(parent_thread_id)
+        {
+            children.push(metadata);
+        }
+    }
+
+    children.sort_by_key(|metadata| metadata.thread_id.to_string());
+    Ok(children)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -198,7 +237,7 @@ mod tests {
             kind: ThreadTraceKind::ChatRoot,
             root_session_id: Some(SessionId::new()),
             parent_thread_id: None,
-            child_thread_ids: Vec::new(),
+            job_id: None,
             agent_snapshot: AgentRecord {
                 system_prompt: "You are a snapshot test agent.".to_string(),
                 display_name: "Snapshot Agent".to_string(),
@@ -232,28 +271,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_child_thread_id_deduplicates() {
+    async fn list_direct_child_threads_ignores_grandchildren() {
         let temp_dir = tempdir().expect("temp dir should exist");
         let parent_base_dir = temp_dir.path().join("parent");
         let parent_id = ThreadId::new();
         let child_id = ThreadId::new();
-        let metadata = sample_metadata(parent_id);
+        let grandchild_id = ThreadId::new();
 
-        persist_thread_metadata(&parent_base_dir, &metadata)
+        persist_thread_metadata(&parent_base_dir, &sample_metadata(parent_id))
             .await
             .expect("metadata should persist");
+        persist_thread_metadata(
+            &child_thread_base_dir(&parent_base_dir, child_id),
+            &ThreadTraceMetadata {
+                thread_id: child_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: None,
+                parent_thread_id: Some(parent_id),
+                job_id: Some("job-child".to_string()),
+                agent_snapshot: AgentRecord::default(),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+        persist_thread_metadata(
+            &child_thread_base_dir(
+                &child_thread_base_dir(&parent_base_dir, child_id),
+                grandchild_id,
+            ),
+            &ThreadTraceMetadata {
+                thread_id: grandchild_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: None,
+                parent_thread_id: Some(child_id),
+                job_id: Some("job-grandchild".to_string()),
+                agent_snapshot: AgentRecord::default(),
+            },
+        )
+        .await
+        .expect("grandchild metadata should persist");
 
-        append_child_thread_id(&parent_base_dir, child_id)
+        let recovered = list_direct_child_threads(&parent_base_dir, parent_id)
             .await
-            .expect("child should be appended");
-        append_child_thread_id(&parent_base_dir, child_id)
-            .await
-            .expect("child append should deduplicate");
-
-        let recovered = recover_thread_metadata(&parent_base_dir)
-            .await
-            .expect("metadata should recover");
-        assert_eq!(recovered.child_thread_ids, vec![child_id]);
+            .expect("direct child threads should recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].thread_id, child_id);
+        assert_eq!(recovered[0].job_id.as_deref(), Some("job-child"));
     }
 
     #[tokio::test]
@@ -272,7 +335,7 @@ mod tests {
                 kind: ThreadTraceKind::ChatRoot,
                 root_session_id: Some(session_id),
                 parent_thread_id: None,
-                child_thread_ids: vec![child_id],
+                job_id: None,
                 agent_snapshot: AgentRecord::default(),
             },
         )
@@ -285,7 +348,7 @@ mod tests {
                 kind: ThreadTraceKind::Job,
                 root_session_id: Some(session_id),
                 parent_thread_id: Some(root_id),
-                child_thread_ids: Vec::new(),
+                job_id: Some("job-child".to_string()),
                 agent_snapshot: AgentRecord::default(),
             },
         )
@@ -296,5 +359,32 @@ mod tests {
             .await
             .expect("job base dir should be found");
         assert_eq!(found, child_base_dir);
+    }
+
+    #[tokio::test]
+    async fn find_job_thread_base_dir_skips_chat_roots() {
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let session_id = SessionId::new();
+        let root_id = ThreadId::new();
+        let root_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, root_id);
+
+        persist_thread_metadata(
+            &root_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: root_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: AgentRecord::default(),
+            },
+        )
+        .await
+        .expect("root metadata should persist");
+
+        let error = find_job_thread_base_dir(temp_dir.path(), root_id)
+            .await
+            .expect_err("chat roots should not resolve as job trace directories");
+        assert!(matches!(error, TurnLogError::ThreadMetadataNotFound(_)));
     }
 }

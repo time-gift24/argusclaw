@@ -178,64 +178,91 @@ impl SessionSchedulerBackend {
         guard.agent_record().display_name.clone()
     }
 
-    fn active_child_thread_ids(&self, thread_id: ThreadId) -> Vec<ThreadId> {
+    async fn active_child_thread_ids(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::result::Result<Vec<ThreadId>, ToolError> {
         let thread_pool = self.thread_pool();
-        thread_pool
-            .child_thread_ids(&thread_id)
-            .into_iter()
-            .filter(|child_thread_id| {
-                thread_pool
-                    .runtime_summary(child_thread_id)
-                    .is_some_and(|summary| {
-                        summary.runtime.kind == ThreadPoolRuntimeKind::Job
-                            && summary
-                                .runtime
-                                .job_id
-                                .as_deref()
-                                .is_some_and(|job_id| self.job_manager.is_job_pending(job_id))
-                    })
-            })
-            .collect()
+        let children = thread_pool
+            .recover_child_jobs(thread_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?;
+        let mut active = Vec::new();
+        for child in children {
+            if self
+                .job_manager
+                .is_job_pending_persisted(&child.job_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+            {
+                active.push(child.thread_id);
+            }
+        }
+        Ok(active)
     }
 
-    fn mailbox_ready_child_thread_ids(&self, thread_id: ThreadId) -> Vec<ThreadId> {
+    async fn mailbox_ready_child_thread_ids(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::result::Result<Vec<ThreadId>, ToolError> {
         let thread_pool = self.thread_pool();
-        self.active_child_thread_ids(thread_id)
+        Ok(self
+            .active_child_thread_ids(thread_id)
+            .await?
             .into_iter()
             .filter(|child_thread_id| thread_pool.loaded_thread(child_thread_id).is_some())
-            .collect()
+            .collect())
     }
 
-    fn is_thread_target_reachable(
+    async fn is_thread_target_reachable(
         &self,
         source_thread_id: ThreadId,
         target_thread_id: ThreadId,
-    ) -> bool {
+    ) -> std::result::Result<bool, ToolError> {
         if source_thread_id == target_thread_id {
-            return true;
+            return Ok(true);
         }
 
         let thread_pool = self.thread_pool();
-        if thread_pool.parent_thread_id(&source_thread_id) == Some(target_thread_id) {
-            return true;
+        let parent = match thread_pool.parent_thread_id(&source_thread_id) {
+            Some(parent) => Some(parent),
+            None => thread_pool
+                .recover_parent_thread_id(&source_thread_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?,
+        };
+        if parent == Some(target_thread_id) {
+            return Ok(true);
         }
 
-        thread_pool
-            .child_thread_ids(&source_thread_id)
+        Ok(thread_pool
+            .recover_child_jobs(source_thread_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?
             .into_iter()
-            .any(|child_thread_id| child_thread_id == target_thread_id)
+            .any(|child| child.thread_id == target_thread_id))
     }
 
-    fn validate_mailbox_target_ready(
+    async fn validate_mailbox_target_ready(
         &self,
         target_thread_id: ThreadId,
     ) -> std::result::Result<(), ToolError> {
         let thread_pool = self.thread_pool();
-        let summary = thread_pool
-            .runtime_summary(&target_thread_id)
-            .ok_or_else(|| {
-                Self::scheduler_error(format!("thread {target_thread_id} is not registered"))
-            })?;
+        let Some(summary) = thread_pool.runtime_summary(&target_thread_id) else {
+            if thread_pool
+                .recover_parent_thread_id(&target_thread_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+                .is_some()
+            {
+                return Err(Self::scheduler_error(format!(
+                    "thread {target_thread_id} is not ready to receive mailbox messages"
+                )));
+            }
+            return Err(Self::scheduler_error(format!(
+                "thread {target_thread_id} is not registered"
+            )));
+        };
 
         if summary.runtime.kind == ThreadPoolRuntimeKind::Job
             && thread_pool.loaded_thread(&target_thread_id).is_none()
@@ -256,7 +283,7 @@ impl SessionSchedulerBackend {
         let thread_pool = self.thread_pool();
         let mut matches = Vec::new();
 
-        for child_thread_id in self.mailbox_ready_child_thread_ids(thread_id) {
+        for child_thread_id in self.mailbox_ready_child_thread_ids(thread_id).await? {
             let Some(thread) = thread_pool.loaded_thread(&child_thread_id) else {
                 continue;
             };
@@ -288,17 +315,29 @@ impl SessionSchedulerBackend {
         let thread_pool = self.thread_pool();
 
         if let Some(job_id) = to.strip_prefix("job:") {
-            if !self.job_manager.is_job_pending(job_id) {
+            if !matches!(
+                self.job_manager
+                    .get_job_result_status_persisted(thread_id, job_id, false)
+                    .await
+                    .map_err(|error| Self::scheduler_error(error.to_string()))?,
+                JobLookup::Pending
+            ) {
                 return Err(Self::scheduler_error(format!("job {job_id} is not active")));
             }
-            let target = thread_pool.get_thread_binding(job_id).ok_or_else(|| {
-                Self::scheduler_error(format!("job {job_id} is not bound to a thread"))
-            })?;
-            self.validate_mailbox_target_ready(target).map_err(|_| {
-                Self::scheduler_error(format!(
-                    "job {job_id} is not ready to receive mailbox messages"
-                ))
-            })?;
+            let target = thread_pool
+                .recover_thread_binding(job_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+                .ok_or_else(|| {
+                    Self::scheduler_error(format!("job {job_id} is not bound to a thread"))
+                })?;
+            self.validate_mailbox_target_ready(target)
+                .await
+                .map_err(|_| {
+                    Self::scheduler_error(format!(
+                        "job {job_id} is not ready to receive mailbox messages"
+                    ))
+                })?;
             return Ok(vec![target]);
         }
 
@@ -306,25 +345,30 @@ impl SessionSchedulerBackend {
             let target = ThreadId::parse(thread_id_str).map_err(|error| {
                 Self::scheduler_error(format!("invalid thread target {thread_id_str}: {error}"))
             })?;
-            if !self.is_thread_target_reachable(thread_id, target) {
+            if !self.is_thread_target_reachable(thread_id, target).await? {
                 return Err(Self::scheduler_error(format!(
                     "thread {target} is not reachable from the current thread"
                 )));
             }
-            self.validate_mailbox_target_ready(target)?;
+            self.validate_mailbox_target_ready(target).await?;
             return Ok(vec![target]);
         }
 
         if to == "parent" {
-            let parent = thread_pool.parent_thread_id(&thread_id).ok_or_else(|| {
-                Self::scheduler_error("current thread does not have a direct parent")
-            })?;
-            self.validate_mailbox_target_ready(parent)?;
+            let parent = match thread_pool.parent_thread_id(&thread_id) {
+                Some(parent) => Some(parent),
+                None => thread_pool
+                    .recover_parent_thread_id(&thread_id)
+                    .await
+                    .map_err(|error| Self::scheduler_error(error.to_string()))?,
+            }
+            .ok_or_else(|| Self::scheduler_error("current thread does not have a direct parent"))?;
+            self.validate_mailbox_target_ready(parent).await?;
             return Ok(vec![parent]);
         }
 
         if to == "*" {
-            let children = self.mailbox_ready_child_thread_ids(thread_id);
+            let children = self.mailbox_ready_child_thread_ids(thread_id).await?;
             if children.is_empty() {
                 return Err(Self::scheduler_error(
                     "current thread does not have any mailbox-ready direct child jobs",
@@ -402,16 +446,20 @@ impl SchedulerBackend for SessionSchedulerBackend {
         &self,
         request: SchedulerLookupRequest,
     ) -> std::result::Result<SchedulerJobLookup, ToolError> {
-        let lookup =
-            self.job_manager
-                .get_job_result_status(request.thread_id, &request.job_id, false);
+        let lookup = self
+            .job_manager
+            .get_job_result_status_persisted(request.thread_id, &request.job_id, false)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?;
 
         if request.consume && matches!(lookup, JobLookup::Completed(_)) {
             self.claim_queued_runtime_result(request.thread_id, &request.job_id)
                 .await?;
-            let consumed_lookup =
-                self.job_manager
-                    .get_job_result_status(request.thread_id, &request.job_id, true);
+            let consumed_lookup = self
+                .job_manager
+                .get_job_result_status_persisted(request.thread_id, &request.job_id, true)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?;
             return Ok(Self::map_job_lookup(consumed_lookup));
         }
 
@@ -906,7 +954,7 @@ impl SessionManager {
                 kind: ThreadTraceKind::ChatRoot,
                 root_session_id: Some(session_id),
                 parent_thread_id: None,
-                child_thread_ids: Vec::new(),
+                job_id: None,
                 agent_snapshot: agent_record.clone(),
             },
         )
@@ -1377,10 +1425,13 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use super::{recover_messages_from_trace, recover_thread_state_from_trace, SessionManager};
+    use super::{
+        recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
+        SessionSchedulerBackend,
+    };
     use argus_agent::history::TurnRecord;
     use argus_agent::thread_trace_store::{
-        chat_thread_base_dir, ThreadTraceKind, ThreadTraceMetadata,
+        chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
     };
     use argus_agent::turn_log_store::append_turn_record;
     use argus_protocol::llm::ChatMessage;
@@ -1393,12 +1444,20 @@ mod tests {
         ThinkingConfig, ThreadId, TokenUsage,
     };
     use argus_repository::migrate;
+    use argus_repository::traits::JobRepository;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
+    use argus_repository::types::{
+        AgentId as RepoAgentId, JobRecord, JobResult, JobStatus, JobType,
+    };
     use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
+    use argus_tool::{SchedulerBackend, SchedulerLookupRequest};
     use async_trait::async_trait;
+    use chrono::Utc;
+    use dashmap::DashMap;
     use futures_util::stream;
     use sqlx::SqlitePool;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::time::{sleep, timeout, Duration};
     use uuid::Uuid;
@@ -1533,6 +1592,16 @@ mod tests {
         }
     }
 
+    struct SessionManagerHarness {
+        manager: SessionManager,
+        temp_dir: TempDir,
+        sqlite: Arc<ArgusSqlite>,
+        template_manager: Arc<TemplateManager>,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        agent_id: AgentId,
+    }
+
     #[async_trait]
     impl argus_protocol::ProviderResolver for FixedProviderResolver {
         async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
@@ -1552,9 +1621,9 @@ mod tests {
         }
     }
 
-    async fn test_session_manager_with_provider(
+    async fn test_session_manager_harness_with_provider(
         provider: Arc<dyn LlmProvider>,
-    ) -> (SessionManager, TempDir, SessionId, ThreadId) {
+    ) -> SessionManagerHarness {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
@@ -1618,7 +1687,27 @@ mod tests {
             .await
             .expect("thread should create");
 
-        (session_manager, temp_dir, session_id, thread_id)
+        SessionManagerHarness {
+            manager: session_manager,
+            temp_dir,
+            sqlite,
+            template_manager,
+            session_id,
+            thread_id,
+            agent_id,
+        }
+    }
+
+    async fn test_session_manager_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (SessionManager, TempDir, SessionId, ThreadId) {
+        let harness = test_session_manager_harness_with_provider(provider).await;
+        (
+            harness.manager,
+            harness.temp_dir,
+            harness.session_id,
+            harness.thread_id,
+        )
     }
 
     async fn test_session_manager() -> (SessionManager, TempDir, SessionId, ThreadId) {
@@ -1634,6 +1723,25 @@ mod tests {
             output_tokens: 1,
             total_tokens,
         }
+    }
+
+    fn restarted_scheduler_backend(
+        sqlite: Arc<ArgusSqlite>,
+        template_manager: Arc<TemplateManager>,
+        trace_dir: PathBuf,
+        provider: Arc<dyn LlmProvider>,
+    ) -> SessionSchedulerBackend {
+        let provider_resolver = Arc::new(FixedProviderResolver::new(provider));
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            template_manager.clone(),
+            provider_resolver,
+            Arc::new(argus_tool::ToolManager::new()),
+            trace_dir,
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite as Arc<dyn LlmProviderRepository>,
+        ));
+        SessionSchedulerBackend::new(template_manager, job_manager, Arc::new(DashMap::new()))
     }
 
     #[tokio::test]
@@ -2101,5 +2209,239 @@ mod tests {
             .expect_err("invalid first checkpoint should fail");
         let message = error.to_string();
         assert!(message.contains("failed to recover committed turn log"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_job_target_uses_persisted_binding_after_restart() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let job_id = "job-restart-routing".to_string();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some(job_id.clone()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+        JobRepository::create(
+            harness.sqlite.as_ref(),
+            &JobRecord {
+                id: argus_repository::types::JobId::new(job_id.clone()),
+                job_type: JobType::Standalone,
+                name: format!("job:{job_id}"),
+                status: JobStatus::Pending,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                context: None,
+                prompt: "persisted child".to_string(),
+                thread_id: Some(child_thread_id),
+                group_id: None,
+                depends_on: Vec::new(),
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            },
+        )
+        .await
+        .expect("job record should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let error = backend
+            .resolve_message_targets(harness.thread_id, &format!("job:{job_id}"))
+            .await
+            .expect_err("persisted but unloaded job target should not be mailbox ready");
+        assert!(
+            error
+                .to_string()
+                .contains("not ready to receive mailbox messages"),
+            "unexpected scheduler error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_get_job_result_recovers_completed_job_after_restart() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let job_id = "job-restart-result".to_string();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some(job_id.clone()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+        JobRepository::create(
+            harness.sqlite.as_ref(),
+            &JobRecord {
+                id: argus_repository::types::JobId::new(job_id.clone()),
+                job_type: JobType::Standalone,
+                name: format!("job:{job_id}"),
+                status: JobStatus::Pending,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                context: None,
+                prompt: "persisted result".to_string(),
+                thread_id: Some(child_thread_id),
+                group_id: None,
+                depends_on: Vec::new(),
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            },
+        )
+        .await
+        .expect("completed job record should persist");
+        JobRepository::update_result(
+            harness.sqlite.as_ref(),
+            &argus_repository::types::JobId::new(job_id.clone()),
+            &JobResult {
+                success: true,
+                message: "persisted answer".to_string(),
+                token_usage: None,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                agent_display_name: "Routing Test Agent".to_string(),
+                agent_description: "Used to verify session mailbox routing".to_string(),
+            },
+        )
+        .await
+        .expect("job result should persist");
+        let finished_at = Utc::now().to_rfc3339();
+        JobRepository::update_status(
+            harness.sqlite.as_ref(),
+            &argus_repository::types::JobId::new(job_id.clone()),
+            JobStatus::Succeeded,
+            None,
+            Some(finished_at.as_str()),
+        )
+        .await
+        .expect("job status should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id: job_id.clone(),
+                consume: false,
+            })
+            .await
+            .expect("persisted job result should load");
+
+        match lookup {
+            argus_tool::SchedulerJobLookup::Completed(result) => {
+                assert_eq!(result.message, "persisted answer");
+                assert!(result.success);
+            }
+            other => panic!("expected completed lookup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_thread_target_recovers_direct_child_relationship_after_restart() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some("job-thread-target".to_string()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let error = backend
+            .resolve_message_targets(harness.thread_id, &format!("thread:{child_thread_id}"))
+            .await
+            .expect_err("persisted child thread should be recognized but not mailbox ready");
+        assert!(
+            error
+                .to_string()
+                .contains("not ready to receive mailbox messages"),
+            "unexpected scheduler error: {error}"
+        );
     }
 }
