@@ -5,7 +5,7 @@
 //! - Agent Template management (CRUD)
 //! - Session/Thread management
 //! - Messaging and subscriptions
-//! 
+//!
 //! ## Example
 //!
 //! ```rust,no_run
