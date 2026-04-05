@@ -11,14 +11,14 @@ use argus_agent::thread_trace_store::chat_thread_base_dir;
 use argus_agent::trace::TraceConfig;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
-    TurnConfigBuilder,
+    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, ThreadError,
+    TurnCancellation, TurnConfigBuilder, TurnError,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent,
 };
-use argus_protocol::{AgentRecord, SessionId, ThreadEvent};
+use argus_protocol::{AgentRecord, SessionId, ThreadEvent, ThreadId};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -305,6 +305,23 @@ impl Compactor for NoopCompactor {
     }
 }
 
+fn build_direct_thread(
+    provider: Arc<dyn LlmProvider>,
+    session_id: SessionId,
+    thread_id: ThreadId,
+    thread_config: ThreadConfig,
+) -> Thread {
+    ThreadBuilder::new()
+        .id(thread_id)
+        .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(Arc::new(AgentRecord::default()))
+        .session_id(session_id)
+        .config(thread_config)
+        .build()
+        .unwrap()
+}
+
 async fn wait_for_turn_settled_event(mut rx: broadcast::Receiver<ThreadEvent>) {
     timeout(Duration::from_secs(5), async {
         loop {
@@ -392,38 +409,35 @@ async fn test_turn_trace_disabled_by_default() {
 #[tokio::test]
 async fn test_turn_execute_does_not_write_legacy_event_trace_file() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+    let session_id = SessionId::new();
+    let thread_id = ThreadId::new();
+    let persisted_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
+    let trace_config = TraceConfig::new(true, persisted_base_dir.clone());
 
     let provider = Arc::new(SimpleMockProvider::new("Hello, world!"));
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let mut thread = build_direct_thread(provider, session_id, thread_id, thread_config);
 
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread-no-legacy-trace".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(
-            TurnConfigBuilder::default()
-                .trace_config(trace_config)
-                .build()
-                .unwrap(),
-        )
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
+    let _output = thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await
         .unwrap();
 
-    let _output = turn.execute().await.unwrap();
+    let recovered = recover_thread_log_state(&persisted_base_dir)
+        .await
+        .expect("direct turn should persist committed turn records");
+    assert_eq!(recovered.turns.len(), 1);
+    assert!(matches!(
+        recovered.turns[0].kind,
+        argus_agent::history::TurnRecordKind::UserTurn
+    ));
 
-    let legacy_trace_path = temp_dir
-        .path()
-        .join("test-thread-no-legacy-trace")
-        .join("turns")
-        .join("1.jsonl");
+    let legacy_trace_path = persisted_base_dir.join("turns").join("1.jsonl");
     assert!(
         !legacy_trace_path.exists(),
         "legacy event trace should not be persisted at {:?}",
@@ -434,42 +448,30 @@ async fn test_turn_execute_does_not_write_legacy_event_trace_file() {
 #[tokio::test]
 async fn test_failed_turn_does_not_write_legacy_partial_trace_file() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let trace_config = TraceConfig::new(true, temp_dir.path().to_path_buf());
+    let session_id = SessionId::new();
+    let thread_id = ThreadId::new();
+    let persisted_base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
+    let trace_config = TraceConfig::new(true, persisted_base_dir.clone());
 
     let provider = Arc::new(PartialFailureMockProvider);
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let mut thread = build_direct_thread(provider, session_id, thread_id, thread_config);
 
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread-no-partial-trace".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(
-            TurnConfigBuilder::default()
-                .trace_config(trace_config)
-                .build()
-                .unwrap(),
-        )
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .unwrap();
-
-    let error = turn
-        .execute()
+    let error = thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
         .await
         .expect_err("stream failure should fail the turn");
-    assert!(matches!(error, argus_agent::TurnError::LlmFailed(_)));
+    assert!(matches!(
+        error,
+        ThreadError::TurnFailed(TurnError::LlmFailed(_))
+    ));
 
-    let legacy_trace_path = temp_dir
-        .path()
-        .join("test-thread-no-partial-trace")
-        .join("turns")
-        .join("1.jsonl");
+    let legacy_trace_path = persisted_base_dir.join("turns").join("1.jsonl");
     assert!(
         !legacy_trace_path.exists(),
         "failed turn should not leave a legacy partial trace at {:?}",
@@ -508,7 +510,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
 
     enqueue_thread_message(&thread, "Hello".to_string()).await;
 
@@ -586,7 +588,7 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
 
     enqueue_thread_message(&thread, "first".to_string()).await;
 
@@ -719,7 +721,7 @@ async fn successful_turn_compaction_persists_turn_checkpoint() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
@@ -812,7 +814,7 @@ async fn failed_turn_after_compaction_persists_no_turn_level_checkpoint() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
@@ -881,7 +883,7 @@ async fn cancelled_turn_after_compaction_persists_no_turn_level_checkpoint() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),

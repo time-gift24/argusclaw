@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use argus_protocol::{
     AgentId, AgentRecord, ChatMessage, LlmProviderId, LlmProviderRecord, LlmProviderRecordJson,
-    ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString, SessionId,
-    ThreadId, ThreadPoolSnapshot, ThreadPoolState,
+    ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString, SessionId, ThreadId,
+    ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};

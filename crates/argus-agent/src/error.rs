@@ -53,16 +53,9 @@ pub enum TurnError {
     #[error("LLM provider not configured for Turn")]
     ProviderNotConfigured,
 
-    /// Turn builder failed (missing required field).
-    #[error("Turn build failed: {0}")]
+    /// Turn setup failed before execution could complete.
+    #[error("Turn setup failed: {0}")]
     BuildFailed(String),
-}
-
-// Implement From<UninitializedFieldError> for derive_builder compatibility
-impl From<derive_builder::UninitializedFieldError> for TurnError {
-    fn from(err: derive_builder::UninitializedFieldError) -> Self {
-        TurnError::BuildFailed(err.to_string())
-    }
 }
 
 /// Errors for turn log recovery operations.
@@ -141,10 +134,6 @@ pub enum ThreadError {
     #[error("Turn execution failed: {0}")]
     TurnFailed(#[from] TurnError),
 
-    /// Turn build failed.
-    #[error("Turn build failed: {0}")]
-    TurnBuildFailed(String),
-
     /// Compact operation failed.
     #[error("Compact failed: {0}")]
     CompactFailed(#[from] CompactError),
@@ -164,6 +153,10 @@ pub enum ThreadError {
     /// Session ID not set.
     #[error("Session ID not set")]
     SessionIdNotSet,
+
+    /// Direct thread execution is unavailable while the runtime owns the thread.
+    #[error("Direct turn execution is unavailable while the thread runtime is active")]
+    RuntimeActive,
 
     /// Channel send error.
     #[error("Event channel closed")]
@@ -286,5 +279,11 @@ mod tests {
     fn thread_error_display_channel_closed() {
         let err = ThreadError::ChannelClosed;
         assert!(err.to_string().contains("channel"));
+    }
+
+    #[test]
+    fn thread_error_display_runtime_active() {
+        let err = ThreadError::RuntimeActive;
+        assert!(err.to_string().contains("runtime is active"));
     }
 }

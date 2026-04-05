@@ -719,9 +719,9 @@ impl ThreadPool {
             let guard = thread.read().await;
             guard.subscribe()
         };
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread)).await;
         self.attach_chat_runtime(thread_id, session_id, Arc::clone(&thread), runtime_rx)
             .await?;
-        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
         Ok(thread)
     }
 
@@ -1401,6 +1401,7 @@ impl ThreadPool {
             let guard = thread.read().await;
             guard.subscribe()
         };
+        argus_agent::Thread::spawn_reactor(Arc::clone(&thread)).await;
         if let Err(error) = self
             .attach_job_runtime(thread_id, Arc::clone(&thread), runtime_rx)
             .await
@@ -1411,7 +1412,6 @@ impl ThreadPool {
             );
             return Err(error);
         }
-        argus_agent::Thread::spawn_reactor(Arc::clone(&thread));
         Ok(thread)
     }
 
@@ -1975,6 +1975,7 @@ impl ThreadPool {
 
         Ok(thread)
     }
+
     fn job_runtime_session_id(thread_id: ThreadId) -> SessionId {
         SessionId(*thread_id.inner())
     }

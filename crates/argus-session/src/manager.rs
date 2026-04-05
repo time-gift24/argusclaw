@@ -2,15 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::thread_trace_store::{
-    ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
+    chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
 };
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
+use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -1369,15 +1369,15 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
-        recover_thread_state_from_trace,
+        recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
+        SessionSchedulerBackend,
     };
     use argus_agent::history::{TurnRecord, TurnRecordKind};
     use argus_agent::thread_trace_store::{
-        ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
+        chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
     };
-    use argus_agent::turn_log_store::RecoveredThreadLogState;
     use argus_agent::turn_log_store::append_turn_record;
+    use argus_agent::turn_log_store::RecoveredThreadLogState;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
@@ -1387,13 +1387,13 @@ mod tests {
         AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
         ThinkingConfig, ThreadId, TokenUsage,
     };
-    use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
     use argus_repository::types::{
         AgentId as RepoAgentId, JobRecord, JobResult, JobStatus, JobType,
     };
+    use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
     use argus_tool::{SchedulerBackend, SchedulerLookupRequest};
     use async_trait::async_trait;
@@ -1403,7 +1403,7 @@ mod tests {
     use sqlx::SqlitePool;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::time::{sleep, timeout, Duration};
     use uuid::Uuid;
 
     #[derive(Debug)]

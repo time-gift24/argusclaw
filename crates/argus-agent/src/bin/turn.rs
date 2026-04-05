@@ -11,15 +11,16 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
-use tokio::sync::broadcast;
 
-use argus_agent::{TurnBuilder, TurnConfig, TurnStreamEvent};
+use argus_agent::{LlmThreadCompactor, Thread, ThreadBuilder, TurnCancellation};
 use argus_llm::providers::{
     OpenAiCompatibleConfig, OpenAiCompatibleFactoryConfig, create_openai_compatible_provider,
 };
 use argus_llm::retry::{RetryConfig, RetryProvider};
-use argus_protocol::llm::{ChatMessage, LlmProvider, Role, ToolDefinition};
+use argus_protocol::llm::{LlmProvider, Role, ToolDefinition};
 use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
+use argus_protocol::{AgentId, AgentRecord, AgentType, SessionId};
+use argus_tool::ToolManager;
 
 /// Configuration file structure.
 #[derive(Debug, Deserialize, Default)]
@@ -204,6 +205,48 @@ fn resolve_config(
     })
 }
 
+fn build_cli_agent_record(
+    system_prompt: impl Into<String>,
+    tool_names: Vec<&str>,
+) -> Arc<AgentRecord> {
+    Arc::new(AgentRecord {
+        id: AgentId::new(0),
+        display_name: "argus-turn".to_string(),
+        description: "CLI thread wrapper for one-shot turn execution".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        provider_id: None,
+        model_id: None,
+        system_prompt: system_prompt.into(),
+        tool_names: tool_names.into_iter().map(str::to_string).collect(),
+        max_tokens: None,
+        temperature: None,
+        thinking_config: None,
+        parent_agent_id: None,
+        agent_type: AgentType::Standard,
+    })
+}
+
+fn build_thread(
+    provider: Arc<dyn LlmProvider>,
+    agent_record: Arc<AgentRecord>,
+    tool_manager: Option<Arc<ToolManager>>,
+) -> Result<Thread> {
+    let builder = ThreadBuilder::new()
+        .provider(Arc::clone(&provider))
+        .compactor(Arc::new(LlmThreadCompactor::new(provider)))
+        .agent_record(agent_record)
+        .session_id(SessionId::new());
+    let builder = if let Some(tool_manager) = tool_manager {
+        builder.tool_manager(tool_manager)
+    } else {
+        builder
+    };
+
+    builder
+        .build()
+        .map_err(|e| anyhow!("Failed to build thread: {}", e))
+}
+
 async fn run_execute_command(args: ExecuteArgs, config: &Config) -> Result<()> {
     let resolved = resolve_config(
         config,
@@ -219,30 +262,16 @@ async fn run_execute_command(args: ExecuteArgs, config: &Config) -> Result<()> {
 
     let provider = create_provider(&resolved)?;
 
-    // Create channels
-    let (stream_tx, _) = broadcast::channel::<TurnStreamEvent>(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    // Build turn
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user(&args.prompt)])
-        .provider(provider)
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
-
-    // Execute turn (no streaming for now due to Send trait issue)
-    let record = turn.execute().await?;
+    let mut thread = build_thread(provider, build_cli_agent_record("", vec![]), None)?;
+    let record = thread
+        .execute_turn(args.prompt, None, TurnCancellation::new())
+        .await
+        .map_err(|e| anyhow!("Turn failed: {}", e))?;
+    let committed_messages: Vec<_> = thread.history_iter().cloned().collect();
 
     println!("Turn completed!");
     println!("Turn messages:");
-    for (i, msg) in record.messages.iter().enumerate() {
+    for (i, msg) in committed_messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",
@@ -280,10 +309,6 @@ async fn tool_test(args: ToolTestArgs, config: &Config) -> Result<()> {
 
     let provider = create_provider(&resolved)?;
 
-    // Create channels
-    let (stream_tx, _) = broadcast::channel::<TurnStreamEvent>(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
     // System prompt that forces the assistant to use echo tool
     let system_prompt = r#"You are a helpful assistant that MUST use the echo tool to respond.
 
@@ -299,38 +324,27 @@ Example flow:
 - Tool returns: {"echoed": "hello"}
 - You: "I echoed 'hello' for you""#;
 
-    // Build turn with echo tool and system prompt
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![
-            ChatMessage::system(system_prompt),
-            ChatMessage::user(&args.prompt),
-        ])
-        .provider(provider)
-        .tools(vec![Arc::new(EchoTool) as Arc<dyn NamedTool>])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
-
-    // Execute turn
-    let record = turn.execute().await?;
+    let tool_manager = Arc::new(ToolManager::new());
+    tool_manager.register(Arc::new(EchoTool));
+    let agent_record = build_cli_agent_record(system_prompt, vec!["echo"]);
+    let mut thread = build_thread(provider, agent_record, Some(tool_manager))?;
+    let record = thread
+        .execute_turn(args.prompt, None, TurnCancellation::new())
+        .await
+        .map_err(|e| anyhow!("Turn failed: {}", e))?;
+    let committed_messages: Vec<_> = thread.history_iter().cloned().collect();
 
     println!("Turn completed!");
     println!(
         "Total tool calls in conversation: {}",
-        record
-            .messages
+        committed_messages
             .iter()
             .filter(|m| m.tool_calls.is_some())
             .count()
     );
 
     println!("Turn messages:");
-    for (i, msg) in record.messages.iter().enumerate() {
+    for (i, msg) in committed_messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",
@@ -386,31 +400,17 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
     );
     println!("Provider: {}", retry_provider.active_model_name());
     println!();
-
-    let messages = vec![ChatMessage::user("Test message".to_string())];
-
     if args.stream {
         // Test streaming turn execution
         todo!("Implement streaming test");
     } else {
         // Test simple turn execution
-        let (stream_tx, _stream_rx) = broadcast::channel::<TurnStreamEvent>(256);
-        let (thread_event_tx, _thread_event_rx) = broadcast::channel(256);
+        let mut thread = build_thread(retry_provider, build_cli_agent_record("", vec![]), None)?;
 
-        let turn = TurnBuilder::default()
-            .turn_number(1)
-            .thread_id("test-thread".to_string())
-            .messages(messages)
-            .provider(retry_provider)
-            .tools(vec![])
-            .hooks(vec![])
-            .config(TurnConfig::default())
-            .stream_tx(stream_tx)
-            .thread_event_tx(thread_event_tx)
-            .build()
-            .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
-
-        match turn.execute().await {
+        match thread
+            .execute_turn("Test message".to_string(), None, TurnCancellation::new())
+            .await
+        {
             Ok(record) => {
                 println!("Turn completed successfully!");
                 println!(
