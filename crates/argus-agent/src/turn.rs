@@ -102,6 +102,67 @@ enum StreamingCallOutcome {
     Failed(argus_protocol::llm::LlmError),
 }
 
+/// Shared context carried through the turn execution call chain.
+///
+/// Constructed once in `execute_thread_turn` from the public API parameters,
+/// then passed by reference to all internal functions.
+struct TurnContext<'a> {
+    thread_id: ThreadId,
+    turn_number: u32,
+    started_at: DateTime<Utc>,
+    tools: &'a [Arc<dyn NamedTool>],
+    hooks: &'a [Arc<dyn HookHandler>],
+    provider: &'a dyn LlmProvider,
+    config: &'a TurnConfig,
+    agent_record: &'a AgentRecord,
+    stream_tx: &'a broadcast::Sender<TurnStreamEvent>,
+    thread_event_tx: &'a broadcast::Sender<ThreadEvent>,
+    cancellation: &'a TurnCancellation,
+}
+
+impl TurnContext<'_> {
+    fn thread_id_str(&self) -> String {
+        self.thread_id.to_string()
+    }
+}
+
+fn build_hook_context(
+    ctx: &TurnContext<'_>,
+    event: HookEvent,
+    tool_name: String,
+    tool_call_id: String,
+    tool_input: serde_json::Value,
+    tool_result: Option<serde_json::Value>,
+    error: Option<String>,
+    tool_manager: Option<Arc<dyn NamedTool>>,
+) -> ToolHookContext {
+    ToolHookContext {
+        event,
+        tool_name,
+        tool_call_id,
+        tool_input,
+        tool_result,
+        error,
+        tool_manager,
+        thread_event_sender: Some(ctx.thread_event_tx.clone()),
+        thread_id: Some(ctx.thread_id_str()),
+        turn_number: Some(ctx.turn_number),
+    }
+}
+
+fn build_turn_end_hook_context(ctx: &TurnContext<'_>) -> ToolHookContext {
+    build_hook_context(
+        ctx,
+        HookEvent::TurnEnd,
+        String::new(),
+        String::new(),
+        serde_json::Value::Null,
+        None,
+        None,
+        None,
+    )
+}
+
 /// Result of a tool execution.
 struct ToolExecutionResult {
     tool_call_id: String,
@@ -379,6 +440,36 @@ fn build_completion_request(
     request
 }
 
+fn apply_tool_call_limit(
+    tool_calls: Vec<ToolCall>,
+    max_tool_calls: Option<u32>,
+) -> Vec<ToolCall> {
+    match max_tool_calls {
+        Some(max) if tool_calls.len() > max as usize => {
+            tracing::debug!(
+                requested = tool_calls.len(),
+                max_allowed = max,
+                "Limiting tool calls per iteration"
+            );
+            tool_calls.into_iter().take(max as usize).collect()
+        }
+        _ => tool_calls,
+    }
+}
+
+fn push_tool_call_message(
+    turn_messages: &mut Vec<ChatMessage>,
+    content: Option<String>,
+    tool_calls: &[ToolCall],
+    reasoning_content: Option<String>,
+) {
+    turn_messages.push(ChatMessage::assistant_with_tool_calls_and_reasoning(
+        content,
+        tool_calls.to_vec(),
+        reasoning_content,
+    ));
+}
+
 fn process_finish_reason(
     response: CompletionResponse,
     turn_messages: &mut Vec<ChatMessage>,
@@ -415,47 +506,15 @@ fn process_finish_reason(
             NextAction::Return
         }
         FinishReason::ToolUse => {
-            let tool_calls: Vec<ToolCall> = match max_tool_calls {
-                Some(max) if response_tool_calls.len() > max as usize => {
-                    tracing::debug!(
-                        requested = response_tool_calls.len(),
-                        max_allowed = max,
-                        "Limiting tool calls per iteration"
-                    );
-                    response_tool_calls.into_iter().take(max as usize).collect()
-                }
-                _ => response_tool_calls,
-            };
-
-            turn_messages.push(ChatMessage::assistant_with_tool_calls_and_reasoning(
-                content.clone(),
-                tool_calls.clone(),
-                reasoning_content,
-            ));
-
+            let tool_calls = apply_tool_call_limit(response_tool_calls, max_tool_calls);
+            push_tool_call_message(turn_messages, content, &tool_calls, reasoning_content);
             NextAction::ContinueWithTools { tool_calls }
         }
         FinishReason::Length => NextAction::LengthExceeded,
         FinishReason::ContentFilter | FinishReason::Unknown => {
             if !response_tool_calls.is_empty() {
-                let tool_calls: Vec<ToolCall> = match max_tool_calls {
-                    Some(max) if response_tool_calls.len() > max as usize => {
-                        tracing::debug!(
-                            requested = response_tool_calls.len(),
-                            max_allowed = max,
-                            "Limiting tool calls per iteration"
-                        );
-                        response_tool_calls.into_iter().take(max as usize).collect()
-                    }
-                    _ => response_tool_calls,
-                };
-
-                turn_messages.push(ChatMessage::assistant_with_tool_calls_and_reasoning(
-                    content.clone(),
-                    tool_calls.clone(),
-                    reasoning_content,
-                ));
-
+                let tool_calls = apply_tool_call_limit(response_tool_calls, max_tool_calls);
+                push_tool_call_message(turn_messages, content, &tool_calls, reasoning_content);
                 NextAction::ContinueWithTools { tool_calls }
             } else if content.as_deref().is_some_and(|value| !value.is_empty())
                 || reasoning_content
@@ -551,87 +610,55 @@ async fn call_llm_streaming(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_tools_parallel(
+    ctx: &TurnContext<'_>,
     tool_calls: Vec<ToolCall>,
-    tools: &[Arc<dyn NamedTool>],
-    hooks: &[Arc<dyn HookHandler>],
     tool_timeout_secs: u64,
-    agent_record: &AgentRecord,
-    originating_thread_id: ThreadId,
-    stream_tx: &broadcast::Sender<TurnStreamEvent>,
-    thread_event_tx: &broadcast::Sender<ThreadEvent>,
-    thread_id: &str,
-    turn_number: u32,
 ) -> Vec<ToolExecutionResult> {
     let futures: Vec<_> = tool_calls
         .into_iter()
-        .map(|tool_call| {
-            execute_single_tool(
-                tool_call,
-                tools,
-                hooks,
-                tool_timeout_secs,
-                agent_record,
-                originating_thread_id,
-                stream_tx,
-                thread_event_tx,
-                thread_id,
-                turn_number,
-            )
-        })
+        .map(|tool_call| execute_single_tool(ctx, tool_call, tool_timeout_secs))
         .collect();
 
     join_all(futures).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool(
+    ctx: &TurnContext<'_>,
     tool_call: ToolCall,
-    tools: &[Arc<dyn NamedTool>],
-    hooks: &[Arc<dyn HookHandler>],
     tool_timeout_secs: u64,
-    agent_record: &AgentRecord,
-    originating_thread_id: ThreadId,
-    stream_tx: &broadcast::Sender<TurnStreamEvent>,
-    thread_event_tx: &broadcast::Sender<ThreadEvent>,
-    thread_id: &str,
-    turn_number: u32,
 ) -> ToolExecutionResult {
+    let thread_id = ctx.thread_id_str();
     let tool_call_id = tool_call.id.clone();
     let tool_name = tool_call.name.clone();
     let tool_input = tool_call.arguments.clone();
-    let tool = find_tool(tools, &tool_name);
+    let tool = find_tool(ctx.tools, &tool_name);
 
-    let ctx = ToolHookContext {
-        event: HookEvent::BeforeToolCall,
-        tool_name: tool_name.clone(),
-        tool_call_id: tool_call_id.clone(),
-        tool_input: tool_input.clone(),
-        tool_result: None,
-        error: None,
-        tool_manager: tool.clone(),
-        thread_event_sender: Some(thread_event_tx.clone()),
-        thread_id: Some(thread_id.to_string()),
-        turn_number: Some(turn_number),
-    };
+    let hook_ctx = build_hook_context(
+        ctx,
+        HookEvent::BeforeToolCall,
+        tool_name.clone(),
+        tool_call_id.clone(),
+        tool_input.clone(),
+        None,
+        None,
+        tool.clone(),
+    );
 
-    if let Ok(HookAction::Block(ref reason)) = fire_hooks(hooks, &ctx).await {
+    if let Ok(HookAction::Block(ref reason)) = fire_hooks(ctx.hooks, &hook_ctx).await {
         let content = format!("Tool call blocked: {}", reason);
 
-        let after_ctx = ToolHookContext {
-            event: HookEvent::AfterToolCall,
-            tool_name: tool_name.clone(),
-            tool_call_id: tool_call_id.clone(),
+        let after_ctx = build_hook_context(
+            ctx,
+            HookEvent::AfterToolCall,
+            tool_name.clone(),
+            tool_call_id.clone(),
             tool_input,
-            tool_result: None,
-            error: Some(reason.clone()),
-            tool_manager: None,
-            thread_event_sender: Some(thread_event_tx.clone()),
-            thread_id: Some(thread_id.to_string()),
-            turn_number: Some(turn_number),
-        };
-        let _ = fire_hooks(hooks, &after_ctx).await;
+            None,
+            Some(reason.clone()),
+            None,
+        );
+        let _ = fire_hooks(ctx.hooks, &after_ctx).await;
 
         return ToolExecutionResult {
             tool_call_id,
@@ -640,53 +667,52 @@ async fn execute_single_tool(
         };
     }
 
-    if let Err(error) = thread_event_tx.send(ThreadEvent::ToolStarted {
-        thread_id: thread_id.to_string(),
-        turn_number,
+    if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::ToolStarted {
+        thread_id: thread_id.clone(),
+        turn_number: ctx.turn_number,
         tool_call_id: tool_call_id.clone(),
         tool_name: tool_name.clone(),
         arguments: tool_input.clone(),
     }) {
         tracing::warn!(
             thread_id = %thread_id,
-            turn_number = %turn_number,
+            turn_number = %ctx.turn_number,
             tool_name = %tool_name,
             error = %error,
             "Failed to send ToolStarted event"
         );
     }
-    let _ = stream_tx.send(TurnStreamEvent::ToolStarted {
+    let _ = ctx.stream_tx.send(TurnStreamEvent::ToolStarted {
         tool_call_id: tool_call_id.clone(),
         tool_name: tool_name.clone(),
         arguments: tool_input.clone(),
     });
 
     let timeout_duration = std::time::Duration::from_secs(tool_timeout_secs);
-    set_current_agent_id(agent_record.id);
-    let start_time = std::time::Instant::now();
+    set_current_agent_id(ctx.agent_record.id);
     let execute_result = {
         let execute_future = async {
             if let Some(tool) = tool {
                 tracing::debug!(
                     thread_id = %thread_id,
-                    turn_number = %turn_number,
+                    turn_number = %ctx.turn_number,
                     tool_call_id = %tool_call_id,
                     tool_name = %tool_name,
                     "Executing tool"
                 );
-                let ctx = Arc::new(ToolExecutionContext {
-                    thread_id: originating_thread_id,
-                    agent_id: Some(agent_record.id),
-                    pipe_tx: thread_event_tx.clone(),
+                let tool_ctx = Arc::new(ToolExecutionContext {
+                    thread_id: ctx.thread_id,
+                    agent_id: Some(ctx.agent_record.id),
+                    pipe_tx: ctx.thread_event_tx.clone(),
                 });
-                tool.execute(tool_input.clone(), ctx).await
+                tool.execute(tool_input.clone(), tool_ctx).await
             } else {
                 tracing::error!(
                     thread_id = %thread_id,
-                    turn_number = %turn_number,
+                    turn_number = %ctx.turn_number,
                     tool_call_id = %tool_call_id,
                     tool_name = %tool_name,
-                    available_tools = ?tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+                    available_tools = ?ctx.tools.iter().map(|t: &Arc<dyn NamedTool>| t.name()).collect::<Vec<_>>(),
                     "Tool not found in registry"
                 );
                 Err(argus_protocol::tool::ToolError::NotFound {
@@ -702,7 +728,7 @@ async fn execute_single_tool(
         Ok(Ok(value)) => {
             tracing::info!(
                 thread_id = %thread_id,
-                turn_number = %turn_number,
+                turn_number = %ctx.turn_number,
                 tool_call_id = %tool_call_id,
                 tool_name = %tool_name,
                 result_preview = %value.to_string().chars().take(200).collect::<String>(),
@@ -713,7 +739,7 @@ async fn execute_single_tool(
         Ok(Err(error)) => {
             tracing::warn!(
                 thread_id = %thread_id,
-                turn_number = %turn_number,
+                turn_number = %ctx.turn_number,
                 tool_call_id = %tool_call_id,
                 tool_name = %tool_name,
                 error = %error,
@@ -724,7 +750,7 @@ async fn execute_single_tool(
         Err(Elapsed { .. }) => {
             tracing::error!(
                 thread_id = %thread_id,
-                turn_number = %turn_number,
+                turn_number = %ctx.turn_number,
                 tool_call_id = %tool_call_id,
                 tool_name = %tool_name,
                 timeout_secs = %tool_timeout_secs,
@@ -741,22 +767,22 @@ async fn execute_single_tool(
         Ok(value) => Ok(value.clone()),
         Err(error) => Err(error.clone()),
     };
-    if let Err(error) = thread_event_tx.send(ThreadEvent::ToolCompleted {
-        thread_id: thread_id.to_string(),
-        turn_number,
+    if let Err(error) = ctx.thread_event_tx.send(ThreadEvent::ToolCompleted {
+        thread_id: thread_id.clone(),
+        turn_number: ctx.turn_number,
         tool_call_id: tool_call_id.clone(),
         tool_name: tool_name.clone(),
         result: event_result.clone(),
     }) {
         tracing::warn!(
             thread_id = %thread_id,
-            turn_number = %turn_number,
+            turn_number = %ctx.turn_number,
             tool_name = %tool_name,
             error = %error,
             "Failed to send ToolCompleted event"
         );
     }
-    let _ = stream_tx.send(TurnStreamEvent::ToolCompleted {
+    let _ = ctx.stream_tx.send(TurnStreamEvent::ToolCompleted {
         tool_call_id: tool_call_id.clone(),
         tool_name: tool_name.clone(),
         result: event_result,
@@ -766,21 +792,18 @@ async fn execute_single_tool(
         Ok(value) => (Some(value.clone()), None),
         Err(error) => (None, Some(error.clone())),
     };
-    let ctx = ToolHookContext {
-        event: HookEvent::AfterToolCall,
-        tool_name: tool_name.clone(),
-        tool_call_id: tool_call_id.clone(),
+    let after_hook_ctx = build_hook_context(
+        ctx,
+        HookEvent::AfterToolCall,
+        tool_name.clone(),
+        tool_call_id.clone(),
         tool_input,
         tool_result,
         error,
-        tool_manager: None,
-        thread_event_sender: Some(thread_event_tx.clone()),
-        thread_id: Some(thread_id.to_string()),
-        turn_number: Some(turn_number),
-    };
-    let _ = fire_hooks(hooks, &ctx).await;
+        None,
+    );
+    let _ = fire_hooks(ctx.hooks, &after_hook_ctx).await;
 
-    let _duration_ms = start_time.elapsed().as_millis() as u64;
     let content = match &result {
         Ok(value) => serde_json::to_string(value).unwrap_or_else(|error| {
             format!("{{\"error\": \"Failed to serialize result: {}\"}}", error)
@@ -795,32 +818,21 @@ async fn execute_single_tool(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_loop(
-    thread_id: &str,
-    turn_number: u32,
-    originating_thread_id: ThreadId,
-    started_at: DateTime<Utc>,
+    ctx: &TurnContext<'_>,
     system_prompt: Option<&str>,
     mut history: Arc<Vec<ChatMessage>>,
     mut turn_messages: Vec<ChatMessage>,
-    tools: &[Arc<dyn NamedTool>],
-    hooks: &[Arc<dyn HookHandler>],
-    provider: &dyn LlmProvider,
-    config: &TurnConfig,
-    agent_record: &AgentRecord,
-    stream_tx: &broadcast::Sender<TurnStreamEvent>,
-    thread_event_tx: &broadcast::Sender<ThreadEvent>,
-    cancellation: &TurnCancellation,
     compactor: Option<&dyn Compactor>,
 ) -> Result<TurnRecord, TurnError> {
-    let max_iterations = config.max_iterations.unwrap_or(50);
-    let tool_timeout_secs = config.tool_timeout_secs.unwrap_or(120);
+    let thread_id = ctx.thread_id_str();
+    let max_iterations = ctx.config.max_iterations.unwrap_or(50);
+    let tool_timeout_secs = ctx.config.tool_timeout_secs.unwrap_or(120);
     let mut token_usage = TokenUsage::default();
     let mut compacted_during_turn = false;
 
     for iteration in 0..max_iterations {
-        if cancellation.is_cancelled() {
+        if ctx.cancellation.is_cancelled() {
             return Err(TurnError::Cancelled);
         }
 
@@ -843,7 +855,7 @@ async fn execute_loop(
                 Err(error) => {
                     tracing::warn!(
                         thread_id = %thread_id,
-                        turn_number = %turn_number,
+                        turn_number = %ctx.turn_number,
                         iteration = %iteration,
                         error = %error,
                         "turn compaction failed; continuing without compaction"
@@ -853,14 +865,14 @@ async fn execute_loop(
         }
         apply_tool_call_limit_message(
             system_prompt,
-            config.max_tool_calls,
-            !tools.is_empty(),
+            ctx.config.max_tool_calls,
+            !ctx.tools.is_empty(),
             &mut request_messages,
         );
 
         tracing::debug!(
             thread_id = %thread_id,
-            turn_number = %turn_number,
+            turn_number = %ctx.turn_number,
             iteration = %iteration,
             max_iterations = %max_iterations,
             message_count = %request_messages.len(),
@@ -869,21 +881,21 @@ async fn execute_loop(
 
         tracing::debug!(
             thread_id = %thread_id,
-            turn_number = %turn_number,
+            turn_number = %ctx.turn_number,
             iteration = %iteration,
-            tool_count = %tools.len(),
+            tool_count = %ctx.tools.len(),
             message_count = %request_messages.len(),
             "Calling LLM"
         );
-        let request = build_completion_request(request_messages.clone(), tools, agent_record);
+        let request = build_completion_request(request_messages.clone(), ctx.tools, ctx.agent_record);
         let response = match call_llm_streaming(
-            provider,
+            ctx.provider,
             request,
-            cancellation,
-            stream_tx,
-            thread_event_tx,
-            thread_id,
-            turn_number,
+            ctx.cancellation,
+            ctx.stream_tx,
+            ctx.thread_event_tx,
+            &thread_id,
+            ctx.turn_number,
         )
         .await?
         {
@@ -892,7 +904,7 @@ async fn execute_loop(
         };
         tracing::debug!(
             thread_id = %thread_id,
-            turn_number = %turn_number,
+            turn_number = %ctx.turn_number,
             iteration = %iteration,
             "LLM call completed"
         );
@@ -901,23 +913,12 @@ async fn execute_loop(
             response,
             &mut turn_messages,
             &mut token_usage,
-            config.max_tool_calls,
+            ctx.config.max_tool_calls,
         );
         match next_action {
             NextAction::Return => {
-                let ctx = ToolHookContext {
-                    event: HookEvent::TurnEnd,
-                    tool_name: String::new(),
-                    tool_call_id: String::new(),
-                    tool_input: serde_json::Value::Null,
-                    tool_result: None,
-                    error: None,
-                    tool_manager: None,
-                    thread_event_sender: Some(thread_event_tx.clone()),
-                    thread_id: Some(thread_id.to_string()),
-                    turn_number: Some(turn_number),
-                };
-                let turn_end_action = fire_hooks(hooks, &ctx).await;
+                let hook_ctx = build_turn_end_hook_context(ctx);
+                let turn_end_action = fire_hooks(ctx.hooks, &hook_ctx).await;
 
                 let continue_message = match turn_end_action {
                     Ok(HookAction::ContinueWithMessage(message)) => Some(message),
@@ -937,7 +938,7 @@ async fn execute_loop(
 
                     tracing::debug!(
                         thread_id = %thread_id,
-                        turn_number = %turn_number,
+                        turn_number = %ctx.turn_number,
                         iteration = %iteration,
                         "TurnEnd hook requested continuation with injected user message"
                     );
@@ -945,8 +946,8 @@ async fn execute_loop(
                 }
 
                 return Ok(finalize_turn_record(
-                    turn_number,
-                    started_at,
+                    ctx.turn_number,
+                    ctx.started_at,
                     history.as_ref(),
                     turn_messages,
                     token_usage.clone(),
@@ -956,33 +957,26 @@ async fn execute_loop(
             NextAction::ContinueWithTools { tool_calls } => {
                 tracing::debug!(
                     thread_id = %thread_id,
-                    turn_number = %turn_number,
+                    turn_number = %ctx.turn_number,
                     iteration = %iteration,
                     tool_count = %tool_calls.len(),
                     "Tool calls detected, executing tools"
                 );
 
-                let tool_results = tokio::select! {
-                    _ = cancellation.cancelled() => {
+                let tool_results: Vec<ToolExecutionResult> = tokio::select! {
+                    _ = ctx.cancellation.cancelled() => {
                         return Err(TurnError::Cancelled);
                     }
                     tool_results = execute_tools_parallel(
+                        ctx,
                         tool_calls,
-                        tools,
-                        hooks,
                         tool_timeout_secs,
-                        agent_record,
-                        originating_thread_id,
-                        stream_tx,
-                        thread_event_tx,
-                        thread_id,
-                        turn_number,
                     ) => tool_results,
                 };
 
                 tracing::debug!(
                     thread_id = %thread_id,
-                    turn_number = %turn_number,
+                    turn_number = %ctx.turn_number,
                     iteration = %iteration,
                     result_count = %tool_results.len(),
                     "Tools executed, adding results to message history"
@@ -990,12 +984,12 @@ async fn execute_loop(
 
                 for result in tool_results {
                     let (sanitized_content, warning) =
-                        sanitize_tool_output(&result.content, &config.safety_config);
+                        sanitize_tool_output(&result.content, &ctx.config.safety_config);
 
                     if let Some(warning) = &warning {
                         tracing::warn!(
                             thread_id = %thread_id,
-                            turn_number = %turn_number,
+                            turn_number = %ctx.turn_number,
                             tool_call_id = %result.tool_call_id,
                             tool_name = %result.name,
                             pattern = %warning.pattern,
@@ -1009,7 +1003,7 @@ async fn execute_loop(
                     let preview = sanitized_content.chars().take(200).collect::<String>();
                     tracing::info!(
                         thread_id = %thread_id,
-                        turn_number = %turn_number,
+                        turn_number = %ctx.turn_number,
                         tool_call_id = %result.tool_call_id,
                         tool_name = %result.name,
                         result_len,
@@ -1062,6 +1056,20 @@ pub(crate) async fn execute_thread_turn(
     let system_prompt =
         (!agent_record.system_prompt.is_empty()).then_some(agent_record.system_prompt.as_str());
 
+    let ctx = TurnContext {
+        thread_id: originating_thread_id,
+        turn_number,
+        started_at,
+        tools: tools.as_ref(),
+        hooks: hooks.as_ref(),
+        provider: provider.as_ref(),
+        config: &config,
+        agent_record: agent_record.as_ref(),
+        stream_tx: &stream_tx,
+        thread_event_tx: &thread_event_tx,
+        cancellation: &cancellation,
+    };
+
     tracing::info!(
         thread_id = %thread_id,
         turn_number = %turn_number,
@@ -1071,21 +1079,10 @@ pub(crate) async fn execute_thread_turn(
     );
 
     let result = execute_loop(
-        &thread_id,
-        turn_number,
-        originating_thread_id,
-        started_at,
+        &ctx,
         system_prompt,
         history,
         messages,
-        tools.as_ref(),
-        hooks.as_ref(),
-        provider.as_ref(),
-        &config,
-        agent_record.as_ref(),
-        &stream_tx,
-        &thread_event_tx,
-        &cancellation,
         compactor.as_deref(),
     )
     .await;
