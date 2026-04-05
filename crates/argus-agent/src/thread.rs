@@ -31,6 +31,17 @@ use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
+type TurnExecutionParts = (
+    String,
+    Arc<Vec<ChatMessage>>,
+    Arc<Vec<Arc<dyn NamedTool>>>,
+    Arc<Vec<Arc<dyn HookHandler>>>,
+    Arc<dyn LlmProvider>,
+    crate::TurnConfig,
+    broadcast::Sender<ThreadEvent>,
+    Arc<dyn Compactor>,
+);
+
 /// Internal runtime state for a loaded thread actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThreadRuntimeState {
@@ -966,19 +977,7 @@ impl Thread {
         }
     }
 
-    fn build_turn_execution_parts(
-        &self,
-        agent_record: Arc<AgentRecord>,
-    ) -> (
-        String,
-        Arc<Vec<ChatMessage>>,
-        Arc<Vec<Arc<dyn NamedTool>>>,
-        Arc<Vec<Arc<dyn HookHandler>>>,
-        Arc<dyn LlmProvider>,
-        crate::TurnConfig,
-        broadcast::Sender<ThreadEvent>,
-        Arc<dyn Compactor>,
-    ) {
+    fn build_turn_execution_parts(&self, agent_record: Arc<AgentRecord>) -> TurnExecutionParts {
         let provider = self.provider.clone();
         (
             self.id.to_string(),

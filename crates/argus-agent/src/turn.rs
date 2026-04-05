@@ -10,7 +10,6 @@ use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, future::join_all};
 use tokio::sync::{broadcast, watch};
 use tokio::time::{error::Elapsed, timeout};
-use tracing;
 
 use super::compact::Compactor;
 use super::history::TurnRecord;
@@ -553,6 +552,7 @@ async fn call_llm_streaming(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
     tools: &[Arc<dyn NamedTool>],
@@ -586,6 +586,7 @@ async fn execute_tools_parallel(
     join_all(futures).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool(
     tool_call: ToolCall,
     tools: &[Arc<dyn NamedTool>],
@@ -795,6 +796,7 @@ async fn execute_single_tool(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_loop(
     thread_id: &str,
     turn_number: u32,
@@ -1033,6 +1035,7 @@ async fn execute_loop(
     Err(TurnError::MaxIterationsReached(max_iterations))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_thread_turn(
     turn_number: u32,
     thread_id: String,
@@ -1459,8 +1462,10 @@ mod tests {
     #[derive(Debug)]
     struct RecordingTurnCompactor {
         calls: Arc<Mutex<Vec<TurnCompactorCall>>>,
-        results: Arc<Mutex<VecDeque<Result<Option<CompactResult>, CompactError>>>>,
+        results: CompactResultQueue,
     }
+
+    type CompactResultQueue = Arc<Mutex<VecDeque<Result<Option<CompactResult>, CompactError>>>>;
 
     #[async_trait]
     impl Compactor for RecordingTurnCompactor {
@@ -2016,7 +2021,7 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect();
-        assert!(final_contents.iter().any(|content| *content == "done"));
+        assert!(final_contents.contains(&"done"));
     }
 
     #[tokio::test]
