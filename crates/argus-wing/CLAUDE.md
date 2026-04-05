@@ -38,11 +38,8 @@ pub struct ArgusWing {
     provider_manager: Arc<ProviderManager>,
     template_manager: Arc<TemplateManager>,
     session_manager: Arc<SessionManager>,
-    approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
-    compactor_manager: Arc<CompactorManager>,
     job_manager: Arc<JobManager>,
-    job_broadcaster: Arc<SseBroadcaster>,
     account_manager: Arc<AccountManager>,
 }
 ```
@@ -68,10 +65,6 @@ let templates = wing.list_templates().await?;
 let session_id = wing.create_session("My Session").await?;
 let thread_id = wing.create_thread(session_id, template_id, None).await?;
 wing.send_message(session_id, thread_id, "Hello".to_string()).await?;
-
-// 审批
-let pending = wing.list_pending_approvals();
-wing.resolve_approval(request_id, decision, None)?;
 
 // 订阅事件
 let mut rx = wing.subscribe(session_id, thread_id).await?;

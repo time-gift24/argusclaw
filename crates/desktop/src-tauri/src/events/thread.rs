@@ -143,30 +143,6 @@ impl ThreadEventEnvelope {
                 turn_number: None,
                 payload: ThreadEventPayload::CompactionFailed { error },
             }),
-            ThreadEvent::WaitingForApproval {
-                thread_id,
-                turn_number,
-                request,
-            } => Some(Self {
-                session_id,
-                thread_id,
-                turn_number: Some(turn_number),
-                payload: ThreadEventPayload::WaitingForApproval {
-                    request: serde_json::to_value(&request).unwrap_or_default(),
-                },
-            }),
-            ThreadEvent::ApprovalResolved {
-                thread_id,
-                turn_number,
-                response,
-            } => Some(Self {
-                session_id,
-                thread_id,
-                turn_number: Some(turn_number),
-                payload: ThreadEventPayload::ApprovalResolved {
-                    response: serde_json::to_value(&response).unwrap_or_default(),
-                },
-            }),
             ThreadEvent::JobDispatched {
                 thread_id,
                 job_id,
@@ -310,12 +286,6 @@ pub enum ThreadEventPayload {
     CompactionFinished,
     CompactionFailed {
         error: String,
-    },
-    WaitingForApproval {
-        request: serde_json::Value,
-    },
-    ApprovalResolved {
-        response: serde_json::Value,
     },
     ThreadBoundToJob {
         job_id: String,

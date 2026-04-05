@@ -21,10 +21,7 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
     tauriSource,
     /getThreadSnapshot:\s*\(sessionId: string, threadId: string\)\s*=>\s*invoke<ThreadSnapshotPayload>\("get_thread_snapshot"/,
   );
-  assert.match(
-    tauriSource,
-    /resolveApproval:\s*\(\s*requestId: string,\s*decision: ApprovalDecision,\s*resolvedBy\?: string \| null/,
-  );
+  assert.doesNotMatch(tauriSource, /resolveApproval:\s*\(/);
   assert.match(
     tauriSource,
     /renameSession:\s*\(sessionId: string,\s*name: string\)\s*=>\s*invoke<void>\("rename_session"/,

@@ -3,19 +3,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const threadSource = readFileSync(new URL("../components/assistant-ui/thread.tsx", import.meta.url), "utf8");
-const approvalSource = readFileSync(new URL("../components/chat/approval-prompt.tsx", import.meta.url), "utf8");
 const agentSelectorSource = readFileSync(new URL("../components/assistant-ui/agent-selector.tsx", import.meta.url), "utf8");
 const providerSelectorSource = readFileSync(new URL("../components/assistant-ui/provider-selector.tsx", import.meta.url), "utf8");
 const dropdownMenuSource = readFileSync(new URL("../components/ui/dropdown-menu.tsx", import.meta.url), "utf8");
 
-test("thread composer exposes chat selectors and approval affordances", () => {
+test("thread composer exposes chat selectors without legacy approval affordances", () => {
   assert.match(threadSource, /AgentSelector/);
   assert.match(threadSource, /ProviderSelector/);
-  assert.match(threadSource, /ApprovalPrompt/);
+  assert.doesNotMatch(threadSource, /ApprovalPrompt/);
   // Stop generating button should be removed (not Stop generating aria-label)
   assert.doesNotMatch(threadSource, /Stop generating/);
-  assert.match(approvalSource, /resolveApproval/);
-  assert.match(approvalSource, /批准|拒绝/);
 });
 
 test("composer action places new-session and history buttons on the far left", () => {

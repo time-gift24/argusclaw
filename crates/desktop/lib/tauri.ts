@@ -301,8 +301,6 @@ export type ThreadPoolEventReason =
   | "cancelled"
   | "execution_failed";
 
-export type ApprovalDecision = "approved" | "denied" | "timed_out";
-
 export const chat = {
   createChatSession: (
     templateId: number,
@@ -350,17 +348,6 @@ export const chat = {
 
   listThreads: (sessionId: string) =>
     invoke<ThreadSummary[]>("list_threads", { sessionId }),
-
-  resolveApproval: (
-    requestId: string,
-    decision: ApprovalDecision,
-    resolvedBy?: string | null,
-  ) =>
-    invoke<void>("resolve_approval", {
-      requestId,
-      decision,
-      resolvedBy,
-    }),
 };
 
 export const threadPool = {

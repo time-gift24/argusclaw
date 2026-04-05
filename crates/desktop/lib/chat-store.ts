@@ -3,7 +3,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { agents, chat, providers, sessions, threadPool } from "@/lib/tauri";
 import type {
-  ApprovalRequestPayload,
   JobStatusPayload,
   ThreadEventEnvelope,
   ThreadPoolEventReason,
@@ -98,14 +97,6 @@ export interface ChatSessionState {
       maxRetries: number;
       error: string;
     } | null;
-  } | null;
-  pendingApprovalRequest: {
-    id: string;
-    tool_name: string;
-    action: string;
-    risk_level: ApprovalRequestPayload["risk_level"];
-    requested_at: string;
-    timeout_secs: number;
   } | null;
   jobStatuses: Record<string, JobStatusPayload>;
   error: string | null;
@@ -332,7 +323,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         status: "idle",
         messages: snapshot.messages,
         pendingAssistant: null,
-        pendingApprovalRequest: null,
         jobStatuses: {},
         error: null,
         tokenCount: 0,
@@ -404,7 +394,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         status: "idle",
         messages: snapshot.messages,
         pendingAssistant: null,
-        pendingApprovalRequest: null,
         jobStatuses: {},
         error: null,
         tokenCount: snapshot.token_count,
@@ -1273,37 +1262,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           },
         }));
         void get().refreshSnapshot(sessionKey, { preserveError: true });
-        break;
-
-      case "waiting_for_approval":
-        set((state) => ({
-          sessionsByKey: {
-            ...state.sessionsByKey,
-            [sessionKey]: {
-              ...state.sessionsByKey[sessionKey],
-              pendingApprovalRequest: {
-                id: payload.request.id,
-                tool_name: payload.request.tool_name,
-                action: payload.request.action,
-                risk_level: payload.request.risk_level,
-                requested_at: payload.request.requested_at,
-                timeout_secs: payload.request.timeout_secs,
-              },
-            },
-          },
-        }));
-        break;
-
-      case "approval_resolved":
-        set((state) => ({
-          sessionsByKey: {
-            ...state.sessionsByKey,
-            [sessionKey]: {
-              ...state.sessionsByKey[sessionKey],
-              pendingApprovalRequest: null,
-            },
-          },
-        }));
         break;
 
       case "idle":

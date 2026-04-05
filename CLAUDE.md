@@ -97,17 +97,16 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 │ • ThreadId      │             ▲          │
 │ • ThreadEvent ★ │             │          │
 │ • TokenUsage    │             └──────────┴──────────────┐
-│ • Approval*     │                        │              ┌───────────────────┐
 │ • RiskLevel     │             ┌───────────┴───────────┐  │ argus-llm         │
 │ • Hook*         │             │                       │  └───────────────────┘
-│ • LlmProvider   │    ┌────────┴───────┐    ┌─────────┴───────┐
-│ • NamedTool     │    │argus-approval │    │ argus-tool       │
-└─────────────────┘    │  审批系统       │    │  工具注册表       │
+│ • LlmProvider   │    ┌────────────────┐    ┌─────────┴───────┐
+│ • NamedTool     │    │ argus-job      │    │ argus-tool       │
+└─────────────────┘    │  后台任务       │    │  工具注册表       │
         ▲              └────────────────┘    └──────────────────┘
         │
         │    ┌────────────────┐        ┌──────────────────┐
-        ├────┤ argus-job      │        │ argus-template   │
-        │    │  后台任务      │        │  模板            │
+        ├────┤ argus-template │        │ argus-session    │
+        │    │  模板          │        │  会话管理        │
         │    └────────────────┘        └──────────────────┘
         │
         │    ┌────────────────┐
@@ -137,9 +136,9 @@ RUST_LOG=arguswing=debug,argus=debug cargo run  # 开启日志运行
 `argus-protocol` 是整个项目的**核心类型库**，不依赖其他 argus-* crates（仅依赖外部 crate 如 serde、uuid、chrono、thiserror）。
 
 它存在的主要目的：
-1. **打破循环依赖**：`agents` ↔ `approval` ↔ `tool` 之间不能直接相互依赖
+1. **打破循环依赖**：核心协议类型不能依赖具体执行模块或工具实现
 2. **提供核心 trait**：`LlmProvider`、`NamedTool`、`HookHandler`、`ProviderResolver`
-3. **定义共享类型**：`ThreadId`、`ThreadEvent`、`TokenUsage`、`Approval*`、`RiskLevel`
+3. **定义共享类型**：`ThreadId`、`ThreadEvent`、`TokenUsage`、`RiskLevel`
 
 ### ThreadEvent — 核心事件总线 ★
 
@@ -154,8 +153,6 @@ pub enum ThreadEvent {
     TurnFailed { thread_id, turn_number, error },
     Idle { thread_id },                    // 线程进入空闲
     Compacted { thread_id, new_token_count }, // 上下文被压缩
-    WaitingForApproval { thread_id, turn_number, request },
-    ApprovalResolved { thread_id, turn_number, response },
     JobCompleted { job_id, status, session_id, message }, // 后台任务完成
 }
 ```
@@ -172,7 +169,6 @@ Turn (stream_tx: TurnStreamEvent)
 
 - `ThreadId` / `SessionId` / `AgentId` / `ProviderId`：强类型 ID 包装器
 - `TokenUsage`：token 使用统计
-- `ApprovalDecision` / `ApprovalRequest` / `ApprovalResponse`：审批协议类型
 - `RiskLevel`：操作风险等级（Low / Medium / High / Critical）
 - `HookEvent` / `HookHandler` / `HookRegistry`：生命周期 Hook 系统
 - `LlmProvider` trait：LLM 提供者抽象
@@ -194,7 +190,6 @@ Turn (stream_tx: TurnStreamEvent)
 | `argus-agent` | 统一智能体：Turn 执行引擎 + Thread 会话管理 | protocol, tool, llm, test-support |
 | `argus-session` | 会话管理 | protocol, template, agent, job |
 | `argus-llm` | LLM 抽象层 | protocol, test-support, crypto |
-| `argus-approval` | 审批系统 | protocol |
 | `argus-tool` | 工具注册表 | protocol |
 | `argus-repository` | 持久化层 | protocol, llm |
 | `argus-template` | 模板 | protocol |

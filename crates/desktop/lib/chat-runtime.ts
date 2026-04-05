@@ -39,9 +39,7 @@ type AssistantUiMessage = {
   readonly role: "assistant" | "system" | "user";
   readonly content: string | readonly AssistantUiMessagePart[];
   readonly createdAt: Date;
-  readonly status?:
-    | { readonly type: "running" }
-    | { readonly type: "requires-action"; readonly reason: "interrupt" };
+  readonly status?: { readonly type: "running" };
   readonly attachments?: readonly [];
   readonly metadata?: {
     readonly unstable_state?: JsonValue;
@@ -269,9 +267,7 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
       role: "assistant",
       content: pendingContent,
       createdAt: new Date(),
-      status: session.pendingApprovalRequest
-        ? { type: "requires-action", reason: "interrupt" }
-        : { type: "running" },
+      status: { type: "running" },
       metadata: createEmptyAssistantMetadata(),
     });
   }
