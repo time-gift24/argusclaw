@@ -8,10 +8,10 @@ Redesign compaction in `argus-agent` so thread-level compaction keeps its curren
 
 - Discard the current in-flight turn compaction patch and redesign from first principles.
 - Split compaction into two explicit implementations under a new `compact/` module directory.
-- Keep thread-level compaction semantics unchanged; only rename its types to make the intent obvious.
+- Keep thread-level compaction semantics unchanged while sharing a single `Compactor` abstraction with turn-level compaction.
 - Add a new turn-level compaction path that runs inside `Turn::execute_loop`.
-- Turn-level compaction is transactional: if a turn fails or is cancelled, none of its turn-level checkpoints are persisted.
-- If a turn succeeds after multiple turn-level compactions, persist every successful checkpoint in order, then persist the final `UserTurn`.
+- Turn-level compaction is transactional: if a turn fails or is cancelled, no `TurnCheckpoint` is persisted.
+- If a turn succeeds after internal compaction, settle it as a single counted `TurnCheckpoint` instead of `Checkpoint(0)... + UserTurn(n)`.
 
 ## Module Layout
 
@@ -21,18 +21,17 @@ Replace the single-file `crates/argus-agent/src/compact.rs` with:
 - `crates/argus-agent/src/compact/thread.rs`
 - `crates/argus-agent/src/compact/turn.rs`
 
-Proposed naming split:
+Shared compaction API:
 
-- Thread side:
-  - `ThreadCompactor`
-  - `ThreadCompactResult`
-  - `LlmThreadCompactor`
-- Turn side:
-  - `TurnCompactor`
-  - `TurnCompactResult`
-  - `LlmTurnCompactor`
+- `Compactor`
+- `CompactResult`
 
-`Thread` depends only on the thread compactor. `Turn` depends only on the turn compactor. The two paths must not share a generic trait because they intentionally have different semantics.
+Concrete implementations:
+
+- `LlmThreadCompactor`
+- `LlmTurnCompactor`
+
+The trait is shared, but the two implementations still have different semantics: thread compaction persists `Checkpoint(0)` records, while turn compaction settles as a counted `TurnCheckpoint`.
 
 ## Thread-Level Compaction
 
@@ -90,34 +89,34 @@ Turn-level compaction must not persist directly during execution.
 
 Instead:
 
-- on each successful turn-level compaction, create a checkpoint record for the eventual settlement payload
 - immediately replace the active execution context with the compacted context
-- drop the folded-away tail from the future `UserTurn` body so the final record does not duplicate content already absorbed by checkpoints
+- keep only the latest compacted history plus any tail messages produced after the last compaction
 
 If the turn later succeeds, persist:
 
-`Checkpoint(0) -> Checkpoint(0) -> ... -> UserTurn(n)`
+- `UserTurn(n)` if no turn-level compaction happened
+- `TurnCheckpoint(n)` if turn-level compaction happened
 
 If the turn later fails or is cancelled:
 
-- persist nothing from turn-level compaction
+- persist no `TurnCheckpoint`
 - keep the invariant that failed/cancelled turns do not create `TurnRecord`s
 
 ## Persistence Boundaries
 
 For turn-level checkpoints:
 
-- persist only the compacted turn context
+- persist a single `TurnCheckpoint(n)` message snapshot
 - do not persist the `system_prompt`
-- store the retained user history inputs and the synthetic `user` summary
+- store the compacted history plus any post-compaction tail messages
 
 For actual model requests:
 
 - prepend the `system_prompt` only at request construction time
 
-For the final `UserTurn`:
+For counted turn settlement:
 
-- store only the remaining tail after the last successful turn-level compaction
+- `TurnCheckpoint` consumes a real turn number and participates in recovery, next-turn numbering, and context reconstruction
 
 ## Error Handling
 
@@ -130,22 +129,23 @@ For the final `UserTurn`:
 Add focused tests for:
 
 - repeated `execute_loop` compaction always using the latest real request context
-- multiple turn-level compactions persisting as ordered checkpoints before the final `UserTurn`
-- no turn-level checkpoints being persisted when a turn is cancelled
-- no turn-level checkpoints being persisted when a turn fails
-- turn-level checkpoints never storing `system_prompt`
+- turn-level compaction settling as a single `TurnCheckpoint`
+- no `TurnCheckpoint` being persisted when a turn is cancelled
+- no `TurnCheckpoint` being persisted when a turn fails
+- `TurnCheckpoint` never storing `system_prompt`
 - turn-level synthetic summaries using the `user` role
-- final `UserTurn` omitting content already absorbed by earlier turn-level checkpoints
-- thread-level compaction continuing to preserve current recovery semantics after the rename
+- `TurnCheckpoint` participating in turn numbering and recovery
+- transcript/session/job readers including `TurnCheckpoint` consistently
+- thread-level compaction continuing to preserve current recovery semantics
 
 ## Non-Goals
 
-- No change to the fundamental `ThreadRecordKind` model beyond adding turn-level checkpoint settlement into the existing `Checkpoint(0)` representation.
+- No reintroduction of per-turn settlement wrappers such as `TurnSettlement`.
 - No extra runtime cache objects for turn compaction bookkeeping when direct recomputation is sufficient.
 - No change to agent snapshot authority or prompt persistence rules.
 
 ## Migration Notes
 
 - Update public exports in `crates/argus-agent/src/lib.rs`.
-- Update `argus-job` wiring to use the renamed thread compactor types.
-- Rename existing tests to make it obvious whether they target thread compaction or turn compaction.
+- Keep thread and turn compactor implementations separate even though they share one trait.
+- Ensure transcript/session/job readers make an explicit decision about whether `TurnCheckpoint` belongs in their view.
