@@ -1436,11 +1436,12 @@ mod tests {
         recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
         SessionSchedulerBackend,
     };
-    use argus_agent::history::TurnRecord;
+    use argus_agent::history::{TurnRecord, TurnRecordKind};
     use argus_agent::thread_trace_store::{
         chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
     };
     use argus_agent::turn_log_store::append_turn_record;
+    use argus_agent::turn_log_store::RecoveredThreadLogState;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
@@ -2216,6 +2217,36 @@ mod tests {
             .expect_err("invalid first checkpoint should fail");
         let message = error.to_string();
         assert!(message.contains("failed to recover committed turn log"));
+    }
+
+    #[test]
+    fn flatten_recovered_thread_state_includes_turn_checkpoint_messages() {
+        let recovered = RecoveredThreadLogState {
+            turns: vec![TurnRecord::turn_checkpoint(
+                1,
+                vec![
+                    ChatMessage::user("compressed user intent"),
+                    ChatMessage::assistant("compressed assistant state"),
+                ],
+                TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    total_tokens: 3,
+                },
+            )],
+        };
+
+        let flattened = super::flatten_recovered_thread_state(recovered);
+
+        assert_eq!(flattened.turn_count, 1);
+        assert_eq!(flattened.token_count, 3);
+        assert_eq!(flattened.messages.len(), 2);
+        assert_eq!(flattened.messages[0].content, "compressed user intent");
+        assert_eq!(flattened.messages[1].content, "compressed assistant state");
+        assert!(matches!(
+            TurnRecordKind::TurnCheckpoint,
+            TurnRecordKind::TurnCheckpoint
+        ));
     }
 
     #[tokio::test]

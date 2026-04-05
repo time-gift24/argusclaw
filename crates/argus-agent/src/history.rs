@@ -112,7 +112,12 @@ pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
 pub fn flatten_turn_messages(turns: &[TurnRecord]) -> Vec<ChatMessage> {
     turns
         .iter()
-        .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
+        .filter(|turn| {
+            matches!(
+                turn.kind,
+                TurnRecordKind::UserTurn | TurnRecordKind::TurnCheckpoint
+            )
+        })
         .flat_map(|turn| turn.messages.iter().cloned())
         .collect()
 }
@@ -216,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_committed_messages_skips_turn_checkpoint_records() {
+    fn flatten_committed_messages_includes_turn_checkpoint_records() {
         let turns = vec![
             TurnRecord::user_turn(
                 1,
@@ -243,7 +248,7 @@ mod tests {
 
         let flattened = flatten_turn_messages(&turns);
 
-        assert_eq!(flattened.len(), 2);
+        assert_eq!(flattened.len(), 4);
         assert!(
             turns
                 .iter()
@@ -251,5 +256,7 @@ mod tests {
         );
         assert_eq!(flattened[0].content, "hi");
         assert_eq!(flattened[1].content, "hello");
+        assert_eq!(flattened[2].content, "snapshot");
+        assert_eq!(flattened[3].content, "state");
     }
 }

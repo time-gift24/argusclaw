@@ -433,7 +433,12 @@ impl Thread {
     pub fn history_iter(&self) -> impl Iterator<Item = &ChatMessage> + '_ {
         self.turns
             .iter()
-            .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
+            .filter(|turn| {
+                matches!(
+                    turn.kind,
+                    TurnRecordKind::UserTurn | TurnRecordKind::TurnCheckpoint
+                )
+            })
             .flat_map(|turn| turn.messages.iter())
     }
 
@@ -1210,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn history_iter_reads_only_successful_user_turn_messages() {
+    fn history_iter_includes_turn_checkpoint_messages() {
         let mut thread = build_test_thread_without_system_prompt();
         thread.hydrate_turn_history_for_test(vec![
             TurnRecord::user_turn(
@@ -1219,17 +1224,25 @@ mod tests {
                 usage(2),
             ),
             TurnRecord::checkpoint(vec![ChatMessage::assistant("summary")], usage(7)),
-            TurnRecord::user_turn(
+            TurnRecord::turn_checkpoint(
                 2,
-                vec![ChatMessage::user("u2"), ChatMessage::assistant("a2")],
+                vec![
+                    ChatMessage::user("snapshot"),
+                    ChatMessage::assistant("state"),
+                ],
                 usage(4),
+            ),
+            TurnRecord::user_turn(
+                3,
+                vec![ChatMessage::user("u2"), ChatMessage::assistant("a2")],
+                usage(5),
             ),
         ]);
 
         let history: Vec<_> = thread.history_iter().map(|m| m.content.clone()).collect();
-        assert_eq!(history, vec!["u1", "a1", "u2", "a2"]);
-        assert_eq!(thread.turn_count(), 2);
-        assert_eq!(thread.token_count(), 4);
+        assert_eq!(history, vec!["u1", "a1", "snapshot", "state", "u2", "a2"]);
+        assert_eq!(thread.turn_count(), 3);
+        assert_eq!(thread.token_count(), 5);
     }
 
     #[test]
