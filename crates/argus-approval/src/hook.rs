@@ -34,7 +34,7 @@ use argus_protocol::{
 };
 
 use super::manager::ApprovalManager;
-use super::policy::{ApprovalPolicy, KNOWLEDGE_CREATE_PR_APPROVAL_KEY};
+use super::policy::ApprovalPolicy;
 use super::runtime_allow::RuntimeAllowList;
 
 /// Approval hook that integrates with Turn execution through the hook system.
@@ -74,19 +74,6 @@ impl ApprovalHook {
     }
 
     fn approval_keys(&self, ctx: &ToolHookContext) -> Vec<String> {
-        if ctx.tool_name == "knowledge"
-            && ctx
-                .tool_input
-                .get("action")
-                .and_then(|value| value.as_str())
-                == Some("create_knowledge_pr")
-        {
-            return vec![
-                KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string(),
-                ctx.tool_name.clone(),
-            ];
-        }
-
         vec![ctx.tool_name.clone()]
     }
 }
@@ -290,102 +277,6 @@ mod tests {
         let ctx = make_ctx("shell", serde_json::json!({"command": "rm -rf /"}));
 
         let action = hook.on_tool_event(&ctx).await;
-        assert!(matches!(action, HookAction::Continue));
-    }
-
-    #[tokio::test]
-    async fn test_approval_hook_skips_knowledge_reads_when_only_write_action_is_gated() {
-        let policy = ApprovalPolicy {
-            require_approval: vec![KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string()],
-            timeout_secs: 60,
-            auto_approve_autonomous: false,
-            auto_approve: false,
-        };
-        let manager = Arc::new(ApprovalManager::new(policy.clone()));
-        let allow_list = Arc::new(RwLock::new(RuntimeAllowList::new()));
-        let hook = ApprovalHook::new(manager.clone(), policy, allow_list, "test-agent");
-
-        let ctx = make_ctx(
-            "knowledge",
-            serde_json::json!({"action": "search_nodes", "query": "docs"}),
-        );
-
-        let action = hook.on_tool_event(&ctx).await;
-        assert!(matches!(action, HookAction::Continue));
-        assert_eq!(manager.pending_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_approval_hook_requires_approval_for_knowledge_create_pr_action() {
-        let policy = ApprovalPolicy {
-            require_approval: vec![KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string()],
-            timeout_secs: 60,
-            auto_approve_autonomous: false,
-            auto_approve: false,
-        };
-        let manager = Arc::new(ApprovalManager::new(policy.clone()));
-        let allow_list = Arc::new(RwLock::new(RuntimeAllowList::new()));
-        let hook = ApprovalHook::new(manager.clone(), policy, allow_list, "test-agent");
-
-        let ctx = make_ctx(
-            "knowledge",
-            serde_json::json!({"action": "create_knowledge_pr", "target_repo": "acme/docs"}),
-        );
-
-        let task = tokio::spawn({
-            let hook = hook;
-            async move { hook.on_tool_event(&ctx).await }
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert_eq!(manager.pending_count(), 1);
-        let request = manager
-            .list_pending()
-            .into_iter()
-            .next()
-            .expect("pending request should exist");
-        manager
-            .resolve(request.id, ApprovalDecision::Approved, None)
-            .expect("approval should resolve");
-
-        let action = task.await.expect("task should join");
-        assert!(matches!(action, HookAction::Continue));
-    }
-
-    #[tokio::test]
-    async fn test_approval_hook_honors_legacy_knowledge_policy_for_create_pr_action() {
-        let policy = ApprovalPolicy {
-            require_approval: vec!["knowledge".to_string()],
-            timeout_secs: 60,
-            auto_approve_autonomous: false,
-            auto_approve: false,
-        };
-        let manager = Arc::new(ApprovalManager::new(policy.clone()));
-        let allow_list = Arc::new(RwLock::new(RuntimeAllowList::new()));
-        let hook = ApprovalHook::new(manager.clone(), policy, allow_list, "test-agent");
-
-        let ctx = make_ctx(
-            "knowledge",
-            serde_json::json!({"action": "create_knowledge_pr", "target_repo": "acme/docs"}),
-        );
-
-        let task = tokio::spawn({
-            let hook = hook;
-            async move { hook.on_tool_event(&ctx).await }
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert_eq!(manager.pending_count(), 1);
-        let request = manager
-            .list_pending()
-            .into_iter()
-            .next()
-            .expect("pending request should exist");
-        manager
-            .resolve(request.id, ApprovalDecision::Approved, None)
-            .expect("approval should resolve");
-
-        let action = task.await.expect("task should join");
         assert!(matches!(action, HookAction::Continue));
     }
 }

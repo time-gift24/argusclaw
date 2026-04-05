@@ -2274,4 +2274,3 @@ fn test_request(job_id: &str) -> ThreadPoolJobRequest {
         context: None,
     }
 }
-

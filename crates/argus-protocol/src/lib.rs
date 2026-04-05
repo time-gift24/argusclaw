@@ -7,7 +7,6 @@ pub mod events;
 pub mod hooks;
 pub mod http_client;
 pub mod ids;
-pub mod knowledge;
 pub mod llm;
 pub mod message_override;
 pub mod plan;
@@ -30,7 +29,6 @@ pub use events::{
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
-pub use knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
 pub use message_override::MessageOverride;
 pub use plan::{PlanItemArg, StepStatus, UpdatePlanArgs};
 pub use risk_level::RiskLevel;
