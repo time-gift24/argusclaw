@@ -8,10 +8,6 @@ license = "MIT OR Apache-2.0"
 name = "argus-chrome-cli"
 path = "src/bin/chrome_cli.rs"
 
-[[bin]]
-name = "argus-knowledge-cli"
-path = "src/bin/knowledge_cli.rs"
-
 [dependencies]
 argus-protocol = { path = "../argus-protocol" }
 async-trait = { workspace = true }

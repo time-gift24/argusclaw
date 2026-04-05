@@ -16,7 +16,6 @@ const EditProviderPage = React.lazy(() => import("@/app/settings/providers/edit/
 const AgentsPage = React.lazy(() => import("@/app/settings/agents/page"));
 const NewAgentPage = React.lazy(() => import("@/app/settings/agents/new/page"));
 const EditAgentPage = React.lazy(() => import("@/app/settings/agents/edit/page"));
-const KnowledgePage = React.lazy(() => import("@/app/settings/knowledge/page"));
 const ToolsPage = React.lazy(() => import("@/app/settings/tools/page"));
 
 function withSuspense(element: React.ReactNode) {
@@ -81,10 +80,6 @@ export const desktopRoutes: RouteObject[] = [
           {
             path: "agents/edit",
             element: withSuspense(<EditAgentPage />),
-          },
-          {
-            path: "knowledge",
-            element: withSuspense(<KnowledgePage />),
           },
           {
             path: "tools",

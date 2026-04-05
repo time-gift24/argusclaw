@@ -1266,7 +1266,6 @@ fn format_turn_log_recovery_error(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::fs;

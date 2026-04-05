@@ -1312,7 +1312,6 @@ impl Thread {
 // Tests
 // ---------------------------------------------------------------------------
 
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

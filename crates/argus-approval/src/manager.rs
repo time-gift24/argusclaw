@@ -185,7 +185,6 @@ mod tests {
         assert!(mgr.requires_approval("shell"));
         assert!(!mgr.requires_approval("file_read"));
         assert!(mgr.requires_approval("http"));
-        assert!(mgr.requires_approval(crate::policy::KNOWLEDGE_CREATE_PR_APPROVAL_KEY));
     }
     #[test]
     fn test_requires_approval_custom_policy() {
@@ -328,11 +327,7 @@ mod tests {
         let policy = mgr.policy();
         assert_eq!(
             policy.require_approval,
-            vec![
-                "shell".to_string(),
-                "http".to_string(),
-                crate::policy::KNOWLEDGE_CREATE_PR_APPROVAL_KEY.to_string(),
-            ]
+            vec!["shell".to_string(), "http".to_string()]
         );
         assert_eq!(policy.timeout_secs, 60);
         assert!(!policy.auto_approve_autonomous);
