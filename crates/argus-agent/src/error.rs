@@ -154,6 +154,10 @@ pub enum ThreadError {
     #[error("Session ID not set")]
     SessionIdNotSet,
 
+    /// Direct thread execution is unavailable while the runtime owns the thread.
+    #[error("Direct turn execution is unavailable while the thread runtime is active")]
+    RuntimeActive,
+
     /// Channel send error.
     #[error("Event channel closed")]
     ChannelClosed,
@@ -275,5 +279,11 @@ mod tests {
     fn thread_error_display_channel_closed() {
         let err = ThreadError::ChannelClosed;
         assert!(err.to_string().contains("channel"));
+    }
+
+    #[test]
+    fn thread_error_display_runtime_active() {
+        let err = ThreadError::RuntimeActive;
+        assert!(err.to_string().contains("runtime is active"));
     }
 }

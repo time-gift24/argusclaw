@@ -572,14 +572,8 @@ impl Thread {
     }
 
     /// Spawn the thread-owned reactor loop that coordinates queued control events.
-    pub fn spawn_reactor(thread: Arc<RwLock<Self>>) {
-        tokio::spawn(async move {
-            Self::run_reactor_loop(thread).await;
-        });
-    }
-
-    async fn run_reactor_loop(thread: Arc<RwLock<Self>>) {
-        let (mut control_rx, mailbox) = {
+    pub async fn spawn_reactor(thread: Arc<RwLock<Self>>) {
+        let (control_rx, mailbox) = {
             let mut guard = thread.write().await;
             let control_rx = match guard.take_control_rx() {
                 Some(rx) => rx,
@@ -592,6 +586,16 @@ impl Thread {
             (control_rx, guard.mailbox())
         };
 
+        tokio::spawn(async move {
+            Self::run_reactor_loop(thread, control_rx, mailbox).await;
+        });
+    }
+
+    async fn run_reactor_loop(
+        thread: Arc<RwLock<Self>>,
+        mut control_rx: mpsc::UnboundedReceiver<ThreadControlEvent>,
+        mailbox: Arc<Mutex<ThreadMailbox>>,
+    ) {
         let mut active_turn: Option<JoinHandle<Result<TurnRecord, ThreadError>>> = None;
         let mut shutdown_requested = false;
 
@@ -901,6 +905,10 @@ impl Thread {
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
     ) -> Result<TurnRecord, ThreadError> {
+        if self.control_rx.is_none() {
+            return Err(ThreadError::RuntimeActive);
+        }
+
         let turn_number = derive_next_user_turn_number(&self.turns);
         let thread_id_for_events = self.id.to_string();
         let originating_thread_id = self.id;

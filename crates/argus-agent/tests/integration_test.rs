@@ -728,6 +728,27 @@ async fn execute_turn_converts_panics_into_regular_thread_errors() {
 }
 
 #[tokio::test]
+async fn execute_turn_rejects_runtime_managed_threads() {
+    let thread = Arc::new(tokio::sync::RwLock::new(build_thread(
+        Arc::new(MockProvider::new("Hello, world!".to_string())),
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    )));
+
+    argus_agent::Thread::spawn_reactor(Arc::clone(&thread)).await;
+
+    let result = thread
+        .write()
+        .await
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await;
+
+    assert!(matches!(result, Err(ThreadError::RuntimeActive)));
+}
+
+#[tokio::test]
 async fn test_turn_integration_with_tool_call() {
     // Create a provider with two responses:
     // 1. First response: call the echo tool

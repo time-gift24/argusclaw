@@ -510,7 +510,7 @@ async fn test_thread_runtime_persists_committed_turn_messages_and_meta() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
 
     enqueue_thread_message(&thread, "Hello".to_string()).await;
 
@@ -588,7 +588,7 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
 
     enqueue_thread_message(&thread, "first".to_string()).await;
 
@@ -721,7 +721,7 @@ async fn successful_turn_compaction_persists_turn_checkpoint() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
@@ -814,7 +814,7 @@ async fn failed_turn_after_compaction_persists_no_turn_level_checkpoint() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
@@ -883,7 +883,7 @@ async fn cancelled_turn_after_compaction_persists_no_turn_level_checkpoint() {
     ));
     let rx = { thread.read().await.subscribe() };
 
-    Thread::spawn_reactor(Arc::clone(&thread));
+    Thread::spawn_reactor(Arc::clone(&thread)).await;
     enqueue_thread_message(
         &thread,
         "this message is long enough to trigger turn compaction".to_string(),
