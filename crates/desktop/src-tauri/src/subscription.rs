@@ -78,25 +78,6 @@ impl ThreadSubscriptions {
         Ok(())
     }
 
-    /// Stop a forwarder for a session.
-    #[allow(dead_code)]
-    pub async fn stop(&self, session_key: &str) {
-        let mut inner = self.inner.lock().await;
-        if let Some(token) = inner.subscriptions.remove(session_key) {
-            token.cancel();
-        }
-    }
-
-    /// Stop all forwarders.
-    #[allow(dead_code)]
-    pub async fn stop_all(&self) {
-        let mut inner = self.inner.lock().await;
-        for token in inner.subscriptions.values() {
-            token.cancel();
-        }
-        inner.subscriptions.clear();
-    }
-
     async fn forward_events(
         mut receiver: broadcast::Receiver<ThreadEvent>,
         session_id: String,

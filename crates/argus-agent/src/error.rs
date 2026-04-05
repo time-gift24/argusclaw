@@ -50,7 +50,7 @@ pub enum TurnError {
     TimeoutExceeded,
 
     /// LLM provider not configured.
-    #[error("LLM provider not configured for TurnInput")]
+    #[error("LLM provider not configured for Turn")]
     ProviderNotConfigured,
 
     /// Turn builder failed (missing required field).
@@ -70,6 +70,15 @@ impl From<derive_builder::UninitializedFieldError> for TurnError {
 pub enum TurnLogError {
     #[error("turn file not found: {0}")]
     TurnNotFound(PathBuf),
+
+    #[error("thread metadata not found: {0}")]
+    ThreadMetadataNotFound(PathBuf),
+
+    #[error("thread metadata I/O failed at {path}: {reason}")]
+    ThreadMetadataIo { path: PathBuf, reason: String },
+
+    #[error("thread metadata malformed at {path}: {reason}")]
+    ThreadMetadataMalformed { path: PathBuf, reason: String },
 
     #[error("malformed JSON event at line {line}: {reason}")]
     MalformedEvent { line: usize, reason: String },
@@ -216,6 +225,12 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("LLM call blocked"));
         assert!(msg.contains("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_provider_not_configured_display_mentions_turn() {
+        let err = TurnError::ProviderNotConfigured;
+        assert_eq!(err.to_string(), "LLM provider not configured for Turn");
     }
 
     #[test]

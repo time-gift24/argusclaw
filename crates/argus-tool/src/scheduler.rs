@@ -11,12 +11,12 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, MailboxMessage, NamedTool, RiskLevel, ThreadControlEvent, ThreadEvent, ThreadId,
-    ToolDefinition, ToolError, ToolExecutionContext,
+    AgentId, MailboxMessage, NamedTool, RiskLevel, ThreadEvent, ThreadId, ToolDefinition,
+    ToolError, ToolExecutionContext,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action")]
@@ -86,7 +86,6 @@ pub struct SchedulerDispatchRequest {
     pub agent_id: AgentId,
     pub context: Option<serde_json::Value>,
     pub pipe_tx: broadcast::Sender<ThreadEvent>,
-    pub control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
 }
 
 /// Request payload for looking up a background job.
@@ -95,7 +94,6 @@ pub struct SchedulerLookupRequest {
     pub thread_id: ThreadId,
     pub job_id: String,
     pub consume: bool,
-    pub control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
 }
 
 /// Request payload for sending a mailbox message.
@@ -364,7 +362,6 @@ impl NamedTool for SchedulerTool {
                         agent_id,
                         context,
                         pipe_tx: ctx.pipe_tx.clone(),
-                        control_tx: ctx.control_tx.clone(),
                     })
                     .await?;
 
@@ -384,7 +381,6 @@ impl NamedTool for SchedulerTool {
                         thread_id: ctx.thread_id,
                         job_id: job_id.clone(),
                         consume: consume.unwrap_or(false),
-                        control_tx: ctx.control_tx.clone(),
                     })
                     .await?;
 
@@ -535,12 +531,10 @@ mod tests {
 
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (pipe_tx, _) = broadcast::channel(8);
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx,
-            control_tx,
         })
     }
 

@@ -101,8 +101,9 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         Arc::new(FilePlanStore::new(
-            std::env::temp_dir().join("argus-plan-hook-tests"),
-            &format!("thread-{nanos}"),
+            std::env::temp_dir()
+                .join("argus-plan-hook-tests")
+                .join(format!("thread-{nanos}")),
         ))
     }
 

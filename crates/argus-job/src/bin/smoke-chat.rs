@@ -200,9 +200,9 @@ async fn run(cli: Cli) -> Result<()> {
             println!();
         }
     }
-    let output = output_result?;
+    let record = output_result?;
 
-    let reply = extract_last_assistant_message(&output.appended_messages)
+    let reply = extract_last_assistant_message(&record.messages)
         .ok_or_else(|| anyhow!("Turn completed without an assistant reply"))?;
 
     if !cli.stream {
@@ -210,9 +210,9 @@ async fn run(cli: Cli) -> Result<()> {
     }
     println!(
         "\nToken usage: input={}, output={}, total={}",
-        output.token_usage.input_tokens,
-        output.token_usage.output_tokens,
-        output.token_usage.total_tokens
+        record.token_usage.input_tokens,
+        record.token_usage.output_tokens,
+        record.token_usage.total_tokens
     );
     Ok(())
 }

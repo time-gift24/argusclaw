@@ -204,7 +204,7 @@ fn resolve_config(
     })
 }
 
-async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
+async fn run_execute_command(args: ExecuteArgs, config: &Config) -> Result<()> {
     let resolved = resolve_config(
         config,
         args.base_url.as_deref(),
@@ -238,11 +238,11 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
         .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
 
     // Execute turn (no streaming for now due to Send trait issue)
-    let output = turn.execute().await?;
+    let record = turn.execute().await?;
 
     println!("Turn completed!");
-    println!("Appended messages:");
-    for (i, msg) in output.appended_messages.iter().enumerate() {
+    println!("Turn messages:");
+    for (i, msg) in record.messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",
@@ -258,9 +258,9 @@ async fn execute_turn(args: ExecuteArgs, config: &Config) -> Result<()> {
     }
     println!(
         "Tokens: {} input, {} output, {} total",
-        output.token_usage.input_tokens,
-        output.token_usage.output_tokens,
-        output.token_usage.total_tokens
+        record.token_usage.input_tokens,
+        record.token_usage.output_tokens,
+        record.token_usage.total_tokens
     );
 
     Ok(())
@@ -317,20 +317,20 @@ Example flow:
         .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
 
     // Execute turn
-    let output = turn.execute().await?;
+    let record = turn.execute().await?;
 
     println!("Turn completed!");
     println!(
         "Total tool calls in conversation: {}",
-        output
-            .appended_messages
+        record
+            .messages
             .iter()
             .filter(|m| m.tool_calls.is_some())
             .count()
     );
 
-    println!("Appended messages:");
-    for (i, msg) in output.appended_messages.iter().enumerate() {
+    println!("Turn messages:");
+    for (i, msg) in record.messages.iter().enumerate() {
         let role_str = match msg.role {
             Role::User => "USER",
             Role::Assistant => "ASSISTANT",
@@ -356,9 +356,9 @@ Example flow:
 
     println!(
         "Tokens: {} input, {} output, {} total",
-        output.token_usage.input_tokens,
-        output.token_usage.output_tokens,
-        output.token_usage.total_tokens
+        record.token_usage.input_tokens,
+        record.token_usage.output_tokens,
+        record.token_usage.total_tokens
     );
 
     Ok(())
@@ -411,13 +411,13 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
             .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
 
         match turn.execute().await {
-            Ok(output) => {
+            Ok(record) => {
                 println!("Turn completed successfully!");
                 println!(
                     "Tokens: {} input, {} output, {} total",
-                    output.token_usage.input_tokens,
-                    output.token_usage.output_tokens,
-                    output.token_usage.total_tokens
+                    record.token_usage.input_tokens,
+                    record.token_usage.output_tokens,
+                    record.token_usage.total_tokens
                 );
                 Ok(())
             }
@@ -447,7 +447,7 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Execute(args) => execute_turn(args, &config).await?,
+        Commands::Execute(args) => run_execute_command(args, &config).await?,
         Commands::ToolTest(args) => tool_test(args, &config).await?,
         Commands::MockTest(args) => mock_test_turn(args).await?,
     }

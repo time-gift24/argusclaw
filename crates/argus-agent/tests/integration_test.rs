@@ -6,21 +6,19 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::{Mutex as TokioMutex, broadcast, oneshot};
 
+use argus_agent::history::TurnRecordKind;
 use argus_agent::turn::{TurnCancellation, TurnProgress};
 use argus_agent::{TurnBuilder, TurnConfig};
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::AgentRecord;
+use argus_protocol::ThreadId;
 use argus_protocol::ToolExecutionContext;
-use argus_protocol::events::{
-    MailboxMessage, MailboxMessageType, ThreadControlEvent, ThreadEvent, ThreadInbox,
-    ThreadMailbox, TurnControlInput,
-};
+use argus_protocol::events::ThreadEvent;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
     LlmProvider, LlmStreamEvent, Role, ToolCall, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
-use argus_protocol::{AgentId, MessageOverride, ThreadId};
 use argus_protocol::{
     ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction, HookEvent, HookHandler,
     RiskLevel, ToolHookContext,
@@ -32,6 +30,17 @@ use rust_decimal::Decimal;
 struct MockProvider {
     /// Responses to return in sequence
     responses: Mutex<Vec<MockResponse>>,
+}
+
+struct RequestCapturingProvider {
+    requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    response: CompletionResponse,
+}
+
+impl RequestCapturingProvider {
+    fn new(requests: Arc<Mutex<Vec<CompletionRequest>>>, response: CompletionResponse) -> Self {
+        Self { requests, response }
+    }
 }
 
 /// A single mock response
@@ -119,6 +128,22 @@ impl LlmProvider for MockProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RequestCapturingProvider {
+    fn model_name(&self) -> &str {
+        "capturing"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(self.response.clone())
     }
 }
 
@@ -278,11 +303,6 @@ impl FlakyProvider {
         }
     }
 
-    #[allow(dead_code)]
-    fn calls(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     fn should_fail(&self) -> bool {
         // Try to decrement the failure counter
         // Returns true if we should fail (counter was > 0)
@@ -382,11 +402,138 @@ async fn test_turn_integration_simple() {
         .build()
         .unwrap();
 
-    let output = turn.execute().await.unwrap();
+    let record = turn.execute().await.unwrap();
 
-    assert_eq!(output.appended_messages.len(), 1);
-    assert_eq!(output.appended_messages[0].role, Role::Assistant);
-    assert_eq!(output.appended_messages[0].content, "Hello, world!");
+    assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.messages.len(), 2);
+    assert_eq!(record.messages[0].role, Role::User);
+    assert_eq!(record.messages[0].content, "Hello");
+    assert_eq!(record.messages[1].role, Role::Assistant);
+    assert_eq!(record.messages[1].content, "Hello, world!");
+}
+
+#[tokio::test]
+async fn first_turn_injects_system_prompt_into_request_but_not_record() {
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RequestCapturingProvider::new(
+        Arc::clone(&captured_requests),
+        CompletionResponse {
+            content: Some("Hello, world!".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+    ));
+
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(1)
+        .thread_id("test-thread".to_string())
+        .messages(vec![ChatMessage::user("Hello")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a helpful assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let record = turn.execute().await.unwrap();
+
+    let requests = captured_requests.lock().unwrap();
+    let first_request = requests
+        .first()
+        .expect("provider should capture first request");
+    assert_eq!(first_request.messages[0].role, Role::System);
+    assert_eq!(
+        first_request.messages[0].content,
+        "You are a helpful assistant."
+    );
+    assert_eq!(first_request.messages[1].role, Role::User);
+    assert_eq!(first_request.messages[1].content, "Hello");
+
+    assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.messages.len(), 2);
+    assert_eq!(record.messages[0].role, Role::User);
+    assert_eq!(record.messages[0].content, "Hello");
+    assert_eq!(record.messages[1].role, Role::Assistant);
+    assert_eq!(record.messages[1].content, "Hello, world!");
+}
+
+#[tokio::test]
+async fn later_turns_still_inject_system_prompt_into_request_but_not_record() {
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RequestCapturingProvider::new(
+        Arc::clone(&captured_requests),
+        CompletionResponse {
+            content: Some("Second reply".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 12,
+            output_tokens: 6,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+    ));
+
+    let (stream_tx, _) = broadcast::channel(256);
+    let (thread_event_tx, _) = broadcast::channel(256);
+
+    let turn = TurnBuilder::default()
+        .turn_number(2)
+        .thread_id("test-thread".to_string())
+        .history(vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("First reply"),
+        ])
+        .messages(vec![ChatMessage::user("Follow-up")])
+        .provider(provider)
+        .agent_record(Arc::new(AgentRecord {
+            system_prompt: "You are a helpful assistant.".to_string(),
+            ..AgentRecord::default()
+        }))
+        .tools(vec![])
+        .hooks(vec![])
+        .config(TurnConfig::default())
+        .stream_tx(stream_tx)
+        .thread_event_tx(thread_event_tx)
+        .build()
+        .unwrap();
+
+    let record = turn.execute().await.unwrap();
+
+    let requests = captured_requests.lock().unwrap();
+    let first_request = requests.first().expect("provider should capture request");
+    assert_eq!(first_request.messages[0].role, Role::System);
+    assert_eq!(
+        first_request.messages[0].content,
+        "You are a helpful assistant."
+    );
+    assert_eq!(first_request.messages[1].role, Role::User);
+    assert_eq!(first_request.messages[1].content, "Hello");
+    assert_eq!(first_request.messages[2].role, Role::Assistant);
+    assert_eq!(first_request.messages[2].content, "First reply");
+    assert_eq!(first_request.messages[3].role, Role::User);
+    assert_eq!(first_request.messages[3].content, "Follow-up");
+
+    assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.messages.len(), 2);
+    assert_eq!(record.messages[0].role, Role::User);
+    assert_eq!(record.messages[0].content, "Follow-up");
+    assert_eq!(record.messages[1].role, Role::Assistant);
+    assert_eq!(record.messages[1].content, "Second reply");
 }
 
 struct HangingStreamingProvider;
@@ -562,14 +709,14 @@ async fn test_turn_integration_with_tool_call() {
         .build()
         .unwrap();
 
-    let output = turn.execute().await.unwrap();
+    let record = turn.execute().await.unwrap();
 
-    assert!(output.appended_messages.len() >= 3);
+    assert!(record.messages.len() >= 3);
     // Should have tracked tokens
-    assert!(output.token_usage.total_tokens > 0);
+    assert!(record.token_usage.total_tokens > 0);
     // First assistant message should have tool calls
-    let assistant_msgs: Vec<_> = output
-        .appended_messages
+    let assistant_msgs: Vec<_> = record
+        .messages
         .iter()
         .filter(|m| m.role == Role::Assistant)
         .collect();
@@ -696,263 +843,6 @@ async fn test_turn_streams_retry_events() {
     );
 }
 
-#[test]
-fn thread_inbox_drains_items_in_global_fifo_order() {
-    let mut inbox = ThreadInbox::default();
-
-    inbox.deliver_mailbox_message(MailboxMessage {
-        id: "msg-job-1".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Researcher".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-1".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(7),
-            agent_display_name: "Researcher".to_string(),
-            agent_description: "Finds background answers".to_string(),
-        },
-        text: "first result".to_string(),
-        timestamp: "2026-04-01T00:00:00Z".to_string(),
-        read: false,
-        summary: None,
-    });
-    inbox.enqueue_user_message(
-        "queued user follow-up".to_string(),
-        Some(MessageOverride::default()),
-    );
-    inbox.deliver_mailbox_message(MailboxMessage {
-        id: "msg-job-2".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Builder".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-2".to_string(),
-            success: false,
-            token_usage: None,
-            agent_id: AgentId::new(8),
-            agent_display_name: "Builder".to_string(),
-            agent_description: "Builds things".to_string(),
-        },
-        text: "second result".to_string(),
-        timestamp: "2026-04-01T00:00:01Z".to_string(),
-        read: false,
-        summary: None,
-    });
-
-    let drained = inbox.drain_for_turn();
-    let rendered = drained
-        .iter()
-        .cloned()
-        .map(TurnControlInput::into_message_text)
-        .collect::<Vec<_>>();
-
-    assert_eq!(rendered.len(), 3);
-    assert!(rendered[0].contains("Job: job-1"));
-    assert_eq!(rendered[1], "queued user follow-up");
-    assert!(rendered[0].contains("Subagent: Researcher"));
-    assert!(rendered[2].contains("Job: job-2"));
-    let msg_override = match &drained[1] {
-        TurnControlInput::UserMessage { msg_override, .. } => msg_override.clone(),
-        _ => panic!("second drained item should be a user message"),
-    };
-    assert!(
-        msg_override.is_some(),
-        "msg_override should survive inbox queueing",
-    );
-    assert!(inbox.is_empty());
-}
-
-#[test]
-fn thread_mailbox_preserves_fifo_user_messages() {
-    let mut mailbox = ThreadMailbox::default();
-
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "first user message".to_string(),
-        msg_override: None,
-    });
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "second user message".to_string(),
-        msg_override: Some(MessageOverride::default()),
-    });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-        id: "msg-job-3".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Verifier".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-3".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(9),
-            agent_display_name: "Verifier".to_string(),
-            agent_description: "Validates state transitions".to_string(),
-        },
-        text: "job result".to_string(),
-        timestamp: "2026-04-01T00:00:02Z".to_string(),
-        read: false,
-        summary: None,
-    }));
-
-    let drained = mailbox.drain_for_turn();
-    let rendered = drained
-        .into_iter()
-        .map(|item| item.into_message_text())
-        .collect::<Vec<_>>();
-
-    assert_eq!(rendered.len(), 3);
-    assert_eq!(rendered[0], "first user message");
-    assert_eq!(rendered[1], "second user message");
-    assert!(rendered[2].contains("Job: job-3"));
-}
-
-#[test]
-fn thread_mailbox_take_next_turn_message_clears_interrupts_and_preserves_fifo_and_override() {
-    let mut mailbox = ThreadMailbox::default();
-
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "interrupt-before-idle".to_string(),
-    });
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "first-user".to_string(),
-        msg_override: Some(MessageOverride::default()),
-    });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-        id: "msg-job-handoff-mailbox".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "MailboxHandoff".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-handoff-mailbox".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(12),
-            agent_display_name: "MailboxHandoff".to_string(),
-            agent_description: "Covers legacy idle handoff".to_string(),
-        },
-        text: "job-second".to_string(),
-        timestamp: "2026-04-01T00:00:03Z".to_string(),
-        read: false,
-        summary: None,
-    }));
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "interrupt-after-work".to_string(),
-    });
-
-    let first = mailbox
-        .take_next_turn_message()
-        .expect("first handoff item should exist");
-    let second = mailbox
-        .take_next_turn_message()
-        .expect("second handoff item should exist");
-
-    assert_eq!(first.content, "first-user");
-    assert!(
-        first.msg_override.is_some(),
-        "compatibility path should preserve msg_override",
-    );
-    assert!(
-        second.content.contains("Job: job-handoff-mailbox"),
-        "queued work should preserve FIFO order for idle handoff",
-    );
-    assert!(
-        second.msg_override.is_none(),
-        "job handoff should not carry user msg_override",
-    );
-    assert!(mailbox.take_next_turn_message().is_none());
-    assert!(
-        mailbox.drain_for_turn().is_empty(),
-        "interrupts should be cleared when idling into handoff",
-    );
-}
-
-#[test]
-fn thread_mailbox_legacy_interrupts_are_drained_before_inbox_items() {
-    let mut mailbox = ThreadMailbox::default();
-
-    mailbox.push(ThreadControlEvent::UserMessage {
-        content: "follow-up".to_string(),
-        msg_override: None,
-    });
-    mailbox.push(ThreadControlEvent::UserInterrupt {
-        content: "interrupt now".to_string(),
-    });
-    mailbox.push(ThreadControlEvent::DeliverMailboxMessage(MailboxMessage {
-        id: "msg-job-legacy".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Legacy".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-legacy".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(10),
-            agent_display_name: "Legacy".to_string(),
-            agent_description: "Legacy caller path".to_string(),
-        },
-        text: "legacy job".to_string(),
-        timestamp: "2026-04-01T00:00:04Z".to_string(),
-        read: false,
-        summary: None,
-    }));
-
-    let drained = mailbox
-        .drain_for_turn()
-        .into_iter()
-        .map(TurnControlInput::into_message_text)
-        .collect::<Vec<_>>();
-
-    assert_eq!(drained.len(), 3);
-    assert_eq!(drained[0], "interrupt now");
-    assert_eq!(drained[1], "follow-up");
-    assert!(drained[2].contains("Job: job-legacy"));
-}
-
-#[test]
-fn thread_inbox_take_next_turn_message_follows_global_fifo_handoff() {
-    let mut inbox = ThreadInbox::default();
-
-    inbox.deliver_mailbox_message(MailboxMessage {
-        id: "msg-job-handoff".to_string(),
-        from_thread_id: ThreadId::new(),
-        to_thread_id: ThreadId::new(),
-        from_label: "Handoff".to_string(),
-        message_type: MailboxMessageType::JobResult {
-            job_id: "job-handoff".to_string(),
-            success: true,
-            token_usage: None,
-            agent_id: AgentId::new(11),
-            agent_display_name: "Handoff".to_string(),
-            agent_description: "Idle handoff ordering".to_string(),
-        },
-        text: "job-first".to_string(),
-        timestamp: "2026-04-01T00:00:05Z".to_string(),
-        read: false,
-        summary: None,
-    });
-    inbox.enqueue_user_message("user-second".to_string(), Some(MessageOverride::default()));
-
-    let first = inbox
-        .take_next_turn_message()
-        .expect("first handoff item should exist");
-    let second = inbox
-        .take_next_turn_message()
-        .expect("second handoff item should exist");
-
-    assert!(
-        first.content.contains("Job: job-handoff"),
-        "job result should be handed off first in global FIFO",
-    );
-    assert!(first.msg_override.is_none());
-    assert_eq!(second.content, "user-second");
-    assert!(
-        second.msg_override.is_some(),
-        "msg_override should survive idle handoff",
-    );
-    assert!(inbox.take_next_turn_message().is_none());
-}
-
 #[tokio::test]
 async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch() {
     let originating_thread_id = ThreadId::new();
@@ -975,7 +865,6 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
 
     let (stream_tx, _) = broadcast::channel(32);
     let (thread_event_tx, _) = broadcast::channel(32);
-    let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let turn = TurnBuilder::default()
         .turn_number(1)
@@ -989,8 +878,6 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
         .config(TurnConfig::default())
         .stream_tx(stream_tx)
         .thread_event_tx(thread_event_tx)
-        .control_tx(control_tx)
-        .mailbox(Arc::new(tokio::sync::Mutex::new(ThreadMailbox::default())))
         .build()
         .unwrap();
 

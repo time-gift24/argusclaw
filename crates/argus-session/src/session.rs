@@ -1,11 +1,14 @@
 use std::sync::{Arc, Weak};
 
 use argus_agent::Thread;
-use argus_protocol::{SessionId, ThreadControlEvent, ThreadEvent, ThreadId};
+use argus_protocol::{
+    MailboxMessage, MessageOverride, SessionId, ThreadControlEvent, ThreadEvent, ThreadId,
+    ThreadMailbox,
+};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Summary of a session for listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +34,7 @@ pub struct Session {
     pub id: SessionId,
     pub name: String,
     threads: DashMap<ThreadId, Weak<RwLock<Thread>>>,
+    mailboxes: DashMap<ThreadId, Arc<Mutex<ThreadMailbox>>>,
 }
 
 impl Session {
@@ -39,15 +43,23 @@ impl Session {
             id,
             name,
             threads: DashMap::new(),
+            mailboxes: DashMap::new(),
         }
     }
 
     pub fn add_thread(&self, thread: Arc<RwLock<Thread>>) {
-        let thread_id = thread.try_read().map(|t| t.id()).unwrap_or_default();
-        self.threads.insert(thread_id, Arc::downgrade(&thread));
+        let thread_arc = Arc::clone(&thread);
+        let Ok(thread_guard) = thread.try_read() else {
+            return;
+        };
+        let thread_id = thread_guard.id();
+        let mailbox = thread_guard.mailbox();
+        self.threads.insert(thread_id, Arc::downgrade(&thread_arc));
+        self.mailboxes.insert(thread_id, mailbox);
     }
 
     pub fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<Thread>>> {
+        self.mailboxes.remove(thread_id);
         self.threads
             .remove(thread_id)
             .and_then(|pair| pair.1.upgrade())
@@ -60,8 +72,77 @@ impl Session {
             .and_then(|r| r.value().upgrade());
         if thread.is_none() {
             self.threads.remove(thread_id);
+            self.mailboxes.remove(thread_id);
         }
         thread
+    }
+
+    pub fn mailbox(&self, thread_id: &ThreadId) -> Option<Arc<Mutex<ThreadMailbox>>> {
+        self.mailboxes
+            .get(thread_id)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    async fn wake_runtime(&self, thread_id: &ThreadId) {
+        if let Some(thread) = self.get_thread(thread_id) {
+            let guard = thread.read().await;
+            let _ = guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+        }
+    }
+
+    pub async fn enqueue_user_message(
+        &self,
+        thread_id: &ThreadId,
+        content: String,
+        msg_override: Option<MessageOverride>,
+    ) -> bool {
+        let Some(mailbox) = self.mailbox(thread_id) else {
+            return false;
+        };
+        mailbox
+            .lock()
+            .await
+            .enqueue_user_message(content, msg_override);
+        self.wake_runtime(thread_id).await;
+        true
+    }
+
+    pub async fn enqueue_mailbox_message(
+        &self,
+        thread_id: &ThreadId,
+        message: MailboxMessage,
+    ) -> bool {
+        let Some(mailbox) = self.mailbox(thread_id) else {
+            return false;
+        };
+        mailbox.lock().await.enqueue_mailbox_message(message);
+        self.wake_runtime(thread_id).await;
+        true
+    }
+
+    pub async fn interrupt_thread(&self, thread_id: &ThreadId) -> bool {
+        let Some(thread) = self.get_thread(thread_id) else {
+            return self.mailbox(thread_id).is_some();
+        };
+        if !thread.read().await.is_turn_running() {
+            return true;
+        }
+        let Some(mailbox) = self.mailbox(thread_id) else {
+            return false;
+        };
+        mailbox.lock().await.interrupt_stop();
+        self.wake_runtime(thread_id).await;
+        true
+    }
+
+    pub async fn claim_job_result(
+        &self,
+        thread_id: &ThreadId,
+        job_id: &str,
+    ) -> Option<MailboxMessage> {
+        let mailbox = self.mailbox(thread_id)?;
+        let claimed = mailbox.lock().await.claim_job_result(job_id);
+        claimed
     }
 
     pub fn thread_ids(&self) -> Vec<ThreadId> {
@@ -74,14 +155,25 @@ impl Session {
         for entry in self.threads.iter() {
             let thread = entry.value().upgrade();
             if let Some(thread) = thread {
-                if let Ok(t) = thread.try_read() {
-                    match &event {
-                        ThreadEvent::UserInterrupt { content } => {
-                            let _ = t.send_control_event(ThreadControlEvent::UserInterrupt {
-                                content: content.clone(),
+                match &event {
+                    ThreadEvent::UserInterrupt { .. } => {
+                        if let Some(mailbox) = self.mailboxes.get(entry.key()) {
+                            let mailbox = Arc::clone(mailbox.value());
+                            let thread = Arc::clone(&thread);
+                            tokio::spawn(async move {
+                                if thread.read().await.is_turn_running() {
+                                    mailbox.lock().await.interrupt_stop();
+                                    let guard = thread.read().await;
+                                    let _ =
+                                        guard.control_tx().send(ThreadControlEvent::MailboxUpdated);
+                                }
                             });
                         }
-                        _ => t.broadcast_to_self(event.clone()),
+                    }
+                    _ => {
+                        if let Ok(t) = thread.try_read() {
+                            t.broadcast_to_self(event.clone());
+                        }
                     }
                 }
             } else {
@@ -91,6 +183,7 @@ impl Session {
 
         for thread_id in stale_thread_ids {
             self.threads.remove(&thread_id);
+            self.mailboxes.remove(&thread_id);
         }
     }
 
@@ -115,6 +208,7 @@ impl Session {
 
         for thread_id in stale_thread_ids {
             self.threads.remove(&thread_id);
+            self.mailboxes.remove(&thread_id);
         }
         summaries
     }

@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use crate::error::TurnLogError;
 use crate::history::{TurnRecord, TurnRecordKind, flatten_turn_messages};
 
-const TURNS_DIR: &str = "turns";
+const TURNS_JSONL_FILE: &str = "turns.jsonl";
 
 #[derive(Debug, Clone)]
 pub struct RecoveredThreadLogState {
@@ -39,24 +39,19 @@ impl RecoveredThreadLogState {
     }
 }
 
-pub fn turns_dir(base_dir: &Path) -> PathBuf {
-    base_dir.join(TURNS_DIR)
+pub fn turns_jsonl_path(base_dir: &Path) -> PathBuf {
+    base_dir.join(TURNS_JSONL_FILE)
 }
 
-pub fn meta_jsonl_path(base_dir: &Path) -> PathBuf {
-    turns_dir(base_dir).join("meta.jsonl")
-}
-
-/// Append a single TurnRecord to the append-only meta.jsonl log.
+/// Append a single TurnRecord to the append-only turns.jsonl log.
 pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<(), TurnLogError> {
-    let turns_dir = turns_dir(base_dir);
-    fs::create_dir_all(&turns_dir)
+    fs::create_dir_all(base_dir)
         .await
         .map_err(|error| TurnLogError::MalformedEvent {
             line: 0,
-            reason: format!("failed to create turns dir: {error}"),
+            reason: format!("failed to create trace dir: {error}"),
         })?;
-    let meta_path = meta_jsonl_path(base_dir);
+    let meta_path = turns_jsonl_path(base_dir);
     let line = serde_json::to_string(record).map_err(|error| TurnLogError::MalformedEvent {
         line: 0,
         reason: format!("failed to serialize turn record: {error}"),
@@ -68,13 +63,13 @@ pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<
         .await
         .map_err(|error| TurnLogError::MalformedEvent {
             line: 0,
-            reason: format!("failed to open meta.jsonl: {error}"),
+            reason: format!("failed to open turns.jsonl: {error}"),
         })?;
     file.write_all(line.as_bytes())
         .await
         .map_err(|error| TurnLogError::MalformedEvent {
             line: 0,
-            reason: format!("failed to append to meta.jsonl: {error}"),
+            reason: format!("failed to append to turns.jsonl: {error}"),
         })?;
     file.write_all(b"\n")
         .await
@@ -85,7 +80,7 @@ pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<
     Ok(())
 }
 
-/// Recover thread log state by replaying the append-only meta.jsonl.
+/// Recover thread log state by replaying the append-only turns.jsonl.
 /// Validates that:
 /// - First record is UserTurn with turn_number = 1
 /// - User turn numbers are strictly increasing
@@ -93,7 +88,7 @@ pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<
 pub async fn recover_thread_log_state(
     base_dir: &Path,
 ) -> Result<RecoveredThreadLogState, TurnLogError> {
-    let meta_path = meta_jsonl_path(base_dir);
+    let meta_path = turns_jsonl_path(base_dir);
     if !fs::try_exists(&meta_path).await.unwrap_or(false) {
         return Ok(RecoveredThreadLogState { turns: Vec::new() });
     }
@@ -102,7 +97,7 @@ pub async fn recover_thread_log_state(
             .await
             .map_err(|error| TurnLogError::MalformedEvent {
                 line: 0,
-                reason: format!("failed to read meta.jsonl: {error}"),
+                reason: format!("failed to read turns.jsonl: {error}"),
             })?;
 
     let mut turns = Vec::new();
@@ -218,7 +213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_and_recover_meta_jsonl_roundtrip() {
+    async fn append_and_recover_turns_jsonl_roundtrip() {
         let temp_dir = tempdir().expect("temp dir should exist");
         let base_dir = temp_dir.path();
 
@@ -253,6 +248,8 @@ mod tests {
             .await
             .expect("recovery should succeed");
 
+        assert!(turns_jsonl_path(base_dir).exists());
+        assert!(!base_dir.join("turns").exists());
         assert_eq!(recovered.turns.len(), 3);
         assert!(matches!(recovered.turns[0].kind, TurnRecordKind::UserTurn));
         assert!(matches!(

@@ -27,7 +27,6 @@ const MAX_READ_SIZE: u64 = 1024 * 1024;
 
 /// Arguments for the read tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct ReadArgs {
     /// Path to the file to read
     path: String,
@@ -83,22 +82,16 @@ impl NamedTool for ReadTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let path_str = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::ExecutionFailed {
+        let args: ReadArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "read".to_string(),
-                reason: "Missing required parameter: path".to_string(),
-            }
-        })?;
-
-        let offset = input
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1)
-            .max(1) as usize;
-        let limit = input.get("limit").and_then(|v| v.as_u64());
+                reason: format!("Invalid arguments: {e}"),
+            })?;
+        let offset = args.offset.unwrap_or(1).max(1) as usize;
+        let limit = args.limit.map(u64::from);
 
         // Validate path (sandboxing)
-        let path = validate_path(path_str, None)?;
+        let path = validate_path(&args.path, None)?;
 
         // Check file exists and is a file
         if !path.exists() {
@@ -180,12 +173,10 @@ mod tests {
 
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (tx, _) = broadcast::channel(16);
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx: tx,
-            control_tx,
         })
     }
 

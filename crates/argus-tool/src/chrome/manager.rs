@@ -149,15 +149,7 @@ pub struct ChromeManager {
 }
 
 impl ChromeManager {
-    #[allow(dead_code)]
-    const DEFAULT_SESSION_LIMIT: usize = 4;
     const PRODUCTION_SESSION_LIMIT: usize = 1;
-
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn new(backend: Arc<dyn BrowserBackend>, paths: ChromePaths) -> Self {
-        Self::new_with_session_limit(backend, None, paths, Self::DEFAULT_SESSION_LIMIT)
-    }
 
     #[must_use]
     fn new_with_session_limit(
@@ -287,7 +279,7 @@ impl ChromeManager {
         static NEXT_TEST_MANAGER_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_TEST_MANAGER_ID.fetch_add(1, Ordering::Relaxed) + 1;
         let home = std::env::temp_dir().join(format!("arguswing-chrome-tests-{id}"));
-        Self::new(backend, ChromePaths::from_home(&home))
+        Self::new_with_session_limit(backend, None, ChromePaths::from_home(&home), 4)
     }
 
     pub async fn install_driver(

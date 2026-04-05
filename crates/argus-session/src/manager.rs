@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use argus_agent::thread_trace_store::{
+    chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
+};
 use argus_agent::tool_context::current_agent_id;
 use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
-    SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -80,6 +83,7 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
 struct SessionSchedulerBackend {
     template_manager: Arc<TemplateManager>,
     job_manager: Arc<JobManager>,
+    sessions: Arc<DashMap<SessionId, Arc<Session>>>,
 }
 
 impl std::fmt::Debug for SessionSchedulerBackend {
@@ -89,10 +93,15 @@ impl std::fmt::Debug for SessionSchedulerBackend {
 }
 
 impl SessionSchedulerBackend {
-    fn new(template_manager: Arc<TemplateManager>, job_manager: Arc<JobManager>) -> Self {
+    fn new(
+        template_manager: Arc<TemplateManager>,
+        job_manager: Arc<JobManager>,
+        sessions: Arc<DashMap<SessionId, Arc<Session>>>,
+    ) -> Self {
         Self {
             template_manager,
             job_manager,
+            sessions,
         }
     }
 
@@ -132,20 +141,35 @@ impl SessionSchedulerBackend {
 
     async fn claim_queued_runtime_result(
         &self,
-        control_tx: &tokio::sync::mpsc::UnboundedSender<ThreadControlEvent>,
+        thread_id: ThreadId,
         job_id: &str,
     ) -> std::result::Result<(), ToolError> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if let Err(error) = control_tx.send(ThreadControlEvent::ClaimQueuedJobResult {
-            job_id: job_id.to_string(),
-            reply_tx,
-        }) {
-            tracing::warn!(job_id, "failed to enqueue queued-job claim: {error}");
+        let thread_pool = self.thread_pool();
+        let Some(thread) = thread_pool.loaded_thread(&thread_id) else {
+            tracing::warn!(job_id, thread_id = %thread_id, "failed to claim queued job result: thread not loaded");
             return Ok(());
-        }
+        };
 
-        if let Err(error) = reply_rx.await {
-            tracing::warn!(job_id, "queued-job claim reply dropped: {error}");
+        let session_id = {
+            let guard = thread.read().await;
+            guard.session_id()
+        };
+        let Some(session) = self
+            .sessions
+            .get(&session_id)
+            .map(|session| session.value().clone())
+        else {
+            tracing::warn!(job_id, thread_id = %thread_id, session_id = %session_id, "failed to claim queued job result: session not loaded");
+            return Ok(());
+        };
+
+        if session.claim_job_result(&thread_id, job_id).await.is_none() {
+            tracing::debug!(
+                job_id,
+                thread_id = %thread_id,
+                session_id = %session_id,
+                "claim queued job result missed because the mailbox item was already absent"
+            );
         }
 
         Ok(())
@@ -161,64 +185,91 @@ impl SessionSchedulerBackend {
         guard.agent_record().display_name.clone()
     }
 
-    fn active_child_thread_ids(&self, thread_id: ThreadId) -> Vec<ThreadId> {
+    async fn active_child_thread_ids(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::result::Result<Vec<ThreadId>, ToolError> {
         let thread_pool = self.thread_pool();
-        thread_pool
-            .child_thread_ids(&thread_id)
-            .into_iter()
-            .filter(|child_thread_id| {
-                thread_pool
-                    .runtime_summary(child_thread_id)
-                    .is_some_and(|summary| {
-                        summary.runtime.kind == ThreadPoolRuntimeKind::Job
-                            && summary
-                                .runtime
-                                .job_id
-                                .as_deref()
-                                .is_some_and(|job_id| self.job_manager.is_job_pending(job_id))
-                    })
-            })
-            .collect()
+        let children = thread_pool
+            .recover_child_jobs(thread_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?;
+        let mut active = Vec::new();
+        for child in children {
+            if self
+                .job_manager
+                .is_job_pending_persisted(&child.job_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+            {
+                active.push(child.thread_id);
+            }
+        }
+        Ok(active)
     }
 
-    fn mailbox_ready_child_thread_ids(&self, thread_id: ThreadId) -> Vec<ThreadId> {
+    async fn mailbox_ready_child_thread_ids(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::result::Result<Vec<ThreadId>, ToolError> {
         let thread_pool = self.thread_pool();
-        self.active_child_thread_ids(thread_id)
+        Ok(self
+            .active_child_thread_ids(thread_id)
+            .await?
             .into_iter()
             .filter(|child_thread_id| thread_pool.loaded_thread(child_thread_id).is_some())
-            .collect()
+            .collect())
     }
 
-    fn is_thread_target_reachable(
+    async fn is_thread_target_reachable(
         &self,
         source_thread_id: ThreadId,
         target_thread_id: ThreadId,
-    ) -> bool {
+    ) -> std::result::Result<bool, ToolError> {
         if source_thread_id == target_thread_id {
-            return true;
+            return Ok(true);
         }
 
         let thread_pool = self.thread_pool();
-        if thread_pool.parent_thread_id(&source_thread_id) == Some(target_thread_id) {
-            return true;
+        let parent = match thread_pool.parent_thread_id(&source_thread_id) {
+            Some(parent) => Some(parent),
+            None => thread_pool
+                .recover_parent_thread_id(&source_thread_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?,
+        };
+        if parent == Some(target_thread_id) {
+            return Ok(true);
         }
 
-        thread_pool
-            .child_thread_ids(&source_thread_id)
+        Ok(thread_pool
+            .recover_child_jobs(source_thread_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?
             .into_iter()
-            .any(|child_thread_id| child_thread_id == target_thread_id)
+            .any(|child| child.thread_id == target_thread_id))
     }
 
-    fn validate_mailbox_target_ready(
+    async fn validate_mailbox_target_ready(
         &self,
         target_thread_id: ThreadId,
     ) -> std::result::Result<(), ToolError> {
         let thread_pool = self.thread_pool();
-        let summary = thread_pool
-            .runtime_summary(&target_thread_id)
-            .ok_or_else(|| {
-                Self::scheduler_error(format!("thread {target_thread_id} is not registered"))
-            })?;
+        let Some(summary) = thread_pool.runtime_summary(&target_thread_id) else {
+            if thread_pool
+                .recover_parent_thread_id(&target_thread_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+                .is_some()
+            {
+                return Err(Self::scheduler_error(format!(
+                    "thread {target_thread_id} is not ready to receive mailbox messages"
+                )));
+            }
+            return Err(Self::scheduler_error(format!(
+                "thread {target_thread_id} is not registered"
+            )));
+        };
 
         if summary.runtime.kind == ThreadPoolRuntimeKind::Job
             && thread_pool.loaded_thread(&target_thread_id).is_none()
@@ -239,7 +290,7 @@ impl SessionSchedulerBackend {
         let thread_pool = self.thread_pool();
         let mut matches = Vec::new();
 
-        for child_thread_id in self.mailbox_ready_child_thread_ids(thread_id) {
+        for child_thread_id in self.mailbox_ready_child_thread_ids(thread_id).await? {
             let Some(thread) = thread_pool.loaded_thread(&child_thread_id) else {
                 continue;
             };
@@ -271,17 +322,29 @@ impl SessionSchedulerBackend {
         let thread_pool = self.thread_pool();
 
         if let Some(job_id) = to.strip_prefix("job:") {
-            if !self.job_manager.is_job_pending(job_id) {
+            if !matches!(
+                self.job_manager
+                    .get_job_result_status_persisted(thread_id, job_id, false)
+                    .await
+                    .map_err(|error| Self::scheduler_error(error.to_string()))?,
+                JobLookup::Pending
+            ) {
                 return Err(Self::scheduler_error(format!("job {job_id} is not active")));
             }
-            let target = thread_pool.get_thread_binding(job_id).ok_or_else(|| {
-                Self::scheduler_error(format!("job {job_id} is not bound to a thread"))
-            })?;
-            self.validate_mailbox_target_ready(target).map_err(|_| {
-                Self::scheduler_error(format!(
-                    "job {job_id} is not ready to receive mailbox messages"
-                ))
-            })?;
+            let target = thread_pool
+                .recover_thread_binding(job_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+                .ok_or_else(|| {
+                    Self::scheduler_error(format!("job {job_id} is not bound to a thread"))
+                })?;
+            self.validate_mailbox_target_ready(target)
+                .await
+                .map_err(|_| {
+                    Self::scheduler_error(format!(
+                        "job {job_id} is not ready to receive mailbox messages"
+                    ))
+                })?;
             return Ok(vec![target]);
         }
 
@@ -289,25 +352,30 @@ impl SessionSchedulerBackend {
             let target = ThreadId::parse(thread_id_str).map_err(|error| {
                 Self::scheduler_error(format!("invalid thread target {thread_id_str}: {error}"))
             })?;
-            if !self.is_thread_target_reachable(thread_id, target) {
+            if !self.is_thread_target_reachable(thread_id, target).await? {
                 return Err(Self::scheduler_error(format!(
                     "thread {target} is not reachable from the current thread"
                 )));
             }
-            self.validate_mailbox_target_ready(target)?;
+            self.validate_mailbox_target_ready(target).await?;
             return Ok(vec![target]);
         }
 
         if to == "parent" {
-            let parent = thread_pool.parent_thread_id(&thread_id).ok_or_else(|| {
-                Self::scheduler_error("current thread does not have a direct parent")
-            })?;
-            self.validate_mailbox_target_ready(parent)?;
+            let parent = match thread_pool.parent_thread_id(&thread_id) {
+                Some(parent) => Some(parent),
+                None => thread_pool
+                    .recover_parent_thread_id(&thread_id)
+                    .await
+                    .map_err(|error| Self::scheduler_error(error.to_string()))?,
+            }
+            .ok_or_else(|| Self::scheduler_error("current thread does not have a direct parent"))?;
+            self.validate_mailbox_target_ready(parent).await?;
             return Ok(vec![parent]);
         }
 
         if to == "*" {
-            let children = self.mailbox_ready_child_thread_ids(thread_id);
+            let children = self.mailbox_ready_child_thread_ids(thread_id).await?;
             if children.is_empty() {
                 return Err(Self::scheduler_error(
                     "current thread does not have any mailbox-ready direct child jobs",
@@ -347,7 +415,6 @@ impl SchedulerBackend for SessionSchedulerBackend {
                 request.prompt,
                 request.context,
                 request.pipe_tx,
-                request.control_tx,
             )
             .await
             .map_err(|error| ToolError::ExecutionFailed {
@@ -386,16 +453,20 @@ impl SchedulerBackend for SessionSchedulerBackend {
         &self,
         request: SchedulerLookupRequest,
     ) -> std::result::Result<SchedulerJobLookup, ToolError> {
-        let lookup =
-            self.job_manager
-                .get_job_result_status(request.thread_id, &request.job_id, false);
+        let lookup = self
+            .job_manager
+            .get_job_result_status_persisted(request.thread_id, &request.job_id, false)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?;
 
         if request.consume && matches!(lookup, JobLookup::Completed(_)) {
-            self.claim_queued_runtime_result(&request.control_tx, &request.job_id)
+            self.claim_queued_runtime_result(request.thread_id, &request.job_id)
                 .await?;
-            let consumed_lookup =
-                self.job_manager
-                    .get_job_result_status(request.thread_id, &request.job_id, true);
+            let consumed_lookup = self
+                .job_manager
+                .get_job_result_status_persisted(request.thread_id, &request.job_id, true)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?;
             return Ok(Self::map_job_lookup(consumed_lookup));
         }
 
@@ -425,10 +496,44 @@ impl SchedulerBackend for SessionSchedulerBackend {
                 summary: request.summary.clone(),
             };
 
-            thread_pool
-                .deliver_mailbox_message(*target, message)
-                .await
-                .map_err(|error| Self::scheduler_error(error.to_string()))?;
+            match thread_pool.runtime_summary(target) {
+                Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
+                    let session_id = summary.runtime.session_id.ok_or_else(|| {
+                        Self::scheduler_error(format!(
+                            "chat thread {} is missing a session binding",
+                            target
+                        ))
+                    })?;
+                    let session = self
+                        .sessions
+                        .get(&session_id)
+                        .map(|entry| entry.value().clone())
+                        .ok_or_else(|| {
+                            Self::scheduler_error(format!(
+                                "session {} is not loaded for thread {}",
+                                session_id, target
+                            ))
+                        })?;
+                    thread_pool.register_chat_thread(session_id, *target);
+                    let thread = thread_pool
+                        .ensure_chat_runtime(session_id, *target)
+                        .await
+                        .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                    session.add_thread(thread);
+                    if !session.enqueue_mailbox_message(target, message).await {
+                        return Err(Self::scheduler_error(format!(
+                            "thread {} is not registered in loaded session {}",
+                            target, session_id
+                        )));
+                    }
+                }
+                _ => {
+                    thread_pool
+                        .deliver_mailbox_message(*target, message)
+                        .await
+                        .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                }
+            }
         }
 
         Ok(SendMessageResponse {
@@ -470,7 +575,7 @@ pub struct SessionManager {
     session_repo: Arc<dyn SessionRepository>,
     thread_repo: Arc<dyn ThreadRepository>,
     llm_provider_repo: Arc<dyn LlmProviderRepository>,
-    sessions: DashMap<SessionId, Arc<Session>>,
+    sessions: Arc<DashMap<SessionId, Arc<Session>>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     trace_dir: PathBuf,
@@ -491,17 +596,50 @@ impl SessionManager {
         thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
     ) -> Self {
+        let sessions = Arc::new(DashMap::new());
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             template_manager.clone(),
             job_manager.clone(),
+            Arc::clone(&sessions),
         ));
         tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
+        {
+            let sessions = Arc::clone(&sessions);
+            let thread_pool = Arc::clone(&thread_pool);
+            job_manager.set_chat_mailbox_forwarder(move |thread_id, message| {
+                let sessions = Arc::clone(&sessions);
+                let thread_pool = Arc::clone(&thread_pool);
+                async move {
+                    let Some(summary) = thread_pool.runtime_summary(&thread_id) else {
+                        return false;
+                    };
+                    if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
+                        return false;
+                    }
+                    let Some(session_id) = summary.runtime.session_id else {
+                        return false;
+                    };
+                    let Some(session) =
+                        sessions.get(&session_id).map(|entry| entry.value().clone())
+                    else {
+                        return false;
+                    };
+                    thread_pool.register_chat_thread(session_id, thread_id);
+                    let Ok(thread) = thread_pool.ensure_chat_runtime(session_id, thread_id).await
+                    else {
+                        return false;
+                    };
+                    session.add_thread(thread);
+                    session.enqueue_mailbox_message(&thread_id, message).await
+                }
+            });
+        }
 
         Self {
             session_repo,
             thread_repo,
             llm_provider_repo,
-            sessions: DashMap::new(),
+            sessions,
             template_manager,
             provider_resolver,
             trace_dir,
@@ -601,7 +739,11 @@ impl SessionManager {
 
     /// Unload a session from memory.
     pub async fn unload(&self, session_id: SessionId) -> Result<()> {
-        self.sessions.remove(&session_id);
+        if let Some((_, session)) = self.sessions.remove(&session_id) {
+            for thread_id in session.thread_ids() {
+                self.thread_pool.remove_runtime(&thread_id);
+            }
+        }
         Ok(())
     }
 
@@ -811,6 +953,22 @@ impl SessionManager {
 
         // Generate thread ID (UUID)
         let thread_id = ThreadId::new();
+        let thread_trace_dir = chat_thread_base_dir(&self.trace_dir, session_id, thread_id);
+        persist_thread_metadata(
+            &thread_trace_dir,
+            &ThreadTraceMetadata {
+                thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: agent_record.clone(),
+            },
+        )
+        .await
+        .map_err(|error| ArgusError::DatabaseError {
+            reason: error.to_string(),
+        })?;
 
         // Insert into DB
         use argus_repository::types::ThreadRecord;
@@ -829,8 +987,14 @@ impl SessionManager {
         self.thread_repo
             .upsert_thread(&thread_record)
             .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
+            .map_err(|e| {
+                let thread_trace_dir = thread_trace_dir.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::fs::remove_dir_all(thread_trace_dir).await;
+                });
+                ArgusError::DatabaseError {
+                    reason: e.to_string(),
+                }
             })?;
         self.thread_pool.register_chat_thread(session_id, thread_id);
         let thread = match self
@@ -842,6 +1006,7 @@ impl SessionManager {
             Err(error) => {
                 self.thread_pool.remove_runtime(&thread_id);
                 let _ = self.thread_repo.delete_thread(&thread_id).await;
+                let _ = tokio::fs::remove_dir_all(&thread_trace_dir).await;
                 return Err(ArgusError::LlmError {
                     reason: error.to_string(),
                 });
@@ -1002,37 +1167,35 @@ impl SessionManager {
         thread_id: &ThreadId,
         message: String,
     ) -> Result<()> {
-        self.load(session_id).await?;
+        let session = self.load(session_id).await?;
         self.ensure_thread_in_session(session_id, thread_id).await?;
         self.thread_pool
-            .send_chat_message(session_id, *thread_id, message)
+            .register_chat_thread(session_id, *thread_id);
+        let thread = self
+            .thread_pool
+            .ensure_chat_runtime(session_id, *thread_id)
             .await
-            .map_err(|e| ArgusError::LlmError {
-                reason: e.to_string(),
-            })
+            .map_err(|error| ArgusError::LlmError {
+                reason: error.to_string(),
+            })?;
+        session.add_thread(thread);
+        if session.enqueue_user_message(thread_id, message, None).await {
+            Ok(())
+        } else {
+            Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()))
+        }
     }
 
     /// Send a cancel/interrupt signal to a specific thread's active turn.
     pub async fn cancel_thread(&self, session_id: SessionId, thread_id: &ThreadId) -> Result<()> {
-        let session = self
-            .sessions
-            .get(&session_id)
-            .ok_or(ArgusError::SessionNotFound(session_id))?;
+        let session = self.load(session_id).await?;
+        self.ensure_thread_in_session(session_id, thread_id).await?;
 
-        let thread = session
-            .get_thread(thread_id)
-            .or_else(|| self.thread_pool.loaded_chat_thread(thread_id))
-            .ok_or(ArgusError::ThreadNotFound(thread_id.to_string()))?;
-
-        let result = thread
-            .read()
-            .await
-            .send_control_event(ThreadControlEvent::UserInterrupt {
-                content: "stop".to_string(),
-            });
-        result.map_err(|e| ArgusError::LlmError {
-            reason: e.to_string(),
-        })
+        if session.interrupt_thread(thread_id).await {
+            Ok(())
+        } else {
+            Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()))
+        }
     }
 
     /// Get the thread message history, falling back to turn trace recovery when
@@ -1223,9 +1386,7 @@ async fn recover_thread_state_from_trace(
     session_id: &SessionId,
     thread_id: &ThreadId,
 ) -> Result<RecoveredThreadState> {
-    let base_dir = trace_dir
-        .join(session_id.to_string())
-        .join(thread_id.to_string());
+    let base_dir = chat_thread_base_dir(trace_dir, *session_id, *thread_id);
     let recovered =
         recover_thread_log_state(&base_dir)
             .await
@@ -1266,17 +1427,302 @@ fn format_turn_log_recovery_error(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Arc;
 
-    use super::{recover_messages_from_trace, recover_thread_state_from_trace};
+    use super::{
+        recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
+        SessionSchedulerBackend,
+    };
     use argus_agent::history::TurnRecord;
+    use argus_agent::thread_trace_store::{
+        chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
+    };
     use argus_agent::turn_log_store::append_turn_record;
     use argus_protocol::llm::ChatMessage;
-    use argus_protocol::TokenUsage;
-    use argus_protocol::{SessionId, ThreadId};
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+        LlmProviderRepository,
+    };
+    use argus_protocol::{
+        AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
+        ThinkingConfig, ThreadId, TokenUsage,
+    };
+    use argus_repository::migrate;
+    use argus_repository::traits::JobRepository;
+    use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
+    use argus_repository::types::{
+        AgentId as RepoAgentId, JobRecord, JobResult, JobStatus, JobType,
+    };
+    use argus_repository::ArgusSqlite;
+    use argus_template::TemplateManager;
+    use argus_tool::{SchedulerBackend, SchedulerLookupRequest};
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use dashmap::DashMap;
+    use futures_util::stream;
+    use sqlx::SqlitePool;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use tokio::time::{sleep, timeout, Duration};
+    use uuid::Uuid;
+
+    #[derive(Debug)]
+    struct FixedProvider {
+        model_name: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FixedProvider {
+        fn model_name(&self) -> &str {
+            &self.model_name
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: "not used in routing tests".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: self.model_name.clone(),
+                capability: "stream_complete".to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct DelayedProvider {
+        model_name: String,
+        response: String,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DelayedProvider {
+        fn model_name(&self) -> &str {
+            &self.model_name
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            sleep(self.delay).await;
+            Ok(CompletionResponse {
+                content: Some(self.response.clone()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: "not used in routing tests".to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct HangingStreamingProvider {
+        model_name: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for HangingStreamingProvider {
+        fn model_name(&self) -> &str {
+            &self.model_name
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: self.model_name.clone(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            Ok(Box::pin(stream::pending()))
+        }
+    }
+
+    struct FixedProviderResolver {
+        provider: Arc<dyn LlmProvider>,
+    }
+
+    impl std::fmt::Debug for FixedProviderResolver {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FixedProviderResolver").finish()
+        }
+    }
+
+    impl FixedProviderResolver {
+        fn new(provider: Arc<dyn LlmProvider>) -> Self {
+            Self { provider }
+        }
+    }
+
+    struct SessionManagerHarness {
+        manager: SessionManager,
+        temp_dir: TempDir,
+        sqlite: Arc<ArgusSqlite>,
+        template_manager: Arc<TemplateManager>,
+        session_id: SessionId,
+        thread_id: ThreadId,
+        agent_id: AgentId,
+    }
+
+    #[async_trait]
+    impl argus_protocol::ProviderResolver for FixedProviderResolver {
+        async fn resolve(&self, _id: ProviderId) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn default_provider(&self) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+
+        async fn resolve_with_model(
+            &self,
+            _id: ProviderId,
+            _model: &str,
+        ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+            Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    async fn test_session_manager_harness_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> SessionManagerHarness {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        let agent_id = AgentId::new(11);
+        template_manager
+            .upsert(AgentRecord {
+                id: agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-test".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent upsert should succeed");
+
+        let provider_resolver = Arc::new(FixedProviderResolver::new(provider));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            Arc::clone(&template_manager),
+            provider_resolver.clone(),
+            Arc::clone(&tool_manager),
+            temp_dir.path().join("trace"),
+            sqlite.clone() as Arc<dyn argus_repository::traits::JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+        ));
+        let session_manager = SessionManager::new(
+            sqlite.clone() as Arc<dyn SessionRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            Arc::clone(&template_manager),
+            provider_resolver,
+            tool_manager,
+            temp_dir.path().join("trace"),
+            job_manager.thread_pool(),
+            job_manager,
+        );
+
+        let session_id: SessionId = session_manager
+            .create("routing session".to_string())
+            .await
+            .expect("session should create");
+        let thread_id: ThreadId = session_manager
+            .create_thread(session_id, agent_id, Some(ProviderId::new(1)), None)
+            .await
+            .expect("thread should create");
+
+        SessionManagerHarness {
+            manager: session_manager,
+            temp_dir,
+            sqlite,
+            template_manager,
+            session_id,
+            thread_id,
+            agent_id,
+        }
+    }
+
+    async fn test_session_manager_with_provider(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (SessionManager, TempDir, SessionId, ThreadId) {
+        let harness = test_session_manager_harness_with_provider(provider).await;
+        (
+            harness.manager,
+            harness.temp_dir,
+            harness.session_id,
+            harness.thread_id,
+        )
+    }
+
+    async fn test_session_manager() -> (SessionManager, TempDir, SessionId, ThreadId) {
+        test_session_manager_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await
+    }
 
     fn usage(total_tokens: u32) -> TokenUsage {
         TokenUsage {
@@ -1284,6 +1730,366 @@ mod tests {
             output_tokens: 1,
             total_tokens,
         }
+    }
+
+    fn restarted_scheduler_backend(
+        sqlite: Arc<ArgusSqlite>,
+        template_manager: Arc<TemplateManager>,
+        trace_dir: PathBuf,
+        provider: Arc<dyn LlmProvider>,
+    ) -> SessionSchedulerBackend {
+        let provider_resolver = Arc::new(FixedProviderResolver::new(provider));
+        let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
+            template_manager.clone(),
+            provider_resolver,
+            Arc::new(argus_tool::ToolManager::new()),
+            trace_dir,
+            sqlite.clone() as Arc<dyn JobRepository>,
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            sqlite as Arc<dyn LlmProviderRepository>,
+        ));
+        SessionSchedulerBackend::new(template_manager, job_manager, Arc::new(DashMap::new()))
+    }
+
+    #[tokio::test]
+    async fn cancel_thread_when_idle_is_a_noop() {
+        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+
+        manager
+            .cancel_thread(session_id, &thread_id)
+            .await
+            .expect("cancel should succeed");
+
+        let session = manager.load(session_id).await.expect("session should load");
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+        let mut mailbox = mailbox.lock().await;
+
+        assert!(
+            !mailbox.take_stop_signal(),
+            "cancel_thread should be a no-op for an idle thread mailbox"
+        );
+        assert!(
+            mailbox.take_next_turn_message().is_none(),
+            "cancel_thread should not queue a new turn input"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_wakes_existing_runtime_loop() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(DelayedProvider {
+                model_name: "routing-delay".to_string(),
+                response: "bridge".to_string(),
+                delay: Duration::from_millis(200),
+            }))
+            .await;
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should succeed");
+
+        let session = manager.load(session_id).await.expect("session should load");
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if mailbox.lock().await.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should wake and consume the queued turn input");
+
+        let mut mailbox = mailbox.lock().await;
+        assert!(
+            mailbox.take_next_turn_message().is_none(),
+            "runtime should consume the queued user message after waking"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_rehydrates_evicted_chat_runtime_before_enqueueing() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(DelayedProvider {
+                model_name: "routing-delay".to_string(),
+                response: "bridge".to_string(),
+                delay: Duration::from_millis(200),
+            }))
+            .await;
+
+        let session = manager.load(session_id).await.expect("session should load");
+        assert!(
+            manager.thread_pool.remove_runtime(&thread_id),
+            "chat runtime should be removable for rehydrate coverage"
+        );
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should reload the evicted runtime");
+
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should refresh the thread mailbox after reload");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if mailbox.lock().await.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("reloaded runtime should consume the queued user message");
+
+        assert!(
+            session.get_thread(&thread_id).is_some(),
+            "session should refresh its thread handle after runtime reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_thread_rehydrates_from_trace_snapshot_instead_of_latest_template() {
+        let (manager, temp_dir, session_id, thread_id) = test_session_manager().await;
+        let snapshot_path = temp_dir
+            .path()
+            .join("trace")
+            .join(session_id.to_string())
+            .join(thread_id.to_string())
+            .join("thread.json");
+
+        let snapshot_content =
+            fs::read_to_string(&snapshot_path).expect("thread snapshot should be persisted");
+        let snapshot: ThreadTraceMetadata =
+            serde_json::from_str(&snapshot_content).expect("thread snapshot should deserialize");
+        assert_eq!(snapshot.kind, ThreadTraceKind::ChatRoot);
+        assert_eq!(snapshot.root_session_id, Some(session_id));
+        assert_eq!(
+            snapshot.agent_snapshot.system_prompt,
+            "You are a routing test agent."
+        );
+
+        manager
+            .template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(11),
+                display_name: "Routing Test Agent Updated".to_string(),
+                description: "Updated template".to_string(),
+                version: "2.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-test-v2".to_string()),
+                system_prompt: "You are a mutated routing test agent.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("template upsert should succeed");
+
+        assert!(
+            manager.thread_pool.remove_runtime(&thread_id),
+            "existing runtime should be evicted before rehydration"
+        );
+
+        let thread = manager
+            .thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .expect("chat runtime should rebuild from trace snapshot");
+        let guard = thread.read().await;
+        assert_eq!(
+            guard.agent_record().system_prompt,
+            "You are a routing test agent."
+        );
+        assert_eq!(guard.agent_record().display_name, "Routing Test Agent");
+    }
+
+    #[tokio::test]
+    async fn unload_evicts_loaded_chat_runtimes() {
+        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+
+        assert!(
+            manager.thread_pool.loaded_chat_thread(&thread_id).is_some(),
+            "test setup should leave the chat runtime loaded"
+        );
+
+        manager
+            .unload(session_id)
+            .await
+            .expect("session unload should succeed");
+
+        assert!(
+            manager.thread_pool.loaded_chat_thread(&thread_id).is_none(),
+            "unload should evict loaded chat runtimes alongside the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_thread_wakes_running_turn_and_reaches_idle() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(HangingStreamingProvider {
+                model_name: "routing-hanging".to_string(),
+            }))
+            .await;
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should succeed");
+
+        let session = manager.load(session_id).await.expect("session should load");
+        let thread = session
+            .get_thread(&thread_id)
+            .expect("thread should be present in session");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start a turn before cancellation");
+
+        manager
+            .cancel_thread(session_id, &thread_id)
+            .await
+            .expect("cancel should succeed");
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should return to idle after cancellation");
+
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+        let mut mailbox = mailbox.lock().await;
+        assert!(
+            mailbox.take_next_turn_message().is_none(),
+            "cancellation should not queue a new turn input"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_mailbox_message_uses_session_owned_mailbox() {
+        let (manager, _temp_dir, session_id, thread_id) =
+            test_session_manager_with_provider(Arc::new(HangingStreamingProvider {
+                model_name: "routing-hanging".to_string(),
+            }))
+            .await;
+        let session = manager.load(session_id).await.expect("session should load");
+
+        manager
+            .send_message(session_id, &thread_id, "hello".to_string())
+            .await
+            .expect("send_message should succeed");
+
+        let thread = session
+            .get_thread(&thread_id)
+            .expect("thread should be present in session");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if thread.read().await.is_turn_running() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("runtime should start before mailbox delivery");
+
+        let message = MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: thread_id,
+            from_label: "sender".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: "hello from the mailbox".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: Some("routing test".to_string()),
+        };
+
+        assert!(
+            session
+                .enqueue_mailbox_message(&thread_id, message.clone())
+                .await,
+            "session should accept mailbox messages for loaded threads"
+        );
+
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+        let unread = mailbox.lock().await.unread_mailbox_messages();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].id, message.id);
+        assert_eq!(unread[0].text, message.text);
+    }
+
+    #[tokio::test]
+    async fn mark_read_removes_message_from_unread_listing_only_after_explicit_request() {
+        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+        let session = manager.load(session_id).await.expect("session should load");
+        let mailbox = session
+            .mailbox(&thread_id)
+            .expect("session should own the thread mailbox");
+        let message = MailboxMessage {
+            id: Uuid::new_v4().to_string(),
+            from_thread_id: ThreadId::new(),
+            to_thread_id: thread_id,
+            from_label: "sender".to_string(),
+            message_type: MailboxMessageType::Plain,
+            text: "mark me read".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            read: false,
+            summary: None,
+        };
+
+        assert!(
+            session
+                .enqueue_mailbox_message(&thread_id, message.clone())
+                .await,
+            "session should enqueue the mailbox message"
+        );
+        {
+            let unread = mailbox.lock().await.unread_mailbox_messages();
+            assert_eq!(unread.len(), 1);
+            assert_eq!(unread[0].id, message.id);
+        }
+
+        assert!(
+            manager
+                .thread_pool
+                .mark_mailbox_message_read(thread_id, &message.id)
+                .await
+                .expect("mark_mailbox_message_read should succeed"),
+            "queued mailbox message should be markable as read"
+        );
+
+        let unread = mailbox.lock().await.unread_mailbox_messages();
+        assert!(
+            unread.is_empty(),
+            "mailbox message should stay unread until mark_read is called"
+        );
     }
 
     #[tokio::test]
@@ -1397,14 +2203,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
-        let base_dir = temp_dir
-            .path()
-            .join(session_id.to_string())
-            .join(thread_id.to_string())
-            .join("turns");
-        fs::create_dir_all(&base_dir).expect("turns dir should exist");
+        let base_dir = chat_thread_base_dir(temp_dir.path(), session_id, thread_id);
+        fs::create_dir_all(&base_dir).expect("thread dir should exist");
         fs::write(
-            base_dir.join("meta.jsonl"),
+            base_dir.join("turns.jsonl"),
             "{\"kind\":\"Checkpoint\",\"turn_number\":0}\n",
         )
         .expect("invalid meta should write");
@@ -1414,5 +2216,239 @@ mod tests {
             .expect_err("invalid first checkpoint should fail");
         let message = error.to_string();
         assert!(message.contains("failed to recover committed turn log"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_job_target_uses_persisted_binding_after_restart() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let job_id = "job-restart-routing".to_string();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some(job_id.clone()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+        JobRepository::create(
+            harness.sqlite.as_ref(),
+            &JobRecord {
+                id: argus_repository::types::JobId::new(job_id.clone()),
+                job_type: JobType::Standalone,
+                name: format!("job:{job_id}"),
+                status: JobStatus::Pending,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                context: None,
+                prompt: "persisted child".to_string(),
+                thread_id: Some(child_thread_id),
+                group_id: None,
+                depends_on: Vec::new(),
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            },
+        )
+        .await
+        .expect("job record should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let error = backend
+            .resolve_message_targets(harness.thread_id, &format!("job:{job_id}"))
+            .await
+            .expect_err("persisted but unloaded job target should not be mailbox ready");
+        assert!(
+            error
+                .to_string()
+                .contains("not ready to receive mailbox messages"),
+            "unexpected scheduler error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_get_job_result_recovers_completed_job_after_restart() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let job_id = "job-restart-result".to_string();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some(job_id.clone()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+        JobRepository::create(
+            harness.sqlite.as_ref(),
+            &JobRecord {
+                id: argus_repository::types::JobId::new(job_id.clone()),
+                job_type: JobType::Standalone,
+                name: format!("job:{job_id}"),
+                status: JobStatus::Pending,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                context: None,
+                prompt: "persisted result".to_string(),
+                thread_id: Some(child_thread_id),
+                group_id: None,
+                depends_on: Vec::new(),
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            },
+        )
+        .await
+        .expect("completed job record should persist");
+        JobRepository::update_result(
+            harness.sqlite.as_ref(),
+            &argus_repository::types::JobId::new(job_id.clone()),
+            &JobResult {
+                success: true,
+                message: "persisted answer".to_string(),
+                token_usage: None,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                agent_display_name: "Routing Test Agent".to_string(),
+                agent_description: "Used to verify session mailbox routing".to_string(),
+            },
+        )
+        .await
+        .expect("job result should persist");
+        let finished_at = Utc::now().to_rfc3339();
+        JobRepository::update_status(
+            harness.sqlite.as_ref(),
+            &argus_repository::types::JobId::new(job_id.clone()),
+            JobStatus::Succeeded,
+            None,
+            Some(finished_at.as_str()),
+        )
+        .await
+        .expect("job status should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id: job_id.clone(),
+                consume: false,
+            })
+            .await
+            .expect("persisted job result should load");
+
+        match lookup {
+            argus_tool::SchedulerJobLookup::Completed(result) => {
+                assert_eq!(result.message, "persisted answer");
+                assert!(result.success);
+            }
+            other => panic!("expected completed lookup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_thread_target_recovers_direct_child_relationship_after_restart() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some("job-thread-target".to_string()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let error = backend
+            .resolve_message_targets(harness.thread_id, &format!("thread:{child_thread_id}"))
+            .await
+            .expect_err("persisted child thread should be recognized but not mailbox ready");
+        assert!(
+            error
+                .to_string()
+                .contains("not ready to receive mailbox messages"),
+            "unexpected scheduler error: {error}"
+        );
     }
 }

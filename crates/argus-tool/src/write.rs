@@ -26,7 +26,6 @@ const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Arguments for the write_file tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct WriteFileArgs {
     /// Path to the file to write
     path: String,
@@ -78,35 +77,26 @@ impl NamedTool for WriteFileTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let path_str = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::ExecutionFailed {
+        let args: WriteFileArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "write_file".to_string(),
-                reason: "Missing required parameter: path".to_string(),
-            }
-        })?;
-
-        let content = input
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                tool_name: "write_file".to_string(),
-                reason: "Missing required parameter: content".to_string(),
+                reason: format!("Invalid arguments: {e}"),
             })?;
 
         // Check content size
-        if content.len() > MAX_WRITE_SIZE {
+        if args.content.len() > MAX_WRITE_SIZE {
             return Err(ToolError::ExecutionFailed {
                 tool_name: "write_file".to_string(),
                 reason: format!(
                     "Content too large ({} bytes). Maximum is {} bytes.",
-                    content.len(),
+                    args.content.len(),
                     MAX_WRITE_SIZE
                 ),
             });
         }
 
         // Validate path (sandboxing)
-        let path = validate_path(path_str, None)?;
+        let path = validate_path(&args.path, None)?;
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -119,7 +109,7 @@ impl NamedTool for WriteFileTool {
         }
 
         // Write file
-        tokio::fs::write(&path, content)
+        tokio::fs::write(&path, &args.content)
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "write_file".to_string(),
@@ -128,7 +118,7 @@ impl NamedTool for WriteFileTool {
 
         Ok(json!({
             "path": path.to_string_lossy(),
-            "bytes_written": content.len(),
+            "bytes_written": args.content.len(),
             "success": true
         }))
     }
@@ -142,12 +132,10 @@ mod tests {
 
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (tx, _) = broadcast::channel(16);
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx: tx,
-            control_tx,
         })
     }
 

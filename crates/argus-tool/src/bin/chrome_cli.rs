@@ -6,7 +6,7 @@ use argus_protocol::ids::ThreadId;
 use argus_tool::{ChromeTool, ToolManager};
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -135,12 +135,10 @@ async fn main() {
 
 fn make_ctx() -> Arc<ToolExecutionContext> {
     let (pipe_tx, _) = broadcast::channel(16);
-    let (control_tx, _control_rx) = mpsc::unbounded_channel();
     Arc::new(ToolExecutionContext {
         thread_id: ThreadId::new(),
         agent_id: None,
         pipe_tx,
-        control_tx,
     })
 }
 

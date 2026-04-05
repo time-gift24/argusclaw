@@ -46,14 +46,6 @@ pub(crate) fn ensure_parent_dir(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) fn database_path_to_string(target: &DatabaseTarget) -> String {
-    match target {
-        DatabaseTarget::Url(url) => url.clone(),
-        DatabaseTarget::Path(path) => path.display().to_string(),
-    }
-}
-
 /// Returns the default directory for turn trace files.
 ///
 /// Order of precedence:

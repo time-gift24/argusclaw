@@ -22,7 +22,6 @@ const MAX_RESULTS: usize = 1000;
 
 /// Arguments for the glob tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct GlobArgs {
     /// The glob pattern to match files (e.g., "**/*.rs", "src/**/*.ts")
     pattern: String,
@@ -73,19 +72,16 @@ impl NamedTool for GlobTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        // Parse pattern argument (required)
-        let pattern = input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
+        let args: GlobArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "glob".to_string(),
-                reason: "Missing required parameter: pattern".to_string(),
+                reason: format!("Invalid arguments: {e}"),
             })?;
 
         // Parse path (optional, default current directory)
-        let base_path = input
-            .get("path")
-            .and_then(|v| v.as_str())
+        let base_path = args
+            .path
+            .as_deref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
@@ -99,9 +95,9 @@ impl NamedTool for GlobTool {
 
         // Build full glob pattern
         let full_pattern = if base_path.is_dir() {
-            format!("{}/{}", base_path.display(), pattern)
+            format!("{}/{}", base_path.display(), args.pattern)
         } else {
-            pattern.to_string()
+            args.pattern.clone()
         };
 
         // Execute glob
@@ -132,7 +128,7 @@ impl NamedTool for GlobTool {
         }
 
         Ok(json!({
-            "pattern": pattern,
+            "pattern": args.pattern,
             "path": base_path.to_string_lossy(),
             "count": files.len(),
             "truncated": truncated,
@@ -151,12 +147,10 @@ mod tests {
 
     fn make_ctx() -> Arc<ToolExecutionContext> {
         let (tx, _) = broadcast::channel(16);
-        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
         Arc::new(ToolExecutionContext {
             thread_id: ThreadId::new(),
             agent_id: None,
             pipe_tx: tx,
-            control_tx,
         })
     }
 

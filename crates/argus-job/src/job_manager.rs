@@ -5,23 +5,26 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use argus_agent::TurnCancellation;
 #[cfg(test)]
-use argus_agent::TurnOutput;
+use argus_agent::TurnRecord;
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
-    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadControlEvent, ThreadEvent,
-    ThreadId, ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadEvent, ThreadId,
+    ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
     ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
+use argus_repository::types::{JobId, JobStatus};
 use argus_template::TemplateManager;
 use argus_tool::ToolManager;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::error::JobError;
@@ -69,7 +72,13 @@ pub enum JobLookup {
 pub struct JobManager {
     thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<TrackedJobsStore>>,
+    chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
+    job_repository: Option<Arc<dyn JobRepository>>,
 }
+
+type ChatMailboxForwarderFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+type ChatMailboxForwarder =
+    dyn Fn(ThreadId, MailboxMessage) -> ChatMailboxForwarderFuture + Send + Sync;
 
 impl fmt::Debug for JobManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -106,6 +115,9 @@ impl JobManager {
         trace_dir: PathBuf,
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
+        let job_repository = persistence
+            .as_ref()
+            .map(ThreadPoolPersistence::job_repository);
         let thread_pool = Arc::new(ThreadPool::with_persistence(
             template_manager,
             provider_resolver,
@@ -117,6 +129,8 @@ impl JobManager {
         Self {
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(TrackedJobsStore::default())),
+            chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
+            job_repository,
         }
     }
 
@@ -152,6 +166,23 @@ impl JobManager {
     /// Return the shared unified thread pool.
     pub fn thread_pool(&self) -> Arc<ThreadPool> {
         Arc::clone(&self.thread_pool)
+    }
+
+    pub fn set_chat_mailbox_forwarder<F, Fut>(&self, forwarder: F)
+    where
+        F: Fn(ThreadId, MailboxMessage) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = bool> + Send + 'static,
+    {
+        let forwarder = Arc::new(
+            move |thread_id: ThreadId, message: MailboxMessage| -> ChatMailboxForwarderFuture {
+                Box::pin(forwarder(thread_id, message))
+            },
+        ) as Arc<ChatMailboxForwarder>;
+        let mut slot = self
+            .chat_mailbox_forwarder
+            .lock()
+            .expect("chat mailbox forwarder mutex poisoned");
+        *slot = Some(forwarder);
     }
 
     /// Collect a point-in-time thread-pool snapshot.
@@ -232,24 +263,86 @@ impl JobManager {
             .tracked_jobs
             .lock()
             .expect("job tracking mutex poisoned");
-        let Some(tracked_job) = tracked_jobs.jobs.get_mut(job_id) else {
-            return JobLookup::NotFound;
-        };
+        Self::lookup_job_in_store(&mut tracked_jobs, thread_id, job_id, consume)
+    }
 
-        if tracked_job.thread_id != thread_id {
-            return JobLookup::NotFound;
+    /// Get the current status for a job, recovering persisted state when caches are cold.
+    pub async fn get_job_result_status_persisted(
+        &self,
+        thread_id: ThreadId,
+        job_id: &str,
+        consume: bool,
+    ) -> Result<JobLookup, JobError> {
+        {
+            let mut tracked_jobs = self
+                .tracked_jobs
+                .lock()
+                .expect("job tracking mutex poisoned");
+            let lookup = Self::lookup_job_in_store(&mut tracked_jobs, thread_id, job_id, consume);
+            if !matches!(lookup, JobLookup::NotFound) {
+                return Ok(lookup);
+            }
         }
 
-        match &tracked_job.state {
-            TrackedJobState::Pending | TrackedJobState::Cancelling => JobLookup::Pending,
-            TrackedJobState::Completed(result) => {
-                let result = result.clone();
-                if consume {
-                    tracked_job.state = TrackedJobState::Consumed(result.clone());
-                }
-                JobLookup::Completed(result)
+        let Some(job_repository) = &self.job_repository else {
+            return Ok(JobLookup::NotFound);
+        };
+        let Some(job_record) = job_repository
+            .get(&JobId::new(job_id))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?
+        else {
+            return Ok(JobLookup::NotFound);
+        };
+        let Some(execution_thread_id) = job_record.thread_id else {
+            return Ok(JobLookup::NotFound);
+        };
+        let Some(metadata) = self
+            .thread_pool
+            .recover_job_thread_metadata(execution_thread_id)
+            .await?
+        else {
+            return Ok(JobLookup::NotFound);
+        };
+        if metadata.parent_thread_id != Some(thread_id)
+            || metadata.job_id.as_deref() != Some(job_id)
+        {
+            return Ok(JobLookup::NotFound);
+        }
+
+        match job_record.status {
+            JobStatus::Pending | JobStatus::Queued | JobStatus::Running => Ok(JobLookup::Pending),
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled => {
+                let Some(result) = job_record.result else {
+                    return Ok(JobLookup::NotFound);
+                };
+                let persisted = ThreadJobResult {
+                    job_id: job_id.to_string(),
+                    success: result.success,
+                    message: result.message,
+                    token_usage: result.token_usage,
+                    agent_id: AgentId::new(result.agent_id.inner()),
+                    agent_display_name: result.agent_display_name,
+                    agent_description: result.agent_description,
+                };
+                Self::record_completed_job_result_in_store(
+                    &self.tracked_jobs,
+                    thread_id,
+                    persisted.clone(),
+                );
+                let mut tracked_jobs = self
+                    .tracked_jobs
+                    .lock()
+                    .expect("job tracking mutex poisoned");
+                Ok(Self::lookup_job_in_store(
+                    &mut tracked_jobs,
+                    thread_id,
+                    job_id,
+                    consume,
+                ))
             }
-            TrackedJobState::Consumed(result) => JobLookup::Consumed(result.clone()),
         }
     }
 
@@ -263,7 +356,6 @@ impl JobManager {
         prompt: String,
         context: Option<serde_json::Value>,
         pipe_tx: broadcast::Sender<ThreadEvent>,
-        control_tx: mpsc::UnboundedSender<ThreadControlEvent>,
     ) -> Result<(), JobError> {
         if prompt.trim().is_empty() {
             return Err(JobError::ExecutionFailed(
@@ -307,8 +399,8 @@ impl JobManager {
 
         let thread_pool = Arc::clone(&self.thread_pool);
         let tracked_jobs = Arc::clone(&self.tracked_jobs);
+        let chat_mailbox_forwarder = Arc::clone(&self.chat_mailbox_forwarder);
         let pipe_tx_clone = pipe_tx.clone();
-        let control_tx_clone = control_tx.clone();
 
         tokio::spawn(async move {
             let result = thread_pool
@@ -316,17 +408,18 @@ impl JobManager {
                     request,
                     execution_thread_id,
                     pipe_tx_clone.clone(),
-                    control_tx_clone.clone(),
                     spawn_cancellation,
                 )
                 .await;
 
             Self::forward_job_result_to_runtime(
-                &control_tx_clone,
+                &thread_pool,
+                &chat_mailbox_forwarder,
                 originating_thread_id,
                 execution_thread_id,
                 result.clone(),
-            );
+            )
+            .await;
             Self::record_completed_job_result_in_store(
                 &tracked_jobs,
                 originating_thread_id,
@@ -340,8 +433,8 @@ impl JobManager {
 
     /// Summarize turn output into a brief result message.
     #[cfg(test)]
-    fn summarize_output(output: &TurnOutput) -> String {
-        for msg in output.appended_messages.iter().rev() {
+    fn summarize_output(output: &TurnRecord) -> String {
+        for msg in output.messages.iter().rev() {
             if let ChatMessage {
                 role: Role::Assistant,
                 content,
@@ -352,10 +445,7 @@ impl JobManager {
                 return Self::truncate_summary(content);
             }
         }
-        format!(
-            "job completed, {} messages in turn",
-            output.appended_messages.len()
-        )
+        format!("job completed, {} messages in turn", output.messages.len())
     }
 
     #[cfg(test)]
@@ -432,6 +522,33 @@ impl JobManager {
         }
     }
 
+    fn lookup_job_in_store(
+        tracked_jobs: &mut TrackedJobsStore,
+        thread_id: ThreadId,
+        job_id: &str,
+        consume: bool,
+    ) -> JobLookup {
+        let Some(tracked_job) = tracked_jobs.jobs.get_mut(job_id) else {
+            return JobLookup::NotFound;
+        };
+
+        if tracked_job.thread_id != thread_id {
+            return JobLookup::NotFound;
+        }
+
+        match &tracked_job.state {
+            TrackedJobState::Pending | TrackedJobState::Cancelling => JobLookup::Pending,
+            TrackedJobState::Completed(result) => {
+                let result = result.clone();
+                if consume {
+                    tracked_job.state = TrackedJobState::Consumed(result.clone());
+                }
+                JobLookup::Completed(result)
+            }
+            TrackedJobState::Consumed(result) => JobLookup::Consumed(result.clone()),
+        }
+    }
+
     fn is_job_runtime_active(&self, job_id: &str) -> bool {
         let Some(thread_id) = self.thread_pool.get_thread_binding(job_id) else {
             return true;
@@ -450,8 +567,9 @@ impl JobManager {
             })
     }
 
-    fn forward_job_result_to_runtime(
-        control_tx: &mpsc::UnboundedSender<ThreadControlEvent>,
+    async fn forward_job_result_to_runtime(
+        thread_pool: &ThreadPool,
+        chat_mailbox_forwarder: &Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
         originating_thread_id: ThreadId,
         execution_thread_id: ThreadId,
         result: ThreadJobResult,
@@ -474,7 +592,19 @@ impl JobManager {
             read: false,
             summary: None,
         };
-        let _ = control_tx.send(ThreadControlEvent::DeliverMailboxMessage(mailbox_message));
+        let forwarder = chat_mailbox_forwarder
+            .lock()
+            .expect("chat mailbox forwarder mutex poisoned")
+            .clone();
+        let forwarded = match forwarder {
+            Some(forwarder) => forwarder(originating_thread_id, mailbox_message.clone()).await,
+            None => false,
+        };
+        if !forwarded {
+            let _ = thread_pool
+                .deliver_mailbox_message(originating_thread_id, mailbox_message)
+                .await;
+        }
     }
 
     pub fn is_job_pending(&self, job_id: &str) -> bool {
@@ -487,6 +617,39 @@ impl JobManager {
             .jobs
             .get(job_id)
             .is_some_and(|tracked_job| matches!(tracked_job.state, TrackedJobState::Pending))
+    }
+
+    pub async fn is_job_pending_persisted(&self, job_id: &str) -> Result<bool, JobError> {
+        {
+            let tracked_jobs = self
+                .tracked_jobs
+                .lock()
+                .expect("job tracking mutex poisoned");
+            if let Some(tracked_job) = tracked_jobs.jobs.get(job_id) {
+                return Ok(matches!(
+                    tracked_job.state,
+                    TrackedJobState::Pending | TrackedJobState::Cancelling
+                ));
+            }
+        }
+
+        let Some(job_repository) = &self.job_repository else {
+            return Ok(false);
+        };
+        let Some(job_record) = job_repository
+            .get(&JobId::new(job_id))
+            .await
+            .map_err(|err| {
+                JobError::ExecutionFailed(format!("failed to load job record: {err}"))
+            })?
+        else {
+            return Ok(false);
+        };
+
+        Ok(matches!(
+            job_record.status,
+            JobStatus::Pending | JobStatus::Queued | JobStatus::Running
+        ))
     }
 
     fn broadcast_job_result(
@@ -511,16 +674,22 @@ impl JobManager {
 mod tests {
     use std::sync::Arc;
 
+    use argus_agent::thread_trace_store::{
+        ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
+    };
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentRecord, AgentType, LlmProvider, MailboxMessageType, ProviderId, ThinkingConfig,
+        AgentRecord, AgentType, LlmProvider, ProviderId, SessionId, ThinkingConfig, ThreadId,
         ThreadRuntimeStatus,
     };
     use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
-    use argus_repository::traits::{AgentRepository, JobRepository, ThreadRepository};
+    use argus_repository::traits::{
+        AgentRepository, JobRepository, SessionRepository, ThreadRepository,
+    };
+    use argus_repository::types::{AgentId as RepoAgentId, ThreadRecord};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
     use rust_decimal::Decimal;
@@ -645,7 +814,7 @@ mod tests {
 
     async fn test_job_manager_with_provider(
         provider: Arc<dyn LlmProvider>,
-    ) -> (JobManager, AgentId) {
+    ) -> (JobManager, AgentId, ThreadId) {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("sqlite memory pool should connect");
@@ -656,33 +825,77 @@ mod tests {
             sqlite.clone(),
         ));
         let agent_id = AgentId::new(7);
+        let agent_record = AgentRecord {
+            id: agent_id,
+            display_name: "Cancellable Job Agent".to_string(),
+            description: "Used to test stop_job cancellation".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: Some("capturing".to_string()),
+            system_prompt: "You are a cancellable test agent.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: Some(ThinkingConfig::enabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        };
         template_manager
-            .upsert(AgentRecord {
-                id: agent_id,
-                display_name: "Cancellable Job Agent".to_string(),
-                description: "Used to test stop_job cancellation".to_string(),
-                version: "1.0.0".to_string(),
-                provider_id: Some(ProviderId::new(1)),
-                model_id: Some("capturing".to_string()),
-                system_prompt: "You are a cancellable test agent.".to_string(),
-                tool_names: vec![],
-                max_tokens: None,
-                temperature: None,
-                thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
-            })
+            .upsert(agent_record.clone())
             .await
             .expect("agent upsert should succeed");
 
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-job-tests-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let parent_session_id = SessionId::new();
+        let parent_thread_id = ThreadId::new();
+        SessionRepository::create(sqlite.as_ref(), &parent_session_id, "job-parent")
+            .await
+            .expect("parent session should persist");
+        ThreadRepository::upsert_thread(
+            sqlite.as_ref(),
+            &ThreadRecord {
+                id: parent_thread_id,
+                provider_id: argus_protocol::LlmProviderId::new(1),
+                title: Some("job-parent".to_string()),
+                token_count: 0,
+                turn_count: 0,
+                session_id: Some(parent_session_id),
+                template_id: Some(RepoAgentId::new(agent_id.inner())),
+                model_override: Some("capturing".to_string()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .await
+        .expect("parent thread should persist");
+        persist_thread_metadata(
+            &chat_thread_base_dir(&trace_dir, parent_session_id, parent_thread_id),
+            &ThreadTraceMetadata {
+                thread_id: parent_thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(parent_session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: agent_record,
+            },
+        )
+        .await
+        .expect("parent trace metadata should persist");
+
         (
-            JobManager::new(
+            JobManager::new_with_repositories(
                 template_manager,
                 Arc::new(FixedProviderResolver::new(provider)),
                 Arc::new(ToolManager::new()),
-                std::env::temp_dir().join("argus-job-tests"),
+                trace_dir,
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
             ),
             agent_id,
+            parent_thread_id,
         )
     }
 
@@ -716,11 +929,12 @@ mod tests {
         )
     }
 
-    fn assistant_output(content: &str) -> TurnOutput {
-        TurnOutput {
-            appended_messages: vec![ChatMessage::assistant(content)],
-            token_usage: TokenUsage::default(),
-        }
+    fn assistant_output(content: &str) -> TurnRecord {
+        TurnRecord::user_turn(
+            1,
+            vec![ChatMessage::assistant(content)],
+            TokenUsage::default(),
+        )
     }
 
     fn sample_job_result(job_id: impl Into<String>) -> ThreadJobResult {
@@ -867,7 +1081,6 @@ mod tests {
         let manager = test_job_manager();
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, _pipe_rx) = broadcast::channel(16);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let job_id = "job-bound".to_string();
 
         manager
@@ -878,7 +1091,6 @@ mod tests {
                 "run this".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("job should enqueue even if execution later fails");
@@ -906,7 +1118,6 @@ mod tests {
         let manager = test_job_manager();
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         let job_id = "alpha-job-event-flow".to_string();
 
         manager
@@ -917,7 +1128,6 @@ mod tests {
                 "run alpha event flow".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("job should enqueue even if execution later fails");
@@ -973,20 +1183,6 @@ mod tests {
         .await
         .expect("job result event should arrive");
 
-        let control_event = timeout(Duration::from_secs(1), control_rx.recv())
-            .await
-            .expect("forwarded control event should arrive")
-            .expect("control channel should stay open");
-        assert!(matches!(
-            control_event,
-            ThreadControlEvent::DeliverMailboxMessage(message)
-                if matches!(
-                    &message.message_type,
-                    MailboxMessageType::JobResult { job_id: forwarded_job_id, success, .. }
-                        if forwarded_job_id == &job_id && !success
-                )
-        ));
-
         let execution_thread_id = bound_thread_id.expect("job should bind to an execution thread");
         assert_eq!(manager.thread_binding(&job_id), Some(execution_thread_id));
         assert!(saw_queued, "queued event should be observed");
@@ -998,7 +1194,6 @@ mod tests {
         let manager = test_persistent_job_manager_without_default_provider().await;
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, _pipe_rx) = broadcast::channel(16);
-        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         let job_id = "job-enqueue-failure".to_string();
 
         let dispatch_result = manager
@@ -1009,7 +1204,6 @@ mod tests {
                 "run this".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await;
 
@@ -1071,11 +1265,10 @@ mod tests {
             Duration::from_secs(5),
             24,
         ));
-        let (manager, agent_id) = test_job_manager_with_provider(provider).await;
-        let originating_thread_id = ThreadId::new();
+        let (manager, agent_id, originating_thread_id) =
+            test_job_manager_with_provider(provider).await;
         let job_id = "job-stop-end-to-end".to_string();
         let (pipe_tx, mut pipe_rx) = broadcast::channel(32);
-        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
 
         manager
             .dispatch_job(
@@ -1085,7 +1278,6 @@ mod tests {
                 "please take your time".to_string(),
                 None,
                 pipe_tx,
-                control_tx,
             )
             .await
             .expect("dispatch should succeed");
@@ -1144,20 +1336,6 @@ mod tests {
             "unexpected cancel message: {}",
             job_event.1
         );
-
-        let control_event = timeout(Duration::from_secs(1), control_rx.recv())
-            .await
-            .expect("forwarded control event should arrive")
-            .expect("control channel should stay open");
-        assert!(matches!(
-            control_event,
-            ThreadControlEvent::DeliverMailboxMessage(message)
-                if matches!(
-                    &message.message_type,
-                    MailboxMessageType::JobResult { job_id: forwarded_job_id, success, .. }
-                        if forwarded_job_id == &job_id && !success
-                ) && message.text.contains("Turn cancelled")
-        ));
 
         assert!(matches!(
             manager.get_job_result_status(originating_thread_id, &job_id, false),
