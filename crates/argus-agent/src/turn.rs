@@ -610,7 +610,6 @@ async fn call_llm_streaming(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_tools_parallel(
     ctx: &TurnContext<'_>,
     tool_calls: Vec<ToolCall>,
@@ -624,7 +623,6 @@ async fn execute_tools_parallel(
     join_all(futures).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_single_tool(
     ctx: &TurnContext<'_>,
     tool_call: ToolCall,
@@ -820,7 +818,6 @@ async fn execute_single_tool(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_loop(
     ctx: &TurnContext<'_>,
     system_prompt: Option<&str>,
