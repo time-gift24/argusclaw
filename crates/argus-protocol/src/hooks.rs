@@ -51,7 +51,7 @@ pub struct ToolHookContext {
     pub error: Option<String>,
     /// Tool manager for accessing tool metadata (e.g., risk level).
     pub tool_manager: Option<Arc<dyn crate::tool::NamedTool>>,
-    /// Thread event sender for broadcasting approval events (optional).
+    /// Thread event sender for broadcasting thread events (optional).
     pub thread_event_sender: Option<broadcast::Sender<crate::events::ThreadEvent>>,
     /// Thread ID for event context (optional).
     pub thread_id: Option<String>,

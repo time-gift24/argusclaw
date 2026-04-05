@@ -44,18 +44,6 @@ pub enum TurnProgress {
         tool_name: String,
         result: Result<serde_json::Value, String>,
     },
-    /// The turn paused for approval.
-    WaitingForApproval {
-        thread_id: String,
-        turn_number: u32,
-        request: argus_protocol::ApprovalRequest,
-    },
-    /// The approval decision has resolved and the turn may continue.
-    ApprovalResolved {
-        thread_id: String,
-        turn_number: u32,
-        response: argus_protocol::ApprovalResponse,
-    },
 }
 
 /// Handle for observing turn progress as it happens and awaiting the final result.
@@ -479,48 +467,6 @@ impl Turn {
         }
     }
 
-    fn map_approval_progress(event: ThreadEvent) -> Option<TurnProgress> {
-        match event {
-            ThreadEvent::WaitingForApproval {
-                thread_id,
-                turn_number,
-                request,
-            } => Some(TurnProgress::WaitingForApproval {
-                thread_id,
-                turn_number,
-                request,
-            }),
-            ThreadEvent::ApprovalResolved {
-                thread_id,
-                turn_number,
-                response,
-            } => Some(TurnProgress::ApprovalResolved {
-                thread_id,
-                turn_number,
-                response,
-            }),
-            _ => None,
-        }
-    }
-
-    fn drain_approval_progress(
-        approval_rx: &mut broadcast::Receiver<ThreadEvent>,
-        progress_tx: &mpsc::UnboundedSender<TurnProgress>,
-    ) {
-        loop {
-            match approval_rx.try_recv() {
-                Ok(event) => {
-                    if let Some(progress) = Self::map_approval_progress(event) {
-                        let _ = progress_tx.send(progress);
-                    }
-                }
-                Err(broadcast::error::TryRecvError::Empty)
-                | Err(broadcast::error::TryRecvError::Closed) => break,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-            }
-        }
-    }
-
     async fn execute_internal(
         mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
@@ -616,36 +562,11 @@ impl Turn {
 
     /// Execute the turn and return a handle for observing incremental progress.
     pub fn execute_progress(self) -> TurnExecution {
-        let mut approval_rx = self.thread_event_tx.subscribe();
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = oneshot::channel();
 
         tokio::spawn(async move {
-            let mut approval_closed = false;
-            let turn_fut = self.execute_internal(Some(progress_tx.clone()));
-            tokio::pin!(turn_fut);
-
-            let result = loop {
-                tokio::select! {
-                    result = &mut turn_fut => break result,
-                    approval_event = approval_rx.recv(), if !approval_closed => {
-                        match approval_event {
-                            Ok(event) => {
-                                if let Some(progress) = Self::map_approval_progress(event) {
-                                    let _ = progress_tx.send(progress);
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(broadcast::error::RecvError::Closed) => {
-                                approval_closed = true;
-                            }
-                        }
-                    }
-                }
-            };
-
-            Self::drain_approval_progress(&mut approval_rx, &progress_tx);
-
+            let result = self.execute_internal(Some(progress_tx.clone())).await;
             let _ = result_tx.send(result);
             drop(progress_tx);
         });
@@ -1367,7 +1288,6 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -1378,13 +1298,12 @@ mod tests {
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
-        AgentId, AgentType, ApprovalDecision, ApprovalRequest, ApprovalResponse, HookAction,
-        HookEvent, HookHandler, HookRegistry, ProviderId, RiskLevel, SessionId, ThreadEvent,
-        TokenUsage, ToolExecutionContext, ToolHookContext,
+        AgentId, AgentType, HookAction, HookEvent, HookHandler, HookRegistry, ProviderId,
+        SessionId, ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext,
     };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
-    use tokio::sync::{Mutex as TokioMutex, Notify, broadcast, oneshot};
+    use tokio::sync::{Notify, broadcast, oneshot};
 
     #[test]
     fn test_generate_turn_id() {
@@ -1750,72 +1669,6 @@ mod tests {
             "recording-turn"
         }
     }
-
-    struct BlockingApprovalHook {
-        gate: Arc<TokioMutex<Option<oneshot::Receiver<()>>>>,
-    }
-
-    impl BlockingApprovalHook {
-        fn new(gate: oneshot::Receiver<()>) -> Self {
-            Self {
-                gate: Arc::new(TokioMutex::new(Some(gate))),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl HookHandler for BlockingApprovalHook {
-        async fn on_tool_event(&self, ctx: &ToolHookContext) -> HookAction {
-            if ctx.event != HookEvent::BeforeToolCall || ctx.tool_name != "echo" {
-                return HookAction::Continue;
-            }
-
-            let request = ApprovalRequest::new(
-                "test-agent".to_string(),
-                ctx.tool_name.clone(),
-                "pause for approval".to_string(),
-                60,
-                RiskLevel::High,
-            );
-
-            if let (Some(sender), Some(thread_id), Some(turn_number)) = (
-                &ctx.thread_event_sender,
-                ctx.thread_id.clone(),
-                ctx.turn_number,
-            ) {
-                let _ = sender.send(ThreadEvent::WaitingForApproval {
-                    thread_id,
-                    turn_number,
-                    request: request.clone(),
-                });
-            }
-
-            if let Some(gate) = self.gate.lock().await.take() {
-                let _ = gate.await;
-            }
-
-            if let (Some(sender), Some(thread_id), Some(turn_number)) = (
-                &ctx.thread_event_sender,
-                ctx.thread_id.clone(),
-                ctx.turn_number,
-            ) {
-                let response = ApprovalResponse {
-                    request_id: request.id,
-                    decision: ApprovalDecision::Approved,
-                    decided_at: Utc::now(),
-                    decided_by: Some("test".to_string()),
-                };
-                let _ = sender.send(ThreadEvent::ApprovalResolved {
-                    thread_id,
-                    turn_number,
-                    response,
-                });
-            }
-
-            HookAction::Continue
-        }
-    }
-
     fn make_agent_record() -> Arc<AgentRecord> {
         Arc::new(AgentRecord {
             id: AgentId::new(1),
@@ -2437,8 +2290,6 @@ mod tests {
                 TurnProgress::LlmEvent(_)
                     | TurnProgress::ToolStarted { .. }
                     | TurnProgress::ToolCompleted { .. }
-                    | TurnProgress::WaitingForApproval { .. }
-                    | TurnProgress::ApprovalResolved { .. }
             )
         }));
     }
@@ -2589,8 +2440,6 @@ mod tests {
                     TurnProgress::LlmEvent(_)
                         | TurnProgress::ToolStarted { .. }
                         | TurnProgress::ToolCompleted { .. }
-                        | TurnProgress::WaitingForApproval { .. }
-                        | TurnProgress::ApprovalResolved { .. }
                 ),
                 "terminal progress should not be duplicated in the progress stream"
             );
@@ -2600,95 +2449,4 @@ mod tests {
         assert!(matches!(result, Err(TurnError::Cancelled)));
     }
 
-    #[tokio::test]
-    async fn turn_progress_approval_pause_and_resume_emits_waiting_and_resolved_progress() {
-        let provider = Arc::new(SequencedProvider::new(vec![
-            CompletionResponse {
-                content: Some("first".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![argus_protocol::llm::ToolCall {
-                    id: "call-approval".to_string(),
-                    name: "echo".to_string(),
-                    arguments: serde_json::json!({"message": "approval test"}),
-                }],
-                input_tokens: 1,
-                output_tokens: 1,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-            CompletionResponse {
-                content: Some("done".to_string()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                input_tokens: 1,
-                output_tokens: 1,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            },
-        ]));
-
-        let (resume_tx, resume_rx) = oneshot::channel();
-        let approval_hook = Arc::new(BlockingApprovalHook::new(resume_rx));
-        let (stream_tx, _) = broadcast::channel(256);
-        let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
-
-        let turn = TurnBuilder::default()
-            .turn_number(1)
-            .thread_id("thread-test".to_string())
-            .messages(vec![ChatMessage::user("start")])
-            .provider(provider)
-            .tools(vec![Arc::new(EchoTool)])
-            .hooks(vec![approval_hook])
-            .config(TurnConfig {
-                max_iterations: Some(5),
-                ..TurnConfig::default()
-            })
-            .agent_record(make_agent_record())
-            .stream_tx(stream_tx)
-            .thread_event_tx(thread_event_tx)
-            .build()
-            .expect("turn should build");
-
-        let execution = turn.execute_progress();
-
-        let mut saw_waiting = false;
-        while !saw_waiting {
-            match tokio::time::timeout(std::time::Duration::from_secs(1), thread_event_rx.recv())
-                .await
-                .expect("should receive approval event in time")
-            {
-                Ok(ThreadEvent::WaitingForApproval { .. }) => {
-                    saw_waiting = true;
-                }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-
-        resume_tx
-            .send(())
-            .expect("approval hook should still be waiting");
-
-        let execution =
-            tokio::time::timeout(std::time::Duration::from_secs(2), execution.collect())
-                .await
-                .expect("turn should resume and finish");
-
-        assert!(execution.result.is_ok());
-        assert!(
-            execution
-                .progress
-                .iter()
-                .any(|item| matches!(item, TurnProgress::WaitingForApproval { .. }))
-        );
-        assert!(
-            execution
-                .progress
-                .iter()
-                .any(|item| matches!(item, TurnProgress::ApprovalResolved { .. }))
-        );
-    }
 }

@@ -3,14 +3,13 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentRecord, ApprovalDecision, ChatMessage, LlmProviderId, LlmProviderRecord,
-    LlmProviderRecordJson, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
-    SecretString, SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
+    AgentId, AgentRecord, ChatMessage, LlmProviderId, LlmProviderRecord, LlmProviderRecordJson,
+    ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString, SessionId,
+    ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use uuid::Uuid;
 
 use crate::subscription::ThreadSubscriptions;
 
@@ -548,26 +547,6 @@ pub async fn get_thread_snapshot(
         token_count,
         plan_item_count: plan_item_count as usize,
     })
-}
-
-#[tauri::command]
-pub fn resolve_approval(
-    wing: State<'_, Arc<ArgusWing>>,
-    request_id: String,
-    decision: String,
-    resolved_by: Option<String>,
-) -> Result<(), String> {
-    let request_id = Uuid::parse_str(&request_id).map_err(|e| e.to_string())?;
-    let decision = match decision.as_str() {
-        "approved" => ApprovalDecision::Approved,
-        "denied" => ApprovalDecision::Denied,
-        _ => return Err(format!("Invalid approval decision: {}", decision)),
-    };
-
-    wing.resolve_approval(request_id, decision, resolved_by)
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
 }
 
 /// Thread summary for listing.

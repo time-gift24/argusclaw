@@ -7,7 +7,7 @@
 //! # Security
 //!
 //! File system traversal is a sensitive operation. This tool has `RiskLevel::High`
-//! and requires approval by default.
+//! so callers can apply appropriate policy or UI treatment.
 
 use async_trait::async_trait;
 use serde_json::json;

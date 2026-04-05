@@ -35,7 +35,6 @@ argus-protocol = { path = "../argus-protocol" }
 argus-llm = { path = "../argus-llm" }
 argus-template = { path = "../argus-template" }
 argus-session = { path = "../argus-session" }
-argus-approval = { path = "../argus-approval" }
 argus-tool = { path = "../argus-tool" }
 argus-agent = { path = "../argus-agent" }
 argus-repository = { path = "../argus-repository" }

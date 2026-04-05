@@ -46,11 +46,6 @@ pub(crate) enum ThreadRuntimeState {
         /// Active turn number being stopped.
         turn_number: u32,
     },
-    /// Runtime is paused waiting for an approval decision.
-    WaitingForApproval {
-        /// Turn number blocked on approval.
-        turn_number: u32,
-    },
 }
 
 /// Runtime decisions emitted by the thread loop.
@@ -308,9 +303,9 @@ impl Thread {
     pub fn state(&self) -> ThreadState {
         match self.runtime_state {
             ThreadRuntimeState::Idle => ThreadState::Idle,
-            ThreadRuntimeState::Running { .. }
-            | ThreadRuntimeState::Stopping { .. }
-            | ThreadRuntimeState::WaitingForApproval { .. } => ThreadState::Processing,
+            ThreadRuntimeState::Running { .. } | ThreadRuntimeState::Stopping { .. } => {
+                ThreadState::Processing
+            }
         }
     }
 
@@ -354,10 +349,7 @@ impl Thread {
 
     fn inspect_runtime_mailbox(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
         if mailbox.take_stop_signal() {
-            if matches!(
-                self.runtime_state,
-                ThreadRuntimeState::Running { .. } | ThreadRuntimeState::WaitingForApproval { .. }
-            ) {
+            if matches!(self.runtime_state, ThreadRuntimeState::Running { .. }) {
                 return self.cancel_active_turn();
             }
 
@@ -369,20 +361,6 @@ impl Thread {
         }
 
         ThreadLoopAction::Noop
-    }
-
-    fn mark_waiting_for_approval_runtime(&mut self, turn_number: u32) {
-        if matches!(self.runtime_state, ThreadRuntimeState::Running { turn_number: active } if active == turn_number)
-        {
-            self.runtime_state = ThreadRuntimeState::WaitingForApproval { turn_number };
-        }
-    }
-
-    fn mark_running_after_approval_runtime(&mut self, turn_number: u32) {
-        if matches!(self.runtime_state, ThreadRuntimeState::WaitingForApproval { turn_number: active } if active == turn_number)
-        {
-            self.runtime_state = ThreadRuntimeState::Running { turn_number };
-        }
     }
 
     fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
@@ -409,8 +387,7 @@ impl Thread {
 
     fn cancel_active_turn(&mut self) -> ThreadLoopAction {
         match self.runtime_state {
-            ThreadRuntimeState::Running { turn_number }
-            | ThreadRuntimeState::WaitingForApproval { turn_number } => {
+            ThreadRuntimeState::Running { turn_number } => {
                 self.runtime_state = ThreadRuntimeState::Stopping { turn_number };
                 ThreadLoopAction::StopTurn { turn_number }
             }
@@ -802,20 +779,7 @@ impl Thread {
         next_action
     }
 
-    async fn handle_turn_progress(thread: &Arc<RwLock<Self>>, progress: &TurnProgress) {
-        match progress {
-            TurnProgress::WaitingForApproval { turn_number, .. } => {
-                let mut guard = thread.write().await;
-                guard.mark_waiting_for_approval_runtime(*turn_number);
-            }
-            TurnProgress::ApprovalResolved { turn_number, .. } => {
-                let mut guard = thread.write().await;
-                guard.mark_running_after_approval_runtime(*turn_number);
-            }
-            TurnProgress::LlmEvent(_)
-            | TurnProgress::ToolStarted { .. }
-            | TurnProgress::ToolCompleted { .. } => {}
-        }
+    async fn handle_turn_progress(_thread: &Arc<RwLock<Self>>, _progress: &TurnProgress) {
     }
 
     async fn settle_active_turn(
@@ -827,7 +791,6 @@ impl Thread {
         let committed = result.is_ok();
         let settled_turn_number = match thread.read().await.runtime_state {
             ThreadRuntimeState::Running { turn_number }
-            | ThreadRuntimeState::WaitingForApproval { turn_number }
             | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
             ThreadRuntimeState::Idle => None,
         };
