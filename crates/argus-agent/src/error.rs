@@ -53,16 +53,9 @@ pub enum TurnError {
     #[error("LLM provider not configured for Turn")]
     ProviderNotConfigured,
 
-    /// Turn builder failed (missing required field).
-    #[error("Turn build failed: {0}")]
+    /// Turn setup failed before execution could complete.
+    #[error("Turn setup failed: {0}")]
     BuildFailed(String),
-}
-
-// Implement From<UninitializedFieldError> for derive_builder compatibility
-impl From<derive_builder::UninitializedFieldError> for TurnError {
-    fn from(err: derive_builder::UninitializedFieldError) -> Self {
-        TurnError::BuildFailed(err.to_string())
-    }
 }
 
 /// Errors for turn log recovery operations.
@@ -140,10 +133,6 @@ pub enum ThreadError {
     /// Turn execution failed.
     #[error("Turn execution failed: {0}")]
     TurnFailed(#[from] TurnError),
-
-    /// Turn build failed.
-    #[error("Turn build failed: {0}")]
-    TurnBuildFailed(String),
 
     /// Compact operation failed.
     #[error("Compact failed: {0}")]

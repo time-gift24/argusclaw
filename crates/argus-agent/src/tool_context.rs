@@ -1,7 +1,7 @@
 //! Thread-local context for tool execution.
 //!
 //! Provides access to the current agent's ID during tool execution.
-//! Set by `Turn::execute_single_tool` before invoking a tool, and cleared after.
+//! Set by the turn executor before invoking a tool, and cleared after.
 
 use argus_protocol::AgentId;
 

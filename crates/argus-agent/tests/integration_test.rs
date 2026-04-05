@@ -5,12 +5,13 @@ use std::time::Duration;
 
 use tokio::sync::broadcast;
 
+use argus_agent::history::TurnRecord;
 use argus_agent::history::TurnRecordKind;
-use argus_agent::turn::TurnCancellation;
-use argus_agent::{TurnBuilder, TurnConfig};
+use argus_agent::{
+    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadError, TurnCancellation,
+    TurnError,
+};
 use argus_llm::retry::{RetryConfig, RetryProvider};
-use argus_protocol::AgentRecord;
-use argus_protocol::ThreadId;
 use argus_protocol::ToolExecutionContext;
 use argus_protocol::events::ThreadEvent;
 use argus_protocol::llm::{
@@ -18,6 +19,8 @@ use argus_protocol::llm::{
     LlmProvider, LlmStreamEvent, Role, ToolCall, ToolDefinition,
 };
 use argus_protocol::tool::{NamedTool, ToolError};
+use argus_protocol::{AgentRecord, SessionId, ThreadId};
+use argus_tool::ToolManager;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -140,6 +143,50 @@ impl LlmProvider for RequestCapturingProvider {
         self.requests.lock().unwrap().push(request);
         Ok(self.response.clone())
     }
+}
+
+struct NoopCompactor;
+
+#[async_trait]
+impl Compactor for NoopCompactor {
+    async fn compact(
+        &self,
+        _messages: &[ChatMessage],
+        _token_count: u32,
+    ) -> Result<Option<CompactResult>, CompactError> {
+        Ok(None)
+    }
+
+    fn name(&self) -> &'static str {
+        "noop"
+    }
+}
+
+fn build_thread(
+    provider: Arc<dyn LlmProvider>,
+    agent_record: Arc<AgentRecord>,
+    turns: Vec<TurnRecord>,
+    tool_manager: Option<Arc<ToolManager>>,
+    thread_id: Option<ThreadId>,
+) -> Thread {
+    let builder = ThreadBuilder::new()
+        .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
+        .agent_record(agent_record)
+        .session_id(SessionId::new())
+        .turns(turns);
+    let builder = if let Some(thread_id) = thread_id {
+        builder.id(thread_id)
+    } else {
+        builder
+    };
+    let builder = if let Some(tool_manager) = tool_manager {
+        builder.tool_manager(tool_manager)
+    } else {
+        builder
+    };
+
+    builder.build().unwrap()
 }
 
 /// Echo tool for integration tests
@@ -314,27 +361,22 @@ impl LlmProvider for FlakyProvider {
 #[tokio::test]
 async fn test_turn_integration_simple() {
     let provider = Arc::new(MockProvider::new("Hello, world!".to_string()));
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    );
 
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
+    let record = thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await
         .unwrap();
 
-    let record = turn.execute().await.unwrap();
-
     assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.turn_number, 1);
+    assert_eq!(record.token_usage.total_tokens, 15);
     assert_eq!(record.messages.len(), 2);
     assert_eq!(record.messages[0].role, Role::User);
     assert_eq!(record.messages[0].content, "Hello");
@@ -359,27 +401,21 @@ async fn first_turn_injects_system_prompt_into_request_but_not_record() {
         },
     ));
 
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord {
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord {
             system_prompt: "You are a helpful assistant.".to_string(),
             ..AgentRecord::default()
-        }))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .unwrap();
+        }),
+        Vec::new(),
+        None,
+        None,
+    );
 
-    let record = turn.execute().await.unwrap();
+    let record = thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await
+        .unwrap();
 
     let requests = captured_requests.lock().unwrap();
     let first_request = requests
@@ -390,10 +426,16 @@ async fn first_turn_injects_system_prompt_into_request_but_not_record() {
         first_request.messages[0].content,
         "You are a helpful assistant."
     );
-    assert_eq!(first_request.messages[1].role, Role::User);
-    assert_eq!(first_request.messages[1].content, "Hello");
+    let last_message = first_request
+        .messages
+        .last()
+        .expect("request should include user input");
+    assert_eq!(last_message.role, Role::User);
+    assert_eq!(last_message.content, "Hello");
 
     assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.turn_number, 1);
+    assert_eq!(record.token_usage.total_tokens, 15);
     assert_eq!(record.messages.len(), 2);
     assert_eq!(record.messages[0].role, Role::User);
     assert_eq!(record.messages[0].content, "Hello");
@@ -418,31 +460,28 @@ async fn later_turns_still_inject_system_prompt_into_request_but_not_record() {
         },
     ));
 
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(2)
-        .thread_id("test-thread".to_string())
-        .history(vec![
-            ChatMessage::user("Hello"),
-            ChatMessage::assistant("First reply"),
-        ])
-        .messages(vec![ChatMessage::user("Follow-up")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord {
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord {
             system_prompt: "You are a helpful assistant.".to_string(),
             ..AgentRecord::default()
-        }))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .unwrap();
+        }),
+        vec![TurnRecord::user_turn(
+            1,
+            vec![
+                ChatMessage::user("Hello"),
+                ChatMessage::assistant("First reply"),
+            ],
+            Default::default(),
+        )],
+        None,
+        None,
+    );
 
-    let record = turn.execute().await.unwrap();
+    let record = thread
+        .execute_turn("Follow-up".to_string(), None, TurnCancellation::new())
+        .await
+        .unwrap();
 
     let requests = captured_requests.lock().unwrap();
     let first_request = requests.first().expect("provider should capture request");
@@ -451,14 +490,22 @@ async fn later_turns_still_inject_system_prompt_into_request_but_not_record() {
         first_request.messages[0].content,
         "You are a helpful assistant."
     );
-    assert_eq!(first_request.messages[1].role, Role::User);
-    assert_eq!(first_request.messages[1].content, "Hello");
-    assert_eq!(first_request.messages[2].role, Role::Assistant);
-    assert_eq!(first_request.messages[2].content, "First reply");
-    assert_eq!(first_request.messages[3].role, Role::User);
-    assert_eq!(first_request.messages[3].content, "Follow-up");
+    let non_system_messages: Vec<_> = first_request
+        .messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .collect();
+    assert_eq!(non_system_messages.len(), 3);
+    assert_eq!(non_system_messages[0].role, Role::User);
+    assert_eq!(non_system_messages[0].content, "Hello");
+    assert_eq!(non_system_messages[1].role, Role::Assistant);
+    assert_eq!(non_system_messages[1].content, "First reply");
+    assert_eq!(non_system_messages[2].role, Role::User);
+    assert_eq!(non_system_messages[2].content, "Follow-up");
 
     assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+    assert_eq!(record.turn_number, 2);
+    assert_eq!(record.token_usage.total_tokens, 18);
     assert_eq!(record.messages.len(), 2);
     assert_eq!(record.messages[0].role, Role::User);
     assert_eq!(record.messages[0].content, "Follow-up");
@@ -507,26 +554,19 @@ impl LlmProvider for HangingStreamingProvider {
 async fn turn_cancel_returns_cancelled_instead_of_error() {
     let provider = Arc::new(HangingStreamingProvider);
     let cancellation = TurnCancellation::new();
-
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .cancellation(cancellation.clone())
-        .build()
-        .unwrap();
-
-    let handle = tokio::spawn(async move { turn.execute().await });
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    );
+    let task_cancellation = cancellation.clone();
+    let handle = tokio::spawn(async move {
+        thread
+            .execute_turn("Hello".to_string(), None, task_cancellation)
+            .await
+    });
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     cancellation.cancel();
@@ -536,33 +576,30 @@ async fn turn_cancel_returns_cancelled_instead_of_error() {
         .expect("turn should terminate quickly after cancellation")
         .expect("turn task should not panic");
 
-    assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
+    assert!(matches!(
+        result,
+        Err(ThreadError::TurnFailed(TurnError::Cancelled))
+    ));
 }
 
 #[tokio::test]
 async fn turn_cancel_does_not_emit_terminal_thread_events() {
     let provider = Arc::new(HangingStreamingProvider);
     let cancellation = TurnCancellation::new();
-
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .cancellation(cancellation.clone())
-        .build()
-        .unwrap();
-
-    let handle = tokio::spawn(async move { turn.execute().await });
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    );
+    let mut thread_event_rx = thread.subscribe();
+    let task_cancellation = cancellation.clone();
+    let handle = tokio::spawn(async move {
+        thread
+            .execute_turn("Hello".to_string(), None, task_cancellation)
+            .await
+    });
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     cancellation.cancel();
@@ -571,7 +608,10 @@ async fn turn_cancel_does_not_emit_terminal_thread_events() {
         .await
         .expect("turn should terminate quickly after cancellation")
         .expect("turn task should not panic");
-    assert!(matches!(result, Err(argus_agent::TurnError::Cancelled)));
+    assert!(matches!(
+        result,
+        Err(ThreadError::TurnFailed(TurnError::Cancelled))
+    ));
 
     let mut saw_failed = false;
     let mut saw_idle = false;
@@ -621,25 +661,27 @@ async fn test_turn_integration_with_tool_call() {
     ];
 
     let provider = Arc::new(MockProvider::with_responses(responses));
+    let tool_manager = Arc::new(ToolManager::new());
+    tool_manager.register(Arc::new(EchoTool));
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord {
+            tool_names: vec!["echo".to_string()],
+            ..AgentRecord::default()
+        }),
+        Vec::new(),
+        Some(tool_manager),
+        None,
+    );
 
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Echo 'test message'")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![Arc::new(EchoTool)])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
+    let record = thread
+        .execute_turn(
+            "Echo 'test message'".to_string(),
+            None,
+            TurnCancellation::new(),
+        )
+        .await
         .unwrap();
-
-    let record = turn.execute().await.unwrap();
 
     assert!(record.messages.len() >= 3);
     // Should have tracked tokens
@@ -660,31 +702,18 @@ async fn test_turn_integration_with_tool_call() {
 }
 
 #[tokio::test]
-async fn test_turn_builder_validation() {
+async fn test_thread_builder_validation() {
     let provider = Arc::new(MockProvider::new("test".to_string()));
 
-    let (stream_tx, _) = broadcast::channel(256);
-    let (thread_event_tx, _) = broadcast::channel(256);
-
-    // Should fail without required fields
-    let result = TurnBuilder::default()
-        .messages(vec![ChatMessage::user("Hello")])
-        .build();
+    let result = ThreadBuilder::new().build();
 
     assert!(result.is_err());
 
-    // Should succeed with all required fields
-    let result = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
+    let result = ThreadBuilder::new()
         .provider(provider)
+        .compactor(Arc::new(NoopCompactor))
         .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
+        .session_id(SessionId::new())
         .build();
 
     assert!(result.is_ok());
@@ -696,26 +725,20 @@ async fn test_turn_streams_retry_events() {
     // (initial attempt + 3 retries = 4 total attempts with RetryConfig::default())
     let flaky_provider = Arc::new(FlakyProvider::new(3));
     let provider = Arc::new(RetryProvider::new(flaky_provider, RetryConfig::default()));
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    );
+    let mut thread_event_rx = thread.subscribe();
 
-    let (stream_tx, _stream_rx) = broadcast::channel(256);
-    let (thread_event_tx, mut thread_event_rx) = broadcast::channel(256);
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("test-thread".to_string())
-        .messages(vec![ChatMessage::user("Hello")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .unwrap();
-
-    // Execute turn in background
-    let turn_handle = tokio::spawn(async move { turn.execute().await });
+    let turn_handle = tokio::spawn(async move {
+        thread
+            .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+            .await
+    });
 
     // Collect retry events from ThreadEvent::Processing
     let mut retry_count = 0;
@@ -774,12 +797,13 @@ async fn test_turn_streams_retry_events() {
 }
 
 #[tokio::test]
-async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch() {
+async fn tool_execution_context_uses_thread_id_for_nested_dispatch() {
     let originating_thread_id = ThreadId::new();
     let seen_thread_id = Arc::new(Mutex::new(None));
-    let tool = Arc::new(CaptureThreadIdTool {
+    let tool_manager = Arc::new(ToolManager::new());
+    tool_manager.register(Arc::new(CaptureThreadIdTool {
         seen_thread_id: Arc::clone(&seen_thread_id),
-    });
+    }));
 
     let provider = Arc::new(MockProvider::with_responses(vec![
         (
@@ -793,29 +817,28 @@ async fn tool_execution_context_uses_originating_thread_id_for_nested_dispatch()
         ("done".to_string(), Vec::new()),
     ]));
 
-    let (stream_tx, _) = broadcast::channel(32);
-    let (thread_event_tx, _) = broadcast::channel(32);
+    let mut thread = build_thread(
+        provider,
+        Arc::new(AgentRecord {
+            tool_names: vec!["capture_thread_id".to_string()],
+            ..AgentRecord::default()
+        }),
+        Vec::new(),
+        Some(tool_manager),
+        Some(originating_thread_id),
+    );
 
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("job-non-uuid".to_string())
-        .originating_thread_id(originating_thread_id)
-        .messages(vec![ChatMessage::user("run nested dispatch")])
-        .provider(provider)
-        .agent_record(Arc::new(AgentRecord::default()))
-        .tools(vec![tool])
-        .hooks(vec![])
-        .config(TurnConfig::default())
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
-        .build()
-        .unwrap();
-
-    let result = turn.execute().await;
+    let result = thread
+        .execute_turn(
+            "run nested dispatch".to_string(),
+            None,
+            TurnCancellation::new(),
+        )
+        .await;
     assert!(result.is_ok(), "turn should complete");
     assert_eq!(
         *seen_thread_id.lock().unwrap(),
         Some(originating_thread_id),
-        "tool context should preserve the originating thread route",
+        "tool context should preserve the thread route",
     );
 }

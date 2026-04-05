@@ -5,9 +5,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use derive_builder::Builder;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::task::{JoinError, JoinHandle};
 
-use crate::TurnBuilder;
-use crate::turn::{TurnCancellation, TurnExecution, TurnProgress};
+use crate::turn::{self, TurnCancellation};
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -581,7 +581,7 @@ impl Thread {
             (control_rx, guard.mailbox())
         };
 
-        let mut active_turn: Option<TurnExecution> = None;
+        let mut active_turn: Option<JoinHandle<Result<TurnRecord, ThreadError>>> = None;
         let mut shutdown_requested = false;
 
         loop {
@@ -618,36 +618,30 @@ impl Thread {
                     )
                     .await;
                 }
-                progress = async {
+                result = async {
                     match active_turn.as_mut() {
-                        Some(execution) => execution.recv().await,
+                        Some(execution) => Some(execution.await),
                         None => None,
                     }
                 }, if active_turn.is_some() => {
-                    match progress {
-                        Some(progress) => {
-                            Self::handle_turn_progress(&thread, &progress).await;
-                        }
-                        None => {
-                            let result = active_turn
-                                .take()
-                                .expect("active turn should exist while receiving progress")
-                                .finish()
-                                .await
-                                .map_err(ThreadError::TurnFailed);
+                    let result = match result
+                        .expect("active turn should exist while awaiting completion")
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(Self::map_turn_join_error(error)),
+                    };
+                    active_turn = None;
 
-                            Self::settle_active_turn(
-                                &thread,
-                                result,
-                                &mut active_turn,
-                                shutdown_requested,
-                            )
-                            .await;
+                    Self::settle_active_turn(
+                        &thread,
+                        result,
+                        &mut active_turn,
+                        shutdown_requested,
+                    )
+                    .await;
 
-                            if shutdown_requested && active_turn.is_none() {
-                                break;
-                            }
-                        }
+                    if shutdown_requested && active_turn.is_none() {
+                        break;
                     }
                 }
                 else => break,
@@ -658,75 +652,37 @@ impl Thread {
     async fn process_loop_action(
         thread: Arc<RwLock<Self>>,
         action: ThreadLoopAction,
-        active_turn: &mut Option<TurnExecution>,
+        active_turn: &mut Option<JoinHandle<Result<TurnRecord, ThreadError>>>,
     ) {
-        let mut next_action = action;
-        loop {
-            match next_action {
-                ThreadLoopAction::StartTurn {
-                    turn_number,
-                    content,
-                    msg_override,
-                } => match Self::start_turn_execution(
-                    Arc::clone(&thread),
-                    turn_number,
-                    content,
-                    msg_override,
-                )
-                .await
-                {
-                    Ok(execution) => {
-                        *active_turn = Some(execution);
-                    }
-                    Err(error) => {
-                        let thread_id = {
-                            let guard = thread.read().await;
-                            guard.id().inner().to_string()
-                        };
-                        let queue_depth = {
-                            let mailbox = {
-                                let guard = thread.read().await;
-                                guard.mailbox()
-                            };
-                            mailbox.lock().await.pending_len()
-                        };
-                        {
-                            let guard = thread.read().await;
-                            guard.broadcast_to_self(ThreadEvent::TurnFailed {
-                                thread_id: thread_id.clone(),
-                                turn_number,
-                                error: error.to_string(),
-                            });
-                        }
-                        tracing::error!(
-                            turn_number,
-                            queue_depth,
-                            "failed to start queued turn: {}",
-                            error
-                        );
-                        next_action =
-                            Self::finish_failed_start_turn(&thread, turn_number, &thread_id).await;
-                        continue;
-                    }
-                },
-                ThreadLoopAction::StopTurn { turn_number } => {
-                    let cancellation = {
-                        let guard = thread.read().await;
-                        guard.active_turn_cancellation.clone()
-                    };
-                    if let Some(cancellation) = cancellation {
-                        tracing::info!(turn_number, "cancelling active turn");
-                        cancellation.cancel();
-                    } else {
-                        tracing::warn!(
-                            turn_number,
-                            "stop-turn requested but no active turn handle"
-                        );
-                    }
-                }
-                ThreadLoopAction::Noop => {}
+        match action {
+            ThreadLoopAction::StartTurn {
+                turn_number,
+                content,
+                msg_override,
+            } => {
+                *active_turn = Some(
+                    Self::start_turn_execution(
+                        Arc::clone(&thread),
+                        turn_number,
+                        content,
+                        msg_override,
+                    )
+                    .await,
+                );
             }
-            break;
+            ThreadLoopAction::StopTurn { turn_number } => {
+                let cancellation = {
+                    let guard = thread.read().await;
+                    guard.active_turn_cancellation.clone()
+                };
+                if let Some(cancellation) = cancellation {
+                    tracing::info!(turn_number, "cancelling active turn");
+                    cancellation.cancel();
+                } else {
+                    tracing::warn!(turn_number, "stop-turn requested but no active turn handle");
+                }
+            }
+            ThreadLoopAction::Noop => {}
         }
     }
 
@@ -735,57 +691,77 @@ impl Thread {
         turn_number: u32,
         content: String,
         msg_override: Option<MessageOverride>,
-    ) -> Result<TurnExecution, ThreadError> {
+    ) -> JoinHandle<Result<TurnRecord, ThreadError>> {
         let cancellation = TurnCancellation::new();
-        let turn = {
+        let (
+            thread_id,
+            originating_thread_id,
+            session_id,
+            history,
+            tools,
+            hooks,
+            provider,
+            config,
+            agent_record,
+            thread_event_tx,
+            compactor,
+        ) = {
             let mut guard = thread.write().await;
-            guard
-                .begin_turn_with_number(turn_number, content, msg_override, cancellation.clone())
-                .await?
+            let effective_record = guard
+                .prepare_turn_start(msg_override, cancellation.clone())
+                .await;
+            let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
+                guard.build_turn_execution_parts(effective_record.clone());
+
+            (
+                thread_id,
+                guard.id,
+                Some(guard.session_id),
+                history,
+                tools,
+                hooks,
+                provider,
+                config,
+                effective_record,
+                thread_event_tx,
+                compactor,
+            )
         };
 
-        Ok(turn.execute_progress())
-    }
-
-    async fn finish_failed_start_turn(
-        thread: &Arc<RwLock<Self>>,
-        turn_number: u32,
-        thread_id: &str,
-    ) -> ThreadLoopAction {
-        let mailbox = {
-            let guard = thread.read().await;
-            guard.mailbox()
-        };
-        let mut mailbox = mailbox.lock().await;
-        let mut guard = thread.write().await;
-        let next_action = guard.complete_runtime_turn(false, &mut mailbox);
-        drop(guard);
-        drop(mailbox);
-
-        {
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::TurnSettled {
-                thread_id: thread_id.to_string(),
+        tokio::spawn(async move {
+            turn::execute_thread_turn(
                 turn_number,
-            });
-        }
-        if matches!(next_action, ThreadLoopAction::Noop) {
-            let guard = thread.read().await;
-            guard.broadcast_to_self(ThreadEvent::Idle {
-                thread_id: thread_id.to_string(),
-            });
-        }
-
-        next_action
+                thread_id,
+                originating_thread_id,
+                session_id,
+                history,
+                vec![ChatMessage::user(content)],
+                tools,
+                hooks,
+                Utc::now(),
+                provider,
+                config,
+                agent_record,
+                None,
+                thread_event_tx,
+                cancellation,
+                Some(compactor),
+            )
+            .await
+            .map_err(ThreadError::TurnFailed)
+        })
     }
 
-    async fn handle_turn_progress(_thread: &Arc<RwLock<Self>>, _progress: &TurnProgress) {
+    fn map_turn_join_error(error: JoinError) -> ThreadError {
+        ThreadError::TurnFailed(crate::TurnError::BuildFailed(format!(
+            "turn setup task failed: {error}"
+        )))
     }
 
     async fn settle_active_turn(
         thread: &Arc<RwLock<Self>>,
         result: Result<TurnRecord, ThreadError>,
-        active_turn: &mut Option<TurnExecution>,
+        active_turn: &mut Option<JoinHandle<Result<TurnRecord, ThreadError>>>,
         shutdown_requested: bool,
     ) {
         let committed = result.is_ok();
@@ -875,25 +851,58 @@ impl Thread {
         }
     }
 
-    /// Begin building a turn without holding the caller's lock for the whole execution.
-    pub async fn begin_turn(
+    /// Execute one user turn through the thread-owned turn lifecycle.
+    pub async fn execute_turn(
         &mut self,
         user_input: String,
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
-    ) -> Result<crate::Turn, ThreadError> {
+    ) -> Result<TurnRecord, ThreadError> {
         let turn_number = derive_next_user_turn_number(&self.turns);
-        self.begin_turn_with_number(turn_number, user_input, msg_override, cancellation)
-            .await
+        let effective_record = self
+            .prepare_turn_start(msg_override, cancellation.clone())
+            .await;
+        let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
+            self.build_turn_execution_parts(effective_record.clone());
+
+        let result = turn::execute_thread_turn(
+            turn_number,
+            thread_id,
+            self.id,
+            Some(self.session_id),
+            history,
+            vec![ChatMessage::user(user_input)],
+            tools,
+            hooks,
+            Utc::now(),
+            provider,
+            config,
+            effective_record,
+            None,
+            thread_event_tx,
+            cancellation,
+            Some(compactor),
+        )
+        .await
+        .map_err(ThreadError::TurnFailed);
+
+        match result {
+            Ok(record) => {
+                self.finish_turn(Ok(record.clone()))?;
+                Ok(record)
+            }
+            Err(error) => match self.finish_turn(Err(error)) {
+                Ok(()) => Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)),
+                Err(error) => Err(error),
+            },
+        }
     }
 
-    async fn begin_turn_with_number(
+    async fn prepare_turn_start(
         &mut self,
-        turn_number: u32,
-        user_input: String,
         msg_override: Option<MessageOverride>,
         cancellation: TurnCancellation,
-    ) -> Result<crate::Turn, ThreadError> {
+    ) -> Arc<AgentRecord> {
         let turn_context = self.build_turn_context();
         match self
             .compactor
@@ -919,9 +928,6 @@ impl Thread {
             }
         }
 
-        // Apply message-level override in-place if provided.
-        // Arc::make_mut clones the inner record only if this Arc is shared (multiple owners).
-        // If no override is provided, just clone the Arc reference (O(1)).
         let effective_record = if let Some(overrides) = msg_override {
             let record = Arc::make_mut(&mut self.agent_record);
             if let Some(v) = overrides.max_tokens {
@@ -938,19 +944,12 @@ impl Thread {
             self.agent_record.clone()
         };
 
-        self.active_turn_cancellation = Some(cancellation.clone());
-
-        match self.build_turn(turn_number, user_input, effective_record, cancellation) {
-            Ok(turn) => Ok(turn),
-            Err(error) => {
-                self.active_turn_cancellation = None;
-                Err(error)
-            }
-        }
+        self.active_turn_cancellation = Some(cancellation);
+        effective_record
     }
 
     /// Finish a previously started turn and apply its output to thread state.
-    pub fn finish_turn(
+    pub(crate) fn finish_turn(
         &mut self,
         result: Result<TurnRecord, ThreadError>,
     ) -> Result<(), ThreadError> {
@@ -967,41 +966,30 @@ impl Thread {
         }
     }
 
-    fn build_turn(
-        &mut self,
-        turn_number: u32,
-        user_input: String,
+    fn build_turn_execution_parts(
+        &self,
         agent_record: Arc<AgentRecord>,
-        cancellation: TurnCancellation,
-    ) -> Result<crate::Turn, ThreadError> {
-        let thread_id = self.id.to_string();
-        let turn_history = self.build_turn_context();
-        let turn_tools = Arc::new(self.build_shared_turn_tools(agent_record.as_ref()));
-        let turn_hooks = Arc::new(self.build_shared_turn_hooks());
-        // Create internal stream channel
-        let (stream_tx, _stream_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-
-        // Build Turn using TurnBuilder
-        let turn_builder = TurnBuilder::default()
-            .turn_number(turn_number)
-            .thread_id(thread_id.clone())
-            .originating_thread_id(self.id)
-            .session_id(self.session_id)
-            .shared_history(turn_history)
-            .messages(vec![ChatMessage::user(user_input)])
-            .shared_tools(turn_tools)
-            .shared_hooks(turn_hooks)
-            .provider(self.provider.clone())
-            .config(self.config.turn_config.clone())
-            .agent_record(agent_record)
-            .stream_tx(stream_tx)
-            .thread_event_tx(self.pipe_tx.clone())
-            .compactor(Arc::new(LlmTurnCompactor::new(self.provider.clone())));
-
-        turn_builder
-            .cancellation(cancellation)
-            .build()
-            .map_err(|e| ThreadError::TurnBuildFailed(e.to_string()))
+    ) -> (
+        String,
+        Arc<Vec<ChatMessage>>,
+        Arc<Vec<Arc<dyn NamedTool>>>,
+        Arc<Vec<Arc<dyn HookHandler>>>,
+        Arc<dyn LlmProvider>,
+        crate::TurnConfig,
+        broadcast::Sender<ThreadEvent>,
+        Arc<dyn Compactor>,
+    ) {
+        let provider = self.provider.clone();
+        (
+            self.id.to_string(),
+            self.build_turn_context(),
+            Arc::new(self.build_shared_turn_tools(agent_record.as_ref())),
+            Arc::new(self.build_shared_turn_hooks()),
+            provider.clone(),
+            self.config.turn_config.clone(),
+            self.pipe_tx.clone(),
+            Arc::new(LlmTurnCompactor::new(provider)) as Arc<dyn Compactor>,
+        )
     }
 
     fn build_shared_turn_tools(&self, agent_record: &AgentRecord) -> Vec<Arc<dyn NamedTool>> {
@@ -1234,19 +1222,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_turn_appends_first_record_without_rewriting_messages() {
+    async fn finish_turn_commits_user_turn_record_history_and_counts() {
         let mut thread = build_test_thread();
-        let _turn = thread
-            .begin_turn("hello".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         let record = TurnRecord::user_turn(
             1,
-            vec![
-                ChatMessage::system("You are a test agent."),
-                ChatMessage::user("hello"),
-                ChatMessage::assistant("world"),
-            ],
+            vec![ChatMessage::user("hello"), ChatMessage::assistant("world")],
             usage(6),
         );
 
@@ -1254,9 +1237,10 @@ mod tests {
             .finish_turn(Ok(record.clone()))
             .expect("turn should settle");
 
-        assert_eq!(thread.turns.len(), 1);
-        assert_eq!(thread.turns[0].turn_number, 1);
-        let stored_messages: Vec<_> = thread.turns[0]
+        let committed = thread.turns.first().expect("record should be committed");
+        assert!(matches!(committed.kind, TurnRecordKind::UserTurn));
+        assert_eq!(committed.turn_number, 1);
+        let stored_messages: Vec<_> = committed
             .messages
             .iter()
             .map(|message| (message.role, message.content.clone()))
@@ -1267,15 +1251,21 @@ mod tests {
             .map(|message| (message.role, message.content.clone()))
             .collect();
         assert_eq!(stored_messages, expected_messages);
+        let history_messages: Vec<_> = thread
+            .history_iter()
+            .map(|message| (message.role, message.content.clone()))
+            .collect();
+        assert_eq!(history_messages, expected_messages);
+        assert_eq!(thread.turn_count(), 1);
+        assert_eq!(thread.token_count(), 6);
     }
 
     #[tokio::test]
     async fn finish_turn_without_system_prompt_keeps_record_messages_unchanged() {
         let mut thread = build_test_thread_without_system_prompt();
-        let _turn = thread
-            .begin_turn("hello".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         let record = TurnRecord::user_turn(
             1,
             vec![ChatMessage::user("hello"), ChatMessage::assistant("world")],
@@ -1303,26 +1293,25 @@ mod tests {
     #[tokio::test]
     async fn cancelled_turn_does_not_append_record() {
         let mut thread = build_test_thread_without_system_prompt();
-        let _turn = thread
-            .begin_turn("hello".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
 
-        thread
-            .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
-            .expect("cancelled turn should settle");
-
+        let result = thread.finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)));
+        assert!(result.is_ok());
+        assert!(thread.history_iter().next().is_none());
+        assert_eq!(thread.turn_count(), 0);
+        assert_eq!(thread.token_count(), 0);
         assert!(thread.turns.is_empty());
         assert!(thread.active_turn_cancellation.is_none());
     }
 
     #[tokio::test]
-    async fn finish_turn_appends_turn_checkpoint_record() {
+    async fn finish_turn_commits_turn_checkpoint_history_and_counts() {
         let mut thread = build_test_thread_without_system_prompt();
-        let _turn = thread
-            .begin_turn("hello".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         let checkpoint = TurnRecord::turn_checkpoint(
             1,
             vec![
@@ -1336,13 +1325,11 @@ mod tests {
             .finish_turn(Ok(checkpoint.clone()))
             .expect("turn should settle");
 
-        assert_eq!(thread.turns.len(), 1);
-        assert!(matches!(
-            thread.turns[0].kind,
-            TurnRecordKind::TurnCheckpoint
-        ));
+        let committed = thread.turns.first().expect("record should be committed");
+        assert!(matches!(committed.kind, TurnRecordKind::TurnCheckpoint));
+        assert_eq!(committed.turn_number, 1);
         assert_eq!(
-            thread.turns[0]
+            committed
                 .messages
                 .iter()
                 .map(|message| message.content.clone())
@@ -1353,16 +1340,24 @@ mod tests {
                 .map(|message| message.content.clone())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(thread.turns[0].turn_number, 1);
+        let history_messages: Vec<_> = thread
+            .history_iter()
+            .map(|message| message.content.clone())
+            .collect();
+        assert_eq!(
+            history_messages,
+            vec!["summary".to_string(), "world".to_string()]
+        );
+        assert_eq!(thread.turn_count(), 1);
+        assert_eq!(thread.token_count(), 4);
     }
 
     #[tokio::test]
     async fn failed_turn_does_not_append_record() {
         let mut thread = build_test_thread_without_system_prompt();
-        let _turn = thread
-            .begin_turn("hello".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
 
         let result = thread.finish_turn(Err(ThreadError::TurnFailed(
             crate::TurnError::ToolExecutionFailed {
@@ -1423,7 +1418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn begin_turn_uses_last_record_usage_for_compaction_and_persists_checkpoint() {
+    async fn prepare_turn_start_uses_last_record_usage_for_compaction_and_persists_checkpoint() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let session_id = SessionId::new();
         let thread_id = ThreadId::new();
@@ -1459,10 +1454,9 @@ mod tests {
             .build()
             .expect("thread should build");
 
-        let _turn = thread
-            .begin_turn("next".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
 
         assert_eq!(seen_token_counts.lock().unwrap().as_slice(), &[7]);
         assert!(matches!(
@@ -1545,10 +1539,9 @@ mod tests {
         );
         assert_eq!(mailbox.pending_len(), 1);
 
-        let _turn = thread
-            .begin_turn_with_number(3, "first".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         thread
             .finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))
             .expect("cancelled turn should settle");
@@ -1559,10 +1552,9 @@ mod tests {
         );
         assert_eq!(mailbox.pending_len(), 0);
 
-        let _turn = thread
-            .begin_turn_with_number(3, "second".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         thread
             .finish_turn(Ok(TurnRecord::user_turn(
                 3,
@@ -1591,10 +1583,9 @@ mod tests {
             ThreadRuntimeState::Running { turn_number: 1 }
         );
 
-        let _turn = thread
-            .begin_turn_with_number(1, "hi".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         thread
             .finish_turn(Ok(TurnRecord::user_turn(
                 1,
@@ -1638,10 +1629,9 @@ mod tests {
             &mut mailbox,
         );
 
-        let _turn = thread
-            .begin_turn_with_number(1, "first".to_string(), None, TurnCancellation::new())
-            .await
-            .expect("turn should build");
+        let _agent = thread
+            .prepare_turn_start(None, TurnCancellation::new())
+            .await;
         mailbox.interrupt_stop();
         thread
             .finish_turn(Ok(TurnRecord::user_turn(
@@ -1663,5 +1653,24 @@ mod tests {
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }
         );
+    }
+
+    #[tokio::test]
+    async fn turn_join_failure_is_mapped_to_regular_thread_error() {
+        let handle: JoinHandle<Result<TurnRecord, ThreadError>> = tokio::spawn(async move {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            Ok(TurnRecord::user_turn(1, Vec::new(), TokenUsage::default()))
+        });
+
+        let join_error = handle.await.expect_err("join should fail");
+        let error = Thread::map_turn_join_error(join_error);
+
+        match error {
+            ThreadError::TurnFailed(crate::TurnError::BuildFailed(message)) => {
+                assert!(message.contains("turn setup task failed"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
