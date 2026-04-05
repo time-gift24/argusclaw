@@ -130,15 +130,13 @@ fn build_smoke_agent_record(
 
 async fn stream_turn_events(mut rx: broadcast::Receiver<ThreadEvent>) {
     while let Ok(event) = rx.recv().await {
-        match event {
-            ThreadEvent::Processing {
-                event: LlmStreamEvent::ContentDelta { delta },
-                ..
-            } => {
-                print!("{delta}");
-                let _ = io::stdout().flush();
-            }
-            _ => {}
+        if let ThreadEvent::Processing {
+            event: LlmStreamEvent::ContentDelta { delta },
+            ..
+        } = event
+        {
+            print!("{delta}");
+            let _ = io::stdout().flush();
         }
     }
 }
