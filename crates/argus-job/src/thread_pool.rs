@@ -16,8 +16,7 @@ use argus_agent::thread_trace_store::{
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
     FilePlanStore, LlmThreadCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
-    TurnCancellation,
-    TurnConfig,
+    TurnCancellation, TurnConfig,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,

@@ -82,7 +82,8 @@ pub async fn append_turn_record(base_dir: &Path, record: &TurnRecord) -> Result<
 
 /// Recover thread log state by replaying the append-only turns.jsonl.
 /// Validates that:
-/// - First record is UserTurn with turn_number = 1
+/// - The first user turn is UserTurn with turn_number = 1
+/// - Leading checkpoints are allowed before that first user turn
 /// - User turn numbers are strictly increasing
 /// - Checkpoint turn_number is always 0
 pub async fn recover_thread_log_state(
@@ -101,7 +102,7 @@ pub async fn recover_thread_log_state(
             })?;
 
     let mut turns = Vec::new();
-    let mut saw_first_record = false;
+    let mut saw_first_user_turn = false;
     let mut last_user_turn_number: u32 = 0;
 
     for (index, line) in content.lines().enumerate() {
@@ -122,10 +123,11 @@ pub async fn recover_thread_log_state(
             });
         }
 
-        if !saw_first_record {
+        if !saw_first_user_turn {
             match record.kind {
                 TurnRecordKind::UserTurn if record.turn_number == 1 => {
                     last_user_turn_number = 1;
+                    saw_first_user_turn = true;
                 }
                 TurnRecordKind::UserTurn => {
                     return Err(TurnLogError::NonMonotonicTurnNumber {
@@ -135,13 +137,10 @@ pub async fn recover_thread_log_state(
                     });
                 }
                 TurnRecordKind::Checkpoint => {
-                    return Err(TurnLogError::MalformedEvent {
-                        line: index + 1,
-                        reason: "first record must be UserTurn(turn_number=1)".to_string(),
-                    });
+                    turns.push(record);
+                    continue;
                 }
             }
-            saw_first_record = true;
             turns.push(record);
             continue;
         }
@@ -159,6 +158,13 @@ pub async fn recover_thread_log_state(
         }
 
         turns.push(record);
+    }
+
+    if !saw_first_user_turn && !turns.is_empty() {
+        return Err(TurnLogError::MalformedEvent {
+            line: 1,
+            reason: "thread log must contain UserTurn(turn_number=1)".to_string(),
+        });
     }
 
     Ok(RecoveredThreadLogState { turns })
@@ -265,7 +271,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_fails_when_first_record_is_checkpoint() {
+    async fn recover_allows_leading_checkpoints_before_first_user_turn() {
+        let temp_dir = tempdir().expect("temp dir should exist");
+        let base_dir = temp_dir.path();
+
+        append_turn_record(
+            base_dir,
+            &TurnRecord::checkpoint(vec![ChatMessage::assistant("summary")], usage(4)),
+        )
+        .await
+        .expect("checkpoint should append");
+
+        append_turn_record(
+            base_dir,
+            &TurnRecord::user_turn(1, vec![ChatMessage::user("turn1")], usage(2)),
+        )
+        .await
+        .expect("first user turn should append");
+
+        let recovered = recover_thread_log_state(base_dir)
+            .await
+            .expect("checkpoint-prefixed log should recover");
+        assert_eq!(recovered.turns.len(), 2);
+        assert!(matches!(
+            recovered.turns[0].kind,
+            TurnRecordKind::Checkpoint
+        ));
+        assert!(matches!(recovered.turns[1].kind, TurnRecordKind::UserTurn));
+    }
+
+    #[tokio::test]
+    async fn recover_fails_when_log_contains_only_checkpoints() {
         let temp_dir = tempdir().expect("temp dir should exist");
         let base_dir = temp_dir.path();
 
@@ -277,7 +313,7 @@ mod tests {
         .expect("checkpoint should append");
 
         let result = recover_thread_log_state(base_dir).await;
-        let err = result.expect_err("checkpoint-first log should fail");
+        let err = result.expect_err("checkpoint-only log should fail");
         assert!(matches!(err, TurnLogError::MalformedEvent { .. }));
     }
 

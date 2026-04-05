@@ -1082,8 +1082,8 @@ mod tests {
     use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
     use crate::thread_trace_store::chat_thread_base_dir;
-    use crate::turn::TurnSettlement;
     use crate::trace::TraceConfig;
+    use crate::turn::TurnSettlement;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand};

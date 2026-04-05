@@ -708,11 +708,14 @@ impl Turn {
             let available_tools = self.resolved_tools();
             let mut request_messages = self.materialize_messages(&turn_messages);
             if let Some(turn_compactor) = &self.turn_compactor {
-                let threshold =
-                    ((self.provider.context_window() as f32) * 0.8).max(1.0) as usize;
+                let threshold = ((self.provider.context_window() as f32) * 0.8).max(1.0) as usize;
                 if Self::estimated_tokens(&request_messages) >= threshold {
                     match turn_compactor
-                        .compact(&self.agent_record.system_prompt, self.history.as_ref(), &turn_messages)
+                        .compact(
+                            &self.agent_record.system_prompt,
+                            self.history.as_ref(),
+                            &turn_messages,
+                        )
                         .await
                     {
                         Ok(Some(result)) => {
@@ -1377,11 +1380,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use crate::compact::turn::{TurnCompactResult, TurnCompactor};
+    use crate::TurnRecordKind;
     use crate::compact::thread::{ThreadCompactResult, ThreadCompactor};
+    use crate::compact::turn::{TurnCompactResult, TurnCompactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
-    use crate::TurnRecordKind;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
@@ -1751,11 +1754,7 @@ mod tests {
                     .collect(),
             });
             let _ = history;
-            self.results
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(Ok(None))
+            self.results.lock().unwrap().pop_front().unwrap_or(Ok(None))
         }
 
         fn name(&self) -> &'static str {
@@ -2004,12 +2003,12 @@ mod tests {
 
         let record = user_turn_only(
             thread
-            .begin_turn("start".to_string(), None, TurnCancellation::default())
-            .await
-            .expect("turn should build")
-            .execute()
-            .await
-            .expect("turn should execute"),
+                .begin_turn("start".to_string(), None, TurnCancellation::default())
+                .await
+                .expect("turn should build")
+                .execute()
+                .await
+                .expect("turn should execute"),
         );
 
         let tool_results = record
@@ -2059,12 +2058,12 @@ mod tests {
 
         let record = user_turn_only(
             thread
-            .begin_turn("start".to_string(), None, TurnCancellation::default())
-            .await
-            .expect("turn should build")
-            .execute()
-            .await
-            .expect("turn should execute"),
+                .begin_turn("start".to_string(), None, TurnCancellation::default())
+                .await
+                .expect("turn should build")
+                .execute()
+                .await
+                .expect("turn should execute"),
         );
 
         assert!(
@@ -2129,9 +2128,9 @@ mod tests {
 
         let record = user_turn_only(
             execution
-            .await
-            .expect("turn task should complete")
-            .expect("turn should execute"),
+                .await
+                .expect("turn task should complete")
+                .expect("turn should execute"),
         );
 
         assert!(
@@ -2192,7 +2191,10 @@ mod tests {
         let settlement = turn.execute().await.expect("turn should succeed");
 
         assert!(settlement.checkpoints.is_empty());
-        assert!(matches!(settlement.user_turn.kind, TurnRecordKind::UserTurn));
+        assert!(matches!(
+            settlement.user_turn.kind,
+            TurnRecordKind::UserTurn
+        ));
     }
 
     #[tokio::test]
@@ -2252,11 +2254,17 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert!(
-            calls[1].turn_messages.iter().any(|content| content == "continue"),
+            calls[1]
+                .turn_messages
+                .iter()
+                .any(|content| content == "continue"),
             "second turn-compactor pass should see the injected continuation message"
         );
         assert!(
-            calls[1].turn_messages.iter().any(|content| content == "first"),
+            calls[1]
+                .turn_messages
+                .iter()
+                .any(|content| content == "first"),
             "second turn-compactor pass should see the prior assistant response"
         );
     }
@@ -2379,9 +2387,11 @@ mod tests {
         ));
         let compactor = Arc::new(RecordingTurnCompactor {
             calls: Arc::new(Mutex::new(Vec::new())),
-            results: Arc::new(Mutex::new(VecDeque::from(vec![Err(CompactError::Failed {
-                reason: "boom".to_string(),
-            })]))),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Err(
+                CompactError::Failed {
+                    reason: "boom".to_string(),
+                },
+            )]))),
         });
         let turn = TurnBuilder::default()
             .turn_number(1)
