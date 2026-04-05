@@ -25,7 +25,6 @@ const MAX_DIR_ENTRIES: usize = 500;
 
 /// Arguments for the list_dir tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct ListDirArgs {
     /// Path to the directory to list (defaults to current directory)
     #[serde(default)]
@@ -89,14 +88,14 @@ impl NamedTool for ListDirTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let path_str = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-
-        let recursive = input
-            .get("recursive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let max_depth = input.get("max_depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+        let args: ListDirArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
+                tool_name: "list_dir".to_string(),
+                reason: format!("Invalid arguments: {e}"),
+            })?;
+        let path_str = args.path.as_deref().unwrap_or(".");
+        let recursive = args.recursive.unwrap_or(false);
+        let max_depth = args.max_depth.unwrap_or(3);
 
         // Validate path (sandboxing)
         let path = validate_path(path_str, None)?;

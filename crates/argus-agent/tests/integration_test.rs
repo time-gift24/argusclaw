@@ -303,11 +303,6 @@ impl FlakyProvider {
         }
     }
 
-    #[allow(dead_code)]
-    fn calls(&self) -> usize {
-        self.calls.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     fn should_fail(&self) -> bool {
         // Try to decrement the failure counter
         // Returns true if we should fail (counter was > 0)

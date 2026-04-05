@@ -22,7 +22,6 @@ use crate::path_utils::validate_path;
 
 /// Arguments for the apply_patch tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct ApplyPatchArgs {
     /// Path to the file to edit
     path: String,
@@ -78,36 +77,15 @@ impl NamedTool for ApplyPatchTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let path_str = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::ExecutionFailed {
+        let args: ApplyPatchArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "apply_patch".to_string(),
-                reason: "Missing required parameter: path".to_string(),
-            }
-        })?;
-
-        let old_string = input
-            .get("old_string")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                tool_name: "apply_patch".to_string(),
-                reason: "Missing required parameter: old_string".to_string(),
+                reason: format!("Invalid arguments: {e}"),
             })?;
-
-        let new_string = input
-            .get("new_string")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                tool_name: "apply_patch".to_string(),
-                reason: "Missing required parameter: new_string".to_string(),
-            })?;
-
-        let replace_all = input
-            .get("replace_all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let replace_all = args.replace_all.unwrap_or(false);
 
         // Validate path (sandboxing)
-        let path = validate_path(path_str, None)?;
+        let path = validate_path(&args.path, None)?;
 
         // Read current content
         let content =
@@ -119,7 +97,7 @@ impl NamedTool for ApplyPatchTool {
                 })?;
 
         // Check if old_string exists
-        if !content.contains(old_string) {
+        if !content.contains(&args.old_string) {
             return Err(ToolError::ExecutionFailed {
                 tool_name: "apply_patch".to_string(),
                 reason: format!(
@@ -131,14 +109,14 @@ impl NamedTool for ApplyPatchTool {
 
         // Apply replacement
         let new_content = if replace_all {
-            content.replace(old_string, new_string)
+            content.replace(&args.old_string, &args.new_string)
         } else {
-            content.replacen(old_string, new_string, 1)
+            content.replacen(&args.old_string, &args.new_string, 1)
         };
 
         // Count replacements
         let replacements = if replace_all {
-            content.matches(old_string).count()
+            content.matches(&args.old_string).count()
         } else {
             1
         };

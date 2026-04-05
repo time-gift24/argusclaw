@@ -26,7 +26,6 @@ const MAX_MATCHES: usize = 100;
 
 /// Arguments for the grep tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct GrepArgs {
     /// The regex pattern to search for
     pattern: String,
@@ -82,33 +81,27 @@ impl NamedTool for GrepTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        // Parse pattern argument (required)
-        let pattern = input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
+        let args: GrepArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "grep".to_string(),
-                reason: "Missing required parameter: pattern".to_string(),
+                reason: format!("Invalid arguments: {e}"),
             })?;
 
         // Parse path (optional, default current directory)
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
+        let path = args
+            .path
+            .as_deref()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
         // Parse glob pattern (optional, default "*")
-        let glob_pattern = input.get("glob").and_then(|v| v.as_str()).unwrap_or("*");
+        let glob_pattern = args.glob_pattern.as_deref().unwrap_or("*");
 
         // Parse ignore_case (optional, default false)
-        let ignore_case = input
-            .get("ignore_case")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let ignore_case = args.ignore_case.unwrap_or(false);
 
         // Build regex
-        let re = RegexBuilder::new(pattern)
+        let re = RegexBuilder::new(&args.pattern)
             .case_insensitive(ignore_case)
             .build()
             .map_err(|e| ToolError::ExecutionFailed {
@@ -130,7 +123,7 @@ impl NamedTool for GrepTool {
         }
 
         Ok(json!({
-            "pattern": pattern,
+            "pattern": args.pattern,
             "path": path.to_string_lossy(),
             "files_searched": files_searched,
             "matches_count": matches.len(),

@@ -212,7 +212,6 @@ fn has_command_token(lower: &str, token: &str) -> bool {
 
 /// Arguments for the shell tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[allow(dead_code)]
 struct ShellArgs {
     /// The shell command to execute
     command: String,
@@ -294,34 +293,27 @@ impl NamedTool for ShellTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let command = input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed {
+        let args: ShellArgs =
+            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
                 tool_name: "shell".to_string(),
-                reason: "Missing required parameter: command".to_string(),
+                reason: format!("Invalid arguments: {e}"),
             })?;
+        let timeout_secs = args.timeout.unwrap_or(self.timeout_secs);
+        let cwd = args.cwd.as_deref().map(PathBuf::from);
 
-        let timeout_secs = input
-            .get("timeout")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(self.timeout_secs);
-
-        let cwd = input.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
-
-        if let Some(reason) = self.is_blocked(command) {
+        if let Some(reason) = self.is_blocked(&args.command) {
             return Err(ToolError::NotAuthorized(format!(
                 "{}: {}",
                 reason,
-                truncate_for_error(command)
+                truncate_for_error(&args.command)
             )));
         }
 
-        if let Some(reason) = detect_command_injection(command) {
+        if let Some(reason) = detect_command_injection(&args.command) {
             return Err(ToolError::NotAuthorized(format!(
                 "Command injection detected ({}): {}",
                 reason,
-                truncate_for_error(command)
+                truncate_for_error(&args.command)
             )));
         }
 
@@ -332,11 +324,11 @@ impl NamedTool for ShellTool {
 
         let mut command = if cfg!(target_os = "windows") {
             let mut c = Command::new("cmd");
-            c.args(["/C", command]);
+            c.args(["/C", args.command.as_str()]);
             c
         } else {
             let mut c = Command::new("sh");
-            c.args(["-c", command]);
+            c.args(["-c", args.command.as_str()]);
             c
         };
 
