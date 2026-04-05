@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use argus_agent::{TurnBuilder, TurnConfig};
+use argus_agent::{LlmThreadCompactor, ThreadBuilder, TurnCancellation};
 use argus_llm::{Cipher, FileKeySource, ProviderManager};
 use argus_protocol::llm::{ChatMessage, LlmProviderId, LlmStreamEvent, Role};
-use argus_protocol::{AgentId, AgentRecord, AgentType, ProviderId, ThreadEvent};
+use argus_protocol::{AgentId, AgentRecord, AgentType, ProviderId, SessionId, ThreadEvent};
 use argus_repository::traits::AccountRepository;
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
 use clap::Parser;
@@ -138,7 +138,6 @@ async fn stream_turn_events(mut rx: broadcast::Receiver<ThreadEvent>) {
                 print!("{delta}");
                 let _ = io::stdout().flush();
             }
-            ThreadEvent::TurnCompleted { .. } | ThreadEvent::TurnFailed { .. } => break,
             _ => {}
         }
     }
@@ -171,38 +170,34 @@ async fn run(cli: Cli) -> Result<()> {
         provider_record.display_name, provider_record.id, provider_record.default_model
     );
 
-    let (stream_tx, _stream_rx) = broadcast::channel(256);
-    let (thread_event_tx, _thread_event_rx) = broadcast::channel(256);
-    let stream_rx = cli.stream.then(|| thread_event_tx.subscribe());
-
-    let turn = TurnBuilder::default()
-        .turn_number(1)
-        .thread_id("job-smoke-chat".to_string())
-        .messages(vec![ChatMessage::user(&cli.prompt)])
-        .provider(provider)
-        .tools(Vec::new())
-        .hooks(Vec::new())
-        .config(TurnConfig::new())
+    let mut thread = ThreadBuilder::new()
+        .provider(Arc::clone(&provider))
+        .compactor(Arc::new(LlmThreadCompactor::new(provider)))
         .agent_record(build_smoke_agent_record(
             provider_record.id,
             cli.system_prompt.clone(),
         ))
-        .stream_tx(stream_tx)
-        .thread_event_tx(thread_event_tx)
+        .session_id(SessionId::new())
         .build()
-        .context("Failed to build smoke turn")?;
+        .context("Failed to build smoke thread")?;
+    let stream_rx = cli.stream.then(|| thread.subscribe());
 
     let stream_task = stream_rx.map(|rx| tokio::spawn(stream_turn_events(rx)));
-    let output_result = turn.execute().await.context("Smoke turn failed");
+    let output_result = thread
+        .execute_turn(cli.prompt, None, TurnCancellation::new())
+        .await
+        .context("Smoke turn failed");
     if let Some(handle) = stream_task {
+        handle.abort();
         let _ = handle.await;
         if output_result.is_ok() {
             println!();
         }
     }
     let record = output_result?;
+    let committed_messages: Vec<_> = thread.history_iter().cloned().collect();
 
-    let reply = extract_last_assistant_message(&record.messages)
+    let reply = extract_last_assistant_message(&committed_messages)
         .ok_or_else(|| anyhow!("Turn completed without an assistant reply"))?;
 
     if !cli.stream {
