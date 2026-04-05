@@ -15,7 +15,8 @@ use argus_agent::thread_trace_store::{
 };
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
+    FilePlanStore, LlmThreadCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
+    TurnCancellation,
     TurnConfig,
 };
 use argus_protocol::llm::{
@@ -1831,7 +1832,7 @@ impl ThreadPool {
             .title(thread_record.title.clone())
             .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(Arc::new(LlmCompactor::new(provider)));
+            .compactor(Arc::new(LlmThreadCompactor::new(provider)));
         let plan_store = FilePlanStore::new(base_dir.clone());
         let thread = thread_builder
             .plan_store(plan_store)
@@ -1954,7 +1955,7 @@ impl ThreadPool {
             .title(thread_title)
             .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(Arc::new(LlmCompactor::new(provider)))
+            .compactor(Arc::new(LlmThreadCompactor::new(provider)))
             .plan_store(plan_store)
             .config(config)
             .build()

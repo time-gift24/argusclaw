@@ -16,7 +16,7 @@ use argus_protocol::{
 };
 use argus_tool::ToolManager;
 
-use super::compact::Compactor;
+use super::compact::thread::ThreadCompactor;
 use super::config::ThreadConfig;
 use super::error::{ThreadError, TurnLogError};
 use super::history::{TurnRecord, TurnRecordKind, derive_next_user_turn_number};
@@ -113,7 +113,7 @@ pub struct Thread {
     tool_manager: Arc<ToolManager>,
 
     /// Compactor for managing context size.
-    compactor: Arc<dyn Compactor>,
+    compactor: Arc<dyn ThreadCompactor>,
 
     /// Hook registry for lifecycle events (optional).
     #[builder(default, setter(strip_option))]
@@ -1075,7 +1075,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::compact::CompactResult;
+    use crate::compact::thread::{ThreadCompactResult, ThreadCompactor};
     use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
     use crate::thread_trace_store::chat_thread_base_dir;
@@ -1120,12 +1120,12 @@ mod tests {
     struct NoopCompactor;
 
     #[async_trait]
-    impl Compactor for NoopCompactor {
+    impl ThreadCompactor for NoopCompactor {
         async fn compact(
             &self,
             _messages: &[ChatMessage],
             _token_count: u32,
-        ) -> Result<Option<CompactResult>, CompactError> {
+        ) -> Result<Option<ThreadCompactResult>, CompactError> {
             Ok(None)
         }
 
@@ -1137,16 +1137,16 @@ mod tests {
     #[derive(Debug)]
     struct RecordingCompactor {
         seen_token_counts: Arc<Mutex<Vec<u32>>>,
-        next_result: Arc<Mutex<VecDeque<CompactResult>>>,
+        next_result: Arc<Mutex<VecDeque<ThreadCompactResult>>>,
     }
 
     #[async_trait]
-    impl Compactor for RecordingCompactor {
+    impl ThreadCompactor for RecordingCompactor {
         async fn compact(
             &self,
             _messages: &[ChatMessage],
             token_count: u32,
-        ) -> Result<Option<CompactResult>, CompactError> {
+        ) -> Result<Option<ThreadCompactResult>, CompactError> {
             self.seen_token_counts.lock().unwrap().push(token_count);
             Ok(self.next_result.lock().unwrap().pop_front())
         }
@@ -1410,7 +1410,7 @@ mod tests {
         let seen_token_counts = Arc::new(Mutex::new(Vec::new()));
         let compactor = RecordingCompactor {
             seen_token_counts: Arc::clone(&seen_token_counts),
-            next_result: Arc::new(Mutex::new(VecDeque::from(vec![CompactResult {
+            next_result: Arc::new(Mutex::new(VecDeque::from(vec![ThreadCompactResult {
                 summary_messages: vec![ChatMessage::assistant("summary")],
                 token_usage: usage(11),
             }]))),

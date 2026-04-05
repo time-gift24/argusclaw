@@ -11,8 +11,8 @@ use argus_agent::thread_trace_store::chat_thread_base_dir;
 use argus_agent::trace::TraceConfig;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
-    TurnConfigBuilder,
+    CompactError, Thread, ThreadBuilder, ThreadCompactResult, ThreadCompactor, ThreadConfig,
+    TurnBuilder, TurnConfigBuilder,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
@@ -209,12 +209,12 @@ impl LlmProvider for SequencedDelayedMockProvider {
 struct NoopCompactor;
 
 #[async_trait]
-impl Compactor for NoopCompactor {
+impl ThreadCompactor for NoopCompactor {
     async fn compact(
         &self,
         _messages: &[ChatMessage],
         _token_count: u32,
-    ) -> Result<Option<CompactResult>, CompactError> {
+    ) -> Result<Option<ThreadCompactResult>, CompactError> {
         Ok(None)
     }
 

@@ -1323,7 +1323,7 @@ mod tests {
     use chrono::Utc;
     use std::sync::{Arc, Mutex};
 
-    use crate::compact::{CompactResult, Compactor};
+    use crate::compact::thread::{ThreadCompactResult, ThreadCompactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
@@ -1612,12 +1612,12 @@ mod tests {
     struct NoopCompactor;
 
     #[async_trait]
-    impl Compactor for NoopCompactor {
+    impl ThreadCompactor for NoopCompactor {
         async fn compact(
             &self,
             _messages: &[ChatMessage],
             _token_count: u32,
-        ) -> Result<Option<CompactResult>, CompactError> {
+        ) -> Result<Option<ThreadCompactResult>, CompactError> {
             Ok(None)
         }
 
@@ -1760,7 +1760,7 @@ mod tests {
         tool_manager: Arc<argus_tool::ToolManager>,
         hooks: Arc<HookRegistry>,
     ) -> crate::thread::Thread {
-        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
+        let compactor: Arc<dyn ThreadCompactor> = Arc::new(NoopCompactor);
         ThreadBuilder::new()
             .provider(provider)
             .compactor(compactor)
