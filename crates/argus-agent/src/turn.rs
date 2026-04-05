@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
-use super::compact::turn::TurnCompactor;
+use super::compact::Compactor;
 use super::history::TurnRecord;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
 use super::{TurnConfig, TurnError, TurnStreamEvent};
@@ -60,23 +60,16 @@ pub enum TurnProgress {
 
 /// Handle for observing turn progress as it happens and awaiting the final result.
 #[derive(Debug)]
-pub struct TurnSettlement {
-    pub checkpoints: Vec<TurnRecord>,
-    pub user_turn: TurnRecord,
-}
-
-/// Handle for observing turn progress as it happens and awaiting the final result.
-#[derive(Debug)]
 pub struct TurnExecution {
     progress_rx: mpsc::UnboundedReceiver<TurnProgress>,
-    result_rx: oneshot::Receiver<Result<TurnSettlement, TurnError>>,
+    result_rx: oneshot::Receiver<Result<TurnRecord, TurnError>>,
 }
 
 /// Fully collected progress plus the final turn result.
 #[derive(Debug)]
 pub struct CollectedTurnExecution {
     pub progress: Vec<TurnProgress>,
-    pub result: Result<TurnSettlement, TurnError>,
+    pub result: Result<TurnRecord, TurnError>,
 }
 
 impl TurnExecution {
@@ -86,7 +79,7 @@ impl TurnExecution {
     }
 
     /// Wait for the terminal turn result.
-    pub async fn finish(self) -> Result<TurnSettlement, TurnError> {
+    pub async fn finish(self) -> Result<TurnRecord, TurnError> {
         let TurnExecution {
             progress_rx,
             result_rx,
@@ -395,7 +388,7 @@ pub struct Turn {
 
     /// Optional turn-level compactor used when a long-running turn needs to shrink its context.
     #[builder(default, setter(strip_option))]
-    turn_compactor: Option<Arc<dyn TurnCompactor>>,
+    compactor: Option<Arc<dyn Compactor>>,
 }
 
 impl TurnBuilder {
@@ -531,7 +524,7 @@ impl Turn {
     async fn execute_internal(
         mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
-    ) -> Result<TurnSettlement, TurnError> {
+    ) -> Result<TurnRecord, TurnError> {
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
@@ -664,7 +657,7 @@ impl Turn {
     }
 
     /// Execute the turn and return the completed turn record.
-    pub async fn execute(self) -> Result<TurnSettlement, TurnError> {
+    pub async fn execute(self) -> Result<TurnRecord, TurnError> {
         self.execute_progress().finish().await
     }
 
@@ -691,12 +684,12 @@ impl Turn {
     async fn execute_loop(
         &mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
-    ) -> Result<TurnSettlement, TurnError> {
+    ) -> Result<TurnRecord, TurnError> {
         let mut turn_messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
-        let mut checkpoints = Vec::new();
+        let mut compacted_during_turn = false;
 
         let max_tool_calls = self.config.max_tool_calls;
 
@@ -707,36 +700,27 @@ impl Turn {
 
             let available_tools = self.resolved_tools();
             let mut request_messages = self.materialize_messages(&turn_messages);
-            if let Some(turn_compactor) = &self.turn_compactor {
-                let threshold = ((self.provider.context_window() as f32) * 0.8).max(1.0) as usize;
-                if Self::estimated_tokens(&request_messages) >= threshold {
-                    match turn_compactor
-                        .compact(
-                            &self.agent_record.system_prompt,
-                            self.history.as_ref(),
-                            &turn_messages,
-                        )
-                        .await
-                    {
-                        Ok(Some(result)) => {
-                            checkpoints.push(TurnRecord::checkpoint(
-                                result.checkpoint_messages.clone(),
-                                result.token_usage,
-                            ));
-                            self.history = Arc::new(result.checkpoint_messages);
-                            turn_messages.clear();
-                            request_messages = self.materialize_messages(&turn_messages);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(
-                                thread_id = %self.thread_id,
-                                turn_number = %self.turn_number,
-                                iteration = %iteration,
-                                error = %error,
-                                "turn compaction failed; continuing without compaction"
-                            );
-                        }
+            let request_token_count = Self::estimated_tokens(&request_messages) as u32;
+            if let Some(compactor) = &self.compactor {
+                match compactor
+                    .compact(&request_messages, request_token_count)
+                    .await
+                {
+                    Ok(Some(result)) => {
+                        compacted_during_turn = true;
+                        self.history = Arc::new(result.messages);
+                        turn_messages.clear();
+                        request_messages = self.materialize_messages(&turn_messages);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            thread_id = %self.thread_id,
+                            turn_number = %self.turn_number,
+                            iteration = %iteration,
+                            error = %error,
+                            "turn compaction failed; continuing without compaction"
+                        );
                     }
                 }
             }
@@ -853,12 +837,19 @@ impl Turn {
                         continue;
                     }
 
-                    return Ok(TurnSettlement {
-                        checkpoints,
-                        user_turn: self.build_turn_record(
-                            std::mem::take(&mut turn_messages),
+                    let final_messages = std::mem::take(&mut turn_messages);
+                    return Ok(if compacted_during_turn {
+                        let mut checkpoint_messages = self.history.as_ref().clone();
+                        checkpoint_messages.extend(final_messages);
+                        TurnRecord::turn_checkpoint_with_times(
+                            self.turn_number,
+                            checkpoint_messages,
                             token_usage.clone(),
-                        ),
+                            self.started_at,
+                            Utc::now(),
+                        )
+                    } else {
+                        self.build_turn_record(final_messages, token_usage.clone())
                     });
                 }
                 NextAction::ContinueWithTools { tool_calls } => {
@@ -1381,8 +1372,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::TurnRecordKind;
-    use crate::compact::thread::{ThreadCompactResult, ThreadCompactor};
-    use crate::compact::turn::{TurnCompactResult, TurnCompactor};
+    use crate::compact::{CompactResult, Compactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
@@ -1395,11 +1385,6 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use tokio::sync::{Mutex as TokioMutex, Notify, broadcast, oneshot};
-
-    fn user_turn_only(settlement: TurnSettlement) -> TurnRecord {
-        assert!(settlement.checkpoints.is_empty());
-        settlement.user_turn
-    }
 
     #[test]
     fn test_generate_turn_id() {
@@ -1714,12 +1699,12 @@ mod tests {
     struct NoopCompactor;
 
     #[async_trait]
-    impl ThreadCompactor for NoopCompactor {
+    impl Compactor for NoopCompactor {
         async fn compact(
             &self,
             _messages: &[ChatMessage],
             _token_count: u32,
-        ) -> Result<Option<ThreadCompactResult>, CompactError> {
+        ) -> Result<Option<CompactResult>, CompactError> {
             Ok(None)
         }
 
@@ -1730,30 +1715,34 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct TurnCompactorCall {
+        messages: Vec<String>,
         turn_messages: Vec<String>,
     }
 
     #[derive(Debug)]
     struct RecordingTurnCompactor {
         calls: Arc<Mutex<Vec<TurnCompactorCall>>>,
-        results: Arc<Mutex<VecDeque<Result<Option<TurnCompactResult>, CompactError>>>>,
+        results: Arc<Mutex<VecDeque<Result<Option<CompactResult>, CompactError>>>>,
     }
 
     #[async_trait]
-    impl TurnCompactor for RecordingTurnCompactor {
+    impl Compactor for RecordingTurnCompactor {
         async fn compact(
             &self,
-            _system_prompt: &str,
-            history: &[ChatMessage],
-            turn_messages: &[ChatMessage],
-        ) -> Result<Option<TurnCompactResult>, CompactError> {
+            messages: &[ChatMessage],
+            _token_count: u32,
+        ) -> Result<Option<CompactResult>, CompactError> {
             self.calls.lock().unwrap().push(TurnCompactorCall {
-                turn_messages: turn_messages
+                messages: messages
                     .iter()
                     .map(|message| message.content.clone())
                     .collect(),
+                turn_messages: messages
+                    .iter()
+                    .filter(|message| message.role != argus_protocol::llm::Role::System)
+                    .map(|message| message.content.clone())
+                    .collect(),
             });
-            let _ = history;
             self.results.lock().unwrap().pop_front().unwrap_or(Ok(None))
         }
 
@@ -1896,7 +1885,7 @@ mod tests {
         tool_manager: Arc<argus_tool::ToolManager>,
         hooks: Arc<HookRegistry>,
     ) -> crate::thread::Thread {
-        let compactor: Arc<dyn ThreadCompactor> = Arc::new(NoopCompactor);
+        let compactor: Arc<dyn Compactor> = Arc::new(NoopCompactor);
         ThreadBuilder::new()
             .provider(provider)
             .compactor(compactor)
@@ -1930,18 +1919,15 @@ mod tests {
         let first_hook_count = resolved_hook_count(&first_turn);
 
         thread
-            .finish_turn(Ok(TurnSettlement {
-                checkpoints: Vec::new(),
-                user_turn: TurnRecord::user_turn(
-                    1,
-                    vec![
-                        ChatMessage::system("You are a test agent."),
-                        ChatMessage::user("first"),
-                        ChatMessage::assistant("done"),
-                    ],
-                    TokenUsage::default(),
-                ),
-            }))
+            .finish_turn(Ok(TurnRecord::user_turn(
+                1,
+                vec![
+                    ChatMessage::system("You are a test agent."),
+                    ChatMessage::user("first"),
+                    ChatMessage::assistant("done"),
+                ],
+                TokenUsage::default(),
+            )))
             .expect("first turn should settle");
 
         tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
@@ -2001,15 +1987,13 @@ mod tests {
 
         tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
 
-        let record = user_turn_only(
-            thread
-                .begin_turn("start".to_string(), None, TurnCancellation::default())
-                .await
-                .expect("turn should build")
-                .execute()
-                .await
-                .expect("turn should execute"),
-        );
+        let record = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build")
+            .execute()
+            .await
+            .expect("turn should execute");
 
         let tool_results = record
             .messages
@@ -2056,15 +2040,13 @@ mod tests {
 
         hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
 
-        let record = user_turn_only(
-            thread
-                .begin_turn("start".to_string(), None, TurnCancellation::default())
-                .await
-                .expect("turn should build")
-                .execute()
-                .await
-                .expect("turn should execute"),
-        );
+        let record = thread
+            .begin_turn("start".to_string(), None, TurnCancellation::default())
+            .await
+            .expect("turn should build")
+            .execute()
+            .await
+            .expect("turn should execute");
 
         assert!(
             record
@@ -2126,12 +2108,10 @@ mod tests {
         hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
         release_first_call.notify_waiters();
 
-        let record = user_turn_only(
-            execution
-                .await
-                .expect("turn task should complete")
-                .expect("turn should execute"),
-        );
+        let record = execution
+            .await
+            .expect("turn task should complete")
+            .expect("turn should execute");
 
         assert!(
             record
@@ -2167,7 +2147,7 @@ mod tests {
         ]));
 
         let turn = make_turn(provider, vec![Arc::new(ContinueOnceTurnEndHook::new())], 5);
-        let record = user_turn_only(turn.execute().await.expect("turn should succeed"));
+        let record = turn.execute().await.expect("turn should succeed");
 
         assert!(record.messages.iter().any(|m| m.content == "first"));
         assert!(record.messages.iter().any(|m| m.content == "continue"));
@@ -2175,7 +2155,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_returns_user_turn_only_settlement_when_no_checkpoints() {
+    async fn execute_returns_user_turn_when_no_internal_compaction_happens() {
         let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
             content: Some("done".to_string()),
             reasoning_content: None,
@@ -2188,13 +2168,9 @@ mod tests {
         }]));
 
         let turn = make_turn(provider, vec![], 5);
-        let settlement = turn.execute().await.expect("turn should succeed");
+        let record = turn.execute().await.expect("turn should succeed");
 
-        assert!(settlement.checkpoints.is_empty());
-        assert!(matches!(
-            settlement.user_turn.kind,
-            TurnRecordKind::UserTurn
-        ));
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
     }
 
     #[tokio::test]
@@ -2242,17 +2218,24 @@ mod tests {
                 ..TurnConfig::default()
             })
             .agent_record(make_agent_record())
-            .turn_compactor(compactor)
+            .compactor(compactor)
             .stream_tx(broadcast::channel(256).0)
             .thread_event_tx(broadcast::channel(256).0)
             .build()
             .expect("turn should build");
 
-        let settlement = turn.execute().await.expect("turn should succeed");
+        let record = turn.execute().await.expect("turn should succeed");
 
-        assert!(settlement.checkpoints.is_empty());
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
+        assert!(
+            calls[0]
+                .messages
+                .iter()
+                .any(|content| content == "You are a test agent."),
+            "compactor should receive the full materialized message list, including the prompt"
+        );
         assert!(
             calls[1]
                 .turn_messages
@@ -2270,7 +2253,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_loop_accumulates_checkpoints_before_final_user_turn() {
+    async fn execute_returns_turn_checkpoint_when_internal_compaction_happens() {
         let provider = Arc::new(SmallWindowSequencedProvider::new(
             vec![
                 CompletionResponse {
@@ -2299,8 +2282,8 @@ mod tests {
         let compactor = Arc::new(RecordingTurnCompactor {
             calls: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(VecDeque::from(vec![
-                Ok(Some(TurnCompactResult {
-                    checkpoint_messages: vec![
+                Ok(Some(CompactResult {
+                    messages: vec![
                         ChatMessage::user("latest input"),
                         ChatMessage::user("summary one"),
                     ],
@@ -2310,8 +2293,8 @@ mod tests {
                         total_tokens: 5,
                     },
                 })),
-                Ok(Some(TurnCompactResult {
-                    checkpoint_messages: vec![
+                Ok(Some(CompactResult {
+                    messages: vec![
                         ChatMessage::user("latest input"),
                         ChatMessage::user("summary two"),
                     ],
@@ -2336,38 +2319,24 @@ mod tests {
                 ..TurnConfig::default()
             })
             .agent_record(make_agent_record())
-            .turn_compactor(compactor)
+            .compactor(compactor)
             .stream_tx(broadcast::channel(256).0)
             .thread_event_tx(broadcast::channel(256).0)
             .build()
             .expect("turn should build");
 
-        let settlement = turn.execute().await.expect("turn should succeed");
+        let record = turn.execute().await.expect("turn should succeed");
 
-        assert_eq!(settlement.checkpoints.len(), 2);
-        assert_eq!(
-            settlement.checkpoints[0]
-                .messages
-                .last()
-                .expect("first checkpoint summary")
-                .content,
-            "summary one"
-        );
-        assert_eq!(
-            settlement.checkpoints[1]
-                .messages
-                .last()
-                .expect("second checkpoint summary")
-                .content,
-            "summary two"
-        );
-        let final_contents: Vec<_> = settlement
-            .user_turn
+        assert!(matches!(record.kind, TurnRecordKind::TurnCheckpoint));
+        let final_contents: Vec<_> = record
             .messages
             .iter()
             .map(|message| message.content.as_str())
             .collect();
-        assert_eq!(final_contents, vec!["second"]);
+        assert_eq!(
+            final_contents,
+            vec!["latest input", "summary two", "second"]
+        );
     }
 
     #[tokio::test]
@@ -2406,17 +2375,16 @@ mod tests {
                 ..TurnConfig::default()
             })
             .agent_record(make_agent_record())
-            .turn_compactor(compactor)
+            .compactor(compactor)
             .stream_tx(broadcast::channel(256).0)
             .thread_event_tx(broadcast::channel(256).0)
             .build()
             .expect("turn should build");
 
-        let settlement = turn.execute().await.expect("turn should still succeed");
+        let record = turn.execute().await.expect("turn should still succeed");
 
-        assert!(settlement.checkpoints.is_empty());
-        let final_contents: Vec<_> = settlement
-            .user_turn
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+        let final_contents: Vec<_> = record
             .messages
             .iter()
             .map(|message| message.content.as_str())
@@ -2458,7 +2426,7 @@ mod tests {
         let turn = make_turn(provider, vec![], 5);
 
         let execution = turn.execute_progress().collect().await;
-        let record = user_turn_only(execution.result.expect("turn should succeed"));
+        let record = execution.result.expect("turn should succeed");
 
         assert_eq!(record.messages.len(), 2);
         assert_eq!(record.messages[0].role, argus_protocol::llm::Role::User);
@@ -2565,7 +2533,7 @@ mod tests {
         ]));
 
         let turn = make_turn(provider, vec![], 5);
-        let record = user_turn_only(turn.execute().await.expect("turn should succeed"));
+        let record = turn.execute().await.expect("turn should succeed");
 
         assert_eq!(record.token_usage.input_tokens, 17);
         assert_eq!(record.token_usage.output_tokens, 5);

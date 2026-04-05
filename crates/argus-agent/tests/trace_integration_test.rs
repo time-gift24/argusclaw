@@ -11,8 +11,8 @@ use argus_agent::thread_trace_store::chat_thread_base_dir;
 use argus_agent::trace::TraceConfig;
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    CompactError, Thread, ThreadBuilder, ThreadCompactResult, ThreadCompactor, ThreadConfig,
-    TurnBuilder, TurnConfigBuilder,
+    CompactError, CompactResult, Compactor, Thread, ThreadBuilder, ThreadConfig, TurnBuilder,
+    TurnConfigBuilder,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream,
@@ -291,12 +291,12 @@ impl LlmProvider for RuntimeCompactionProvider {
 struct NoopCompactor;
 
 #[async_trait]
-impl ThreadCompactor for NoopCompactor {
+impl Compactor for NoopCompactor {
     async fn compact(
         &self,
         _messages: &[ChatMessage],
         _token_count: u32,
-    ) -> Result<Option<ThreadCompactResult>, CompactError> {
+    ) -> Result<Option<CompactResult>, CompactError> {
         Ok(None)
     }
 
@@ -674,7 +674,7 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
 }
 
 #[tokio::test]
-async fn successful_turn_compaction_persists_checkpoint_before_user_turn() {
+async fn successful_turn_compaction_persists_turn_checkpoint() {
     let temp_dir = tempfile::tempdir().unwrap();
     let session_id = SessionId::new();
     let thread_id = argus_protocol::ThreadId::new();
@@ -734,29 +734,33 @@ async fn successful_turn_compaction_persists_checkpoint_before_user_turn() {
     ))
     .await
     .expect("recovery should work");
-    assert_eq!(recovered.turns.len(), 2);
+    assert_eq!(recovered.turns.len(), 1);
     assert!(matches!(
         recovered.turns[0].kind,
-        argus_agent::history::TurnRecordKind::Checkpoint
-    ));
-    assert!(matches!(
-        recovered.turns[1].kind,
-        argus_agent::history::TurnRecordKind::UserTurn
+        argus_agent::history::TurnRecordKind::TurnCheckpoint
     ));
     assert_eq!(
         recovered.turns[0]
             .messages
             .last()
-            .expect("checkpoint summary")
+            .expect("tail reply")
             .content,
-        "user-facing summary"
+        "final reply"
     );
-    let user_turn_contents: Vec<_> = recovered.turns[1]
+    let turn_checkpoint_contents: Vec<_> = recovered.turns[0]
         .messages
         .iter()
         .map(|message| message.content.as_str())
         .collect();
-    assert_eq!(user_turn_contents, vec!["final reply"]);
+    assert_eq!(
+        turn_checkpoint_contents,
+        vec![
+            "this message is long enough to trigger turn compaction",
+            "user-facing summary",
+            "final reply"
+        ]
+    );
+    assert_eq!(recovered.turns[0].turn_number, 1);
 }
 
 #[tokio::test]

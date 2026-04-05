@@ -200,8 +200,7 @@ async fn run(cli: Cli) -> Result<()> {
             println!();
         }
     }
-    let settlement = output_result?;
-    let record = settlement.user_turn;
+    let record = output_result?;
 
     let reply = extract_last_assistant_message(&record.messages)
         .ok_or_else(|| anyhow!("Turn completed without an assistant reply"))?;

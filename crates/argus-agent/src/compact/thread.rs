@@ -1,8 +1,6 @@
 //! Thread compaction: LLM-driven checkpoint summarization.
 //!
 //! This module provides:
-//! - `ThreadCompactor`: Async trait for thread-level compaction strategies.
-//! - `ThreadCompactResult`: Result type carrying checkpoint summary messages and token usage.
 //! - `LlmThreadCompactor`: LLM-driven compaction that summarizes stale history.
 
 use std::sync::Arc;
@@ -10,9 +8,8 @@ use std::sync::Arc;
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
-use argus_protocol::token_usage::TokenUsage;
-use async_trait::async_trait;
 
+use super::{CompactResult, Compactor};
 use crate::error::CompactError;
 
 const DEFAULT_COMPACTION_PROMPT: &str = "\
@@ -36,30 +33,6 @@ Provide a detailed prompt for continuing our conversation above.\n\
   [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the\n\
    path to the directory.]\n\
   ---";
-
-/// Result of a successful compaction.
-#[derive(Debug, Clone)]
-pub struct ThreadCompactResult {
-    /// Summary messages to use in a compaction checkpoint.
-    pub summary_messages: Vec<ChatMessage>,
-    /// Authoritative token count for the compaction request + summary response.
-    pub token_usage: TokenUsage,
-}
-
-/// Thread compactor trait — responsible for deciding when and how to compact.
-#[async_trait]
-pub trait ThreadCompactor: Send + Sync {
-    /// Attempt compaction. Returns `Some(ThreadCompactResult)` if compaction occurred,
-    /// `None` if compaction was not needed.
-    async fn compact(
-        &self,
-        messages: &[ChatMessage],
-        token_count: u32,
-    ) -> Result<Option<ThreadCompactResult>, CompactError>;
-
-    /// Name of the compactor strategy.
-    fn name(&self) -> &'static str;
-}
 
 // ---------------------------------------------------------------------------
 // LlmThreadCompactor
@@ -137,13 +110,13 @@ impl LlmThreadCompactor {
     }
 }
 
-#[async_trait]
-impl ThreadCompactor for LlmThreadCompactor {
+#[async_trait::async_trait]
+impl Compactor for LlmThreadCompactor {
     async fn compact(
         &self,
         messages: &[ChatMessage],
         token_count: u32,
-    ) -> Result<Option<ThreadCompactResult>, CompactError> {
+    ) -> Result<Option<CompactResult>, CompactError> {
         if token_count < self.threshold() {
             return Ok(None);
         }
@@ -175,9 +148,9 @@ impl ThreadCompactor for LlmThreadCompactor {
 
         tracing::debug!(compactor = self.name(), "LLM compaction completed");
 
-        Ok(Some(ThreadCompactResult {
-            summary_messages,
-            token_usage: TokenUsage {
+        Ok(Some(CompactResult {
+            messages: summary_messages,
+            token_usage: argus_protocol::token_usage::TokenUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
                 total_tokens: response.input_tokens + response.output_tokens,
@@ -360,9 +333,9 @@ mod tests {
             .expect("compact should succeed")
             .expect("should have compacted");
 
-        assert_eq!(result.summary_messages.len(), 1);
-        assert_eq!(result.summary_messages[0].role, Role::Assistant);
-        assert_eq!(result.summary_messages[0].content, "历史摘要");
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, Role::Assistant);
+        assert_eq!(result.messages[0].content, "历史摘要");
         assert_eq!(result.token_usage.total_tokens, 20);
     }
 

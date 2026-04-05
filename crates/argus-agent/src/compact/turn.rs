@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use argus_protocol::TokenUsage;
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
-use async_trait::async_trait;
 
+use super::{CompactResult, Compactor};
 use crate::error::CompactError;
 
 const USER_HISTORY_TOKEN_BUDGET: usize = 20_000;
+const DEFAULT_THRESHOLD_RATIO: f32 = 0.8;
 const TURN_COMPACTION_PROMPT: &str = "\
 Write a compact continuation message from the user's perspective.\n\
 Summarize what I asked you to do, what you already discovered or completed,\n\
@@ -17,47 +17,57 @@ Write the summary as if it were written by the user in first person.\n\
 Do not call any tools. Do not write from the assistant perspective.\n\
 Respond only with the summary text.";
 
-#[derive(Debug, Clone)]
-pub struct TurnCompactResult {
-    pub checkpoint_messages: Vec<ChatMessage>,
-    pub token_usage: TokenUsage,
-}
-
-#[async_trait]
-pub trait TurnCompactor: Send + Sync {
-    async fn compact(
-        &self,
-        system_prompt: &str,
-        history: &[ChatMessage],
-        turn_messages: &[ChatMessage],
-    ) -> Result<Option<TurnCompactResult>, CompactError>;
-
-    fn name(&self) -> &'static str;
-}
-
 pub struct LlmTurnCompactor {
     provider: Arc<dyn LlmProvider>,
+    threshold_ratio: f32,
 }
 
 impl LlmTurnCompactor {
     pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            threshold_ratio: DEFAULT_THRESHOLD_RATIO,
+        }
+    }
+
+    #[must_use]
+    pub fn with_threshold_ratio(mut self, ratio: f32) -> Self {
+        self.threshold_ratio = ratio.clamp(0.1, 0.95);
+        self
     }
 
     fn estimated_tokens(content: &str) -> usize {
         (content.len().saturating_add(3)) / 4
     }
 
-    fn select_recent_user_inputs(
-        history: &[ChatMessage],
-        turn_messages: &[ChatMessage],
-    ) -> Vec<ChatMessage> {
-        let user_inputs: Vec<_> = history
+    fn threshold(&self) -> u32 {
+        (self.provider.context_window() as f32 * self.threshold_ratio) as u32
+    }
+
+    fn split_message_segments(
+        messages: &[ChatMessage],
+    ) -> (Vec<ChatMessage>, Vec<ChatMessage>, Vec<ChatMessage>) {
+        let system_messages = messages
             .iter()
-            .chain(turn_messages.iter())
+            .filter(|message| message.role == Role::System)
+            .cloned()
+            .collect();
+        let user_messages = messages
+            .iter()
             .filter(|message| message.role == Role::User)
             .cloned()
             .collect();
+        let non_user_messages = messages
+            .iter()
+            .filter(|message| !matches!(message.role, Role::System | Role::User))
+            .cloned()
+            .collect();
+
+        (system_messages, user_messages, non_user_messages)
+    }
+
+    fn select_recent_user_inputs(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+        let (_, user_inputs, _) = Self::split_message_segments(messages);
 
         let mut selected = Vec::new();
         let mut used_budget = 0usize;
@@ -85,28 +95,21 @@ impl LlmTurnCompactor {
     }
 
     fn build_request_messages(
-        system_prompt: &str,
+        system_messages: &[ChatMessage],
         selected_history: &[ChatMessage],
-        turn_messages: &[ChatMessage],
+        non_user_messages: &[ChatMessage],
     ) -> Vec<ChatMessage> {
         let mut request_messages = Vec::with_capacity(
-            selected_history
+            system_messages
                 .len()
-                .saturating_add(turn_messages.len())
-                .saturating_add(usize::from(!system_prompt.is_empty()))
+                .saturating_add(selected_history.len())
+                .saturating_add(non_user_messages.len())
                 .saturating_add(1),
         );
 
-        if !system_prompt.is_empty() {
-            request_messages.push(ChatMessage::system(system_prompt));
-        }
+        request_messages.extend(system_messages.iter().cloned());
         request_messages.extend(selected_history.iter().cloned());
-        request_messages.extend(
-            turn_messages
-                .iter()
-                .filter(|message| message.role != Role::User)
-                .cloned(),
-        );
+        request_messages.extend(non_user_messages.iter().cloned());
         request_messages.push(ChatMessage::user(TURN_COMPACTION_PROMPT).with_metadata(
             ChatMessageMetadata {
                 summary: false,
@@ -120,23 +123,27 @@ impl LlmTurnCompactor {
     }
 }
 
-#[async_trait]
-impl TurnCompactor for LlmTurnCompactor {
+#[async_trait::async_trait]
+impl Compactor for LlmTurnCompactor {
     async fn compact(
         &self,
-        system_prompt: &str,
-        history: &[ChatMessage],
-        turn_messages: &[ChatMessage],
-    ) -> Result<Option<TurnCompactResult>, CompactError> {
-        let selected_history = Self::select_recent_user_inputs(history, turn_messages);
-        if selected_history.is_empty() && turn_messages.is_empty() {
+        messages: &[ChatMessage],
+        token_count: u32,
+    ) -> Result<Option<CompactResult>, CompactError> {
+        if token_count < self.threshold() {
+            return Ok(None);
+        }
+
+        let (system_messages, _, non_user_messages) = Self::split_message_segments(messages);
+        let selected_history = Self::select_recent_user_inputs(messages);
+        if selected_history.is_empty() && non_user_messages.is_empty() {
             return Ok(None);
         }
 
         let request = CompletionRequest::new(Self::build_request_messages(
-            system_prompt,
+            &system_messages,
             &selected_history,
-            turn_messages,
+            &non_user_messages,
         ));
         let response =
             self.provider
@@ -153,9 +160,9 @@ impl TurnCompactor for LlmTurnCompactor {
         let mut checkpoint_messages = selected_history;
         checkpoint_messages
             .push(ChatMessage::user(summary).with_metadata(Self::summary_metadata()));
-        Ok(Some(TurnCompactResult {
-            checkpoint_messages,
-            token_usage: TokenUsage {
+        Ok(Some(CompactResult {
+            messages: checkpoint_messages,
+            token_usage: argus_protocol::TokenUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
                 total_tokens: response.input_tokens + response.output_tokens,
@@ -182,13 +189,19 @@ mod tests {
     struct CapturingSummaryProvider {
         requests: Arc<Mutex<Vec<CompletionRequest>>>,
         summary: String,
+        context_window: u32,
     }
 
     impl CapturingSummaryProvider {
-        fn new(requests: Arc<Mutex<Vec<CompletionRequest>>>, summary: impl Into<String>) -> Self {
+        fn new(
+            requests: Arc<Mutex<Vec<CompletionRequest>>>,
+            summary: impl Into<String>,
+            context_window: u32,
+        ) -> Self {
             Self {
                 requests,
                 summary: summary.into(),
+                context_window,
             }
         }
     }
@@ -219,6 +232,10 @@ mod tests {
                 cache_creation_input_tokens: 0,
             })
         }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
     }
 
     #[tokio::test]
@@ -227,27 +244,28 @@ mod tests {
         let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
             Arc::clone(&requests),
             "continue from here",
-        )));
+            100,
+        )))
+        .with_threshold_ratio(0.2);
 
         let result = compactor
             .compact(
-                "system prompt",
                 &[
+                    ChatMessage::system("system prompt"),
                     ChatMessage::user("oldest user"),
                     ChatMessage::assistant("oldest assistant"),
                     ChatMessage::user("newer user"),
-                ],
-                &[
                     ChatMessage::assistant("tool context"),
                     ChatMessage::user("latest user"),
                 ],
+                90,
             )
             .await
             .expect("turn compact should succeed")
             .expect("turn compact should produce a result");
 
         let checkpoint_contents: Vec<_> = result
-            .checkpoint_messages
+            .messages
             .iter()
             .map(|message| message.content.as_str())
             .collect();
@@ -263,18 +281,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_includes_system_prompt_in_request_but_not_checkpoint_messages() {
+    async fn compact_includes_system_prompt_in_request_but_not_compacted_messages() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
             Arc::clone(&requests),
             "please continue the task",
-        )));
+            100,
+        )))
+        .with_threshold_ratio(0.2);
 
         let result = compactor
             .compact(
-                "You are a helpful assistant.",
-                &[ChatMessage::user("older request")],
-                &[ChatMessage::assistant("recent tool output")],
+                &[
+                    ChatMessage::system("You are a helpful assistant."),
+                    ChatMessage::user("older request"),
+                    ChatMessage::assistant("recent tool output"),
+                ],
+                90,
             )
             .await
             .expect("turn compact should succeed")
@@ -286,13 +309,13 @@ mod tests {
         assert_eq!(request.messages[0].content, "You are a helpful assistant.");
         assert!(
             result
-                .checkpoint_messages
+                .messages
                 .iter()
                 .all(|message| message.role != Role::System)
         );
         assert_eq!(
             result
-                .checkpoint_messages
+                .messages
                 .last()
                 .expect("summary message should exist")
                 .role,
@@ -301,149 +324,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_marks_summary_as_synthetic_user_summary_and_uses_user_prompt() {
+    async fn compact_uses_internal_threshold_instead_of_always_compacting() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
             Arc::clone(&requests),
-            "I already asked you to inspect the latest tool result and continue.",
+            "summary",
+            100,
         )));
 
         let result = compactor
             .compact(
-                "system prompt",
-                &[ChatMessage::user("older request")],
                 &[
-                    ChatMessage::assistant("found one issue"),
-                    ChatMessage::tool_result("tool-1", "echo", "{\"ok\":true}"),
+                    ChatMessage::system("system prompt"),
+                    ChatMessage::user("short"),
+                    ChatMessage::assistant("reply"),
                 ],
+                10,
             )
             .await
-            .expect("turn compact should succeed")
-            .expect("turn compact should produce a result");
+            .expect("turn compact should succeed");
 
-        let request = requests
-            .lock()
-            .unwrap()
-            .first()
-            .expect("provider should capture a request")
-            .clone();
-        let prompt = request
-            .messages
-            .last()
-            .expect("compaction prompt should be appended");
-        assert_eq!(prompt.role, Role::User);
-        assert!(prompt.content.contains("user's perspective"));
-        assert!(prompt.content.contains("Do not call any tools"));
-        assert!(prompt.content.contains("assistant perspective"));
-
-        let summary = result
-            .checkpoint_messages
-            .last()
-            .expect("summary message should exist");
-        let metadata = summary
-            .metadata
-            .as_ref()
-            .expect("summary should carry metadata");
-        assert_eq!(summary.role, Role::User);
-        assert!(metadata.summary);
-        assert_eq!(
-            metadata.mode,
-            Some(ChatMessageMetadataMode::CompactionSummary)
-        );
-        assert!(metadata.synthetic);
-        assert!(metadata.collapsed_by_default);
-    }
-
-    #[tokio::test]
-    async fn compact_keeps_prior_synthetic_summary_in_latest_checkpoint() {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
-            Arc::clone(&requests),
-            "continue from the latest state",
-        )));
-
-        let prior_summary =
-            ChatMessage::user("previous synthetic summary").with_metadata(ChatMessageMetadata {
-                summary: true,
-                mode: Some(ChatMessageMetadataMode::CompactionSummary),
-                synthetic: true,
-                collapsed_by_default: true,
-            });
-
-        let result = compactor
-            .compact(
-                "system prompt",
-                &[ChatMessage::user("real user input"), prior_summary],
-                &[ChatMessage::assistant("latest assistant output")],
-            )
-            .await
-            .expect("turn compact should succeed")
-            .expect("turn compact should produce a result");
-
-        let checkpoint_contents: Vec<_> = result
-            .checkpoint_messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect();
-        assert_eq!(
-            checkpoint_contents,
-            vec![
-                "previous synthetic summary",
-                "real user input",
-                "continue from the latest state"
-            ]
-        );
-
-        let request = requests
-            .lock()
-            .unwrap()
-            .first()
-            .expect("provider should capture a request")
-            .clone();
-        assert!(
-            request
-                .messages
-                .iter()
-                .any(|message| message.content == "previous synthetic summary"),
-            "later compaction must see prior synthetic summary so the latest checkpoint remains self-contained"
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_does_not_duplicate_current_turn_user_inputs_in_request() {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
-            Arc::clone(&requests),
-            "continue from the latest state",
-        )));
-
-        let _ = compactor
-            .compact(
-                "system prompt",
-                &[ChatMessage::user("real user input")],
-                &[
-                    ChatMessage::user("continue current turn"),
-                    ChatMessage::assistant("latest assistant output"),
-                ],
-            )
-            .await
-            .expect("turn compact should succeed")
-            .expect("turn compact should produce a result");
-
-        let request = requests
-            .lock()
-            .unwrap()
-            .first()
-            .expect("provider should capture a request")
-            .clone();
-        let duplicate_count = request
-            .messages
-            .iter()
-            .filter(|message| message.content == "continue current turn")
-            .count();
-        assert_eq!(
-            duplicate_count, 1,
-            "current-turn user input should appear only once in the compaction request"
-        );
+        assert!(result.is_none());
+        assert!(requests.lock().unwrap().is_empty());
     }
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum TurnRecordKind {
     UserTurn,
     Checkpoint,
+    TurnCheckpoint,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,12 +66,43 @@ impl TurnRecord {
             finished_at,
         }
     }
+
+    pub fn turn_checkpoint(
+        turn_number: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+    ) -> Self {
+        let now = Utc::now();
+        Self::turn_checkpoint_with_times(turn_number, messages, token_usage, now, now)
+    }
+
+    pub fn turn_checkpoint_with_times(
+        turn_number: u32,
+        messages: Vec<ChatMessage>,
+        token_usage: TokenUsage,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            kind: TurnRecordKind::TurnCheckpoint,
+            turn_number,
+            messages,
+            token_usage,
+            started_at,
+            finished_at,
+        }
+    }
 }
 
 pub fn derive_next_user_turn_number(turns: &[TurnRecord]) -> u32 {
     turns
         .iter()
-        .filter(|t| matches!(t.kind, TurnRecordKind::UserTurn))
+        .filter(|t| {
+            matches!(
+                t.kind,
+                TurnRecordKind::UserTurn | TurnRecordKind::TurnCheckpoint
+            )
+        })
         .map(|t| t.turn_number)
         .max()
         .unwrap_or(0)
@@ -90,7 +122,7 @@ mod tests {
     use argus_protocol::TokenUsage;
     use argus_protocol::llm::ChatMessage;
 
-    use super::{TurnRecord, derive_next_user_turn_number, flatten_turn_messages};
+    use super::{TurnRecord, TurnRecordKind, derive_next_user_turn_number, flatten_turn_messages};
 
     #[test]
     fn flatten_committed_messages_skips_checkpoint_records() {
@@ -156,5 +188,68 @@ mod tests {
         ];
 
         assert_eq!(derive_next_user_turn_number(&records), 2);
+    }
+
+    #[test]
+    fn user_turn_number_derivation_counts_turn_checkpoints() {
+        let records = vec![
+            TurnRecord::turn_checkpoint(
+                1,
+                vec![ChatMessage::user("snapshot")],
+                TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    total_tokens: 3,
+                },
+            ),
+            TurnRecord::checkpoint(
+                vec![ChatMessage::assistant("summary")],
+                TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: 1,
+                    total_tokens: 5,
+                },
+            ),
+        ];
+
+        assert_eq!(derive_next_user_turn_number(&records), 2);
+    }
+
+    #[test]
+    fn flatten_committed_messages_skips_turn_checkpoint_records() {
+        let turns = vec![
+            TurnRecord::user_turn(
+                1,
+                vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")],
+                TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                },
+            ),
+            TurnRecord::turn_checkpoint(
+                2,
+                vec![
+                    ChatMessage::user("snapshot"),
+                    ChatMessage::assistant("state"),
+                ],
+                TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 2,
+                    total_tokens: 4,
+                },
+            ),
+        ];
+
+        let flattened = flatten_turn_messages(&turns);
+
+        assert_eq!(flattened.len(), 2);
+        assert!(
+            turns
+                .iter()
+                .any(|turn| matches!(turn.kind, TurnRecordKind::TurnCheckpoint))
+        );
+        assert_eq!(flattened[0].content, "hi");
+        assert_eq!(flattened[1].content, "hello");
     }
 }

@@ -7,7 +7,6 @@ use chrono::Utc;
 use tokio::sync::{Mutex as TokioMutex, broadcast, oneshot};
 
 use argus_agent::history::TurnRecordKind;
-use argus_agent::turn::TurnSettlement;
 use argus_agent::turn::{TurnCancellation, TurnProgress};
 use argus_agent::{TurnBuilder, TurnConfig};
 use argus_llm::retry::{RetryConfig, RetryProvider};
@@ -26,11 +25,6 @@ use argus_protocol::{
 };
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-
-fn user_turn_only(settlement: TurnSettlement) -> argus_agent::TurnRecord {
-    assert!(settlement.checkpoints.is_empty());
-    settlement.user_turn
-}
 
 /// Mock provider that can simulate tool calls with stateful responses
 struct MockProvider {
@@ -408,7 +402,7 @@ async fn test_turn_integration_simple() {
         .build()
         .unwrap();
 
-    let record = user_turn_only(turn.execute().await.unwrap());
+    let record = turn.execute().await.unwrap();
 
     assert!(matches!(record.kind, TurnRecordKind::UserTurn));
     assert_eq!(record.messages.len(), 2);
@@ -455,7 +449,7 @@ async fn first_turn_injects_system_prompt_into_request_but_not_record() {
         .build()
         .unwrap();
 
-    let record = user_turn_only(turn.execute().await.unwrap());
+    let record = turn.execute().await.unwrap();
 
     let requests = captured_requests.lock().unwrap();
     let first_request = requests
@@ -518,7 +512,7 @@ async fn later_turns_still_inject_system_prompt_into_request_but_not_record() {
         .build()
         .unwrap();
 
-    let record = user_turn_only(turn.execute().await.unwrap());
+    let record = turn.execute().await.unwrap();
 
     let requests = captured_requests.lock().unwrap();
     let first_request = requests.first().expect("provider should capture request");
@@ -715,7 +709,7 @@ async fn test_turn_integration_with_tool_call() {
         .build()
         .unwrap();
 
-    let record = user_turn_only(turn.execute().await.unwrap());
+    let record = turn.execute().await.unwrap();
 
     assert!(record.messages.len() >= 3);
     // Should have tracked tokens
