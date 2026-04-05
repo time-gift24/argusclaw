@@ -2275,19 +2275,18 @@ impl ThreadPool {
         thread_record.template_id = Some(RepoAgentId::new(request.agent_id.inner()));
         thread_record.model_override = model_override;
         thread_record.updated_at = now.to_string();
-        persistence
+        if let Err(err) = persistence
             .thread_repository
             .upsert_thread(&thread_record)
             .await
-            .map_err(|err| {
-                let base_dir = base_dir.clone();
-                if should_cleanup_trace_dir {
-                    tokio::spawn(async move {
-                        let _ = tokio::fs::remove_dir_all(base_dir).await;
-                    });
-                }
-                JobError::ExecutionFailed(format!("failed to persist thread record: {err}"))
-            })?;
+        {
+            if should_cleanup_trace_dir {
+                Self::cleanup_trace_dir(&base_dir).await;
+            }
+            return Err(JobError::ExecutionFailed(format!(
+                "failed to persist thread record: {err}"
+            )));
+        }
 
         let job_id = JobId::new(request.job_id.clone());
         if existing_job.is_some() {
@@ -2296,7 +2295,7 @@ impl ThreadPool {
                     Self::persist_existing_job_binding(persistence, &job_id, thread_id).await
             {
                 if should_cleanup_trace_dir {
-                    let _ = tokio::fs::remove_dir_all(&base_dir).await;
+                    Self::cleanup_trace_dir(&base_dir).await;
                 }
                 return Err(
                     Self::rollback_thread_record(persistence, thread_id, format!("{err}")).await,
@@ -2329,7 +2328,7 @@ impl ThreadPool {
 
         if let Err(err) = persistence.job_repository.create(&job_record).await {
             if should_cleanup_trace_dir {
-                let _ = tokio::fs::remove_dir_all(&base_dir).await;
+                Self::cleanup_trace_dir(&base_dir).await;
             }
             return Err(Self::rollback_thread_record(
                 persistence,
@@ -2340,6 +2339,20 @@ impl ThreadPool {
         }
 
         Ok(thread_id)
+    }
+
+    async fn cleanup_trace_dir(base_dir: &Path) {
+        match tokio::fs::remove_dir_all(base_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %base_dir.display(),
+                    error = %error,
+                    "failed to clean up thread trace directory"
+                );
+            }
+        }
     }
 
     async fn persist_existing_job_binding(
@@ -2482,10 +2495,12 @@ mod tests {
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, LlmEventStream};
     use argus_protocol::{AgentRecord, AgentType, ProviderId, ThinkingConfig};
     use argus_repository::ArgusSqlite;
+    use argus_repository::error::DbError;
     use argus_repository::migrate;
     use argus_repository::traits::{
         AgentRepository, JobRepository, LlmProviderRepository, SessionRepository, ThreadRepository,
     };
+    use argus_repository::types::{MessageId, MessageRecord};
     use argus_template::TemplateManager;
     use async_trait::async_trait;
     use rust_decimal::Decimal;
@@ -2556,6 +2571,108 @@ mod tests {
             _model: &str,
         ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
             Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    struct FailingUpsertThreadRepository {
+        inner: Arc<ArgusSqlite>,
+    }
+
+    #[async_trait]
+    impl ThreadRepository for FailingUpsertThreadRepository {
+        async fn upsert_thread(&self, _thread: &ThreadRecord) -> Result<(), DbError> {
+            Err(DbError::QueryFailed {
+                reason: "forced thread upsert failure for cleanup test".to_string(),
+            })
+        }
+
+        async fn get_thread(&self, id: &ThreadId) -> Result<Option<ThreadRecord>, DbError> {
+            self.inner.get_thread(id).await
+        }
+
+        async fn list_threads(&self, limit: u32) -> Result<Vec<ThreadRecord>, DbError> {
+            self.inner.list_threads(limit).await
+        }
+
+        async fn list_threads_in_session(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Vec<ThreadRecord>, DbError> {
+            self.inner.list_threads_in_session(session_id).await
+        }
+
+        async fn delete_thread(&self, id: &ThreadId) -> Result<bool, DbError> {
+            self.inner.delete_thread(id).await
+        }
+
+        async fn delete_threads_in_session(&self, session_id: &SessionId) -> Result<u64, DbError> {
+            self.inner.delete_threads_in_session(session_id).await
+        }
+
+        async fn add_message(&self, message: &MessageRecord) -> Result<MessageId, DbError> {
+            self.inner.add_message(message).await
+        }
+
+        async fn get_messages(&self, thread_id: &ThreadId) -> Result<Vec<MessageRecord>, DbError> {
+            self.inner.get_messages(thread_id).await
+        }
+
+        async fn get_recent_messages(
+            &self,
+            thread_id: &ThreadId,
+            limit: u32,
+        ) -> Result<Vec<MessageRecord>, DbError> {
+            self.inner.get_recent_messages(thread_id, limit).await
+        }
+
+        async fn delete_messages_before(
+            &self,
+            thread_id: &ThreadId,
+            seq: u32,
+        ) -> Result<u64, DbError> {
+            self.inner.delete_messages_before(thread_id, seq).await
+        }
+
+        async fn update_thread_stats(
+            &self,
+            id: &ThreadId,
+            token_count: u32,
+            turn_count: u32,
+        ) -> Result<(), DbError> {
+            self.inner
+                .update_thread_stats(id, token_count, turn_count)
+                .await
+        }
+
+        async fn rename_thread(
+            &self,
+            id: &ThreadId,
+            session_id: &SessionId,
+            title: Option<&str>,
+        ) -> Result<bool, DbError> {
+            self.inner.rename_thread(id, session_id, title).await
+        }
+
+        async fn update_thread_model(
+            &self,
+            id: &ThreadId,
+            session_id: &SessionId,
+            provider_id: argus_protocol::LlmProviderId,
+            model_override: Option<&str>,
+        ) -> Result<bool, DbError> {
+            self.inner
+                .update_thread_model(id, session_id, provider_id, model_override)
+                .await
+        }
+
+        async fn get_thread_in_session(
+            &self,
+            thread_id: &ThreadId,
+            session_id: &SessionId,
+        ) -> Result<Option<ThreadRecord>, DbError> {
+            self.inner
+                .get_thread_in_session(thread_id, session_id)
+                .await
         }
     }
 
@@ -2873,6 +2990,122 @@ mod tests {
                     job_id: "job-sibling-b".to_string(),
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_binding_cleans_trace_dir_before_returning_thread_record_errors() {
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-thread-pool-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        let agent_id = AgentId::new(7);
+        let agent_record = AgentRecord {
+            id: agent_id,
+            display_name: "Cleanup Agent".to_string(),
+            description: "Tests trace cleanup".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: Some("job-test".to_string()),
+            system_prompt: "You clean up after failures.".to_string(),
+            tool_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: Some(ThinkingConfig::disabled()),
+            parent_agent_id: None,
+            agent_type: AgentType::Standard,
+        };
+        template_manager
+            .upsert(agent_record.clone())
+            .await
+            .expect("template upsert should succeed");
+
+        let parent_session_id = SessionId::new();
+        let parent_thread_id = ThreadId::new();
+        SessionRepository::create(sqlite.as_ref(), &parent_session_id, "parent")
+            .await
+            .expect("parent session should persist");
+        sqlite
+            .upsert_thread(&ThreadRecord {
+                id: parent_thread_id,
+                provider_id: argus_protocol::LlmProviderId::new(1),
+                title: Some("parent".to_string()),
+                token_count: 0,
+                turn_count: 0,
+                session_id: Some(parent_session_id),
+                template_id: Some(RepoAgentId::new(agent_id.inner())),
+                model_override: Some("job-test".to_string()),
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            })
+            .await
+            .expect("parent thread record should persist");
+        let parent_base_dir = chat_thread_base_dir(&trace_dir, parent_session_id, parent_thread_id);
+        persist_thread_metadata(
+            &parent_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: parent_thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(parent_session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: agent_record,
+            },
+        )
+        .await
+        .expect("parent metadata should persist");
+
+        let thread_pool = ThreadPool::with_persistence(
+            template_manager,
+            Arc::new(FixedProviderResolver {
+                provider: Arc::new(FixedProvider),
+            }),
+            Arc::new(ToolManager::new()),
+            trace_dir,
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                Arc::new(FailingUpsertThreadRepository {
+                    inner: sqlite.clone(),
+                }) as Arc<dyn ThreadRepository>,
+                sqlite as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+
+        let error = thread_pool
+            .persist_binding(
+                &ThreadPoolJobRequest {
+                    originating_thread_id: parent_thread_id,
+                    job_id: "job-cleanup".to_string(),
+                    agent_id,
+                    prompt: "run cleanup".to_string(),
+                    context: None,
+                },
+                &Utc::now().to_string(),
+            )
+            .await
+            .expect_err("thread record persistence should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to persist thread record"),
+            "unexpected error: {error}"
+        );
+
+        let children = list_direct_child_threads(&parent_base_dir, parent_thread_id)
+            .await
+            .expect("direct child scan should succeed");
+        assert!(
+            children.is_empty(),
+            "failed binding should not leave persisted child traces behind"
         );
     }
 }

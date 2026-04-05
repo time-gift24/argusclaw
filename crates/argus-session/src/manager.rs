@@ -163,7 +163,14 @@ impl SessionSchedulerBackend {
             return Ok(());
         };
 
-        let _ = session.claim_job_result(&thread_id, job_id).await;
+        if session.claim_job_result(&thread_id, job_id).await.is_none() {
+            tracing::debug!(
+                job_id,
+                thread_id = %thread_id,
+                session_id = %session_id,
+                "claim queued job result missed because the mailbox item was already absent"
+            );
+        }
 
         Ok(())
     }

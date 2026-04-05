@@ -344,6 +344,9 @@ impl Thread {
         _committed: bool,
         mailbox: &mut ThreadMailbox,
     ) -> ThreadLoopAction {
+        // A stop request only applies to the turn that just settled; it must
+        // not spill into the next queued turn.
+        mailbox.clear_stop_signal();
         self.runtime_state = ThreadRuntimeState::Idle;
         self.try_start_next_turn(mailbox)
     }
@@ -1585,6 +1588,53 @@ mod tests {
             },
             &mut mailbox,
         );
+        assert_eq!(
+            thread.runtime_state,
+            ThreadRuntimeState::Running { turn_number: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_stop_signal_does_not_cancel_next_turn_after_settle() {
+        let mut thread = build_test_thread_without_system_prompt();
+        let mut mailbox = ThreadMailbox::default();
+
+        thread.dispatch_runtime_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "first".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
+        thread.dispatch_runtime_command(
+            ThreadCommand::EnqueueUserMessage {
+                content: "second".to_string(),
+                msg_override: None,
+            },
+            &mut mailbox,
+        );
+
+        let _turn = thread
+            .begin_turn_with_number(1, "first".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        mailbox.interrupt_stop();
+        thread
+            .finish_turn(Ok(TurnRecord::user_turn(
+                1,
+                vec![ChatMessage::user("first"), ChatMessage::assistant("done")],
+                usage(4),
+            )))
+            .expect("turn should settle");
+
+        thread.complete_runtime_turn(true, &mut mailbox);
+        assert_eq!(
+            thread.runtime_state,
+            ThreadRuntimeState::Running { turn_number: 2 }
+        );
+
+        let action = thread.inspect_runtime_mailbox(&mut mailbox);
+        assert!(matches!(action, ThreadLoopAction::Noop));
         assert_eq!(
             thread.runtime_state,
             ThreadRuntimeState::Running { turn_number: 2 }

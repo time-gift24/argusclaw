@@ -228,6 +228,11 @@ impl ThreadMailbox {
         std::mem::take(&mut self.stop_requested)
     }
 
+    /// Clear any pending stop request without interpreting it as a fresh signal.
+    pub fn clear_stop_signal(&mut self) {
+        self.stop_requested = false;
+    }
+
     /// Remove a queued job result by job ID while preserving FIFO order for remaining items.
     pub fn claim_job_result(&mut self, job_id: &str) -> Option<MailboxMessage> {
         let index = self.items.iter().position(|item| match item {
