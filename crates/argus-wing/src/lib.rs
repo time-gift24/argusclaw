@@ -5,8 +5,7 @@
 //! - Agent Template management (CRUD)
 //! - Session/Thread management
 //! - Messaging and subscriptions
-//! - Approval management
-//!
+//! 
 //! ## Example
 //!
 //! ```rust,no_run
@@ -29,7 +28,6 @@ use std::sync::Arc;
 
 use crate::db::{default_trace_dir, ensure_parent_dir, resolve_database_target, DatabaseTarget};
 
-use argus_approval::{ApprovalManager, ApprovalPolicy};
 use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
@@ -65,13 +63,11 @@ const DEFAULT_AGENT_DISPLAY_NAME: &str = "ArgusWing";
 /// - Agent Template management
 /// - Session/Thread management
 /// - Messaging and subscriptions
-/// - Approval management
 pub struct ArgusWing {
     pool: SqlitePool,
     provider_manager: Arc<ProviderManager>,
     template_manager: Arc<TemplateManager>,
     session_manager: Arc<SessionManager>,
-    approval_manager: Arc<ApprovalManager>,
     tool_manager: Arc<ToolManager>,
     job_manager: Arc<JobManager>,
     pub account_manager: Arc<AccountManager>,
@@ -156,9 +152,6 @@ impl ArgusWing {
             job_manager.clone(),
         ));
 
-        // Create approval manager
-        let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
-
         let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
             Arc::new(ArgusSqlite::new(pool.clone()));
 
@@ -167,7 +160,6 @@ impl ArgusWing {
             provider_manager,
             template_manager,
             session_manager,
-            approval_manager,
             tool_manager,
             job_manager,
             account_manager,
@@ -221,8 +213,6 @@ impl ArgusWing {
             job_manager.thread_pool(),
             job_manager.clone(),
         ));
-        let approval_manager = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
-
         let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
             Arc::new(ArgusSqlite::new(pool.clone()));
 
@@ -231,7 +221,6 @@ impl ArgusWing {
             provider_manager,
             template_manager,
             session_manager,
-            approval_manager,
             tool_manager,
             job_manager,
             account_manager,
@@ -273,12 +262,6 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(knowledge_tool));
 
         Ok(())
-    }
-
-    /// Get a reference to the approval manager.
-    #[must_use]
-    pub fn approval_manager(&self) -> &Arc<ApprovalManager> {
-        &self.approval_manager
     }
 
     /// Get a point-in-time snapshot of aggregate thread-pool metrics.
@@ -446,56 +429,6 @@ impl ArgusWing {
         self.session_manager.create(name.to_string()).await
     }
 
-    /// Create a session with approval policy.
-    ///
-    /// Creates a new session and thread with the specified approval configuration.
-    ///
-    /// # Arguments
-    /// * `name` - Session name
-    /// * `approval_tools` - List of tool names that require approval
-    /// * `auto_approve` - Whether to auto-approve tools
-    ///
-    /// # Returns
-    /// Tuple of (session_id, thread_id) if successful
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Default template 'ArgusWing' is not found
-    /// - Session or thread creation fails
-    pub async fn create_session_with_approval(
-        &self,
-        name: &str,
-        approval_tools: Vec<String>,
-        auto_approve: bool,
-    ) -> Result<(SessionId, ThreadId)> {
-        let session_id = self.create_session(name).await?;
-
-        // Get default template
-        let template =
-            self.get_default_template()
-                .await?
-                .ok_or_else(|| ArgusError::ApprovalError {
-                    reason: "Default template 'ArgusWing' not found".to_string(),
-                })?;
-
-        // Configure approval policy if needed
-        if !approval_tools.is_empty() {
-            let policy = ApprovalPolicy {
-                require_approval: approval_tools.clone(),
-                auto_approve,
-                ..Default::default()
-            };
-            self.approval_manager.update_policy(policy);
-        }
-
-        // Create thread
-        let thread_id = self
-            .create_thread(session_id, template.id, None, None)
-            .await?;
-
-        Ok((session_id, thread_id))
-    }
-
     /// Load a session into memory.
     pub async fn load_session(&self, session_id: SessionId) -> Result<Arc<argus_session::Session>> {
         self.session_manager.load(session_id).await
@@ -637,30 +570,6 @@ impl ArgusWing {
         thread_id: ThreadId,
     ) -> Option<broadcast::Receiver<ThreadEvent>> {
         self.session_manager.subscribe(session_id, &thread_id).await
-    }
-
-    // =========================================================================
-    // Approval API
-    // =========================================================================
-
-    /// List pending approval requests.
-    #[must_use]
-    pub fn list_pending_approvals(&self) -> Vec<argus_protocol::ApprovalRequest> {
-        self.approval_manager.list_pending()
-    }
-
-    /// Resolve an approval request.
-    pub fn resolve_approval(
-        &self,
-        request_id: uuid::Uuid,
-        decision: argus_protocol::ApprovalDecision,
-        resolved_by: Option<String>,
-    ) -> Result<argus_protocol::ApprovalResponse> {
-        self.approval_manager
-            .resolve(request_id, decision, resolved_by)
-            .map_err(|e| ArgusError::ApprovalError {
-                reason: e.to_string(),
-            })
     }
 
     // =========================================================================
@@ -1067,79 +976,6 @@ mod tests {
             message.contains("1 个会话线程"),
             "unexpected error: {message}"
         );
-    }
-
-    #[tokio::test]
-    async fn create_session_with_approval_configures_policy() {
-        use argus_protocol::LlmProviderRecord;
-        use std::collections::HashMap;
-        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
-        let database_path = temp_dir.path().join("test.sqlite");
-
-        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
-            .await
-            .expect("ArgusWing should initialize");
-
-        // Create a test provider first
-        let provider_record = LlmProviderRecord {
-            id: argus_protocol::LlmProviderId::new(1),
-            display_name: "test-provider".to_string(),
-            kind: argus_protocol::LlmProviderKind::OpenAiCompatible,
-            base_url: "http://localhost:11434/v1".to_string(),
-            api_key: argus_protocol::SecretString::new("test-key"),
-            models: vec!["gpt-4".to_string()],
-            model_config: HashMap::new(),
-            default_model: "gpt-4".to_string(),
-            is_default: true,
-            extra_headers: HashMap::new(),
-            secret_status: argus_protocol::ProviderSecretStatus::Ready,
-            meta_data: HashMap::new(),
-        };
-
-        let provider_id = wing
-            .upsert_provider(provider_record.clone())
-            .await
-            .expect("provider should upsert");
-
-        wing.set_default_provider(provider_id)
-            .await
-            .expect("should set default provider");
-
-        // Create the default template
-        let default_template = AgentRecord {
-            id: AgentId::new(0),
-            display_name: DEFAULT_AGENT_DISPLAY_NAME.to_string(),
-            description: "Default assistant for ArgusWing".to_string(),
-            version: "0.1.0".to_string(),
-            provider_id: Some(argus_protocol::ProviderId::new(provider_id.into_inner())),
-            model_id: None,
-            system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
-            tool_names: vec!["shell".to_string(), "read".to_string()],
-            max_tokens: None,
-            temperature: None,
-            thinking_config: Some(ThinkingConfig::enabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
-        };
-        wing.upsert_template(default_template)
-            .await
-            .expect("should upsert default template");
-
-        let (session_id, _thread_id) = wing
-            .create_session_with_approval("test-session", vec!["shell".to_string()], false)
-            .await
-            .expect("session with approval should create");
-
-        // Verify session was created
-        let sessions = wing.list_sessions().await.expect("should list sessions");
-        assert!(!sessions.is_empty());
-
-        // Verify thread was created
-        let threads = wing
-            .list_threads(session_id)
-            .await
-            .expect("should list threads");
-        assert_eq!(threads.len(), 1);
     }
 
     #[tokio::test]

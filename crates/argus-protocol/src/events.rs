@@ -5,7 +5,6 @@
 use std::collections::VecDeque;
 
 use crate::TokenUsage;
-use crate::approval::{ApprovalRequest, ApprovalResponse};
 use crate::ids::{AgentId, SessionId, ThreadId};
 use crate::llm::LlmStreamEvent;
 use crate::message_override::MessageOverride;
@@ -505,24 +504,6 @@ pub enum ThreadEvent {
         thread_id: String,
         /// Error summary.
         error: String,
-    },
-    /// Waiting for approval - tool execution paused for human confirmation.
-    WaitingForApproval {
-        /// Thread ID.
-        thread_id: String,
-        /// Turn number.
-        turn_number: u32,
-        /// The approval request.
-        request: ApprovalRequest,
-    },
-    /// Approval was resolved.
-    ApprovalResolved {
-        /// Thread ID.
-        thread_id: String,
-        /// Turn number.
-        turn_number: u32,
-        /// The approval response.
-        response: ApprovalResponse,
     },
     /// A job was dispatched by the dispatch_job tool.
     JobDispatched {

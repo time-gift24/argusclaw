@@ -85,7 +85,6 @@ pub fn run() {
             commands::cancel_turn,
             commands::stop_job,
             commands::get_thread_snapshot,
-            commands::resolve_approval,
             commands::list_sessions,
             commands::delete_session,
             commands::rename_session,

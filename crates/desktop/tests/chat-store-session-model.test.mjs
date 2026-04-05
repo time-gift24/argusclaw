@@ -31,8 +31,8 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /case "turn_completed"/);
   assert.match(storeSource, /case "job_dispatched"/);
   assert.match(storeSource, /case "job_result"/);
-  assert.match(storeSource, /case "waiting_for_approval"/);
-  assert.match(storeSource, /case "approval_resolved"/);
+  assert.doesNotMatch(storeSource, /case "waiting_for_approval"/);
+  assert.doesNotMatch(storeSource, /case "approval_resolved"/);
   assert.match(storeSource, /case "idle"/);
   assert.match(storeSource, /case "thread_bound_to_job"/);
   assert.match(storeSource, /case "thread_pool_queued"/);

@@ -9,7 +9,6 @@ src/
 ├── lib.rs              # 公共 API 导出
 ├── ids.rs              # 强类型 ID（ThreadId、SessionId、AgentId）
 ├── events.rs           # ThreadEvent 事件类型
-├── approval.rs         # ApprovalRequest、ApprovalDecision
 ├── hooks.rs            # Hook 系统（HookEvent、HookHandler）
 ├── agent.rs            # AgentRecord
 ├── risk_level.rs       # RiskLevel 枚举
@@ -47,7 +46,6 @@ src/
 ### 事件类型
 - `ThreadEvent`：线程生命周期事件
 - `HookEvent`：Hook 触发事件
-- `ApprovalEvent`：审批事件
 
 ### 风险等级
 ```rust

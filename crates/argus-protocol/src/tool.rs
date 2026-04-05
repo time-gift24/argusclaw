@@ -68,7 +68,7 @@ pub trait NamedTool: Send + Sync {
         ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError>;
 
-    /// Returns the risk level of this tool for approval gating.
+    /// Returns the risk level metadata for this tool.
     /// Default is `RiskLevel::Low` for read-only/safe operations.
     fn risk_level(&self) -> RiskLevel {
         RiskLevel::Low

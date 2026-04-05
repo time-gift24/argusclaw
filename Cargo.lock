@@ -168,22 +168,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "argus-approval"
-version = "0.1.0"
-dependencies = [
- "argus-protocol",
- "async-trait",
- "chrono",
- "dashmap",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "argus-auth"
 version = "0.1.0"
 dependencies = [
@@ -392,7 +376,6 @@ name = "argus-wing"
 version = "0.1.0"
 dependencies = [
  "argus-agent",
- "argus-approval",
  "argus-auth",
  "argus-crypto",
  "argus-job",

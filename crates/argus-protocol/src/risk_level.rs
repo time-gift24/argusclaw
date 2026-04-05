@@ -1,8 +1,8 @@
-//! Risk level classification for operations requiring approval.
+//! Risk level classification for tool and operation metadata.
 
 use serde::{Deserialize, Serialize};
 
-/// Risk level of an operation requiring approval.
+/// Risk level of an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {

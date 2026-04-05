@@ -12,7 +12,6 @@ import {
   NewSessionButton,
   SessionHistoryButton,
 } from "@/components/assistant-ui/session-selector";
-import { ApprovalPrompt } from "@/components/chat/approval-prompt";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
@@ -861,7 +860,6 @@ export const Thread: FC = () => {
           <JobStatusArtifacts />
           <PendingAssistantArtifacts />
           <ChatStatusBanner />
-          <ApprovalPrompt />
           <Composer />
         </div>
       </div>

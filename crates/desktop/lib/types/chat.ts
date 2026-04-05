@@ -4,23 +4,6 @@ export interface ToolCallPayload {
   arguments: unknown;
 }
 
-export interface ApprovalRequestPayload {
-  id: string;
-  agent_id: string;
-  tool_name: string;
-  action: string;
-  risk_level: "low" | "medium" | "high" | "critical";
-  requested_at: string;
-  timeout_secs: number;
-}
-
-export interface ApprovalResponsePayload {
-  request_id: string;
-  decision: ApprovalDecision;
-  decided_at: string;
-  decided_by?: string | null;
-}
-
 export interface ChatMessageMetadataPayload {
   summary: boolean;
   mode?:
@@ -200,9 +183,7 @@ export type ThreadEventPayload =
       agent_id: number;
       agent_display_name: string;
       agent_description: string;
-    }
-  | { type: "waiting_for_approval"; request: ApprovalRequestPayload }
-  | { type: "approval_resolved"; response: ApprovalResponsePayload };
+    };
 
 export interface ThreadEventEnvelope {
   session_id: string;
@@ -210,5 +191,3 @@ export interface ThreadEventEnvelope {
   turn_number?: number | null;
   payload: ThreadEventPayload;
 }
-
-export type ApprovalDecision = "approved" | "denied" | "timed_out";

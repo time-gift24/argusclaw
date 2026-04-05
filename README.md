@@ -12,7 +12,6 @@ argusclaw/
 │   ├── argus-thread/      # 线程管理
 │   ├── argus-turn/        # 轮次执行
 │   ├── argus-llm/        # LLM 抽象层
-│   ├── argus-approval/    # 审批系统
 │   ├── argus-tool/       # 工具注册表
 │   ├── argus-repository/ # 持久化层
 │   ├── claw/             # 核心库门面
