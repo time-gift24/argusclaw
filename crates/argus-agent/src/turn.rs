@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{error::Elapsed, timeout};
 use tracing;
 
+use super::compact::turn::TurnCompactor;
 use super::history::TurnRecord;
 use super::tool_context::{clear_current_agent_id, set_current_agent_id};
 use super::{TurnConfig, TurnError, TurnStreamEvent};
@@ -391,6 +392,10 @@ pub struct Turn {
     /// Cancellation primitive used to stop this turn.
     #[builder(default)]
     cancellation: TurnCancellation,
+
+    /// Optional turn-level compactor used when a long-running turn needs to shrink its context.
+    #[builder(default, setter(strip_option))]
+    turn_compactor: Option<Arc<dyn TurnCompactor>>,
 }
 
 impl TurnBuilder {
@@ -595,6 +600,13 @@ impl Turn {
         )
     }
 
+    fn estimated_tokens(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .map(|message| (message.content.len().saturating_add(3)) / 4)
+            .sum()
+    }
+
     fn resolved_tools(&self) -> Vec<Arc<dyn NamedTool>> {
         self.tools.iter().cloned().collect()
     }
@@ -684,6 +696,7 @@ impl Turn {
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
         let mut token_usage = TokenUsage::default();
+        let mut checkpoints = Vec::new();
 
         let max_tool_calls = self.config.max_tool_calls;
 
@@ -694,6 +707,36 @@ impl Turn {
 
             let available_tools = self.resolved_tools();
             let mut request_messages = self.materialize_messages(&turn_messages);
+            if let Some(turn_compactor) = &self.turn_compactor {
+                let threshold =
+                    ((self.provider.context_window() as f32) * 0.8).max(1.0) as usize;
+                if Self::estimated_tokens(&request_messages) >= threshold {
+                    match turn_compactor
+                        .compact(&self.agent_record.system_prompt, self.history.as_ref(), &turn_messages)
+                        .await
+                    {
+                        Ok(Some(result)) => {
+                            checkpoints.push(TurnRecord::checkpoint(
+                                result.checkpoint_messages.clone(),
+                                result.token_usage,
+                            ));
+                            self.history = Arc::new(result.checkpoint_messages);
+                            turn_messages.clear();
+                            request_messages = self.materialize_messages(&turn_messages);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %self.thread_id,
+                                turn_number = %self.turn_number,
+                                iteration = %iteration,
+                                error = %error,
+                                "turn compaction failed; continuing without compaction"
+                            );
+                        }
+                    }
+                }
+            }
             if let Some(max) = max_tool_calls
                 && !available_tools.is_empty()
             {
@@ -808,7 +851,7 @@ impl Turn {
                     }
 
                     return Ok(TurnSettlement {
-                        checkpoints: Vec::new(),
+                        checkpoints,
                         user_turn: self.build_turn_record(
                             std::mem::take(&mut turn_messages),
                             token_usage.clone(),
@@ -1331,8 +1374,10 @@ impl Turn {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    use crate::compact::turn::{TurnCompactResult, TurnCompactor};
     use crate::compact::thread::{ThreadCompactResult, ThreadCompactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
@@ -1426,6 +1471,44 @@ mod tests {
         first_call_started: Mutex<Option<oneshot::Sender<()>>>,
         release_first_call: Arc<Notify>,
         gate_first_call: Mutex<bool>,
+    }
+
+    #[derive(Debug)]
+    struct SmallWindowSequencedProvider {
+        responses: Mutex<Vec<CompletionResponse>>,
+        context_window: u32,
+    }
+
+    impl SmallWindowSequencedProvider {
+        fn new(responses: Vec<CompletionResponse>, context_window: u32) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                context_window,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SmallWindowSequencedProvider {
+        fn model_name(&self) -> &str {
+            "small-window-sequenced"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let mut responses = self.responses.lock().unwrap();
+            Ok(responses.remove(0))
+        }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
     }
 
     impl BlockingFirstResponseProvider {
@@ -1639,6 +1722,44 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "noop"
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct TurnCompactorCall {
+        turn_messages: Vec<String>,
+    }
+
+    #[derive(Debug)]
+    struct RecordingTurnCompactor {
+        calls: Arc<Mutex<Vec<TurnCompactorCall>>>,
+        results: Arc<Mutex<VecDeque<Result<Option<TurnCompactResult>, CompactError>>>>,
+    }
+
+    #[async_trait]
+    impl TurnCompactor for RecordingTurnCompactor {
+        async fn compact(
+            &self,
+            _system_prompt: &str,
+            history: &[ChatMessage],
+            turn_messages: &[ChatMessage],
+        ) -> Result<Option<TurnCompactResult>, CompactError> {
+            self.calls.lock().unwrap().push(TurnCompactorCall {
+                turn_messages: turn_messages
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect(),
+            });
+            let _ = history;
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(None))
+        }
+
+        fn name(&self) -> &'static str {
+            "recording-turn"
         }
     }
 
@@ -2072,6 +2193,225 @@ mod tests {
 
         assert!(settlement.checkpoints.is_empty());
         assert!(matches!(settlement.user_turn.kind, TurnRecordKind::UserTurn));
+    }
+
+    #[tokio::test]
+    async fn execute_loop_turn_compactor_recomputes_from_latest_turn_messages() {
+        let provider = Arc::new(SmallWindowSequencedProvider::new(
+            vec![
+                CompletionResponse {
+                    content: Some("first".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                CompletionResponse {
+                    content: Some("second".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+            ],
+            4,
+        ));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::clone(&calls),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None)]))),
+        });
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user(
+                "this input is long enough to trigger turn compaction checks",
+            )])
+            .provider(provider)
+            .hooks(vec![Arc::new(ContinueOnceTurnEndHook::new())])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .turn_compactor(compactor)
+            .stream_tx(broadcast::channel(256).0)
+            .thread_event_tx(broadcast::channel(256).0)
+            .build()
+            .expect("turn should build");
+
+        let settlement = turn.execute().await.expect("turn should succeed");
+
+        assert!(settlement.checkpoints.is_empty());
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls[1].turn_messages.iter().any(|content| content == "continue"),
+            "second turn-compactor pass should see the injected continuation message"
+        );
+        assert!(
+            calls[1].turn_messages.iter().any(|content| content == "first"),
+            "second turn-compactor pass should see the prior assistant response"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_loop_accumulates_checkpoints_before_final_user_turn() {
+        let provider = Arc::new(SmallWindowSequencedProvider::new(
+            vec![
+                CompletionResponse {
+                    content: Some("first".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                CompletionResponse {
+                    content: Some("second".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+            ],
+            4,
+        ));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![
+                Ok(Some(TurnCompactResult {
+                    checkpoint_messages: vec![
+                        ChatMessage::user("latest input"),
+                        ChatMessage::user("summary one"),
+                    ],
+                    token_usage: TokenUsage {
+                        input_tokens: 4,
+                        output_tokens: 1,
+                        total_tokens: 5,
+                    },
+                })),
+                Ok(Some(TurnCompactResult {
+                    checkpoint_messages: vec![
+                        ChatMessage::user("latest input"),
+                        ChatMessage::user("summary two"),
+                    ],
+                    token_usage: TokenUsage {
+                        input_tokens: 5,
+                        output_tokens: 2,
+                        total_tokens: 7,
+                    },
+                })),
+            ]))),
+        });
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user(
+                "this input is long enough to trigger turn compaction checks",
+            )])
+            .provider(provider)
+            .hooks(vec![Arc::new(ContinueOnceTurnEndHook::new())])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .turn_compactor(compactor)
+            .stream_tx(broadcast::channel(256).0)
+            .thread_event_tx(broadcast::channel(256).0)
+            .build()
+            .expect("turn should build");
+
+        let settlement = turn.execute().await.expect("turn should succeed");
+
+        assert_eq!(settlement.checkpoints.len(), 2);
+        assert_eq!(
+            settlement.checkpoints[0]
+                .messages
+                .last()
+                .expect("first checkpoint summary")
+                .content,
+            "summary one"
+        );
+        assert_eq!(
+            settlement.checkpoints[1]
+                .messages
+                .last()
+                .expect("second checkpoint summary")
+                .content,
+            "summary two"
+        );
+        let final_contents: Vec<_> = settlement
+            .user_turn
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(final_contents, vec!["second"]);
+    }
+
+    #[tokio::test]
+    async fn execute_loop_continues_when_turn_compaction_fails() {
+        let provider = Arc::new(SmallWindowSequencedProvider::new(
+            vec![CompletionResponse {
+                content: Some("done".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            }],
+            4,
+        ));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Err(CompactError::Failed {
+                reason: "boom".to_string(),
+            })]))),
+        });
+        let turn = TurnBuilder::default()
+            .turn_number(1)
+            .thread_id("thread-test".to_string())
+            .messages(vec![ChatMessage::user(
+                "this input is long enough to trigger turn compaction checks",
+            )])
+            .provider(provider)
+            .hooks(vec![])
+            .config(TurnConfig {
+                max_iterations: Some(5),
+                ..TurnConfig::default()
+            })
+            .agent_record(make_agent_record())
+            .turn_compactor(compactor)
+            .stream_tx(broadcast::channel(256).0)
+            .thread_event_tx(broadcast::channel(256).0)
+            .build()
+            .expect("turn should build");
+
+        let settlement = turn.execute().await.expect("turn should still succeed");
+
+        assert!(settlement.checkpoints.is_empty());
+        let final_contents: Vec<_> = settlement
+            .user_turn
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert!(final_contents.iter().any(|content| *content == "done"));
     }
 
     #[tokio::test]

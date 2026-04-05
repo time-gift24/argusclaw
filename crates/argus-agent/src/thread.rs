@@ -17,6 +17,7 @@ use argus_protocol::{
 use argus_tool::ToolManager;
 
 use super::compact::thread::ThreadCompactor;
+use super::compact::turn::LlmTurnCompactor;
 use super::config::ThreadConfig;
 use super::error::{ThreadError, TurnLogError};
 use super::history::{TurnRecord, TurnRecordKind, derive_next_user_turn_number};
@@ -1021,7 +1022,8 @@ impl Thread {
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
-            .thread_event_tx(self.pipe_tx.clone());
+            .thread_event_tx(self.pipe_tx.clone())
+            .turn_compactor(Arc::new(LlmTurnCompactor::new(self.provider.clone())));
 
         turn_builder
             .cancellation(cancellation)

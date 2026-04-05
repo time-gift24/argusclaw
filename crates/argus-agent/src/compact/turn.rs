@@ -3,6 +3,7 @@ use std::sync::Arc;
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
+use argus_protocol::TokenUsage;
 use async_trait::async_trait;
 
 use crate::error::CompactError;
@@ -19,6 +20,7 @@ Respond only with the summary text.";
 #[derive(Debug, Clone)]
 pub struct TurnCompactResult {
     pub checkpoint_messages: Vec<ChatMessage>,
+    pub token_usage: TokenUsage,
 }
 
 #[async_trait]
@@ -146,7 +148,14 @@ impl TurnCompactor for LlmTurnCompactor {
         checkpoint_messages.push(
             ChatMessage::user(summary).with_metadata(Self::summary_metadata()),
         );
-        Ok(Some(TurnCompactResult { checkpoint_messages }))
+        Ok(Some(TurnCompactResult {
+            checkpoint_messages,
+            token_usage: TokenUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+                total_tokens: response.input_tokens + response.output_tokens,
+            },
+        }))
     }
 
     fn name(&self) -> &'static str {
