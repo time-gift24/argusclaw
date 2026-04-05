@@ -7,7 +7,7 @@ use derive_builder::Builder;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::TurnBuilder;
-use crate::turn::{TurnCancellation, TurnExecution, TurnProgress};
+use crate::turn::{TurnCancellation, TurnExecution, TurnProgress, TurnSettlement};
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -808,7 +808,7 @@ impl Thread {
 
     async fn settle_active_turn(
         thread: &Arc<RwLock<Self>>,
-        result: Result<TurnRecord, ThreadError>,
+        result: Result<TurnSettlement, ThreadError>,
         active_turn: &mut Option<TurnExecution>,
         shutdown_requested: bool,
     ) {
@@ -827,11 +827,11 @@ impl Thread {
         {
             let guard = thread.read().await;
             match &result {
-                Ok(record) => {
+                Ok(settlement) => {
                     guard.broadcast_to_self(ThreadEvent::TurnCompleted {
                         thread_id: thread_id.clone(),
                         turn_number: settled_turn_number.unwrap_or_default(),
-                        token_usage: record.token_usage.clone(),
+                        token_usage: settlement.user_turn.token_usage.clone(),
                     });
                 }
                 Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
@@ -977,13 +977,14 @@ impl Thread {
     /// Finish a previously started turn and apply its output to thread state.
     pub fn finish_turn(
         &mut self,
-        result: Result<TurnRecord, ThreadError>,
+        result: Result<TurnSettlement, ThreadError>,
     ) -> Result<(), ThreadError> {
         self.active_turn_cancellation = None;
 
         match result {
-            Ok(record) => {
-                self.turns.push(record);
+            Ok(settlement) => {
+                self.turns.extend(settlement.checkpoints);
+                self.turns.push(settlement.user_turn);
                 self.updated_at = Utc::now();
                 Ok(())
             }
@@ -1079,6 +1080,7 @@ mod tests {
     use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
     use crate::thread_trace_store::chat_thread_base_dir;
+    use crate::turn::TurnSettlement;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
@@ -1091,6 +1093,13 @@ mod tests {
             input_tokens: total_tokens.saturating_sub(1),
             output_tokens: 1,
             total_tokens,
+        }
+    }
+
+    fn user_turn_only(record: TurnRecord) -> TurnSettlement {
+        TurnSettlement {
+            checkpoints: Vec::new(),
+            user_turn: record,
         }
     }
 
@@ -1267,7 +1276,7 @@ mod tests {
         );
 
         thread
-            .finish_turn(Ok(record.clone()))
+            .finish_turn(Ok(user_turn_only(record.clone())))
             .expect("turn should settle");
 
         assert_eq!(thread.turns.len(), 1);
@@ -1299,7 +1308,7 @@ mod tests {
         );
 
         thread
-            .finish_turn(Ok(record.clone()))
+            .finish_turn(Ok(user_turn_only(record.clone())))
             .expect("turn should settle");
 
         assert_eq!(thread.turns.len(), 1);
@@ -1330,6 +1339,56 @@ mod tests {
 
         assert!(thread.turns.is_empty());
         assert!(thread.active_turn_cancellation.is_none());
+    }
+
+    #[tokio::test]
+    async fn finish_turn_appends_checkpoints_before_user_turn() {
+        let mut thread = build_test_thread_without_system_prompt();
+        let _turn = thread
+            .begin_turn("hello".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        let checkpoint = TurnRecord::checkpoint(vec![ChatMessage::assistant("summary")], usage(6));
+        let user_turn = TurnRecord::user_turn(
+            1,
+            vec![ChatMessage::user("hello"), ChatMessage::assistant("world")],
+            usage(4),
+        );
+
+        thread
+            .finish_turn(Ok(TurnSettlement {
+                checkpoints: vec![checkpoint.clone()],
+                user_turn: user_turn.clone(),
+            }))
+            .expect("turn should settle");
+
+        assert_eq!(thread.turns.len(), 2);
+        assert!(matches!(thread.turns[0].kind, TurnRecordKind::Checkpoint));
+        assert!(matches!(thread.turns[1].kind, TurnRecordKind::UserTurn));
+        assert_eq!(
+            thread.turns[0]
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>(),
+            checkpoint
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            thread.turns[1]
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>(),
+            user_turn
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1540,11 +1599,11 @@ mod tests {
             .await
             .expect("turn should build");
         thread
-            .finish_turn(Ok(TurnRecord::user_turn(
+            .finish_turn(Ok(user_turn_only(TurnRecord::user_turn(
                 3,
                 vec![ChatMessage::user("second"), ChatMessage::assistant("done")],
                 usage(7),
-            )))
+            ))))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
@@ -1572,11 +1631,11 @@ mod tests {
             .await
             .expect("turn should build");
         thread
-            .finish_turn(Ok(TurnRecord::user_turn(
+            .finish_turn(Ok(user_turn_only(TurnRecord::user_turn(
                 1,
                 vec![ChatMessage::user("hi"), ChatMessage::assistant("there")],
                 usage(4),
-            )))
+            ))))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
@@ -1620,11 +1679,11 @@ mod tests {
             .expect("turn should build");
         mailbox.interrupt_stop();
         thread
-            .finish_turn(Ok(TurnRecord::user_turn(
+            .finish_turn(Ok(user_turn_only(TurnRecord::user_turn(
                 1,
                 vec![ChatMessage::user("first"), ChatMessage::assistant("done")],
                 usage(4),
-            )))
+            ))))
             .expect("turn should settle");
 
         thread.complete_runtime_turn(true, &mut mailbox);

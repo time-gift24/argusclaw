@@ -238,7 +238,8 @@ async fn run_execute_command(args: ExecuteArgs, config: &Config) -> Result<()> {
         .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
 
     // Execute turn (no streaming for now due to Send trait issue)
-    let record = turn.execute().await?;
+    let settlement = turn.execute().await?;
+    let record = settlement.user_turn;
 
     println!("Turn completed!");
     println!("Turn messages:");
@@ -317,7 +318,8 @@ Example flow:
         .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
 
     // Execute turn
-    let record = turn.execute().await?;
+    let settlement = turn.execute().await?;
+    let record = settlement.user_turn;
 
     println!("Turn completed!");
     println!(
@@ -411,7 +413,8 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
             .map_err(|e| anyhow!("Failed to build turn: {}", e))?;
 
         match turn.execute().await {
-            Ok(record) => {
+            Ok(settlement) => {
+                let record = settlement.user_turn;
                 println!("Turn completed successfully!");
                 println!(
                     "Tokens: {} input, {} output, {} total",

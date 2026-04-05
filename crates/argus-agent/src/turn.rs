@@ -59,16 +59,23 @@ pub enum TurnProgress {
 
 /// Handle for observing turn progress as it happens and awaiting the final result.
 #[derive(Debug)]
+pub struct TurnSettlement {
+    pub checkpoints: Vec<TurnRecord>,
+    pub user_turn: TurnRecord,
+}
+
+/// Handle for observing turn progress as it happens and awaiting the final result.
+#[derive(Debug)]
 pub struct TurnExecution {
     progress_rx: mpsc::UnboundedReceiver<TurnProgress>,
-    result_rx: oneshot::Receiver<Result<TurnRecord, TurnError>>,
+    result_rx: oneshot::Receiver<Result<TurnSettlement, TurnError>>,
 }
 
 /// Fully collected progress plus the final turn result.
 #[derive(Debug)]
 pub struct CollectedTurnExecution {
     pub progress: Vec<TurnProgress>,
-    pub result: Result<TurnRecord, TurnError>,
+    pub result: Result<TurnSettlement, TurnError>,
 }
 
 impl TurnExecution {
@@ -78,7 +85,7 @@ impl TurnExecution {
     }
 
     /// Wait for the terminal turn result.
-    pub async fn finish(self) -> Result<TurnRecord, TurnError> {
+    pub async fn finish(self) -> Result<TurnSettlement, TurnError> {
         let TurnExecution {
             progress_rx,
             result_rx,
@@ -519,7 +526,7 @@ impl Turn {
     async fn execute_internal(
         mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
-    ) -> Result<TurnRecord, TurnError> {
+    ) -> Result<TurnSettlement, TurnError> {
         tracing::info!(
             thread_id = %self.thread_id,
             turn_number = %self.turn_number,
@@ -645,7 +652,7 @@ impl Turn {
     }
 
     /// Execute the turn and return the completed turn record.
-    pub async fn execute(self) -> Result<TurnRecord, TurnError> {
+    pub async fn execute(self) -> Result<TurnSettlement, TurnError> {
         self.execute_progress().finish().await
     }
 
@@ -672,7 +679,7 @@ impl Turn {
     async fn execute_loop(
         &mut self,
         progress_tx: Option<mpsc::UnboundedSender<TurnProgress>>,
-    ) -> Result<TurnRecord, TurnError> {
+    ) -> Result<TurnSettlement, TurnError> {
         let mut turn_messages = std::mem::take(&mut self.messages);
         let max_iterations = self.config.max_iterations.unwrap_or(50);
         let tool_timeout_secs = self.config.tool_timeout_secs.unwrap_or(120);
@@ -800,10 +807,13 @@ impl Turn {
                         continue;
                     }
 
-                    return Ok(self.build_turn_record(
-                        std::mem::take(&mut turn_messages),
-                        token_usage.clone(),
-                    ));
+                    return Ok(TurnSettlement {
+                        checkpoints: Vec::new(),
+                        user_turn: self.build_turn_record(
+                            std::mem::take(&mut turn_messages),
+                            token_usage.clone(),
+                        ),
+                    });
                 }
                 NextAction::ContinueWithTools { tool_calls } => {
                     tracing::debug!(
@@ -1326,6 +1336,7 @@ mod tests {
     use crate::compact::thread::{ThreadCompactResult, ThreadCompactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
+    use crate::TurnRecordKind;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
@@ -1336,6 +1347,11 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use tokio::sync::{Mutex as TokioMutex, Notify, broadcast, oneshot};
+
+    fn user_turn_only(settlement: TurnSettlement) -> TurnRecord {
+        assert!(settlement.checkpoints.is_empty());
+        settlement.user_turn
+    }
 
     #[test]
     fn test_generate_turn_id() {
@@ -1794,15 +1810,18 @@ mod tests {
         let first_hook_count = resolved_hook_count(&first_turn);
 
         thread
-            .finish_turn(Ok(TurnRecord::user_turn(
-                1,
-                vec![
-                    ChatMessage::system("You are a test agent."),
-                    ChatMessage::user("first"),
-                    ChatMessage::assistant("done"),
-                ],
-                TokenUsage::default(),
-            )))
+            .finish_turn(Ok(TurnSettlement {
+                checkpoints: Vec::new(),
+                user_turn: TurnRecord::user_turn(
+                    1,
+                    vec![
+                        ChatMessage::system("You are a test agent."),
+                        ChatMessage::user("first"),
+                        ChatMessage::assistant("done"),
+                    ],
+                    TokenUsage::default(),
+                ),
+            }))
             .expect("first turn should settle");
 
         tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
@@ -1862,13 +1881,15 @@ mod tests {
 
         tool_manager.register(Arc::new(VersionedTool { version: "v2" }));
 
-        let record = thread
+        let record = user_turn_only(
+            thread
             .begin_turn("start".to_string(), None, TurnCancellation::default())
             .await
             .expect("turn should build")
             .execute()
             .await
-            .expect("turn should execute");
+            .expect("turn should execute"),
+        );
 
         let tool_results = record
             .messages
@@ -1915,13 +1936,15 @@ mod tests {
 
         hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
 
-        let record = thread
+        let record = user_turn_only(
+            thread
             .begin_turn("start".to_string(), None, TurnCancellation::default())
             .await
             .expect("turn should build")
             .execute()
             .await
-            .expect("turn should execute");
+            .expect("turn should execute"),
+        );
 
         assert!(
             record
@@ -1983,10 +2006,12 @@ mod tests {
         hooks.register(HookEvent::TurnEnd, Arc::new(ContinueOnceTurnEndHook::new()));
         release_first_call.notify_waiters();
 
-        let record = execution
+        let record = user_turn_only(
+            execution
             .await
             .expect("turn task should complete")
-            .expect("turn should execute");
+            .expect("turn should execute"),
+        );
 
         assert!(
             record
@@ -2022,11 +2047,31 @@ mod tests {
         ]));
 
         let turn = make_turn(provider, vec![Arc::new(ContinueOnceTurnEndHook::new())], 5);
-        let record = turn.execute().await.expect("turn should succeed");
+        let record = user_turn_only(turn.execute().await.expect("turn should succeed"));
 
         assert!(record.messages.iter().any(|m| m.content == "first"));
         assert!(record.messages.iter().any(|m| m.content == "continue"));
         assert!(record.messages.iter().any(|m| m.content == "second"));
+    }
+
+    #[tokio::test]
+    async fn execute_returns_user_turn_only_settlement_when_no_checkpoints() {
+        let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
+            content: Some("done".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 2,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }]));
+
+        let turn = make_turn(provider, vec![], 5);
+        let settlement = turn.execute().await.expect("turn should succeed");
+
+        assert!(settlement.checkpoints.is_empty());
+        assert!(matches!(settlement.user_turn.kind, TurnRecordKind::UserTurn));
     }
 
     #[tokio::test]
@@ -2063,7 +2108,7 @@ mod tests {
         let turn = make_turn(provider, vec![], 5);
 
         let execution = turn.execute_progress().collect().await;
-        let record = execution.result.expect("turn should succeed");
+        let record = user_turn_only(execution.result.expect("turn should succeed"));
 
         assert_eq!(record.messages.len(), 2);
         assert_eq!(record.messages[0].role, argus_protocol::llm::Role::User);
@@ -2170,7 +2215,7 @@ mod tests {
         ]));
 
         let turn = make_turn(provider, vec![], 5);
-        let record = turn.execute().await.expect("turn should succeed");
+        let record = user_turn_only(turn.execute().await.expect("turn should succeed"));
 
         assert_eq!(record.token_usage.input_tokens, 17);
         assert_eq!(record.token_usage.output_tokens, 5);
