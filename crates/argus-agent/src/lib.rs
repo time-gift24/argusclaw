@@ -70,7 +70,7 @@ pub mod types;
 // ---------------------------------------------------------------------------
 
 // Turn (low-level)
-pub use config::{OnTurnComplete, TurnConfig, TurnConfigBuilder, TurnStreamEvent};
+pub use config::{TurnConfig, TurnConfigBuilder, TurnStreamEvent};
 pub use error::{TurnError, TurnLogError};
 pub use history::{TurnRecord, TurnRecordKind};
 pub use trace::TraceConfig;
