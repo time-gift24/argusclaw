@@ -779,8 +779,7 @@ impl Thread {
         next_action
     }
 
-    async fn handle_turn_progress(_thread: &Arc<RwLock<Self>>, _progress: &TurnProgress) {
-    }
+    async fn handle_turn_progress(_thread: &Arc<RwLock<Self>>, _progress: &TurnProgress) {}
 
     async fn settle_active_turn(
         thread: &Arc<RwLock<Self>>,
@@ -986,7 +985,6 @@ impl Thread {
             .turn_number(turn_number)
             .thread_id(thread_id.clone())
             .originating_thread_id(self.id)
-            .session_id(self.session_id)
             .shared_history(turn_history)
             .messages(vec![ChatMessage::user(user_input)])
             .shared_tools(turn_tools)

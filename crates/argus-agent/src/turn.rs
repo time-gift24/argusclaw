@@ -330,10 +330,6 @@ pub struct Turn {
     #[builder(default = "ThreadId::new()", setter(custom))]
     originating_thread_id: ThreadId,
 
-    /// Session identifier (for callback).
-    #[builder(default, setter(strip_option))]
-    session_id: Option<argus_protocol::SessionId>,
-
     /// Immutable conversation history preceding this turn.
     #[builder(setter(custom), default = "Arc::new(Vec::new())")]
     history: Arc<Vec<ChatMessage>>,
@@ -487,16 +483,6 @@ impl Turn {
             result = ?result.as_ref().map(|_| "ok"),
             "Turn execution completed"
         );
-
-        let cancelled = matches!(result, Err(TurnError::Cancelled));
-
-        // Invoke on_turn_complete callback if configured
-        if !cancelled
-            && let (Some(callback), Some(session_id)) =
-                (&self.config.on_turn_complete, &self.session_id)
-        {
-            callback(*session_id, self.turn_number);
-        }
 
         result
     }
@@ -2448,5 +2434,4 @@ mod tests {
         let result = execution.finish().await;
         assert!(matches!(result, Err(TurnError::Cancelled)));
     }
-
 }

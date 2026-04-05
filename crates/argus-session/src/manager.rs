@@ -2,15 +2,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use argus_agent::thread_trace_store::{
-    chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
+    ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
 };
 use argus_agent::tool_context::current_agent_id;
-use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
+use argus_agent::turn_log_store::{RecoveredThreadLogState, recover_thread_log_state};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
-    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
     SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -689,10 +689,6 @@ impl SessionManager {
             return Ok(existing.clone());
         }
 
-        if let Err(e) = self.ensure_session_dir(session_id).await {
-            tracing::warn!(session_id = %session_id, error = %e, "Failed to ensure session directory");
-        }
-
         let session_record =
             self.session_repo
                 .get(&session_id)
@@ -757,67 +753,7 @@ impl SessionManager {
                 reason: e.to_string(),
             })?;
 
-        // Create session trace directory with meta.json
-        if let Err(e) = self.ensure_session_dir(session_id).await {
-            tracing::warn!(session_id = %session_id, error = %e, "Failed to create session directory");
-        }
-
         Ok(session_id)
-    }
-
-    /// Ensure the session trace directory exists with meta.json.
-    /// Idempotent: safe to call multiple times.
-    pub async fn ensure_session_dir(&self, session_id: SessionId) -> std::io::Result<()> {
-        let session_dir = self.trace_dir.join(session_id.to_string());
-        tokio::fs::create_dir_all(&session_dir).await?;
-        let meta_path = session_dir.join("meta.json");
-
-        // Only create meta.json if it doesn't exist
-        if !meta_path.exists() {
-            let meta = serde_json::json!({
-                "session_id": session_id.to_string(),
-                "current_turn": 0,
-            });
-            tokio::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Update the current_turn in meta.json after a turn completes.
-    pub async fn update_session_turn(
-        &self,
-        session_id: SessionId,
-        turn_number: u32,
-    ) -> std::io::Result<()> {
-        let meta_path = self
-            .trace_dir
-            .join(session_id.to_string())
-            .join("meta.json");
-
-        let meta = if meta_path.exists() {
-            let content = tokio::fs::read_to_string(&meta_path).await?;
-            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| {
-                serde_json::json!({
-                    "session_id": session_id.to_string(),
-                    "current_turn": 0,
-                })
-            })
-        } else {
-            serde_json::json!({
-                "session_id": session_id.to_string(),
-                "current_turn": 0,
-            })
-        };
-
-        let updated = serde_json::json!({
-            "session_id": meta.get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&session_id.to_string()),
-            "current_turn": turn_number,
-        });
-        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await?;
-        Ok(())
     }
 
     /// Delete a session and all its threads.
@@ -1433,15 +1369,15 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
-        SessionSchedulerBackend,
+        SessionManager, SessionSchedulerBackend, recover_messages_from_trace,
+        recover_thread_state_from_trace,
     };
     use argus_agent::history::{TurnRecord, TurnRecordKind};
     use argus_agent::thread_trace_store::{
-        chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
+        ThreadTraceKind, ThreadTraceMetadata, chat_thread_base_dir, persist_thread_metadata,
     };
-    use argus_agent::turn_log_store::append_turn_record;
     use argus_agent::turn_log_store::RecoveredThreadLogState;
+    use argus_agent::turn_log_store::append_turn_record;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
@@ -1451,13 +1387,13 @@ mod tests {
         AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
         ThinkingConfig, ThreadId, TokenUsage,
     };
+    use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
     use argus_repository::traits::{AgentRepository, SessionRepository, ThreadRepository};
     use argus_repository::types::{
         AgentId as RepoAgentId, JobRecord, JobResult, JobStatus, JobType,
     };
-    use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
     use argus_tool::{SchedulerBackend, SchedulerLookupRequest};
     use async_trait::async_trait;
@@ -1467,7 +1403,7 @@ mod tests {
     use sqlx::SqlitePool;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
     use uuid::Uuid;
 
     #[derive(Debug)]

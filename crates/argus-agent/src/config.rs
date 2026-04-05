@@ -3,8 +3,6 @@
 //! This module defines the configuration options and data structures used
 //! for turn-based LLM conversation execution with tool support.
 
-use std::sync::Arc;
-
 use derive_builder::Builder;
 
 use argus_protocol::{SafetyConfig, llm::LlmStreamEvent};
@@ -14,9 +12,6 @@ use super::TraceConfig;
 // ---------------------------------------------------------------------------
 // TurnConfig
 // ---------------------------------------------------------------------------
-
-/// Callback invoked after a turn completes, with session_id and turn_number.
-pub type OnTurnComplete = Arc<dyn Fn(argus_protocol::SessionId, u32) + Send + Sync>;
 
 /// Turn execution configuration.
 ///
@@ -44,9 +39,6 @@ pub struct TurnConfig {
     /// Trace configuration for turn execution logging.
     #[builder(default, setter(strip_option))]
     pub trace_config: Option<TraceConfig>,
-    /// Callback invoked after a turn completes.
-    #[builder(default, setter(strip_option))]
-    pub on_turn_complete: Option<OnTurnComplete>,
 }
 
 impl std::fmt::Debug for TurnConfig {
@@ -57,7 +49,6 @@ impl std::fmt::Debug for TurnConfig {
             .field("max_iterations", &self.max_iterations)
             .field("safety_config", &self.safety_config)
             .field("trace_config", &self.trace_config)
-            .field("on_turn_complete", &self.on_turn_complete.is_some())
             .finish()
     }
 }
@@ -71,7 +62,6 @@ impl TurnConfig {
             max_iterations: Some(50),
             safety_config: SafetyConfig::new(),
             trace_config: None,
-            on_turn_complete: None,
         }
     }
 }
