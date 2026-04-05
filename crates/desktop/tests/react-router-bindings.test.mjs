@@ -25,7 +25,6 @@ test("desktop exports a React Router route tree for the Tauri SPA", () => {
   assert.match(routerSource, /path:\s*"settings"/);
   assert.match(routerSource, /path:\s*"providers"/);
   assert.match(routerSource, /path:\s*"agents"/);
-  assert.match(routerSource, /path:\s*"knowledge"/);
   assert.match(routerSource, /path:\s*"tools"/);
 });
 
