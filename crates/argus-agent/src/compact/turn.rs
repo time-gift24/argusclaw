@@ -55,13 +55,7 @@ impl LlmTurnCompactor {
         let user_inputs: Vec<_> = history
             .iter()
             .chain(turn_messages.iter())
-            .filter(|message| {
-                message.role == Role::User
-                    && !message
-                        .metadata
-                        .as_ref()
-                        .is_some_and(|metadata| metadata.summary)
-            })
+            .filter(|message| message.role == Role::User)
             .cloned()
             .collect();
 
@@ -107,7 +101,12 @@ impl LlmTurnCompactor {
             request_messages.push(ChatMessage::system(system_prompt));
         }
         request_messages.extend(selected_history.iter().cloned());
-        request_messages.extend(turn_messages.iter().cloned());
+        request_messages.extend(
+            turn_messages
+                .iter()
+                .filter(|message| message.role != Role::User)
+                .cloned(),
+        );
         request_messages.push(ChatMessage::user(TURN_COMPACTION_PROMPT).with_metadata(
             ChatMessageMetadata {
                 summary: false,
@@ -356,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_does_not_treat_prior_synthetic_summary_as_user_history_input() {
+    async fn compact_keeps_prior_synthetic_summary_in_latest_checkpoint() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
             Arc::clone(&requests),
@@ -388,7 +387,63 @@ mod tests {
             .collect();
         assert_eq!(
             checkpoint_contents,
-            vec!["real user input", "continue from the latest state"]
+            vec![
+                "previous synthetic summary",
+                "real user input",
+                "continue from the latest state"
+            ]
+        );
+
+        let request = requests
+            .lock()
+            .unwrap()
+            .first()
+            .expect("provider should capture a request")
+            .clone();
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.content == "previous synthetic summary"),
+            "later compaction must see prior synthetic summary so the latest checkpoint remains self-contained"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_does_not_duplicate_current_turn_user_inputs_in_request() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let compactor = LlmTurnCompactor::new(Arc::new(CapturingSummaryProvider::new(
+            Arc::clone(&requests),
+            "continue from the latest state",
+        )));
+
+        let _ = compactor
+            .compact(
+                "system prompt",
+                &[ChatMessage::user("real user input")],
+                &[
+                    ChatMessage::user("continue current turn"),
+                    ChatMessage::assistant("latest assistant output"),
+                ],
+            )
+            .await
+            .expect("turn compact should succeed")
+            .expect("turn compact should produce a result");
+
+        let request = requests
+            .lock()
+            .unwrap()
+            .first()
+            .expect("provider should capture a request")
+            .clone();
+        let duplicate_count = request
+            .messages
+            .iter()
+            .filter(|message| message.content == "continue current turn")
+            .count();
+        assert_eq!(
+            duplicate_count, 1,
+            "current-turn user input should appear only once in the compaction request"
         );
     }
 }
