@@ -370,14 +370,28 @@ impl LlmProvider for FailingProvider {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         Err(LlmError::RequestFailed {
             provider: "failing".to_string(),
             reason: "boom".to_string(),
         })
+    }
+}
+
+struct PanickingProvider;
+
+#[async_trait]
+impl LlmProvider for PanickingProvider {
+    fn model_name(&self) -> &str {
+        "panicking"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        panic!("provider panic");
     }
 }
 
@@ -606,7 +620,7 @@ async fn turn_cancel_returns_cancelled_instead_of_error() {
 }
 
 #[tokio::test]
-async fn turn_cancel_does_not_emit_terminal_thread_events() {
+async fn turn_cancel_emits_settled_and_idle_without_turn_failed() {
     let provider = Arc::new(HangingStreamingProvider);
     let cancellation = TurnCancellation::new();
     let mut thread = build_thread(
@@ -637,13 +651,19 @@ async fn turn_cancel_does_not_emit_terminal_thread_events() {
     ));
 
     let mut saw_failed = false;
+    let mut saw_settled = false;
     let mut saw_idle = false;
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_millis(250) {
         match tokio::time::timeout(Duration::from_millis(50), thread_event_rx.recv()).await {
+            Ok(Ok(ThreadEvent::TurnSettled { .. })) => {
+                saw_settled = true;
+            }
             Ok(Ok(ThreadEvent::Idle { .. })) => {
                 saw_idle = true;
-                break;
+                if saw_settled {
+                    break;
+                }
             }
             Ok(Ok(ThreadEvent::TurnFailed { .. })) => {
                 saw_failed = true;
@@ -658,12 +678,10 @@ async fn turn_cancel_does_not_emit_terminal_thread_events() {
 
     assert!(
         !saw_failed,
-        "raw turn execution should not emit terminal runtime lifecycle events"
+        "cancelled direct turn should not emit TurnFailed"
     );
-    assert!(
-        !saw_idle,
-        "raw turn execution should not emit Idle directly"
-    );
+    assert!(saw_settled, "cancelled direct turn should emit TurnSettled");
+    assert!(saw_idle, "cancelled direct turn should emit Idle");
 }
 
 #[tokio::test]
@@ -686,6 +704,27 @@ async fn execute_turn_propagates_non_cancelled_failures_directly() {
     ));
     assert!(thread.history_iter().next().is_none());
     assert_eq!(thread.turn_count(), 0);
+}
+
+#[tokio::test]
+async fn execute_turn_converts_panics_into_regular_thread_errors() {
+    let mut thread = build_thread(
+        Arc::new(PanickingProvider),
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    );
+
+    let result = thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ThreadError::TurnFailed(TurnError::BuildFailed(message)))
+            if message.contains("turn setup task failed")
+    ));
 }
 
 #[tokio::test]
@@ -836,8 +875,8 @@ async fn test_turn_streams_retry_events() {
         "should report max_retries=3 from RetryConfig::default()"
     );
     assert!(
-        !saw_completed,
-        "raw turn execution should not emit TurnCompleted directly"
+        saw_completed,
+        "direct turn execution should emit TurnCompleted"
     );
 }
 

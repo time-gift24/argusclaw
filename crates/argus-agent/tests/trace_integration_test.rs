@@ -428,6 +428,15 @@ async fn test_turn_execute_does_not_write_legacy_event_trace_file() {
         .await
         .unwrap();
 
+    let recovered = recover_thread_log_state(&persisted_base_dir)
+        .await
+        .expect("direct turn should persist committed turn records");
+    assert_eq!(recovered.turns.len(), 1);
+    assert!(matches!(
+        recovered.turns[0].kind,
+        argus_agent::history::TurnRecordKind::UserTurn
+    ));
+
     let legacy_trace_path = persisted_base_dir.join("turns").join("1.jsonl");
     assert!(
         !legacy_trace_path.exists(),

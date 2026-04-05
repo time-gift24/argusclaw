@@ -213,7 +213,6 @@ struct Turn {
     turn_number: u32,
     thread_id: String,
     originating_thread_id: ThreadId,
-    session_id: Option<argus_protocol::SessionId>,
     history: Arc<Vec<ChatMessage>>,
     messages: Vec<ChatMessage>,
     tools: Arc<Vec<Arc<dyn NamedTool>>>,
@@ -1040,7 +1039,6 @@ pub(crate) async fn execute_thread_turn(
     turn_number: u32,
     thread_id: String,
     originating_thread_id: ThreadId,
-    session_id: Option<argus_protocol::SessionId>,
     history: Arc<Vec<ChatMessage>>,
     messages: Vec<ChatMessage>,
     tools: Arc<Vec<Arc<dyn NamedTool>>>,
@@ -1099,12 +1097,6 @@ pub(crate) async fn execute_thread_turn(
         "Turn execution completed"
     );
 
-    let cancelled = matches!(result, Err(TurnError::Cancelled));
-    if !cancelled && let (Some(callback), Some(session_id)) = (&config.on_turn_complete, session_id)
-    {
-        callback(session_id, turn_number);
-    }
-
     result
 }
 
@@ -1115,7 +1107,6 @@ impl Turn {
         turn_number: u32,
         thread_id: String,
         originating_thread_id: ThreadId,
-        session_id: Option<argus_protocol::SessionId>,
         history: Arc<Vec<ChatMessage>>,
         messages: Vec<ChatMessage>,
         tools: Arc<Vec<Arc<dyn NamedTool>>>,
@@ -1134,7 +1125,6 @@ impl Turn {
             turn_number,
             thread_id,
             originating_thread_id,
-            session_id,
             history,
             messages,
             tools,
@@ -1155,7 +1145,6 @@ impl Turn {
             turn_number,
             thread_id,
             originating_thread_id,
-            session_id,
             history,
             messages,
             tools,
@@ -1174,7 +1163,6 @@ impl Turn {
             turn_number,
             thread_id,
             originating_thread_id,
-            session_id,
             history,
             messages,
             tools,
@@ -1554,7 +1542,6 @@ mod tests {
             1,
             "thread-test".to_string(),
             ThreadId::new(),
-            None,
             Arc::new(Vec::new()),
             messages,
             Arc::new(tools),

@@ -707,7 +707,6 @@ impl Thread {
         let (
             thread_id,
             originating_thread_id,
-            session_id,
             history,
             tools,
             hooks,
@@ -727,7 +726,6 @@ impl Thread {
             (
                 thread_id,
                 guard.id,
-                Some(guard.session_id),
                 history,
                 tools,
                 hooks,
@@ -744,7 +742,6 @@ impl Thread {
                 turn_number,
                 thread_id,
                 originating_thread_id,
-                session_id,
                 history,
                 vec![ChatMessage::user(content)],
                 tools,
@@ -767,6 +764,41 @@ impl Thread {
         ThreadError::TurnFailed(crate::TurnError::BuildFailed(format!(
             "turn setup task failed: {error}"
         )))
+    }
+
+    fn broadcast_turn_terminal_event(
+        &self,
+        turn_number: u32,
+        result: &Result<TurnRecord, ThreadError>,
+    ) {
+        match result {
+            Ok(record) => {
+                self.broadcast_to_self(ThreadEvent::TurnCompleted {
+                    thread_id: self.id.to_string(),
+                    turn_number,
+                    token_usage: record.token_usage.clone(),
+                });
+            }
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {}
+            Err(error) => {
+                self.broadcast_to_self(ThreadEvent::TurnFailed {
+                    thread_id: self.id.to_string(),
+                    turn_number,
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    async fn persist_committed_turns_if_needed(&self) {
+        if let Some(base_dir) = self.trace_base_dir()
+            && let Err(error) = Self::persist_trace_turns(&base_dir, &self.turns).await
+        {
+            tracing::warn!(
+                error = %error,
+                "failed to persist committed turn records"
+            );
+        }
     }
 
     async fn settle_active_turn(
@@ -870,45 +902,79 @@ impl Thread {
         cancellation: TurnCancellation,
     ) -> Result<TurnRecord, ThreadError> {
         let turn_number = derive_next_user_turn_number(&self.turns);
+        let thread_id_for_events = self.id.to_string();
+        let originating_thread_id = self.id;
         let effective_record = self
             .prepare_turn_start(msg_override, cancellation.clone())
             .await;
         let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
             self.build_turn_execution_parts(effective_record.clone());
 
-        let result = turn::execute_thread_turn(
-            turn_number,
-            thread_id,
-            self.id,
-            Some(self.session_id),
-            history,
-            vec![ChatMessage::user(user_input)],
-            tools,
-            hooks,
-            Utc::now(),
-            provider,
-            config,
-            effective_record,
-            None,
-            thread_event_tx,
-            cancellation,
-            Some(compactor),
-        )
+        let result = match tokio::spawn(async move {
+            turn::execute_thread_turn(
+                turn_number,
+                thread_id,
+                originating_thread_id,
+                history,
+                vec![ChatMessage::user(user_input)],
+                tools,
+                hooks,
+                Utc::now(),
+                provider,
+                config,
+                effective_record,
+                None,
+                thread_event_tx,
+                cancellation,
+                Some(compactor),
+            )
+            .await
+            .map_err(ThreadError::TurnFailed)
+        })
         .await
-        .map_err(ThreadError::TurnFailed);
+        {
+            Ok(result) => result,
+            Err(error) => Err(Self::map_turn_join_error(error)),
+        };
+
+        self.broadcast_turn_terminal_event(turn_number, &result);
 
         match result {
             Ok(record) => {
                 self.finish_turn(Ok(record.clone()))?;
+                self.persist_committed_turns_if_needed().await;
+                self.broadcast_to_self(ThreadEvent::TurnSettled {
+                    thread_id: thread_id_for_events.clone(),
+                    turn_number,
+                });
+                self.broadcast_to_self(ThreadEvent::Idle {
+                    thread_id: thread_id_for_events.clone(),
+                });
                 Ok(record)
             }
             Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
                 self.finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))?;
+                self.broadcast_to_self(ThreadEvent::TurnSettled {
+                    thread_id: thread_id_for_events.clone(),
+                    turn_number,
+                });
+                self.broadcast_to_self(ThreadEvent::Idle {
+                    thread_id: thread_id_for_events.clone(),
+                });
                 Err(ThreadError::TurnFailed(crate::TurnError::Cancelled))
             }
             Err(error) => match self.finish_turn(Err(error)) {
                 Ok(()) => unreachable!("only cancelled turns should settle without committing"),
-                Err(error) => Err(error),
+                Err(error) => {
+                    self.broadcast_to_self(ThreadEvent::TurnSettled {
+                        thread_id: thread_id_for_events.clone(),
+                        turn_number,
+                    });
+                    self.broadcast_to_self(ThreadEvent::Idle {
+                        thread_id: thread_id_for_events,
+                    });
+                    Err(error)
+                }
             },
         }
     }

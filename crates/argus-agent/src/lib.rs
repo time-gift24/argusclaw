@@ -46,7 +46,7 @@ pub mod types;
 // ---------------------------------------------------------------------------
 
 // Turn execution config
-pub use config::{OnTurnComplete, TurnConfig, TurnConfigBuilder, TurnStreamEvent};
+pub use config::{TurnConfig, TurnConfigBuilder, TurnStreamEvent};
 pub use error::{TurnError, TurnLogError};
 pub use history::{TurnRecord, TurnRecordKind};
 pub use trace::TraceConfig;

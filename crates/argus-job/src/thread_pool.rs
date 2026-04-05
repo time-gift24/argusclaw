@@ -15,8 +15,7 @@ use argus_agent::thread_trace_store::{
 };
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    FilePlanStore, LlmThreadCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
-    TurnCancellation, TurnConfig,
+    FilePlanStore, LlmThreadCompactor, ThreadBuilder, TraceConfig, TurnCancellation, TurnConfig,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
@@ -1817,9 +1816,6 @@ impl ThreadPool {
             .with_model(Some(provider.model_name().to_string()));
         let mut turn_config = TurnConfig::new();
         turn_config.trace_config = Some(trace_cfg);
-        turn_config.on_turn_complete = Some(Self::build_on_turn_complete(
-            self.chat_runtime_config.trace_dir.clone(),
-        ));
         let config = ThreadConfigBuilder::default()
             .turn_config(turn_config)
             .build()
@@ -1978,15 +1974,6 @@ impl ThreadPool {
         }
 
         Ok(thread)
-    }
-
-    fn build_on_turn_complete(trace_dir: PathBuf) -> OnTurnComplete {
-        Arc::new(move |sid: SessionId, turn_num: u32| {
-            let trace_dir = trace_dir.clone();
-            tokio::spawn(async move {
-                let _ = ThreadPool::update_session_turn_file(&trace_dir, sid, turn_num).await;
-            });
-        })
     }
 
     fn job_runtime_session_id(thread_id: ThreadId) -> SessionId {
@@ -2386,35 +2373,6 @@ impl ThreadPool {
         }
     }
 
-    async fn update_session_turn_file(
-        trace_dir: &Path,
-        session_id: SessionId,
-        turn_number: u32,
-    ) -> std::io::Result<()> {
-        let meta_path = trace_dir.join(session_id.to_string()).join("meta.json");
-        let meta = if meta_path.exists() {
-            let content = tokio::fs::read_to_string(&meta_path).await?;
-            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_else(|_| {
-                serde_json::json!({
-                    "session_id": session_id.to_string(),
-                    "current_turn": 0,
-                })
-            })
-        } else {
-            serde_json::json!({
-                "session_id": session_id.to_string(),
-                "current_turn": 0,
-            })
-        };
-
-        let updated = serde_json::json!({
-            "session_id": meta.get("session_id")
-                .and_then(|value| value.as_str())
-                .unwrap_or(&session_id.to_string()),
-            "current_turn": turn_number,
-        });
-        tokio::fs::write(&meta_path, serde_json::to_string_pretty(&updated)?).await
-    }
     #[cfg(test)]
     pub(crate) fn test_pool() -> Self {
         use argus_protocol::{LlmProvider, ProviderId};
