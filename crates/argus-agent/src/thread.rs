@@ -902,8 +902,12 @@ impl Thread {
                 self.finish_turn(Ok(record.clone()))?;
                 Ok(record)
             }
+            Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)) => {
+                self.finish_turn(Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)))?;
+                Err(ThreadError::TurnFailed(crate::TurnError::Cancelled))
+            }
             Err(error) => match self.finish_turn(Err(error)) {
-                Ok(()) => Err(ThreadError::TurnFailed(crate::TurnError::Cancelled)),
+                Ok(()) => unreachable!("only cancelled turns should settle without committing"),
                 Err(error) => Err(error),
             },
         }

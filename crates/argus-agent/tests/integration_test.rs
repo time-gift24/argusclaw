@@ -358,6 +358,29 @@ impl LlmProvider for FlakyProvider {
     }
 }
 
+struct FailingProvider;
+
+#[async_trait]
+impl LlmProvider for FailingProvider {
+    fn model_name(&self) -> &str {
+        "failing"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "failing".to_string(),
+            reason: "boom".to_string(),
+        })
+    }
+}
+
 #[tokio::test]
 async fn test_turn_integration_simple() {
     let provider = Arc::new(MockProvider::new("Hello, world!".to_string()));
@@ -641,6 +664,28 @@ async fn turn_cancel_does_not_emit_terminal_thread_events() {
         !saw_idle,
         "raw turn execution should not emit Idle directly"
     );
+}
+
+#[tokio::test]
+async fn execute_turn_propagates_non_cancelled_failures_directly() {
+    let mut thread = build_thread(
+        Arc::new(FailingProvider),
+        Arc::new(AgentRecord::default()),
+        Vec::new(),
+        None,
+        None,
+    );
+
+    let result = thread
+        .execute_turn("Hello".to_string(), None, TurnCancellation::new())
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(ThreadError::TurnFailed(TurnError::LlmFailed(_)))
+    ));
+    assert!(thread.history_iter().next().is_none());
+    assert_eq!(thread.turn_count(), 0);
 }
 
 #[tokio::test]
