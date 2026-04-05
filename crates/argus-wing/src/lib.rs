@@ -1672,7 +1672,14 @@ mod tests {
             .await
             .expect("template should upsert");
 
-        let originating_thread_id = ThreadId::new();
+        let session_id = wing
+            .create_session("dispatch-binding-session")
+            .await
+            .expect("session should create");
+        let originating_thread_id = wing
+            .create_thread(session_id, agent_id, None, None)
+            .await
+            .expect("originating thread should create");
         let job_id = "job-binding-recoverable".to_string();
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
 
@@ -1801,12 +1808,20 @@ mod tests {
             .await
             .expect("template should upsert");
 
+        let session_id = wing
+            .create_session("dispatch-provider-session")
+            .await
+            .expect("session should create");
+        let originating_thread_id = wing
+            .create_thread(session_id, agent_id, None, None)
+            .await
+            .expect("originating thread should create");
         let job_id = "job-agent-provider-without-default".to_string();
         let (pipe_tx, _pipe_rx) = broadcast::channel(32);
 
         wing.job_manager
             .dispatch_job(
-                ThreadId::new(),
+                originating_thread_id,
                 job_id.clone(),
                 agent_id,
                 "execute a recoverable job".to_string(),
