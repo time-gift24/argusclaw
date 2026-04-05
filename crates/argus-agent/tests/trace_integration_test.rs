@@ -206,6 +206,88 @@ impl LlmProvider for SequencedDelayedMockProvider {
     }
 }
 
+struct RuntimeCompactionProvider {
+    delay: Duration,
+    complete_responses: Mutex<VecDeque<CompletionResponse>>,
+    stream_results: Mutex<VecDeque<Result<String, LlmError>>>,
+    context_window: u32,
+}
+
+impl RuntimeCompactionProvider {
+    fn new(
+        delay: Duration,
+        complete_responses: Vec<CompletionResponse>,
+        stream_results: Vec<Result<&str, LlmError>>,
+        context_window: u32,
+    ) -> Self {
+        Self {
+            delay,
+            complete_responses: Mutex::new(complete_responses.into_iter().collect()),
+            stream_results: Mutex::new(
+                stream_results
+                    .into_iter()
+                    .map(|item| item.map(str::to_string))
+                    .collect(),
+            ),
+            context_window,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RuntimeCompactionProvider {
+    fn model_name(&self) -> &str {
+        "runtime-compaction"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.complete_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| LlmError::RequestFailed {
+                provider: "runtime-compaction".to_string(),
+                reason: "missing complete response".to_string(),
+            })
+    }
+
+    async fn stream_complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<LlmEventStream, LlmError> {
+        let delay = self.delay;
+        let next = self
+            .stream_results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| LlmError::RequestFailed {
+                provider: "runtime-compaction".to_string(),
+                reason: "missing stream response".to_string(),
+            })?;
+        match next {
+            Ok(response) => {
+                let stream = futures_util::stream::once(async move {
+                    sleep(delay).await;
+                    Ok(LlmStreamEvent::ContentDelta { delta: response })
+                });
+                Ok(Box::pin(stream))
+            }
+            Err(error) => Ok(Box::pin(futures_util::stream::once(
+                async move { Err(error) },
+            ))),
+        }
+    }
+
+    fn context_window(&self) -> u32 {
+        self.context_window
+    }
+}
+
 struct NoopCompactor;
 
 #[async_trait]
@@ -251,6 +333,18 @@ async fn wait_for_provider_inputs(
     })
     .await
     .expect("provider should capture user inputs");
+}
+
+async fn request_thread_stop(thread: &Arc<RwLock<Thread>>) {
+    let mailbox = {
+        let guard = thread.read().await;
+        guard.mailbox()
+    };
+    mailbox.lock().await.interrupt_stop();
+    let guard = thread.read().await;
+    let _ = guard
+        .control_tx()
+        .send(argus_protocol::ThreadControlEvent::MailboxUpdated);
 }
 
 async fn collect_terminal_events_until_final_idle(
@@ -577,4 +671,238 @@ async fn test_thread_runtime_queues_follow_up_turn_without_emitting_idle_between
             .expect("should have user turn");
         assert_eq!(user_turn.turn_number, expected_turn_number);
     }
+}
+
+#[tokio::test]
+async fn successful_turn_compaction_persists_turn_checkpoint() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let thread_id = argus_protocol::ThreadId::new();
+    let trace_config = TraceConfig::new(
+        true,
+        chat_thread_base_dir(temp_dir.path(), session_id, thread_id),
+    );
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let provider = Arc::new(RuntimeCompactionProvider::new(
+        Duration::from_millis(10),
+        vec![CompletionResponse {
+            content: Some("user-facing summary".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 4,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }],
+        vec![Ok("final reply")],
+        4,
+    ));
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .id(thread_id)
+            .provider(provider)
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord {
+                system_prompt: "You are a test assistant.".to_string(),
+                ..AgentRecord::default()
+            }))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_reactor(Arc::clone(&thread));
+    enqueue_thread_message(
+        &thread,
+        "this message is long enough to trigger turn compaction".to_string(),
+    )
+    .await;
+    wait_for_turn_settled_event(rx).await;
+
+    let recovered = recover_thread_log_state(&chat_thread_base_dir(
+        temp_dir.path(),
+        session_id,
+        thread_id,
+    ))
+    .await
+    .expect("recovery should work");
+    assert_eq!(recovered.turns.len(), 1);
+    assert!(matches!(
+        recovered.turns[0].kind,
+        argus_agent::history::TurnRecordKind::TurnCheckpoint
+    ));
+    assert_eq!(
+        recovered.turns[0]
+            .messages
+            .last()
+            .expect("tail reply")
+            .content,
+        "final reply"
+    );
+    let turn_checkpoint_contents: Vec<_> = recovered.turns[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(
+        turn_checkpoint_contents,
+        vec![
+            "this message is long enough to trigger turn compaction",
+            "user-facing summary",
+            "final reply"
+        ]
+    );
+    assert_eq!(recovered.turns[0].turn_number, 1);
+}
+
+#[tokio::test]
+async fn failed_turn_after_compaction_persists_no_turn_level_checkpoint() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let thread_id = argus_protocol::ThreadId::new();
+    let trace_config = TraceConfig::new(
+        true,
+        chat_thread_base_dir(temp_dir.path(), session_id, thread_id),
+    );
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let provider = Arc::new(RuntimeCompactionProvider::new(
+        Duration::from_millis(10),
+        vec![CompletionResponse {
+            content: Some("user-facing summary".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 4,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }],
+        vec![Err(LlmError::RequestFailed {
+            provider: "runtime-compaction".to_string(),
+            reason: "stream failed".to_string(),
+        })],
+        4,
+    ));
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .id(thread_id)
+            .provider(provider)
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord {
+                system_prompt: "You are a test assistant.".to_string(),
+                ..AgentRecord::default()
+            }))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_reactor(Arc::clone(&thread));
+    enqueue_thread_message(
+        &thread,
+        "this message is long enough to trigger turn compaction".to_string(),
+    )
+    .await;
+    let terminal_events = collect_terminal_events_until_final_idle(rx, 1).await;
+    assert!(
+        terminal_events
+            .iter()
+            .any(|event| matches!(event, ThreadEvent::TurnFailed { .. }))
+    );
+
+    let recovered = recover_thread_log_state(&chat_thread_base_dir(
+        temp_dir.path(),
+        session_id,
+        thread_id,
+    ))
+    .await
+    .expect("recovery should work");
+    assert!(recovered.turns.is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_turn_after_compaction_persists_no_turn_level_checkpoint() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let thread_id = argus_protocol::ThreadId::new();
+    let trace_config = TraceConfig::new(
+        true,
+        chat_thread_base_dir(temp_dir.path(), session_id, thread_id),
+    );
+    let thread_config = ThreadConfig {
+        turn_config: TurnConfigBuilder::default()
+            .trace_config(trace_config)
+            .build()
+            .unwrap(),
+    };
+    let provider = Arc::new(RuntimeCompactionProvider::new(
+        Duration::from_secs(1),
+        vec![CompletionResponse {
+            content: Some("user-facing summary".to_string()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            input_tokens: 4,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }],
+        vec![Ok("slow final reply")],
+        4,
+    ));
+    let thread = Arc::new(RwLock::new(
+        ThreadBuilder::new()
+            .id(thread_id)
+            .provider(provider)
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord {
+                system_prompt: "You are a test assistant.".to_string(),
+                ..AgentRecord::default()
+            }))
+            .session_id(session_id)
+            .config(thread_config)
+            .build()
+            .unwrap(),
+    ));
+    let rx = { thread.read().await.subscribe() };
+
+    Thread::spawn_reactor(Arc::clone(&thread));
+    enqueue_thread_message(
+        &thread,
+        "this message is long enough to trigger turn compaction".to_string(),
+    )
+    .await;
+    sleep(Duration::from_millis(50)).await;
+    request_thread_stop(&thread).await;
+    let terminal_events = collect_terminal_events_until_final_idle(rx, 1).await;
+    assert!(
+        terminal_events
+            .iter()
+            .all(|event| !matches!(event, ThreadEvent::TurnCompleted { .. })),
+        "cancelled turn should not report completion"
+    );
+
+    let recovered = recover_thread_log_state(&chat_thread_base_dir(
+        temp_dir.path(),
+        session_id,
+        thread_id,
+    ))
+    .await
+    .expect("recovery should work");
+    assert!(recovered.turns.is_empty());
 }

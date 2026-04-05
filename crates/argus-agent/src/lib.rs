@@ -77,7 +77,9 @@ pub use trace::TraceConfig;
 pub use turn::{Turn, TurnBuilder, TurnCancellation};
 
 // Thread (high-level)
-pub use compact::{CompactResult, Compactor, LlmCompactor};
+pub use compact::thread::LlmThreadCompactor;
+pub use compact::turn::LlmTurnCompactor;
+pub use compact::{CompactResult, Compactor};
 pub use config::ThreadConfig;
 pub use error::{CompactError, ThreadError};
 pub use plan_store::FilePlanStore;

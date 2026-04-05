@@ -4,9 +4,11 @@
 
 - `Thread` 的唯一持久化真相源是 `turns: Vec<TurnRecord>`。
 - 禁止引入线程级累计 token 缓存、累计 turn 编号缓存、或任何可由 `Vec<TurnRecord>` 直接推导出的镜像状态。
-- `TurnRecord` 只记录成功结果：`UserTurn` 和 `Checkpoint`。
+- `TurnRecord` 只记录成功结果：`UserTurn`、`Checkpoint` 和 `TurnCheckpoint`。
 - 失败或取消的 turn 不得落成 `TurnRecord`。
 - `TurnRecord.token_usage` 只表达本轮 turn 或 compact 调用返回的 usage，同时也是 compact 判断依据。
+- `Checkpoint` 是线程级上下文快照，`turn_number = 0`。
+- `TurnCheckpoint` 是“发生过 turn 内 compact 的成功 turn”，必须保留真实 `turn_number`，并参与编号、恢复和 transcript 读取。
 
 ### Turn Boundary
 
@@ -14,6 +16,17 @@
 - `Turn` 负责把一次成功执行直接收敛成最终 `TurnRecord`，包括 transcript 归一化、时间戳和 usage。
 - `Thread` 只负责调度、取消、追加成功返回的 `TurnRecord`，不负责二次修补 transcript。
 - `Turn` 不直接持有 `Thread`；线程上下文应以快照值传入 `Turn`，避免运行中回读线程可变状态。
+- 未发生 turn 内 compact 的成功 turn 结算为 `UserTurn`。
+- 发生过 turn 内 compact 的成功 turn 结算为单个 `TurnCheckpoint`；禁止再为同一 turn 持久化中间 compact 记录数组。
+
+### Compaction Rules
+
+- `Compactor` / `CompactResult` 是共享抽象；thread 和 turn 只是两个不同实现，不再拆双 trait。
+- compact 是否触发、threshold 如何计算，都必须由具体 `Compactor` 实现内部决定；调用方只传入当前完整消息和 token 估值。
+- thread-level compact 在开始新 turn 前运行；成功时立即追加 `Checkpoint(0)`。
+- turn-level compact 在 `Turn::execute_loop` 中对“当前真实 request messages”运行，禁止基于陈旧 history 快照判断。
+- turn-level compact 成功后只更新运行中的 `self.history` / `turn_messages`；若该 turn 最终失败或取消，不得留下任何持久化记录。
+- turn-level compact 一旦发生且该 turn 最终成功，最终返回值必须是单个 `TurnCheckpoint`，而不是 `Checkpoint... + UserTurn` 或其他包装结构。
 
 ### Prompt / Agent Snapshot
 
@@ -32,6 +45,15 @@
 - chat root 路径：`{trace_root}/{session_id}/{thread_id}/`
 - job child 路径：`{parent_thread_dir}/{child_thread_id}/`
 - `TraceConfig` 必须持有显式 `thread_base_dir`；禁止再由 `trace_root + session_id + thread_id` 在运行时反推目录。
+
+### Turn Log / Recovery Rules
+
+- `turns.jsonl` 是 append-only 的 turn 真相源；恢复逻辑必须以它为 authority，而不是额外计数状态。
+- `recover_thread_log_state()` 允许若干前置 `Checkpoint(0)`，但第一条“已结算 turn”必须是 `UserTurn(1)` 或 `TurnCheckpoint(1)`。
+- `derive_next_user_turn_number()`、`turn_count()` 和恢复时的单调递增校验，都必须把 `UserTurn` 与 `TurnCheckpoint` 视为已消耗的真实 turn。
+- `history_iter()`、`flatten_turn_messages()`、`RecoveredThreadLogState::committed_messages()` 必须包含 `UserTurn` 与 `TurnCheckpoint`，仅跳过 `Checkpoint(0)`。
+- `build_turn_context()` 必须把最近的 `Checkpoint` 或 `TurnCheckpoint` 视为上下文基底；其后只追加后续 `UserTurn` transcript。
+- transcript 读取、session snapshot、job summary / memory estimation 等读取侧，禁止默默退回到“只看 UserTurn”的旧语义。
 
 ### Thread Metadata
 

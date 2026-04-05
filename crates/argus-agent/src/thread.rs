@@ -17,6 +17,7 @@ use argus_protocol::{
 use argus_tool::ToolManager;
 
 use super::compact::Compactor;
+use super::compact::turn::LlmTurnCompactor;
 use super::config::ThreadConfig;
 use super::error::{ThreadError, TurnLogError};
 use super::history::{TurnRecord, TurnRecordKind, derive_next_user_turn_number};
@@ -409,16 +410,22 @@ impl Thread {
     pub fn history_iter(&self) -> impl Iterator<Item = &ChatMessage> + '_ {
         self.turns
             .iter()
-            .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
+            .filter(|turn| {
+                matches!(
+                    turn.kind,
+                    TurnRecordKind::UserTurn | TurnRecordKind::TurnCheckpoint
+                )
+            })
             .flat_map(|turn| turn.messages.iter())
     }
 
     fn build_turn_context(&self) -> Arc<Vec<ChatMessage>> {
-        if let Some(checkpoint_index) = self
-            .turns
-            .iter()
-            .rposition(|turn| matches!(turn.kind, TurnRecordKind::Checkpoint))
-        {
+        if let Some(checkpoint_index) = self.turns.iter().rposition(|turn| {
+            matches!(
+                turn.kind,
+                TurnRecordKind::Checkpoint | TurnRecordKind::TurnCheckpoint
+            )
+        }) {
             let checkpoint = &self.turns[checkpoint_index];
             let mut context_messages = checkpoint.messages.clone();
             context_messages.extend(
@@ -446,7 +453,12 @@ impl Thread {
     pub fn turn_count(&self) -> u32 {
         self.turns
             .iter()
-            .filter(|turn| matches!(turn.kind, TurnRecordKind::UserTurn))
+            .filter(|turn| {
+                matches!(
+                    turn.kind,
+                    TurnRecordKind::UserTurn | TurnRecordKind::TurnCheckpoint
+                )
+            })
             .map(|turn| turn.turn_number)
             .max()
             .unwrap_or(0)
@@ -890,7 +902,7 @@ impl Thread {
         {
             Ok(Some(result)) => {
                 let new_token_count = result.token_usage.total_tokens;
-                self.append_checkpoint_record(result.summary_messages, result.token_usage.clone());
+                self.append_checkpoint_record(result.messages, result.token_usage.clone());
                 if let Some(base_dir) = self.trace_base_dir()
                     && let Err(error) = Self::persist_trace_turns(&base_dir, &self.turns).await
                 {
@@ -983,7 +995,8 @@ impl Thread {
             .config(self.config.turn_config.clone())
             .agent_record(agent_record)
             .stream_tx(stream_tx)
-            .thread_event_tx(self.pipe_tx.clone());
+            .thread_event_tx(self.pipe_tx.clone())
+            .compactor(Arc::new(LlmTurnCompactor::new(self.provider.clone())));
 
         turn_builder
             .cancellation(cancellation)
@@ -1038,7 +1051,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::compact::CompactResult;
+    use crate::compact::{CompactResult, Compactor};
     use crate::config::{ThreadConfig, TurnConfigBuilder};
     use crate::error::CompactError;
     use crate::thread_trace_store::chat_thread_base_dir;
@@ -1165,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn history_iter_reads_only_successful_user_turn_messages() {
+    fn history_iter_includes_turn_checkpoint_messages() {
         let mut thread = build_test_thread_without_system_prompt();
         thread.hydrate_turn_history_for_test(vec![
             TurnRecord::user_turn(
@@ -1174,17 +1187,25 @@ mod tests {
                 usage(2),
             ),
             TurnRecord::checkpoint(vec![ChatMessage::assistant("summary")], usage(7)),
-            TurnRecord::user_turn(
+            TurnRecord::turn_checkpoint(
                 2,
-                vec![ChatMessage::user("u2"), ChatMessage::assistant("a2")],
+                vec![
+                    ChatMessage::user("snapshot"),
+                    ChatMessage::assistant("state"),
+                ],
                 usage(4),
+            ),
+            TurnRecord::user_turn(
+                3,
+                vec![ChatMessage::user("u2"), ChatMessage::assistant("a2")],
+                usage(5),
             ),
         ]);
 
         let history: Vec<_> = thread.history_iter().map(|m| m.content.clone()).collect();
-        assert_eq!(history, vec!["u1", "a1", "u2", "a2"]);
-        assert_eq!(thread.turn_count(), 2);
-        assert_eq!(thread.token_count(), 4);
+        assert_eq!(history, vec!["u1", "a1", "snapshot", "state", "u2", "a2"]);
+        assert_eq!(thread.turn_count(), 3);
+        assert_eq!(thread.token_count(), 5);
     }
 
     #[test]
@@ -1296,6 +1317,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finish_turn_appends_turn_checkpoint_record() {
+        let mut thread = build_test_thread_without_system_prompt();
+        let _turn = thread
+            .begin_turn("hello".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should build");
+        let checkpoint = TurnRecord::turn_checkpoint(
+            1,
+            vec![
+                ChatMessage::user("summary"),
+                ChatMessage::assistant("world"),
+            ],
+            usage(4),
+        );
+
+        thread
+            .finish_turn(Ok(checkpoint.clone()))
+            .expect("turn should settle");
+
+        assert_eq!(thread.turns.len(), 1);
+        assert!(matches!(
+            thread.turns[0].kind,
+            TurnRecordKind::TurnCheckpoint
+        ));
+        assert_eq!(
+            thread.turns[0]
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>(),
+            checkpoint
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(thread.turns[0].turn_number, 1);
+    }
+
+    #[tokio::test]
     async fn failed_turn_does_not_append_record() {
         let mut thread = build_test_thread_without_system_prompt();
         let _turn = thread
@@ -1374,7 +1435,7 @@ mod tests {
         let compactor = RecordingCompactor {
             seen_token_counts: Arc::clone(&seen_token_counts),
             next_result: Arc::new(Mutex::new(VecDeque::from(vec![CompactResult {
-                summary_messages: vec![ChatMessage::assistant("summary")],
+                messages: vec![ChatMessage::assistant("summary")],
                 token_usage: usage(11),
             }]))),
         };

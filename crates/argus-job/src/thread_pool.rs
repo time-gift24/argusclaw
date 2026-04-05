@@ -15,8 +15,8 @@ use argus_agent::thread_trace_store::{
 };
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    FilePlanStore, LlmCompactor, OnTurnComplete, ThreadBuilder, TraceConfig, TurnCancellation,
-    TurnConfig,
+    FilePlanStore, LlmThreadCompactor, OnTurnComplete, ThreadBuilder, TraceConfig,
+    TurnCancellation, TurnConfig,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
@@ -1831,7 +1831,7 @@ impl ThreadPool {
             .title(thread_record.title.clone())
             .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(Arc::new(LlmCompactor::new(provider)));
+            .compactor(Arc::new(LlmThreadCompactor::new(provider)));
         let plan_store = FilePlanStore::new(base_dir.clone());
         let thread = thread_builder
             .plan_store(plan_store)
@@ -1954,7 +1954,7 @@ impl ThreadPool {
             .title(thread_title)
             .provider(provider.clone())
             .tool_manager(self.tool_manager.clone())
-            .compactor(Arc::new(LlmCompactor::new(provider)))
+            .compactor(Arc::new(LlmThreadCompactor::new(provider)))
             .plan_store(plan_store)
             .config(config)
             .build()
@@ -2492,6 +2492,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use argus_agent::{Compactor, ThreadBuilder};
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, LlmEventStream};
     use argus_protocol::{AgentRecord, AgentType, ProviderId, ThinkingConfig};
     use argus_repository::ArgusSqlite;
@@ -2505,6 +2506,23 @@ mod tests {
     use async_trait::async_trait;
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
+
+    struct NoopCompactor;
+
+    #[async_trait]
+    impl Compactor for NoopCompactor {
+        async fn compact(
+            &self,
+            _messages: &[argus_protocol::llm::ChatMessage],
+            _token_count: u32,
+        ) -> Result<Option<argus_agent::CompactResult>, argus_agent::CompactError> {
+            Ok(None)
+        }
+
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+    }
 
     #[derive(Debug)]
     struct FixedProvider;
@@ -3107,5 +3125,54 @@ mod tests {
             children.is_empty(),
             "failed binding should not leave persisted child traces behind"
         );
+    }
+
+    #[tokio::test]
+    async fn summarize_and_estimate_thread_memory_include_turn_checkpoint_messages() {
+        let mut thread = ThreadBuilder::new()
+            .provider(Arc::new(FixedProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .agent_record(Arc::new(AgentRecord {
+                id: AgentId::new(1),
+                display_name: "job-agent".to_string(),
+                description: "job-agent".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: None,
+                system_prompt: String::new(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            }))
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+        thread.hydrate_from_turn_log_state(
+            argus_agent::turn_log_store::RecoveredThreadLogState {
+                turns: vec![argus_agent::TurnRecord::turn_checkpoint(
+                    1,
+                    vec![
+                        argus_protocol::llm::ChatMessage::user("compressed user intent"),
+                        argus_protocol::llm::ChatMessage::assistant("compressed assistant result"),
+                    ],
+                    argus_protocol::TokenUsage {
+                        input_tokens: 2,
+                        output_tokens: 1,
+                        total_tokens: 3,
+                    },
+                )],
+            },
+            Utc::now(),
+        );
+        let thread = Arc::new(tokio::sync::RwLock::new(thread));
+
+        let summary = ThreadPool::summarize_thread_history(&thread).await;
+        let estimated = ThreadPool::estimate_thread_memory(&thread).await;
+
+        assert_eq!(summary, "compressed assistant result");
+        assert!(estimated >= "compressed user intentcompressed assistant result".len() as u64);
     }
 }

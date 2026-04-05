@@ -1,19 +1,16 @@
-//! Compact module: LLM-driven message compaction.
+//! Thread compaction: LLM-driven checkpoint summarization.
 //!
 //! This module provides:
-//! - `Compactor`: Async trait for implementing compaction strategies.
-//! - `CompactResult`: Result type carrying checkpoint summary messages and token usage.
-//! - `LlmCompactor`: LLM-driven compaction that summarizes stale history.
+//! - `LlmThreadCompactor`: LLM-driven compaction that summarizes stale history.
 
 use std::sync::Arc;
 
 use argus_protocol::llm::{
     ChatMessage, ChatMessageMetadata, ChatMessageMetadataMode, CompletionRequest, LlmProvider, Role,
 };
-use argus_protocol::token_usage::TokenUsage;
-use async_trait::async_trait;
 
-use super::error::CompactError;
+use super::{CompactResult, Compactor};
+use crate::error::CompactError;
 
 const DEFAULT_COMPACTION_PROMPT: &str = "\
 Provide a detailed prompt for continuing our conversation above.\n\
@@ -37,32 +34,8 @@ Provide a detailed prompt for continuing our conversation above.\n\
    path to the directory.]\n\
   ---";
 
-/// Result of a successful compaction.
-#[derive(Debug, Clone)]
-pub struct CompactResult {
-    /// Summary messages to use in a compaction checkpoint.
-    pub summary_messages: Vec<ChatMessage>,
-    /// Authoritative token count for the compaction request + summary response.
-    pub token_usage: TokenUsage,
-}
-
-/// Compactor trait — responsible for deciding when and how to compact.
-#[async_trait]
-pub trait Compactor: Send + Sync {
-    /// Attempt compaction. Returns `Some(CompactResult)` if compaction occurred,
-    /// `None` if compaction was not needed.
-    async fn compact(
-        &self,
-        messages: &[ChatMessage],
-        token_count: u32,
-    ) -> Result<Option<CompactResult>, CompactError>;
-
-    /// Name of the compactor strategy.
-    fn name(&self) -> &'static str;
-}
-
 // ---------------------------------------------------------------------------
-// LlmCompactor
+// LlmThreadCompactor
 // ---------------------------------------------------------------------------
 
 /// LLM-driven compactor that summarizes stale history using the current thread provider.
@@ -70,13 +43,13 @@ pub trait Compactor: Send + Sync {
 /// When token usage exceeds the threshold ratio of the context window, older messages
 /// are sent to the current provider for summarization. The result replaces the old history
 /// with checkpoint summary messages.
-pub struct LlmCompactor {
+pub struct LlmThreadCompactor {
     provider: Arc<dyn LlmProvider>,
     threshold_ratio: f32,
 }
 
-impl LlmCompactor {
-    /// Create a new LlmCompactor.
+impl LlmThreadCompactor {
+    /// Create a new `LlmThreadCompactor`.
     pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             provider,
@@ -137,8 +110,8 @@ impl LlmCompactor {
     }
 }
 
-#[async_trait]
-impl Compactor for LlmCompactor {
+#[async_trait::async_trait]
+impl Compactor for LlmThreadCompactor {
     async fn compact(
         &self,
         messages: &[ChatMessage],
@@ -176,8 +149,8 @@ impl Compactor for LlmCompactor {
         tracing::debug!(compactor = self.name(), "LLM compaction completed");
 
         Ok(Some(CompactResult {
-            summary_messages,
-            token_usage: TokenUsage {
+            messages: summary_messages,
+            token_usage: argus_protocol::token_usage::TokenUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
                 total_tokens: response.input_tokens + response.output_tokens,
@@ -311,7 +284,7 @@ mod tests {
             summary: String::new(),
             context_window: 100,
         });
-        let compactor = LlmCompactor::new(provider).with_threshold_ratio(2.0);
+        let compactor = LlmThreadCompactor::new(provider).with_threshold_ratio(2.0);
         assert!((compactor.threshold_ratio - 0.95).abs() < f32::EPSILON);
     }
 
@@ -321,7 +294,7 @@ mod tests {
             summary: String::new(),
             context_window: 100,
         });
-        let compactor = LlmCompactor::new(provider);
+        let compactor = LlmThreadCompactor::new(provider);
         let messages = vec![ChatMessage::user("hello")];
         let result = compactor.compact(&messages, 10).await;
         assert!(result.is_ok());
@@ -334,7 +307,7 @@ mod tests {
             summary: String::new(),
             context_window: 100,
         });
-        let compactor = LlmCompactor::new(provider);
+        let compactor = LlmThreadCompactor::new(provider);
         let messages = vec![ChatMessage::system("system only")];
         let result = compactor.compact(&messages, 90).await;
         assert!(result.is_ok());
@@ -347,7 +320,7 @@ mod tests {
             summary: "历史摘要".to_string(),
             context_window: 100,
         });
-        let compactor = LlmCompactor::new(provider).with_threshold_ratio(0.2);
+        let compactor = LlmThreadCompactor::new(provider).with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::user("old question"),
@@ -360,16 +333,16 @@ mod tests {
             .expect("compact should succeed")
             .expect("should have compacted");
 
-        assert_eq!(result.summary_messages.len(), 1);
-        assert_eq!(result.summary_messages[0].role, Role::Assistant);
-        assert_eq!(result.summary_messages[0].content, "历史摘要");
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].role, Role::Assistant);
+        assert_eq!(result.messages[0].content, "历史摘要");
         assert_eq!(result.token_usage.total_tokens, 20);
     }
 
     #[tokio::test]
     async fn failure_returns_error() {
         let provider = Arc::new(FailingSummaryProvider);
-        let compactor = LlmCompactor::new(provider).with_threshold_ratio(0.2);
+        let compactor = LlmThreadCompactor::new(provider).with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::user("old"),
@@ -388,7 +361,7 @@ mod tests {
             context_window: 100,
             captured_requests: Arc::clone(&captured),
         });
-        let compactor = LlmCompactor::new(provider).with_threshold_ratio(0.2);
+        let compactor = LlmThreadCompactor::new(provider).with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::user("完成了 provider 绑定"),
@@ -428,7 +401,7 @@ mod tests {
             context_window: 100,
             captured_requests: Arc::clone(&captured),
         });
-        let compactor = LlmCompactor::new(provider).with_threshold_ratio(0.2);
+        let compactor = LlmThreadCompactor::new(provider).with_threshold_ratio(0.2);
 
         let messages = vec![
             ChatMessage::system("system guardrails"),
@@ -472,8 +445,10 @@ mod tests {
             summary: "large window summary".to_string(),
             context_window: 200,
         });
-        let small_compactor = LlmCompactor::new(small_context_provider).with_threshold_ratio(0.8);
-        let large_compactor = LlmCompactor::new(large_context_provider).with_threshold_ratio(0.8);
+        let small_compactor =
+            LlmThreadCompactor::new(small_context_provider).with_threshold_ratio(0.8);
+        let large_compactor =
+            LlmThreadCompactor::new(large_context_provider).with_threshold_ratio(0.8);
 
         let compacted = small_compactor
             .compact(&messages, 90)
