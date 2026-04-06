@@ -629,24 +629,12 @@ impl ThreadPool {
         let thread = self.ensure_chat_runtime(session_id, thread_id).await?;
         let estimated_memory_bytes =
             Self::estimate_thread_memory(&thread).await + message.len() as u64;
-        let sender = {
-            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-            let sender = {
-                let entry = store
-                    .runtimes
-                    .get_mut(&thread_id.to_string())
-                    .ok_or_else(|| {
-                        JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
-                    })?;
-                entry.summary.status = ThreadRuntimeStatus::Running;
-                entry.summary.estimated_memory_bytes = estimated_memory_bytes;
-                entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
-                entry.summary.last_reason = None;
-                entry.sender.clone()
-            };
-            Self::refresh_peaks(&mut store);
-            sender
-        };
+        let started_at = Utc::now().to_rfc3339();
+        let sender = self
+            .mark_runtime_running(&thread_id, estimated_memory_bytes, started_at)
+            .ok_or_else(|| {
+                JobError::ExecutionFailed(format!("thread {} is not registered", thread_id))
+            })?;
 
         let _ = sender.send(ThreadEvent::ThreadPoolStarted {
             runtime: ThreadPoolRuntimeRef {
@@ -773,16 +761,7 @@ impl ThreadPool {
         let started_at = Utc::now().to_rfc3339();
         let estimated_memory_bytes =
             Self::estimate_thread_memory(&thread).await + request.prompt.len() as u64;
-        {
-            let mut store = self.store.lock().expect("thread-pool mutex poisoned");
-            if let Some(entry) = store.runtimes.get_mut(&execution_thread_id.to_string()) {
-                entry.summary.status = ThreadRuntimeStatus::Running;
-                entry.summary.estimated_memory_bytes = estimated_memory_bytes;
-                entry.summary.last_active_at = Some(started_at.clone());
-                entry.summary.last_reason = None;
-            }
-            Self::refresh_peaks(&mut store);
-        }
+        self.mark_runtime_running(&execution_thread_id, estimated_memory_bytes, started_at.clone());
         if let Err(error) = self
             .persist_job_status(
                 &request.job_id,
@@ -898,27 +877,38 @@ impl ThreadPool {
         if let Some((runtime, _sender, snapshot)) =
             self.transition_runtime_to_cooling(&execution_thread_id, Some(cooling_memory))
         {
-            if self.admission_waiters.load(Ordering::SeqCst) > 0
-                && let Some((runtime, snapshot, shutdown)) = Self::evict_runtime_from_shared_store(
-                    &self.store,
-                    self.max_threads,
-                    &execution_thread_id,
-                    ThreadPoolEventReason::MemoryPressure,
-                )
-            {
+            #[allow(clippy::collapsible_if)]
+            if let Some(shutdown) = Self::emit_cooling_or_evict(
+                &self.store,
+                self.max_threads,
+                &self.admission_waiters,
+                &execution_thread_id,
+                &pipe_tx,
+                runtime,
+                snapshot,
+            ) {
                 shutdown.run();
-                let _ = pipe_tx.send(ThreadEvent::ThreadPoolEvicted {
-                    runtime,
-                    reason: ThreadPoolEventReason::MemoryPressure,
-                });
-                let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
-            } else {
-                let _ = pipe_tx.send(ThreadEvent::ThreadPoolCooling { runtime });
-                let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
             }
         }
 
         result
+    }
+
+    fn mark_runtime_running(
+        &self,
+        thread_id: &ThreadId,
+        estimated_memory_bytes: u64,
+        started_at: String,
+    ) -> Option<broadcast::Sender<ThreadEvent>> {
+        let mut store = self.store.lock().expect("thread-pool mutex poisoned");
+        let entry = store.runtimes.get_mut(&thread_id.to_string())?;
+        entry.summary.status = ThreadRuntimeStatus::Running;
+        entry.summary.estimated_memory_bytes = estimated_memory_bytes;
+        entry.summary.last_active_at = Some(started_at);
+        entry.summary.last_reason = None;
+        let sender = entry.sender.clone();
+        Self::refresh_peaks(&mut store);
+        Some(sender)
     }
 
     fn update_state(
@@ -1316,27 +1306,16 @@ impl ThreadPool {
                                 (runtime, snapshot)
                             };
 
-                            if admission_waiters.load(Ordering::SeqCst) > 0 {
-                                if let Some((runtime, snapshot, shutdown)) =
-                                    ThreadPool::evict_runtime_from_shared_store(
-                                        &store,
-                                        max_threads,
-                                        &thread_id,
-                                        ThreadPoolEventReason::MemoryPressure,
-                                    )
-                                {
-                                    shutdown.run();
-                                    let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
-                                        runtime,
-                                        reason: ThreadPoolEventReason::MemoryPressure,
-                                    });
-                                    let _ = sender
-                                        .send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
-                                }
-                            } else {
-                                let _ = sender.send(ThreadEvent::ThreadPoolCooling { runtime });
-                                let _ =
-                                    sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+                            if let Some(shutdown) = ThreadPool::emit_cooling_or_evict(
+                                &store,
+                                max_threads,
+                                &admission_waiters,
+                                &thread_id,
+                                &sender,
+                                runtime,
+                                snapshot,
+                            ) {
+                                shutdown.run();
                             }
                         }
                     }
@@ -1450,6 +1429,35 @@ impl ThreadPool {
         });
         let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
         Some(runtime)
+    }
+
+    fn emit_cooling_or_evict(
+        store: &Arc<StdMutex<ThreadPoolStore>>,
+        max_threads: u32,
+        admission_waiters: &AtomicUsize,
+        thread_id: &ThreadId,
+        sender: &broadcast::Sender<ThreadEvent>,
+        runtime: ThreadPoolRuntimeRef,
+        snapshot: ThreadPoolSnapshot,
+    ) -> Option<RuntimeShutdown> {
+        if admission_waiters.load(Ordering::SeqCst) > 0
+            && let Some((runtime, snapshot, shutdown)) = Self::evict_runtime_from_shared_store(
+                store,
+                max_threads,
+                thread_id,
+                ThreadPoolEventReason::MemoryPressure,
+            )
+        {
+            let _ = sender.send(ThreadEvent::ThreadPoolEvicted {
+                runtime,
+                reason: ThreadPoolEventReason::MemoryPressure,
+            });
+            let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+            return Some(shutdown);
+        }
+        let _ = sender.send(ThreadEvent::ThreadPoolCooling { runtime });
+        let _ = sender.send(ThreadEvent::ThreadPoolMetricsUpdated { snapshot });
+        None
     }
 
     fn evict_runtime_from_shared_store(
@@ -1654,6 +1662,28 @@ impl ThreadPool {
         }
     }
 
+    async fn recover_and_validate_metadata(
+        base_dir: &Path,
+        expected_thread_id: ThreadId,
+        expected_kind: ThreadTraceKind,
+    ) -> Result<ThreadTraceMetadata, JobError> {
+        let metadata = recover_thread_metadata(base_dir)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        if metadata.thread_id != expected_thread_id {
+            return Err(JobError::ExecutionFailed(format!(
+                "{expected_kind:?} trace metadata for {expected_thread_id} resolved to {}",
+                metadata.thread_id
+            )));
+        }
+        if metadata.kind != expected_kind {
+            return Err(JobError::ExecutionFailed(format!(
+                "thread {expected_thread_id} is not recorded as {expected_kind:?}"
+            )));
+        }
+        Ok(metadata)
+    }
+
     fn sync_relationship_cache(&self, metadata: &ThreadTraceMetadata) {
         let mut store = self.store.lock().expect("thread-pool mutex poisoned");
 
@@ -1677,6 +1707,39 @@ impl ThreadPool {
         }
     }
 
+    fn build_thread_config(
+        base_dir: PathBuf,
+        model_name: String,
+    ) -> Result<argus_agent::ThreadConfig, JobError> {
+        let trace_cfg = TraceConfig::new(true, base_dir).with_model(Some(model_name));
+        let mut turn_config = TurnConfig::new();
+        turn_config.trace_config = Some(trace_cfg);
+        ThreadConfigBuilder::default()
+            .turn_config(turn_config)
+            .build()
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))
+    }
+
+    async fn hydrate_turn_log_state(
+        thread: &Arc<RwLock<argus_agent::Thread>>,
+        base_dir: &Path,
+        updated_at: &str,
+    ) -> Result<(), JobError> {
+        let updated_at = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        let recovered = recover_thread_log_state(base_dir)
+            .await
+            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        if recovered.turn_count() > 0 {
+            thread
+                .write()
+                .await
+                .hydrate_from_turn_log_state(recovered, updated_at);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn recover_job_thread_metadata(
         &self,
         thread_id: ThreadId,
@@ -1693,21 +1756,9 @@ impl ThreadPool {
                     )));
                 }
             };
-        let metadata = recover_thread_metadata(&base_dir)
-            .await
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        if metadata.thread_id != thread_id {
-            return Err(JobError::ExecutionFailed(format!(
-                "job trace metadata for {} resolved to {}",
-                thread_id, metadata.thread_id
-            )));
-        }
-        if metadata.kind != ThreadTraceKind::Job {
-            return Err(JobError::ExecutionFailed(format!(
-                "thread {} is not recorded as a job thread",
-                thread_id
-            )));
-        }
+        let metadata =
+            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
+                .await?;
         self.sync_relationship_cache(&metadata);
         Ok(Some(metadata))
     }
@@ -1746,6 +1797,26 @@ impl ThreadPool {
             })
     }
 
+    async fn resolve_provider_with_fallback(
+        &self,
+        provider_id: ProviderId,
+        model: Option<&str>,
+    ) -> argus_protocol::Result<Arc<dyn LlmProvider>> {
+        match model {
+            Some(model) => {
+                match self
+                    .provider_resolver
+                    .resolve_with_model(provider_id, model)
+                    .await
+                {
+                    Ok(provider) => Ok(provider),
+                    Err(_) => self.provider_resolver.resolve(provider_id).await,
+                }
+            }
+            None => self.provider_resolver.resolve(provider_id).await,
+        }
+    }
+
     async fn build_chat_thread(
         &self,
         session_id: SessionId,
@@ -1764,38 +1835,18 @@ impl ThreadPool {
             .ok_or_else(|| JobError::ExecutionFailed(format!("thread {} not found", thread_id)))?;
         let base_dir =
             chat_thread_base_dir(&self.chat_runtime_config.trace_dir, session_id, thread_id);
-        let metadata = recover_thread_metadata(&base_dir)
-            .await
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        if metadata.thread_id != thread_id {
-            return Err(JobError::ExecutionFailed(format!(
-                "chat trace metadata for {} resolved to {}",
-                thread_id, metadata.thread_id
-            )));
-        }
-        if metadata.kind != ThreadTraceKind::ChatRoot {
-            return Err(JobError::ExecutionFailed(format!(
-                "thread {} is not recorded as a chat root",
-                thread_id
-            )));
-        }
+        let metadata =
+            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::ChatRoot)
+                .await?;
         let agent_record = metadata.agent_snapshot.clone();
         let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
         let requested_model = thread_record
             .model_override
             .clone()
             .unwrap_or_else(|| format!("provider-{}", provider_id.inner()));
-        let provider = match thread_record.model_override.as_deref() {
-            Some(model) => match self
-                .provider_resolver
-                .resolve_with_model(provider_id, model)
-                .await
-            {
-                Ok(provider) => Ok(provider),
-                Err(_) => self.provider_resolver.resolve(provider_id).await,
-            },
-            None => self.provider_resolver.resolve(provider_id).await,
-        };
+        let provider =
+            self.resolve_provider_with_fallback(provider_id, thread_record.model_override.as_deref())
+                .await;
         let provider = match provider {
             Ok(provider) => provider,
             Err(error) => {
@@ -1812,14 +1863,8 @@ impl ThreadPool {
             }
         };
 
-        let trace_cfg = TraceConfig::new(true, base_dir.clone())
-            .with_model(Some(provider.model_name().to_string()));
-        let mut turn_config = TurnConfig::new();
-        turn_config.trace_config = Some(trace_cfg);
-        let config = ThreadConfigBuilder::default()
-            .turn_config(turn_config)
-            .build()
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let config =
+            Self::build_thread_config(base_dir.clone(), provider.model_name().to_string())?;
         let thread_builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(session_id)
@@ -1837,18 +1882,7 @@ impl ThreadPool {
         let thread = Arc::new(RwLock::new(thread));
         self.sync_relationship_cache(&metadata);
 
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
-        let recovered = recover_thread_log_state(&base_dir)
-            .await
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        if recovered.turn_count() > 0 {
-            thread
-                .write()
-                .await
-                .hydrate_from_turn_log_state(recovered, updated_at);
-        }
+        Self::hydrate_turn_log_state(&thread, &base_dir, &thread_record.updated_at).await?;
 
         Ok(thread)
     }
@@ -1872,21 +1906,9 @@ impl ThreadPool {
         let base_dir = find_job_thread_base_dir(&self.chat_runtime_config.trace_dir, thread_id)
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        let metadata = recover_thread_metadata(&base_dir)
-            .await
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-        if metadata.thread_id != thread_id {
-            return Err(JobError::ExecutionFailed(format!(
-                "job trace metadata for {} resolved to {}",
-                thread_id, metadata.thread_id
-            )));
-        }
-        if metadata.kind != ThreadTraceKind::Job {
-            return Err(JobError::ExecutionFailed(format!(
-                "thread {} is not recorded as a job thread",
-                thread_id
-            )));
-        }
+        let metadata =
+            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
+                .await?;
         if metadata.parent_thread_id != Some(request.originating_thread_id) {
             return Err(JobError::ExecutionFailed(format!(
                 "job thread {} is bound to parent {:?}, not {}",
@@ -1902,42 +1924,18 @@ impl ThreadPool {
         let agent_record = metadata.agent_snapshot.clone();
         let provider = if let Some(thread_record) = thread_record.as_ref() {
             let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
-            match thread_record.model_override.as_deref() {
-                Some(model) => match self
-                    .provider_resolver
-                    .resolve_with_model(provider_id, model)
-                    .await
-                {
-                    Ok(provider) => Ok(provider),
-                    Err(_) => self.provider_resolver.resolve(provider_id).await,
-                },
-                None => self.provider_resolver.resolve(provider_id).await,
-            }
+            self.resolve_provider_with_fallback(provider_id, thread_record.model_override.as_deref())
+                .await
         } else if let Some(provider_id) = agent_record.provider_id {
-            match agent_record.model_id.as_deref() {
-                Some(model) => match self
-                    .provider_resolver
-                    .resolve_with_model(provider_id, model)
-                    .await
-                {
-                    Ok(provider) => Ok(provider),
-                    Err(_) => self.provider_resolver.resolve(provider_id).await,
-                },
-                None => self.provider_resolver.resolve(provider_id).await,
-            }
+            self.resolve_provider_with_fallback(provider_id, agent_record.model_id.as_deref())
+                .await
         } else {
             self.provider_resolver.default_provider().await
         }
         .map_err(|err| JobError::ExecutionFailed(format!("failed to resolve provider: {err}")))?;
 
-        let trace_cfg = TraceConfig::new(true, base_dir.clone())
-            .with_model(Some(provider.model_name().to_string()));
-        let mut turn_config = TurnConfig::new();
-        turn_config.trace_config = Some(trace_cfg);
-        let config = ThreadConfigBuilder::default()
-            .turn_config(turn_config)
-            .build()
-            .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
+        let config =
+            Self::build_thread_config(base_dir.clone(), provider.model_name().to_string())?;
         let plan_store = FilePlanStore::new(base_dir.clone());
         let thread_title = thread_record
             .as_ref()
@@ -1959,18 +1957,7 @@ impl ThreadPool {
         self.sync_relationship_cache(&metadata);
 
         if let Some(thread_record) = thread_record {
-            let updated_at = chrono::DateTime::parse_from_rfc3339(&thread_record.updated_at)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
-            let recovered = recover_thread_log_state(&base_dir)
-                .await
-                .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
-            if recovered.turn_count() > 0 {
-                thread
-                    .write()
-                    .await
-                    .hydrate_from_turn_log_state(recovered, updated_at);
-            }
+            Self::hydrate_turn_log_state(&thread, &base_dir, &thread_record.updated_at).await?;
         }
 
         Ok(thread)
