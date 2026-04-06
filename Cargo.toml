@@ -37,7 +37,7 @@ dashmap = "6"
 tracing = "0.1"
 
 # Database
-sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls", "migrate", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "postgres", "runtime-tokio-rustls", "migrate", "macros"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
