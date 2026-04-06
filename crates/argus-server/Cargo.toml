@@ -1,0 +1,32 @@
+[package]
+name = "argus-server"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "argus-server"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { version = "0.8", features = ["macros"] }
+base64 = { workspace = true }
+chrono = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+# Argus crates
+argus-protocol = { path = "../argus-protocol" }
+argus-repository = { path = "../argus-repository", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5" }
+http-body-util = "0.1"
