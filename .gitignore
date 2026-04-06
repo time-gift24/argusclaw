@@ -8,3 +8,7 @@
 *.tsbuildinfo
 # Auto-generated files
 crates/argus-template/src/generated_agents.rs
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
