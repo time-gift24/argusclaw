@@ -1,7 +1,7 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useNavigate } from "react-router-dom"
-import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2, Server } from "lucide-react"
+import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2, Server, ChevronLeft, ChevronRight } from "lucide-react"
 import {
   agents,
   providers,
@@ -62,6 +62,70 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
     temperature: undefined,
     thinking_config: { type: "enabled", clear_thinking: false },
   }
+}
+
+const TOOL_PAGE_SIZE = 8
+
+interface ToolParameterDetail {
+  name: string
+  required: boolean
+  typeLabel: string
+  description: string
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function readToolSchemaDescription(parameters: ToolInfo["parameters"]): string | null {
+  const schema = asRecord(parameters)
+  const description = schema?.description
+  if (typeof description !== "string") return null
+  const trimmed = description.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function toTypeLabel(schema: Record<string, unknown>): string {
+  const typeField = schema.type
+  if (typeof typeField === "string" && typeField.trim().length > 0) {
+    return typeField
+  }
+  if (Array.isArray(typeField)) {
+    const typeList = typeField.filter(
+      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+    )
+    if (typeList.length > 0) return typeList.join(" | ")
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return "enum"
+  return "any"
+}
+
+function extractToolParameterDetails(parameters: ToolInfo["parameters"]): ToolParameterDetail[] {
+  const schema = asRecord(parameters)
+  const properties = asRecord(schema?.properties)
+  if (!properties) return []
+
+  const requiredField = Array.isArray(schema?.required) ? schema?.required : []
+  const required = new Set(
+    requiredField.filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    ),
+  )
+
+  return Object.entries(properties).map(([name, propertySchema]) => {
+    const propertyRecord = asRecord(propertySchema) ?? {}
+    const descriptionField = propertyRecord.description
+    return {
+      name,
+      required: required.has(name),
+      typeLabel: toTypeLabel(propertyRecord),
+      description:
+        typeof descriptionField === "string" && descriptionField.trim().length > 0
+          ? descriptionField
+          : "无描述",
+    }
+  })
 }
 
 async function loadMcpServers() {
@@ -131,6 +195,19 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     () => toolList.filter((t) => t.name !== "knowledge"),
     [toolList],
   )
+  const uniqueToolList = React.useMemo(
+    () => [...new Map(filteredToolList.map((tool) => [tool.name, tool])).values()],
+    [filteredToolList],
+  )
+  const [toolPage, setToolPage] = React.useState(1)
+  const toolTotalPages = React.useMemo(
+    () => Math.max(1, Math.ceil(uniqueToolList.length / TOOL_PAGE_SIZE)),
+    [uniqueToolList.length],
+  )
+  const pagedToolList = React.useMemo(() => {
+    const startIndex = (toolPage - 1) * TOOL_PAGE_SIZE
+    return uniqueToolList.slice(startIndex, startIndex + TOOL_PAGE_SIZE)
+  }, [toolPage, uniqueToolList])
   const mcpEnabledCount = React.useMemo(() => mcpBindings.length, [mcpBindings])
   const selectedMcpToolCount = React.useMemo(
     () =>
@@ -142,6 +219,10 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       }, 0),
     [mcpBindings, mcpToolsByServerId],
   )
+
+  React.useEffect(() => {
+    setToolPage((prev) => Math.min(prev, toolTotalPages))
+  }, [toolTotalPages])
 
   const canSave = Boolean(
     formData.display_name.trim() &&
@@ -572,71 +653,158 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             </div>
           </div>
 
-          {/* 第二排：能力与工具 + 知识库 + MCP */}
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px_280px] gap-6">
-            {/* 通用工具箱 */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm font-bold text-foreground px-1">
-                <div className="flex items-center gap-2">
-                  <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
-                    <Wrench className="h-4 w-4" />
-                  </div>
-                  可用工具箱
+          {/* 第二排：可用工具箱（单独一行） */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between text-sm font-bold text-foreground px-0.5">
+              <div className="flex items-center gap-2">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Wrench className="h-4 w-4" />
                 </div>
+                可用工具箱
+              </div>
+              <div className="flex items-center gap-1.5">
                 <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest bg-muted/40 px-2 py-0.5 rounded-full">
                   已选 {formData.tool_names.length} / {toolList.length}
                 </span>
-              </div>
-              <div className="bg-muted/20 p-6 rounded-3xl border border-muted/60 shadow-sm">
-                {filteredToolList.length === 0 ? (
-                  <div className="text-center py-10">
-                    <p className="text-xs text-muted-foreground">当前环境下没有可用的插件工具</p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {[...new Map(filteredToolList.map((tool) => [tool.name, tool])).values()].map((tool) => (
-                      <div
-                        key={tool.name}
-                        onClick={() => {
-                          const isSelected = formData.tool_names.includes(tool.name)
-                          setFormData((prev) => ({
-                            ...prev,
-                            tool_names: isSelected
-                              ? prev.tool_names.filter((n) => n !== tool.name)
-                              : [...prev.tool_names, tool.name],
-                          }))
-                        }}
-                        className={cn(
-                          "group flex items-start gap-3 rounded-2xl border p-4 cursor-pointer transition-all",
-                          formData.tool_names.includes(tool.name)
-                            ? "border-primary bg-primary/5 shadow-inner"
-                            : "border-muted/60 bg-background hover:border-primary/30"
-                        )}
-                      >
-                        <Checkbox
-                          id={`tool-${tool.name}`}
-                          checked={formData.tool_names.includes(tool.name)}
-                          className="mt-0.5 shrink-0"
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <div className="space-y-1 min-w-0">
-                          <Label
-                            htmlFor={`tool-${tool.name}`}
-                            className="text-xs font-bold cursor-pointer block truncate"
-                          >
-                            {tool.name}
-                          </Label>
-                          <p className="text-[10px] text-muted-foreground leading-snug line-clamp-2">
-                            {tool.description}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={toolPage <= 1}
+                    onClick={() => setToolPage((prev) => Math.max(1, prev - 1))}
+                  >
+                    <ChevronLeft className="h-3 w-3" />
+                  </Button>
+                  <span className="min-w-11 text-center text-[10px] font-mono text-muted-foreground">
+                    {toolPage}/{toolTotalPages}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={toolPage >= toolTotalPages}
+                    onClick={() => setToolPage((prev) => Math.min(toolTotalPages, prev + 1))}
+                  >
+                    <ChevronRight className="h-3 w-3" />
+                  </Button>
+                </div>
               </div>
             </div>
+            <div className="bg-muted/20 p-3 rounded-3xl border border-muted/60 shadow-sm">
+              {filteredToolList.length === 0 ? (
+                <div className="text-center py-10 flex items-center justify-center">
+                  <p className="text-xs text-muted-foreground">当前环境下没有可用的插件工具</p>
+                </div>
+              ) : (
+                <div className="grid content-start grid-cols-2 lg:grid-cols-4 gap-2">
+                  {pagedToolList.map((tool, index) => {
+                    const parameterDetails = extractToolParameterDetails(tool.parameters)
+                    const detailedDescription = tool.description || readToolSchemaDescription(tool.parameters) || "无描述"
+                    const columnIndex = index % 4
+                    const isTopRow = index < 4
+                    const hoverPositionClass =
+                      isTopRow
+                        ? "bottom-full mb-2 left-1/2 -translate-x-1/2"
+                        : columnIndex < 2
+                          ? "left-full ml-2 top-1/2 -translate-y-1/2"
+                          : "right-full mr-2 top-1/2 -translate-y-1/2"
+                    const arrowPositionClass =
+                      isTopRow
+                        ? "left-1/2 -translate-x-1/2 top-full -mt-1"
+                        : columnIndex < 2
+                          ? "right-full -mr-1 top-1/2 -translate-y-1/2"
+                          : "left-full -ml-1 top-1/2 -translate-y-1/2"
 
+                    return (
+                    <div
+                      key={tool.name}
+                      onClick={() => {
+                        const isSelected = formData.tool_names.includes(tool.name)
+                        setFormData((prev) => ({
+                          ...prev,
+                          tool_names: isSelected
+                            ? prev.tool_names.filter((n) => n !== tool.name)
+                            : [...prev.tool_names, tool.name],
+                        }))
+                      }}
+                      className={cn(
+                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 cursor-pointer transition-all",
+                        formData.tool_names.includes(tool.name)
+                          ? "border-primary bg-primary/5 shadow-inner"
+                          : "border-muted/60 bg-background hover:border-primary/30"
+                      )}
+                    >
+                      <Checkbox
+                        id={`tool-${tool.name}`}
+                        checked={formData.tool_names.includes(tool.name)}
+                        className="mt-0.5 shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="min-w-0">
+                        <Label
+                          htmlFor={`tool-${tool.name}`}
+                          className="text-[11px] font-bold cursor-pointer block truncate"
+                        >
+                          {tool.name}
+                        </Label>
+                        <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1">
+                          {tool.description || "无描述"}
+                        </p>
+                      </div>
+                      <div
+                        className={cn(
+                          "pointer-events-none absolute z-20 w-80 rounded-2xl border border-primary/25 bg-gradient-to-br from-background via-background to-primary/10 p-3 shadow-2xl shadow-primary/15 opacity-0 backdrop-blur-sm transition-all duration-200 group-hover:opacity-100",
+                          hoverPositionClass,
+                        )}
+                      >
+                        <div className="text-[11px] font-bold text-foreground">{tool.name}</div>
+                        <div className="mt-1 text-[10px] font-semibold text-foreground/90">描述</div>
+                        <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground line-clamp-4">
+                          {detailedDescription}
+                        </p>
+
+                        <div className="mt-2 text-[10px] font-semibold text-foreground/90">参数</div>
+                        {parameterDetails.length === 0 ? (
+                          <p className="mt-0.5 text-[10px] text-muted-foreground">无参数</p>
+                        ) : (
+                          <div className="mt-1 max-h-28 space-y-1 overflow-y-auto custom-scrollbar pr-1">
+                            {parameterDetails.map((parameter) => (
+                              <div key={`${tool.name}-${parameter.name}`} className="rounded-lg border border-muted/50 bg-background/70 px-2 py-1.5">
+                                <div className="flex items-center gap-1.5 text-[10px]">
+                                  <span className="font-semibold text-foreground break-all">
+                                    {parameter.name}{parameter.required ? "*" : ""}
+                                  </span>
+                                  <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                                    {parameter.typeLabel}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground line-clamp-2">
+                                  {parameter.description}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div
+                          className={cn(
+                            "absolute h-2.5 w-2.5 rotate-45 border border-primary/25 bg-background",
+                            arrowPositionClass,
+                          )}
+                        />
+                      </div>
+                    </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 第三排：知识库 + MCP */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* 知识库独立卡片 */}
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
@@ -921,7 +1089,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             </DialogContent>
           </Dialog>
 
-          {/* 第三排：系统提示词 - 占据整宽 */}
+          {/* 第四排：系统提示词 - 占据整宽 */}
           <div className="space-y-4 pb-10">
             <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
               <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
