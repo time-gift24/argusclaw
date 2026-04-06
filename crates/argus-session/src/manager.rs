@@ -676,6 +676,14 @@ impl SessionManager {
         }
     }
 
+    /// List all agent templates for user-facing consumption.
+    ///
+    /// Returns all templates; the caller is responsible for filtering
+    /// (e.g., only enabled agents for server users).
+    pub async fn list_templates_for_user(&self) -> Vec<argus_protocol::AgentRecord> {
+        self.template_manager.list().await.unwrap_or_default()
+    }
+
     /// List all sessions (from DB).
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let sessions =
