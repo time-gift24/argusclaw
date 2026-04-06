@@ -849,7 +849,7 @@ async fn execute_loop(
     let mut token_usage = TokenUsage::default();
     let mut compacted_during_turn = false;
     let mut usage_baseline_total: Option<u32> = None;
-    let mut local_delta_messages: Vec<ChatMessage> = Vec::new();
+    let mut local_delta_token_count: u32 = 0;
 
     for iteration in 0..max_iterations {
         if ctx.cancellation.is_cancelled() {
@@ -859,9 +859,7 @@ async fn execute_loop(
         let mut request_messages =
             materialize_messages(system_prompt, history.as_ref(), &turn_messages);
         let request_token_count = match usage_baseline_total {
-            Some(baseline) => {
-                baseline.saturating_add(estimate_local_message_delta_tokens(&local_delta_messages))
-            }
+            Some(baseline) => baseline.saturating_add(local_delta_token_count),
             None => estimated_tokens(&request_messages) as u32,
         };
         if let Some(compactor) = compactor {
@@ -873,7 +871,7 @@ async fn execute_loop(
                     compacted_during_turn = true;
                     history = Arc::new(result.messages);
                     turn_messages.clear();
-                    local_delta_messages.clear();
+                    local_delta_token_count = 0;
                     request_messages =
                         materialize_messages(system_prompt, history.as_ref(), &turn_messages);
                 }
@@ -947,7 +945,7 @@ async fn execute_loop(
         );
         if usage_reported {
             usage_baseline_total = Some(token_usage.total_tokens);
-            local_delta_messages.clear();
+            local_delta_token_count = 0;
         } else {
             usage_baseline_total = None;
         }
@@ -971,8 +969,12 @@ async fn execute_loop(
 
                 if let Some(message) = continue_message {
                     let continue_message = ChatMessage::user(&message);
-                    turn_messages.push(continue_message.clone());
-                    local_delta_messages.push(continue_message);
+                    local_delta_token_count = local_delta_token_count.saturating_add(
+                        estimate_local_message_delta_tokens(std::slice::from_ref(
+                            &continue_message,
+                        )),
+                    );
+                    turn_messages.push(continue_message);
 
                     tracing::debug!(
                         thread_id = %thread_id,
@@ -1053,8 +1055,10 @@ async fn execute_loop(
                         result.name,
                         sanitized_content,
                     );
-                    turn_messages.push(tool_message.clone());
-                    local_delta_messages.push(tool_message);
+                    local_delta_token_count = local_delta_token_count.saturating_add(
+                        estimate_local_message_delta_tokens(std::slice::from_ref(&tool_message)),
+                    );
+                    turn_messages.push(tool_message);
                 }
             }
             NextAction::LengthExceeded => {
@@ -2165,6 +2169,86 @@ mod tests {
             ChatMessage::user("continue"),
         ]) as u32;
         assert_eq!(calls[1].token_count, expected_second);
+    }
+
+    #[tokio::test]
+    async fn execute_loop_turn_compactor_falls_back_after_usage_then_missing_usage() {
+        let provider = Arc::new(StreamingSequencedProvider::new(
+            vec![
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "first".to_string(),
+                    },
+                    LlmStreamEvent::Usage {
+                        input_tokens: 9,
+                        output_tokens: 3,
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+                vec![
+                    LlmStreamEvent::ToolCallDelta(argus_protocol::llm::ToolCallDelta {
+                        index: 0,
+                        id: Some("call-fixed".to_string()),
+                        name: Some("fixed_tool".to_string()),
+                        arguments_delta: Some("{}".to_string()),
+                    }),
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::ToolUse,
+                    },
+                ],
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "done".to_string(),
+                    },
+                    LlmStreamEvent::Usage {
+                        input_tokens: 11,
+                        output_tokens: 2,
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+            ],
+            4,
+        ));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::clone(&calls),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None), Ok(None)]))),
+        });
+        let turn = make_turn_with(
+            provider,
+            vec![Arc::new(FixedResultTool)],
+            vec![Arc::new(ContinueOnceTurnEndHook::new())],
+            6,
+            TurnCancellation::default(),
+            Some(compactor),
+            vec![ChatMessage::user("start")],
+        );
+
+        let _record = turn.execute().await.expect("turn should succeed");
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        let expected_third = estimated_tokens(&[
+            ChatMessage::system("You are a test agent."),
+            ChatMessage::user("start"),
+            ChatMessage::assistant("first"),
+            ChatMessage::user("continue"),
+            ChatMessage::assistant_with_tool_calls_and_reasoning(
+                None,
+                vec![ToolCall {
+                    id: "call-fixed".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                None,
+            ),
+            ChatMessage::tool_result("call-fixed", "fixed_tool", r#"{"ok":"1"}"#),
+        ]) as u32;
+        assert_eq!(calls[2].token_count, expected_third);
     }
 
     #[tokio::test]
