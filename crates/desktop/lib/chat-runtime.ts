@@ -115,12 +115,6 @@ const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
     "compaction_replay",
   ].includes(message.metadata.mode ?? "");
 
-const toMessageCustomMetadata = (msg: ChatMessagePayload) => ({
-  messageMetadata: msg.metadata ?? null,
-  localDeliveryStatus: msg.local_delivery_status ?? null,
-  localClientId: msg.local_client_id ?? null,
-});
-
 function convertSnapshotMessage(msg: ChatMessagePayload, index: number): AssistantUiMessage | null {
   const createdAt = new Date(index);
 
@@ -158,7 +152,9 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
       createdAt,
       metadata: {
         ...createEmptyAssistantMetadata(),
-        custom: toMessageCustomMetadata(msg),
+        custom: {
+          messageMetadata: msg.metadata ?? null,
+        },
       },
     };
   }
@@ -170,7 +166,7 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
       content: msg.content,
       createdAt,
       attachments: [],
-      metadata: { custom: toMessageCustomMetadata(msg) },
+      metadata: { custom: { messageMetadata: msg.metadata ?? null } },
     };
   }
 
@@ -179,7 +175,7 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
     role: "system",
     content: msg.content,
     createdAt,
-    metadata: { custom: toMessageCustomMetadata(msg) },
+    metadata: { custom: { messageMetadata: msg.metadata ?? null } },
   };
 }
 

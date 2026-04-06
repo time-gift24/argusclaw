@@ -20,10 +20,10 @@ export function ChatScreen() {
   return (
     <Tabs
       defaultValue="chat"
-      className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden"
+      className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden"
     >
-      <div className="px-3 pt-3">
-        <TabsList className="h-8 bg-muted/60 px-1 shadow-sm">
+      <div className="px-4 pt-4">
+        <TabsList className="bg-muted/60 shadow-sm">
           <TabsTrigger value="chat">Chat</TabsTrigger>
           <TabsTrigger value="threads">Threads</TabsTrigger>
         </TabsList>

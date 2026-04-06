@@ -59,7 +59,7 @@ test("settings exposes dedicated MCP routes and editor components", () => {
 })
 
 test("settings navigation and breadcrumbs surface the MCP configuration section", () => {
-  assert.match(dashboardShellSource, /href="\/settings\/mcp"/)
+  assert.match(dashboardShellSource, /(to|href)="\/settings\/mcp"/)
   assert.match(dashboardShellSource, /MCP 配置/)
   assert.match(navbarSource, /pathname\.startsWith\("\/settings\/mcp"\)/)
   assert.match(navbarSource, /label: "MCP"/)
