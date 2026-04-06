@@ -925,13 +925,12 @@ async fn execute_loop(
             message_count = %request_messages.len(),
             "Calling LLM"
         );
-        let tools_for_request: &[Arc<dyn NamedTool>] = if force_text {
-            &[]
-        } else {
-            ctx.tools
-        };
-        let request =
-            build_completion_request(request_messages.clone(), tools_for_request, ctx.agent_record);
+        let tools_for_request: &[Arc<dyn NamedTool>] = if force_text { &[] } else { ctx.tools };
+        let request = build_completion_request(
+            request_messages.clone(),
+            tools_for_request,
+            ctx.agent_record,
+        );
         let (response, usage_reported) = match call_llm_streaming(
             ctx.provider,
             request,
@@ -2235,7 +2234,11 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let compactor = Arc::new(RecordingTurnCompactor {
             calls: Arc::clone(&calls),
-            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None), Ok(None)]))),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![
+                Ok(None),
+                Ok(None),
+                Ok(None),
+            ]))),
         });
         let turn = make_turn_with(
             provider,
@@ -2470,7 +2473,10 @@ mod tests {
             vec![ChatMessage::user("start")],
         );
 
-        let record = turn.execute().await.expect("turn should succeed gracefully");
+        let record = turn
+            .execute()
+            .await
+            .expect("turn should succeed gracefully");
 
         // Should complete successfully, not with MaxIterationsReached
         assert!(matches!(record.kind, TurnRecordKind::UserTurn));
