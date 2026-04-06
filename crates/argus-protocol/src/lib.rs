@@ -6,7 +6,6 @@ pub mod events;
 pub mod hooks;
 pub mod http_client;
 pub mod ids;
-pub mod knowledge;
 pub mod llm;
 pub mod mcp;
 pub mod message_override;
@@ -28,7 +27,6 @@ pub use events::{
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
-pub use knowledge::{KnowledgeRepoProvider, KnowledgeRepoRecord};
 pub use mcp::{
     AgentMcpBinding, AgentMcpServerBinding, AgentMcpToolBinding, McpDiscoveredToolRecord,
     McpServerRecord, McpServerStatus, McpToolResolver, McpTransportConfig, McpTransportKind,

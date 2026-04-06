@@ -1,16 +1,14 @@
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useNavigate } from "react-router-dom"
-import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2, Server, ChevronLeft, ChevronRight } from "lucide-react"
+import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, Server, ChevronLeft, ChevronRight } from "lucide-react"
 import {
   agents,
   providers,
   tools,
-  knowledge,
   mcp,
   type AgentMcpBinding,
   type AgentRecord,
-  type KnowledgeRepoRecord,
   type LlmProviderSummary,
   type McpDiscoveredToolRecord,
   type McpServerRecord,
@@ -145,18 +143,12 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [toolList, setToolList] = React.useState<ToolInfo[]>([])
-  const [knowledgeRepoList, setKnowledgeRepoList] = React.useState<KnowledgeRepoRecord[]>([])
   const [mcpServerList, setMcpServerList] = React.useState<McpServerRecord[]>([])
   const [mcpBindings, setMcpBindings] = React.useState<AgentMcpBinding[]>([])
   const [mcpToolsByServerId, setMcpToolsByServerId] = React.useState<Record<number, McpDiscoveredToolRecord[]>>({})
   const mcpToolsByServerIdRef = React.useRef<Record<number, McpDiscoveredToolRecord[]>>({})
-  const [agentWorkspaces, setAgentWorkspaces] = React.useState<string[]>([])
   const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
-  const [knowledgeDialogOpen, setKnowledgeDialogOpen] = React.useState(false)
   const [mcpDialogOpen, setMcpDialogOpen] = React.useState(false)
-  const [addRepoInput, setAddRepoInput] = React.useState("")
-  const [addWorkspaceInput, setAddWorkspaceInput] = React.useState("")
-  const [addingRepo, setAddingRepo] = React.useState(false)
   const [loadingMcpToolsByServerId, setLoadingMcpToolsByServerId] = React.useState<Record<number, boolean>>({})
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
@@ -186,18 +178,9 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     () => getExcludedAgentIds(agentId, parentAgentList),
     [agentId, parentAgentList],
   )
-  const uniqueWorkspaces = React.useMemo(
-    () => [...new Set(knowledgeRepoList.map((r) => r.workspace))],
-    [knowledgeRepoList],
-  )
-  const knowledgeEnabled = formData.tool_names.includes("knowledge")
-  const filteredToolList = React.useMemo(
-    () => toolList.filter((t) => t.name !== "knowledge"),
-    [toolList],
-  )
   const uniqueToolList = React.useMemo(
-    () => [...new Map(filteredToolList.map((tool) => [tool.name, tool])).values()],
-    [filteredToolList],
+    () => [...new Map(toolList.map((tool) => [tool.name, tool])).values()],
+    [toolList],
   )
   const [toolPage, setToolPage] = React.useState(1)
   const toolTotalPages = React.useMemo(
@@ -297,17 +280,15 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   React.useEffect(() => {
     const loadData = async () => {
       try {
-        const [providersData, toolsData, knowledgeReposData, allAgents, mcpServersData] =
+        const [providersData, toolsData, allAgents, mcpServersData] =
           await Promise.all([
             providers.list(),
             tools.list(),
-            knowledge.list(),
             agents.list(),
             loadMcpServers(),
           ])
         setProviderList(providersData)
         setToolList(toolsData)
-        setKnowledgeRepoList(knowledgeReposData)
         setMcpServerList(mcpServersData)
         const candidates = allAgents.filter(
           (a) => !a.parent_agent_id && a.agent_type !== "subagent" && a.id !== agentId
@@ -316,13 +297,11 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
 
         const preferredProviderId = getPreferredProviderId(providersData)
         if (agentId !== undefined) {
-          const [agent, workspaces, bindings] = await Promise.all([
+          const [agent, bindings] = await Promise.all([
             agents.get(agentId),
-            knowledge.listAgentWorkspaces(agentId).catch(() => []),
             loadAgentMcpBindings(agentId).catch(() => []),
           ])
           if (agent) setFormData(agent)
-          setAgentWorkspaces(workspaces)
           setMcpBindings(bindings)
           await Promise.all(
             bindings.map((binding) => loadMcpTools(binding.server_id)),
@@ -349,15 +328,11 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     setSaving(true)
     try {
       const savedId = await agents.upsert(formData)
-      // Save knowledge workspace bindings
       if (isEditing || savedId) {
         const targetId = isEditing ? agentId! : savedId
-        try {
-          await knowledge.setAgentWorkspaces(targetId, agentWorkspaces)
-          await mcp.setAgentBindings(targetId, mcpBindings)
-        } catch (wsError) {
+        await mcp.setAgentBindings(targetId, mcpBindings).catch((wsError) => {
           console.error("Failed to save agent capability bindings:", wsError)
-        }
+        })
       }
       addToast("success", isEditing ? "配置已保存" : "创建成功")
       navigate(`/settings/agents/edit?id=${savedId}`)
@@ -366,55 +341,6 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       addToast("error", "保存失败")
     } finally {
       setSaving(false)
-    }
-  }
-
-  const refreshKnowledgeRepos = async () => {
-    try {
-      const data = await knowledge.list()
-      setKnowledgeRepoList(data)
-    } catch (e) {
-      console.error("Failed to refresh knowledge repos:", e)
-    }
-  }
-
-  const handleAddRepo = async () => {
-    if (!addRepoInput.trim() || !addWorkspaceInput.trim()) return
-    setAddingRepo(true)
-    try {
-      await knowledge.upsert({
-        id: 0,
-        repo: addRepoInput.trim(),
-        repo_id: "",
-        provider: "",
-        owner: "",
-        name: "",
-        default_branch: "",
-        manifest_paths: [],
-        workspace: addWorkspaceInput.trim(),
-      })
-      // Auto-bind the new workspace
-      if (!agentWorkspaces.includes(addWorkspaceInput.trim())) {
-        setAgentWorkspaces((prev) => [...prev, addWorkspaceInput.trim()])
-      }
-      setAddRepoInput("")
-      setAddWorkspaceInput("")
-      await refreshKnowledgeRepos()
-    } catch (e) {
-      console.error("Failed to add repo:", e)
-      addToast("error", "添加知识库失败")
-    } finally {
-      setAddingRepo(false)
-    }
-  }
-
-  const handleDeleteRepo = async (id: number) => {
-    try {
-      await knowledge.delete(id)
-      await refreshKnowledgeRepos()
-    } catch (e) {
-      console.error("Failed to delete repo:", e)
-      addToast("error", "删除知识库失败")
     }
   }
 
@@ -694,7 +620,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
               </div>
             </div>
             <div className="bg-muted/20 p-3 rounded-3xl border border-muted/60 shadow-sm">
-              {filteredToolList.length === 0 ? (
+              {uniqueToolList.length === 0 ? (
                 <div className="text-center py-10 flex items-center justify-center">
                   <p className="text-xs text-muted-foreground">当前环境下没有可用的插件工具</p>
                 </div>
@@ -803,232 +729,41 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             </div>
           </div>
 
-          {/* 第三排：知识库 + MCP */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* 知识库独立卡片 */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
-                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
-                  <BookOpen className="h-4 w-4" />
-                </div>
-                知识库
+          {/* 第三排：MCP 配置 */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
+              <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                <Server className="h-4 w-4" />
               </div>
-              <div
-                onClick={() => setKnowledgeDialogOpen(true)}
-                className={cn(
-                  "flex flex-col items-center justify-center gap-3 p-6 rounded-3xl border cursor-pointer transition-all min-h-[200px]",
-                  knowledgeEnabled
-                    ? "border-primary bg-primary/5 shadow-inner"
-                    : "border-muted/60 bg-muted/20 hover:border-primary/30",
-                )}
-              >
-                <div className={cn(
-                  "p-3 rounded-2xl transition-colors",
-                  knowledgeEnabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
-                )}>
-                  <BookOpen className="h-6 w-6" />
-                </div>
-                <div className="text-center space-y-1">
-                  <p className="text-xs font-bold">
-                    {knowledgeEnabled ? "已启用知识库" : "点击配置知识库"}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {knowledgeEnabled
-                      ? `${agentWorkspaces.length} 个工作区 · ${knowledgeRepoList.length} 个仓库`
-                      : "为智能体绑定知识来源"}
-                  </p>
-                </div>
-              </div>
+              MCP Servers
             </div>
-
-            {/* MCP 独立卡片 */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
-                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
-                  <Server className="h-4 w-4" />
-                </div>
-                MCP Servers
+            <div
+              onClick={() => setMcpDialogOpen(true)}
+              className={cn(
+                "flex flex-col items-center justify-center gap-3 p-6 rounded-3xl border cursor-pointer transition-all min-h-[200px]",
+                mcpEnabledCount > 0
+                  ? "border-primary bg-primary/5 shadow-inner"
+                  : "border-muted/60 bg-muted/20 hover:border-primary/30",
+              )}
+            >
+              <div className={cn(
+                "p-3 rounded-2xl transition-colors",
+                mcpEnabledCount > 0 ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+              )}>
+                <Server className="h-6 w-6" />
               </div>
-              <div
-                onClick={() => setMcpDialogOpen(true)}
-                className={cn(
-                  "flex flex-col items-center justify-center gap-3 p-6 rounded-3xl border cursor-pointer transition-all min-h-[200px]",
-                  mcpEnabledCount > 0
-                    ? "border-primary bg-primary/5 shadow-inner"
-                    : "border-muted/60 bg-muted/20 hover:border-primary/30",
-                )}
-              >
-                <div className={cn(
-                  "p-3 rounded-2xl transition-colors",
-                  mcpEnabledCount > 0 ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
-                )}>
-                  <Server className="h-6 w-6" />
-                </div>
-                <div className="text-center space-y-1">
-                  <p className="text-xs font-bold">
-                    {mcpEnabledCount > 0 ? "已绑定 MCP" : "点击配置 MCP"}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    {mcpEnabledCount > 0
-                      ? `${mcpEnabledCount} 个 server · ${selectedMcpToolCount} 个 tools`
-                      : "为智能体绑定可动态注入的 MCP servers"}
-                  </p>
-                </div>
+              <div className="text-center space-y-1">
+                <p className="text-xs font-bold">
+                  {mcpEnabledCount > 0 ? "已绑定 MCP" : "点击配置 MCP"}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {mcpEnabledCount > 0
+                    ? `${mcpEnabledCount} 个 server · ${selectedMcpToolCount} 个 tools`
+                    : "为智能体绑定可动态注入的 MCP servers"}
+                </p>
               </div>
             </div>
           </div>
-
-          {/* 知识库配置对话框 */}
-          <Dialog open={knowledgeDialogOpen} onOpenChange={setKnowledgeDialogOpen}>
-            <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
-              <DialogHeader>
-                <DialogTitle className="flex items-center gap-2">
-                  <BookOpen className="h-4 w-4 text-primary" />
-                  知识库配置
-                </DialogTitle>
-                <DialogDescription>
-                  管理知识仓库与工作区绑定。勾选工作区后，智能体可访问该工作区下的所有知识库。
-                </DialogDescription>
-              </DialogHeader>
-
-              <div className="flex-1 overflow-y-auto space-y-5 py-2 custom-scrollbar">
-                {/* 启用开关 */}
-                <div
-                  onClick={() => {
-                    setFormData((prev) => ({
-                      ...prev,
-                      tool_names: prev.tool_names.includes("knowledge")
-                        ? prev.tool_names.filter((n) => n !== "knowledge")
-                        : [...prev.tool_names, "knowledge"],
-                    }))
-                  }}
-                  className={cn(
-                    "flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all",
-                    knowledgeEnabled
-                      ? "border-primary bg-primary/5"
-                      : "border-muted/60 bg-background hover:border-primary/30",
-                  )}
-                >
-                  <Checkbox
-                    checked={knowledgeEnabled}
-                    className="shrink-0"
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                  <div>
-                    <p className="text-xs font-bold">启用知识库工具</p>
-                    <p className="text-[10px] text-muted-foreground">开启后智能体可在对话中检索知识库内容</p>
-                  </div>
-                </div>
-
-                {/* 工作区绑定 */}
-                {knowledgeEnabled && uniqueWorkspaces.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider px-1">
-                      工作区绑定
-                    </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {uniqueWorkspaces.map((ws) => (
-                        <div
-                          key={ws}
-                          onClick={() => {
-                            setAgentWorkspaces((prev) =>
-                              prev.includes(ws) ? prev.filter((w) => w !== ws) : [...prev, ws],
-                            )
-                          }}
-                          className={cn(
-                            "flex items-center gap-2 rounded-xl border p-3 cursor-pointer transition-all",
-                            agentWorkspaces.includes(ws)
-                              ? "border-primary bg-primary/5"
-                              : "border-muted/60 bg-background hover:border-primary/30",
-                          )}
-                        >
-                          <Checkbox
-                            checked={agentWorkspaces.includes(ws)}
-                            className="shrink-0"
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                          <div className="min-w-0">
-                            <p className="text-xs font-bold truncate">{ws}</p>
-                            <p className="text-[10px] text-muted-foreground">
-                              {knowledgeRepoList.filter((r) => r.workspace === ws).length} 个仓库
-                            </p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 已有仓库列表 */}
-                {knowledgeRepoList.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider px-1">
-                      已注册仓库
-                    </p>
-                    <div className="space-y-1.5">
-                      {knowledgeRepoList.map((repo) => (
-                        <div
-                          key={repo.id}
-                          className="flex items-center justify-between rounded-xl border border-muted/60 bg-background px-3 py-2"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-xs font-bold truncate">{repo.repo}</p>
-                            <p className="text-[10px] text-muted-foreground">{repo.workspace}</p>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            className="shrink-0 text-muted-foreground hover:text-destructive"
-                            onClick={() => handleDeleteRepo(repo.id)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 新增仓库 */}
-                <div className="space-y-2">
-                  <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider px-1">
-                    新增仓库
-                  </p>
-                  <div className="flex gap-2">
-                    <Input
-                      placeholder="owner/repo"
-                      value={addRepoInput}
-                      onChange={(e) => setAddRepoInput(e.target.value)}
-                      className="h-9 text-xs bg-background border-muted/60 flex-1"
-                    />
-                    <Input
-                      placeholder="工作区"
-                      value={addWorkspaceInput}
-                      onChange={(e) => setAddWorkspaceInput(e.target.value)}
-                      className="h-9 text-xs bg-background border-muted/60 w-24"
-                    />
-                    <Button
-                      size="sm"
-                      className="h-9 px-3 shrink-0"
-                      disabled={!addRepoInput.trim() || !addWorkspaceInput.trim() || addingRepo}
-                      onClick={handleAddRepo}
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <DialogFooter showCloseButton>
-                <Button
-                  size="sm"
-                  onClick={() => setKnowledgeDialogOpen(false)}
-                >
-                  完成
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
 
           <Dialog open={mcpDialogOpen} onOpenChange={setMcpDialogOpen}>
             <DialogContent className="sm:max-w-3xl max-h-[80vh] flex flex-col">
