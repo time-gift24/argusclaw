@@ -3,6 +3,8 @@
 //! These tests verify that:
 //! - Users can be upserted by `external_subject`
 //! - Sessions and threads are only listed for the owning user
+
+#![cfg(feature = "postgres")]
 //! - Provider token credentials can be read back for a provider
 //! - `agent_templates.is_enabled` defaults correctly for migrated rows
 //!
