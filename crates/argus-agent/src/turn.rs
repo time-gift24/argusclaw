@@ -978,6 +978,11 @@ async fn execute_loop(
                         iteration = %iteration,
                         "LLM returned tool calls despite force_text (tools were stripped); treating as text response"
                     );
+                    // Strip tool_calls from the last assistant message to avoid
+                    // persisting unpaired tool calls (no corresponding tool results).
+                    if let Some(last) = turn_messages.last_mut() {
+                        last.tool_calls = None;
+                    }
                 }
 
                 // Fire TurnEnd hooks for observation (audit/logging), but ignore
@@ -1290,7 +1295,7 @@ mod tests {
     use crate::compact::{CompactResult, Compactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, Role};
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
         AgentId, AgentType, HookAction, HookEvent, HookHandler, HookRegistry, ProviderId,
@@ -2615,6 +2620,17 @@ mod tests {
             .messages
             .iter()
             .any(|m| m.content == "my final answer"));
+        // The last assistant message (from force_text iteration) must not have
+        // unpaired tool_calls — force_text strips them before persisting.
+        let last_assistant = record
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::Assistant));
+        assert!(
+            last_assistant.is_some_and(|m| m.tool_calls.is_none()),
+            "force_text should strip tool_calls from the last assistant message"
+        );
     }
 
     #[tokio::test]
