@@ -298,6 +298,7 @@ impl ArgusSqlite {
             thinking_config,
             parent_agent_id: parent_agent_id.map(AgentId::new),
             agent_type,
+            is_enabled: true,
         })
     }
 }

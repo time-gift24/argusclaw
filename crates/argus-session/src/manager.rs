@@ -1629,6 +1629,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("agent upsert should succeed");
@@ -1864,6 +1865,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template upsert should succeed");

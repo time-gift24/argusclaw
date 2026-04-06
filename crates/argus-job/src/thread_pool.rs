@@ -2669,6 +2669,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::disabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         template_manager
             .upsert(original_agent_record.clone())
@@ -2774,6 +2775,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template update should succeed");
@@ -2840,6 +2842,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::disabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         template_manager
             .upsert(agent_record.clone())
@@ -2986,6 +2989,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::disabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         template_manager
             .upsert(agent_record.clone())
@@ -3091,6 +3095,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             }))
             .session_id(SessionId::new())
             .build()

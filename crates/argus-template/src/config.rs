@@ -35,6 +35,7 @@ impl TomlAgentDef {
             thinking_config: self.thinking_config.clone(),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         }
     }
 }

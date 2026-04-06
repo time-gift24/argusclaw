@@ -1616,6 +1616,7 @@ mod tests {
             thinking_config: None,
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         })
     }
 

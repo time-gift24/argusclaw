@@ -57,6 +57,15 @@ pub struct AgentRecord {
     /// Agent type determining its capabilities.
     #[serde(default)]
     pub agent_type: AgentType,
+    /// Whether this agent is visible to end users via the server API.
+    /// Defaults to `true` for backward compatibility with existing records.
+    #[serde(default = "default_true")]
+    pub is_enabled: bool,
+}
+
+/// Helper for serde default on `is_enabled`.
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AgentRecord {
@@ -75,6 +84,7 @@ impl Default for AgentRecord {
             thinking_config: None,
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         }
     }
 }
@@ -97,6 +107,36 @@ impl AgentRecord {
             thinking_config: Some(ThinkingConfig::enabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_record_is_enabled_defaults_to_true_when_missing() {
+        let json = r#"{"id":1,"display_name":"A","description":"B","version":"1","system_prompt":"C","tool_names":[]}"#;
+        let record: AgentRecord = serde_json::from_str(json).expect("should deserialize");
+        assert!(record.is_enabled, "is_enabled should default to true");
+    }
+
+    #[test]
+    fn agent_record_is_enabled_can_be_set_to_false() {
+        let json = r#"{"id":1,"display_name":"A","description":"B","version":"1","system_prompt":"C","tool_names":[],"is_enabled":false}"#;
+        let record: AgentRecord = serde_json::from_str(json).expect("should deserialize");
+        assert!(!record.is_enabled, "is_enabled should be false");
+    }
+
+    #[test]
+    fn agent_record_is_enabled_round_trips() {
+        let mut record = AgentRecord::default();
+        record.id = AgentId::new(1);
+        record.is_enabled = false;
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: AgentRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.is_enabled, false);
     }
 }
