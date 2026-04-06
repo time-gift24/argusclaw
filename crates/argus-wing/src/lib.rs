@@ -32,6 +32,7 @@ use argus_auth::AccountManager;
 use argus_crypto::{Cipher, FileKeySource};
 use argus_job::JobManager;
 use argus_llm::ProviderManager;
+use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
 use argus_protocol::{
     knowledge::KnowledgeRepoProvider, AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId,
     LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent,
@@ -39,7 +40,7 @@ use argus_protocol::{
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, KnowledgeRepoRepository,
-    LlmProviderRepository, SessionRepository, ThreadRepository,
+    LlmProviderRepository, McpRepository, SessionRepository, ThreadRepository,
 };
 
 use argus_repository::types::JobId;
@@ -70,8 +71,10 @@ pub struct ArgusWing {
     session_manager: Arc<SessionManager>,
     tool_manager: Arc<ToolManager>,
     job_manager: Arc<JobManager>,
+    mcp_runtime: Arc<McpRuntime>,
     pub account_manager: Arc<AccountManager>,
     knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository>,
+    mcp_repo: Arc<dyn McpRepository>,
 }
 
 impl ArgusWing {
@@ -139,6 +142,15 @@ impl ArgusWing {
             llm_repository.clone(),
         ));
 
+        let mcp_runtime = Arc::new(McpRuntime::new(
+            arc_sqlite.clone(),
+            Arc::new(RmcpConnector),
+            McpRuntimeConfig::default(),
+        ));
+        McpRuntime::start(&mcp_runtime);
+        let mcp_tool_resolver: Arc<dyn argus_protocol::McpToolResolver> =
+            Arc::new(McpRuntime::handle(&mcp_runtime));
+
         // Create session manager
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
@@ -146,6 +158,7 @@ impl ArgusWing {
             Arc::clone(&llm_repository) as Arc<dyn LlmProviderRepository>,
             template_manager.clone(),
             provider_resolver,
+            mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
             job_manager.thread_pool(),
@@ -154,6 +167,7 @@ impl ArgusWing {
 
         let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
             Arc::new(ArgusSqlite::new(pool.clone()));
+        let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
 
         Ok(Arc::new(Self {
             pool,
@@ -162,8 +176,10 @@ impl ArgusWing {
             session_manager,
             tool_manager,
             job_manager,
+            mcp_runtime,
             account_manager,
             knowledge_repo_repo,
+            mcp_repo,
         }))
     }
 
@@ -202,12 +218,21 @@ impl ArgusWing {
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
             llm_repository.clone(),
         ));
+        let mcp_runtime = Arc::new(McpRuntime::new(
+            arc_sqlite.clone(),
+            Arc::new(RmcpConnector),
+            McpRuntimeConfig::default(),
+        ));
+        McpRuntime::start(&mcp_runtime);
+        let mcp_tool_resolver: Arc<dyn argus_protocol::McpToolResolver> =
+            Arc::new(McpRuntime::handle(&mcp_runtime));
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,
             Arc::clone(&llm_repository) as Arc<dyn LlmProviderRepository>,
             template_manager.clone(),
             provider_resolver,
+            mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
             job_manager.thread_pool(),
@@ -215,6 +240,7 @@ impl ArgusWing {
         ));
         let knowledge_repo_repo: Arc<dyn KnowledgeRepoRepository> =
             Arc::new(ArgusSqlite::new(pool.clone()));
+        let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
 
         Arc::new(Self {
             pool,
@@ -223,8 +249,10 @@ impl ArgusWing {
             session_manager,
             tool_manager,
             job_manager,
+            mcp_runtime,
             account_manager,
             knowledge_repo_repo,
+            mcp_repo,
         })
     }
 
@@ -232,6 +260,12 @@ impl ArgusWing {
     #[must_use]
     pub fn tool_manager(&self) -> &Arc<ToolManager> {
         &self.tool_manager
+    }
+
+    /// Get a reference to the MCP runtime supervisor.
+    #[must_use]
+    pub fn mcp_runtime(&self) -> &Arc<McpRuntime> {
+        &self.mcp_runtime
     }
 
     /// Register default tools (shell, read, grep, glob, http, write, list, patch) with the tool manager.
@@ -591,6 +625,161 @@ impl ArgusWing {
     }
 
     // =========================================================================
+    // MCP API
+    // =========================================================================
+
+    /// List all configured MCP servers.
+    pub async fn list_mcp_servers(&self) -> Result<Vec<argus_protocol::McpServerRecord>> {
+        self.mcp_repo
+            .list_mcp_servers()
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// Fetch a single MCP server by ID.
+    pub async fn get_mcp_server(&self, id: i64) -> Result<Option<argus_protocol::McpServerRecord>> {
+        self.mcp_repo
+            .get_mcp_server(id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// Add or update an MCP server configuration.
+    pub async fn upsert_mcp_server(&self, record: argus_protocol::McpServerRecord) -> Result<i64> {
+        self.mcp_repo
+            .upsert_mcp_server(&record)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// Delete an MCP server configuration.
+    pub async fn delete_mcp_server(&self, id: i64) -> Result<bool> {
+        let deleted = self.mcp_repo.delete_mcp_server(id).await.map_err(|error| {
+            ArgusError::DatabaseError {
+                reason: error.to_string(),
+            }
+        })?;
+        if deleted {
+            self.mcp_runtime
+                .poll_once()
+                .await
+                .map_err(ArgusError::from)?;
+        }
+        Ok(deleted)
+    }
+
+    /// Run a connection test against an unsaved MCP server configuration.
+    pub async fn test_mcp_server_input(
+        &self,
+        record: argus_protocol::McpServerRecord,
+    ) -> Result<argus_mcp::McpConnectionTestResult> {
+        self.mcp_runtime
+            .test_server_input(record)
+            .await
+            .map_err(ArgusError::from)
+    }
+
+    /// Run a connection test against a persisted MCP server and refresh cached tools on success.
+    pub async fn test_mcp_server_connection(
+        &self,
+        id: i64,
+    ) -> Result<argus_mcp::McpConnectionTestResult> {
+        let record = self
+            .get_mcp_server(id)
+            .await?
+            .ok_or_else(|| ArgusError::DatabaseError {
+                reason: format!("MCP server not found: {id}"),
+            })?;
+        let result = self.test_mcp_server_input(record.clone()).await?;
+        let mut persisted_record = record;
+        persisted_record.last_checked_at = Some(result.checked_at.clone());
+        persisted_record.last_error = Some(result.message.clone());
+        persisted_record.discovered_tool_count = result.discovered_tools.len() as u32;
+
+        if persisted_record.enabled && result.status == argus_protocol::McpServerStatus::Ready {
+            persisted_record.status = argus_protocol::McpServerStatus::Ready;
+            persisted_record.last_success_at = Some(result.checked_at.clone());
+            persisted_record.last_error = None;
+            self.mcp_repo
+                .replace_mcp_server_tools(id, &result.discovered_tools)
+                .await
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: error.to_string(),
+                })?;
+            self.mcp_repo
+                .upsert_mcp_server(&persisted_record)
+                .await
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: error.to_string(),
+                })?;
+            self.mcp_runtime
+                .poll_once()
+                .await
+                .map_err(ArgusError::from)?;
+        } else {
+            persisted_record.status = if persisted_record.enabled {
+                result.status
+            } else {
+                argus_protocol::McpServerStatus::Disabled
+            };
+            self.mcp_repo
+                .upsert_mcp_server(&persisted_record)
+                .await
+                .map_err(|error| ArgusError::DatabaseError {
+                    reason: error.to_string(),
+                })?;
+        }
+
+        Ok(result)
+    }
+
+    /// List the last discovered tool snapshot for an MCP server.
+    pub async fn list_mcp_server_tools(
+        &self,
+        server_id: i64,
+    ) -> Result<Vec<argus_protocol::McpDiscoveredToolRecord>> {
+        self.mcp_repo
+            .list_mcp_server_tools(server_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// List MCP bindings for a specific agent.
+    pub async fn list_agent_mcp_bindings(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Vec<argus_protocol::AgentMcpBinding>> {
+        self.mcp_repo
+            .list_agent_mcp_bindings(agent_id)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    /// Replace MCP bindings for a specific agent.
+    pub async fn set_agent_mcp_bindings(
+        &self,
+        agent_id: AgentId,
+        bindings: Vec<argus_protocol::AgentMcpBinding>,
+    ) -> Result<()> {
+        self.mcp_repo
+            .set_agent_mcp_bindings(agent_id, &bindings)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })
+    }
+
+    // =========================================================================
     // Knowledge Repo API
     // =========================================================================
 
@@ -681,8 +870,13 @@ pub struct ToolInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use argus_protocol::{AgentType, ThinkingConfig};
+    use argus_protocol::{
+        AgentMcpBinding, AgentMcpServerBinding, AgentRecord, AgentType, McpServerRecord,
+        McpServerStatus, McpTransportConfig, ThinkingConfig,
+    };
 
     async fn make_test_wing() -> Arc<ArgusWing> {
         let pool = SqlitePool::connect_lazy("sqlite::memory:")
@@ -716,6 +910,12 @@ mod tests {
         assert!(action_values.contains(&"install"));
         assert!(definition.parameters["properties"].get("text").is_some());
         assert!(wing.tool_manager().get("chrome_install").is_none());
+    }
+
+    #[tokio::test]
+    async fn with_pool_starts_mcp_runtime() {
+        let wing = make_test_wing().await;
+        assert!(wing.mcp_runtime().supervisor_started());
     }
 
     #[tokio::test]
@@ -756,6 +956,123 @@ mod tests {
             repos,
             vec![argus_repository::types::KnowledgeRepoRecord { id, ..record }]
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_api_round_trips_servers_and_agent_bindings() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("mcp.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+        let server_id = wing
+            .upsert_mcp_server(McpServerRecord {
+                id: None,
+                display_name: "Docs MCP".to_string(),
+                enabled: true,
+                transport: McpTransportConfig::Stdio {
+                    command: "docs-mcp".to_string(),
+                    args: vec!["--stdio".to_string()],
+                    env: BTreeMap::new(),
+                },
+                timeout_ms: 5_000,
+                status: McpServerStatus::Retrying,
+                last_checked_at: None,
+                last_success_at: None,
+                last_error: None,
+                discovered_tool_count: 0,
+            })
+            .await
+            .expect("mcp server should upsert");
+
+        let servers = wing
+            .list_mcp_servers()
+            .await
+            .expect("mcp servers should list");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, Some(server_id));
+
+        let fetched = wing
+            .get_mcp_server(server_id)
+            .await
+            .expect("mcp server lookup should succeed")
+            .expect("mcp server should exist");
+        assert_eq!(fetched.display_name, "Docs MCP");
+        assert!(wing
+            .list_mcp_server_tools(server_id)
+            .await
+            .expect("tool cache should list")
+            .is_empty());
+
+        let agent_id = wing
+            .upsert_template(AgentRecord {
+                id: AgentId::new(0),
+                display_name: "MCP Bound Agent".to_string(),
+                description: "Uses MCP".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "Use MCP when needed.".to_string(),
+                tool_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::enabled()),
+                parent_agent_id: None,
+                agent_type: AgentType::Standard,
+            })
+            .await
+            .expect("agent template should upsert");
+        let bindings = vec![AgentMcpBinding {
+            server: AgentMcpServerBinding {
+                agent_id,
+                server_id,
+            },
+            allowed_tools: Some(vec!["search_docs".to_string()]),
+        }];
+        wing.set_agent_mcp_bindings(agent_id, bindings.clone())
+            .await
+            .expect("mcp bindings should save");
+
+        assert_eq!(
+            wing.list_agent_mcp_bindings(agent_id)
+                .await
+                .expect("mcp bindings should list"),
+            bindings
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_server_input_returns_structured_failure_for_missing_binary() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should exist");
+        let database_path = temp_dir.path().join("mcp-test.sqlite");
+
+        let wing = ArgusWing::init(Some(&database_path.display().to_string()))
+            .await
+            .expect("ArgusWing should initialize");
+
+        let result = wing
+            .test_mcp_server_input(McpServerRecord {
+                id: None,
+                display_name: "Broken MCP".to_string(),
+                enabled: true,
+                transport: McpTransportConfig::Stdio {
+                    command: "__argus_missing_mcp_binary__".to_string(),
+                    args: vec!["--stdio".to_string()],
+                    env: BTreeMap::new(),
+                },
+                timeout_ms: 500,
+                status: McpServerStatus::Failed,
+                last_checked_at: None,
+                last_success_at: None,
+                last_error: None,
+                discovered_tool_count: 0,
+            })
+            .await
+            .expect("mcp test should return structured failure");
+
+        assert_eq!(result.status, McpServerStatus::Failed);
+        assert!(!result.message.is_empty());
     }
 
     #[tokio::test]

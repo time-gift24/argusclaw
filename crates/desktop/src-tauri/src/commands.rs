@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentRecord, ChatMessage, LlmProviderId, LlmProviderRecord, LlmProviderRecordJson,
-    ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString, SessionId, ThreadId,
-    ThreadPoolSnapshot, ThreadPoolState,
+    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage,
+    LlmProviderId, LlmProviderRecord, LlmProviderRecordJson, McpDiscoveredToolRecord,
+    McpServerRecord, McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
+    SecretString, SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -248,6 +249,153 @@ pub async fn get_thread_pool_state(
     wing: State<'_, Arc<ArgusWing>>,
 ) -> Result<ThreadPoolState, String> {
     Ok(wing.thread_pool_state())
+}
+
+// ============================================================================
+// MCP Commands
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpConnectionTestResultPayload {
+    pub status: McpServerStatus,
+    pub checked_at: String,
+    pub latency_ms: u64,
+    pub discovered_tools: Vec<McpDiscoveredToolRecord>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMcpBindingPayload {
+    pub server_id: i64,
+    pub allowed_tools: Option<Vec<String>>,
+}
+
+impl From<AgentMcpBinding> for AgentMcpBindingPayload {
+    fn from(binding: AgentMcpBinding) -> Self {
+        Self {
+            server_id: binding.server.server_id,
+            allowed_tools: binding.allowed_tools,
+        }
+    }
+}
+
+impl AgentMcpBindingPayload {
+    fn into_binding(self, agent_id: AgentId) -> AgentMcpBinding {
+        AgentMcpBinding {
+            server: AgentMcpServerBinding {
+                agent_id,
+                server_id: self.server_id,
+            },
+            allowed_tools: self.allowed_tools,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn list_mcp_servers(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<Vec<McpServerRecord>, String> {
+    wing.list_mcp_servers()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<Option<McpServerRecord>, String> {
+    wing.get_mcp_server(id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn upsert_mcp_server(
+    wing: State<'_, Arc<ArgusWing>>,
+    record: McpServerRecord,
+) -> Result<i64, String> {
+    wing.upsert_mcp_server(record)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_mcp_server(wing: State<'_, Arc<ArgusWing>>, id: i64) -> Result<bool, String> {
+    wing.delete_mcp_server(id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn test_mcp_server_input(
+    wing: State<'_, Arc<ArgusWing>>,
+    record: McpServerRecord,
+) -> Result<McpConnectionTestResultPayload, String> {
+    wing.test_mcp_server_input(record)
+        .await
+        .map(|result| McpConnectionTestResultPayload {
+            status: result.status,
+            checked_at: result.checked_at,
+            latency_ms: result.latency_ms,
+            discovered_tools: result.discovered_tools,
+            message: result.message,
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn test_mcp_server_connection(
+    wing: State<'_, Arc<ArgusWing>>,
+    id: i64,
+) -> Result<McpConnectionTestResultPayload, String> {
+    wing.test_mcp_server_connection(id)
+        .await
+        .map(|result| McpConnectionTestResultPayload {
+            status: result.status,
+            checked_at: result.checked_at,
+            latency_ms: result.latency_ms,
+            discovered_tools: result.discovered_tools,
+            message: result.message,
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_mcp_server_tools(
+    wing: State<'_, Arc<ArgusWing>>,
+    server_id: i64,
+) -> Result<Vec<McpDiscoveredToolRecord>, String> {
+    wing.list_mcp_server_tools(server_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn list_agent_mcp_bindings(
+    wing: State<'_, Arc<ArgusWing>>,
+    agent_id: i64,
+) -> Result<Vec<AgentMcpBindingPayload>, String> {
+    wing.list_agent_mcp_bindings(AgentId::new(agent_id))
+        .await
+        .map(|bindings| bindings.into_iter().map(Into::into).collect())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_agent_mcp_bindings(
+    wing: State<'_, Arc<ArgusWing>>,
+    agent_id: i64,
+    bindings: Vec<AgentMcpBindingPayload>,
+) -> Result<(), String> {
+    let agent_id = AgentId::new(agent_id);
+    let bindings = bindings
+        .into_iter()
+        .map(|binding| binding.into_binding(agent_id))
+        .collect::<Vec<_>>();
+    wing.set_agent_mcp_bindings(agent_id, bindings)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 // ============================================================================

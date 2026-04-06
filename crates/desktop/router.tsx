@@ -18,6 +18,9 @@ const NewAgentPage = React.lazy(() => import("@/app/settings/agents/new/page"));
 const EditAgentPage = React.lazy(() => import("@/app/settings/agents/edit/page"));
 const KnowledgePage = React.lazy(() => import("@/app/settings/knowledge/page"));
 const ToolsPage = React.lazy(() => import("@/app/settings/tools/page"));
+const McpPage = React.lazy(() => import("@/app/settings/mcp/page"));
+const NewMcpPage = React.lazy(() => import("@/app/settings/mcp/new/page"));
+const EditMcpPage = React.lazy(() => import("@/app/settings/mcp/edit/page"));
 
 function withSuspense(element: React.ReactNode) {
   return (
@@ -89,6 +92,18 @@ export const desktopRoutes: RouteObject[] = [
           {
             path: "tools",
             element: withSuspense(<ToolsPage />),
+          },
+          {
+            path: "mcp",
+            element: withSuspense(<McpPage />),
+          },
+          {
+            path: "mcp/new",
+            element: withSuspense(<NewMcpPage />),
+          },
+          {
+            path: "mcp/edit",
+            element: withSuspense(<EditMcpPage />),
           },
         ],
       },

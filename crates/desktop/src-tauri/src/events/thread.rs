@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::{
-    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadPoolEventReason, ThreadPoolRuntimeRef,
+    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolRuntimeRef,
     ThreadPoolSnapshot,
 };
 
@@ -115,6 +115,16 @@ impl ThreadEventEnvelope {
                 thread_id,
                 turn_number: None,
                 payload: ThreadEventPayload::Idle,
+            }),
+            ThreadEvent::Notice {
+                thread_id,
+                level,
+                message,
+            } => Some(Self {
+                session_id,
+                thread_id,
+                turn_number: None,
+                payload: ThreadEventPayload::Notice { level, message },
             }),
             ThreadEvent::Compacted {
                 thread_id,
@@ -279,6 +289,10 @@ pub enum ThreadEventPayload {
     },
     TurnSettled,
     Idle,
+    Notice {
+        level: ThreadNoticeLevel,
+        message: String,
+    },
     Compacted {
         new_token_count: u32,
     },

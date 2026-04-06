@@ -16,6 +16,7 @@ mod agent;
 mod job;
 mod knowledge_repo;
 mod llm_provider;
+mod mcp;
 mod session;
 mod thread;
 

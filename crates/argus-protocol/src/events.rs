@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use crate::TokenUsage;
 use crate::ids::{AgentId, SessionId, ThreadId};
 use crate::llm::LlmStreamEvent;
+use crate::mcp::ThreadNoticeLevel;
 use crate::message_override::MessageOverride;
 use serde::{Deserialize, Serialize};
 
@@ -414,7 +415,8 @@ pub enum ThreadPoolEventReason {
 }
 
 /// Thread event broadcast to subscribers (CLI, Tauri).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThreadEvent {
     /// Turn is processing, streaming LLM/tool events.
     Processing {
@@ -480,6 +482,15 @@ pub enum ThreadEvent {
     Idle {
         /// Thread ID.
         thread_id: String,
+    },
+    /// Non-fatal notice for the UI and logs.
+    Notice {
+        /// Thread ID.
+        thread_id: String,
+        /// Notice level.
+        level: ThreadNoticeLevel,
+        /// Human-readable message.
+        message: String,
     },
     /// Context was compacted.
     Compacted {

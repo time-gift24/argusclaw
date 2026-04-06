@@ -1,10 +1,21 @@
-"use client"
-
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
 import { useNavigate } from "react-router-dom"
-import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2 } from "lucide-react"
-import { agents, providers, tools, knowledge, type AgentRecord, type LlmProviderSummary, type ToolInfo, type KnowledgeRepoRecord } from "@/lib/tauri"
+import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2, Server, ChevronLeft, ChevronRight } from "lucide-react"
+import {
+  agents,
+  providers,
+  tools,
+  knowledge,
+  mcp,
+  type AgentMcpBinding,
+  type AgentRecord,
+  type KnowledgeRepoRecord,
+  type LlmProviderSummary,
+  type McpDiscoveredToolRecord,
+  type McpServerRecord,
+  type ToolInfo,
+} from "@/lib/tauri"
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text"
 import { Button } from "@/components/ui/button"
@@ -21,6 +32,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { AgentMcpBindingCard } from "@/components/settings/agent-mcp-binding-card"
 import { cn } from "@/lib/utils"
 
 interface AgentEditorProps {
@@ -52,6 +64,78 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
   }
 }
 
+const TOOL_PAGE_SIZE = 8
+
+interface ToolParameterDetail {
+  name: string
+  required: boolean
+  typeLabel: string
+  description: string
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function readToolSchemaDescription(parameters: ToolInfo["parameters"]): string | null {
+  const schema = asRecord(parameters)
+  const description = schema?.description
+  if (typeof description !== "string") return null
+  const trimmed = description.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function toTypeLabel(schema: Record<string, unknown>): string {
+  const typeField = schema.type
+  if (typeof typeField === "string" && typeField.trim().length > 0) {
+    return typeField
+  }
+  if (Array.isArray(typeField)) {
+    const typeList = typeField.filter(
+      (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+    )
+    if (typeList.length > 0) return typeList.join(" | ")
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return "enum"
+  return "any"
+}
+
+function extractToolParameterDetails(parameters: ToolInfo["parameters"]): ToolParameterDetail[] {
+  const schema = asRecord(parameters)
+  const properties = asRecord(schema?.properties)
+  if (!properties) return []
+
+  const requiredField = Array.isArray(schema?.required) ? schema?.required : []
+  const required = new Set(
+    requiredField.filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    ),
+  )
+
+  return Object.entries(properties).map(([name, propertySchema]) => {
+    const propertyRecord = asRecord(propertySchema) ?? {}
+    const descriptionField = propertyRecord.description
+    return {
+      name,
+      required: required.has(name),
+      typeLabel: toTypeLabel(propertyRecord),
+      description:
+        typeof descriptionField === "string" && descriptionField.trim().length > 0
+          ? descriptionField
+          : "无描述",
+    }
+  })
+}
+
+async function loadMcpServers() {
+  return await mcp.listServers()
+}
+
+async function loadAgentMcpBindings(agentId: number) {
+  return await mcp.listAgentBindings(agentId)
+}
+
 export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const navigate = useNavigate()
   const { addToast } = useToast()
@@ -62,12 +146,18 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const [providerList, setProviderList] = React.useState<LlmProviderSummary[]>([])
   const [toolList, setToolList] = React.useState<ToolInfo[]>([])
   const [knowledgeRepoList, setKnowledgeRepoList] = React.useState<KnowledgeRepoRecord[]>([])
+  const [mcpServerList, setMcpServerList] = React.useState<McpServerRecord[]>([])
+  const [mcpBindings, setMcpBindings] = React.useState<AgentMcpBinding[]>([])
+  const [mcpToolsByServerId, setMcpToolsByServerId] = React.useState<Record<number, McpDiscoveredToolRecord[]>>({})
+  const mcpToolsByServerIdRef = React.useRef<Record<number, McpDiscoveredToolRecord[]>>({})
   const [agentWorkspaces, setAgentWorkspaces] = React.useState<string[]>([])
   const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = React.useState(false)
+  const [mcpDialogOpen, setMcpDialogOpen] = React.useState(false)
   const [addRepoInput, setAddRepoInput] = React.useState("")
   const [addWorkspaceInput, setAddWorkspaceInput] = React.useState("")
   const [addingRepo, setAddingRepo] = React.useState(false)
+  const [loadingMcpToolsByServerId, setLoadingMcpToolsByServerId] = React.useState<Record<number, boolean>>({})
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -105,26 +195,120 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     () => toolList.filter((t) => t.name !== "knowledge"),
     [toolList],
   )
+  const uniqueToolList = React.useMemo(
+    () => [...new Map(filteredToolList.map((tool) => [tool.name, tool])).values()],
+    [filteredToolList],
+  )
+  const [toolPage, setToolPage] = React.useState(1)
+  const toolTotalPages = React.useMemo(
+    () => Math.max(1, Math.ceil(uniqueToolList.length / TOOL_PAGE_SIZE)),
+    [uniqueToolList.length],
+  )
+  const pagedToolList = React.useMemo(() => {
+    const startIndex = (toolPage - 1) * TOOL_PAGE_SIZE
+    return uniqueToolList.slice(startIndex, startIndex + TOOL_PAGE_SIZE)
+  }, [toolPage, uniqueToolList])
+  const mcpEnabledCount = React.useMemo(() => mcpBindings.length, [mcpBindings])
+  const selectedMcpToolCount = React.useMemo(
+    () =>
+      mcpBindings.reduce((count, binding) => {
+        if (binding.allowed_tools === null) {
+          return count + (mcpToolsByServerId[binding.server_id]?.length ?? 0)
+        }
+        return count + binding.allowed_tools.length
+      }, 0),
+    [mcpBindings, mcpToolsByServerId],
+  )
+
+  React.useEffect(() => {
+    setToolPage((prev) => Math.min(prev, toolTotalPages))
+  }, [toolTotalPages])
 
   const canSave = Boolean(
     formData.display_name.trim() &&
       formData.system_prompt.trim(),
   )
 
+  React.useEffect(() => {
+    mcpToolsByServerIdRef.current = mcpToolsByServerId
+  }, [mcpToolsByServerId])
+
+  const loadMcpTools = React.useCallback(async (serverId: number) => {
+    if (mcpToolsByServerIdRef.current[serverId]) return
+    setLoadingMcpToolsByServerId((prev) => ({ ...prev, [serverId]: true }))
+    try {
+      const discoveredTools = await mcp.listServerTools(serverId)
+      setMcpToolsByServerId((prev) => ({ ...prev, [serverId]: discoveredTools }))
+    } catch (error) {
+      console.error("Failed to load MCP tools:", error)
+    } finally {
+      setLoadingMcpToolsByServerId((prev) => ({ ...prev, [serverId]: false }))
+    }
+  }, [])
+
+  const toggleMcpServerBinding = React.useCallback(async (serverId: number) => {
+    const alreadyBound = mcpBindings.some((binding) => binding.server_id === serverId)
+    if (alreadyBound) {
+      setMcpBindings((prev) => prev.filter((binding) => binding.server_id !== serverId))
+      return
+    }
+
+    await loadMcpTools(serverId)
+    setMcpBindings((prev) => [...prev, { server_id: serverId, allowed_tools: null }])
+  }, [loadMcpTools, mcpBindings])
+
+  const setServerFullAccess = React.useCallback((serverId: number, enabled: boolean) => {
+    setMcpBindings((prev) =>
+      prev.map((binding) => {
+        if (binding.server_id !== serverId) return binding
+        const discoveredTools = mcpToolsByServerIdRef.current[serverId] ?? []
+        return {
+          ...binding,
+          allowed_tools: enabled
+            ? null
+            : discoveredTools.length === 0
+              ? null
+              : discoveredTools.map((tool) => tool.tool_name_original),
+        }
+      }),
+    )
+  }, [])
+
+  const toggleMcpTool = React.useCallback((serverId: number, toolName: string) => {
+    setMcpBindings((prev) =>
+      prev.map((binding) => {
+        if (binding.server_id !== serverId) return binding
+        const discoveredTools = mcpToolsByServerIdRef.current[serverId] ?? []
+        const baseSelection =
+          binding.allowed_tools ??
+          discoveredTools.map((tool) => tool.tool_name_original)
+        const nextSelection = baseSelection.includes(toolName)
+          ? baseSelection.filter((name) => name !== toolName)
+          : [...baseSelection, toolName]
+        return {
+          ...binding,
+          allowed_tools: nextSelection.length === 0 ? null : nextSelection,
+        }
+      }),
+    )
+  }, [])
+
   // Load data
   React.useEffect(() => {
     const loadData = async () => {
       try {
-        const providersData = await providers.list()
+        const [providersData, toolsData, knowledgeReposData, allAgents, mcpServersData] =
+          await Promise.all([
+            providers.list(),
+            tools.list(),
+            knowledge.list(),
+            agents.list(),
+            loadMcpServers(),
+          ])
         setProviderList(providersData)
-
-        const toolsData = await tools.list()
         setToolList(toolsData)
-
-        const knowledgeReposData = await knowledge.list()
         setKnowledgeRepoList(knowledgeReposData)
-
-        const allAgents = await agents.list()
+        setMcpServerList(mcpServersData)
         const candidates = allAgents.filter(
           (a) => !a.parent_agent_id && a.agent_type !== "subagent" && a.id !== agentId
         )
@@ -132,18 +316,24 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
 
         const preferredProviderId = getPreferredProviderId(providersData)
         if (agentId !== undefined) {
-          const agent = await agents.get(agentId)
+          const [agent, workspaces, bindings] = await Promise.all([
+            agents.get(agentId),
+            knowledge.listAgentWorkspaces(agentId).catch(() => []),
+            loadAgentMcpBindings(agentId).catch(() => []),
+          ])
           if (agent) setFormData(agent)
-          try {
-            const workspaces = await knowledge.listAgentWorkspaces(agentId)
-            setAgentWorkspaces(workspaces)
-          } catch {
-            // Agent may not have knowledge workspaces yet
-          }
-        } else if (parentId !== undefined) {
-          setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
+          setAgentWorkspaces(workspaces)
+          setMcpBindings(bindings)
+          await Promise.all(
+            bindings.map((binding) => loadMcpTools(binding.server_id)),
+          )
         } else {
-          setFormData(createDefaultFormData(preferredProviderId))
+          setMcpBindings([])
+          if (parentId !== undefined) {
+            setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
+          } else {
+            setFormData(createDefaultFormData(preferredProviderId))
+          }
         }
       } catch (error) {
         console.error("Failed to load data:", error)
@@ -152,7 +342,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId, parentId])
+  }, [agentId, loadMcpTools, parentId])
 
   const handleSave = async () => {
     if (!canSave) return
@@ -164,8 +354,9 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         const targetId = isEditing ? agentId! : savedId
         try {
           await knowledge.setAgentWorkspaces(targetId, agentWorkspaces)
+          await mcp.setAgentBindings(targetId, mcpBindings)
         } catch (wsError) {
-          console.error("Failed to save knowledge workspaces:", wsError)
+          console.error("Failed to save agent capability bindings:", wsError)
         }
       }
       addToast("success", isEditing ? "配置已保存" : "创建成功")
@@ -462,71 +653,158 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             </div>
           </div>
 
-          {/* 第二排：能力与工具 + 知识库 */}
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_280px] gap-6">
-            {/* 通用工具箱 */}
-            <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm font-bold text-foreground px-1">
-                <div className="flex items-center gap-2">
-                  <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
-                    <Wrench className="h-4 w-4" />
-                  </div>
-                  可用工具箱
+          {/* 第二排：可用工具箱（单独一行） */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between text-sm font-bold text-foreground px-0.5">
+              <div className="flex items-center gap-2">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Wrench className="h-4 w-4" />
                 </div>
+                可用工具箱
+              </div>
+              <div className="flex items-center gap-1.5">
                 <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest bg-muted/40 px-2 py-0.5 rounded-full">
                   已选 {formData.tool_names.length} / {toolList.length}
                 </span>
-              </div>
-              <div className="bg-muted/20 p-6 rounded-3xl border border-muted/60 shadow-sm">
-                {filteredToolList.length === 0 ? (
-                  <div className="text-center py-10">
-                    <p className="text-xs text-muted-foreground">当前环境下没有可用的插件工具</p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {[...new Map(filteredToolList.map((tool) => [tool.name, tool])).values()].map((tool) => (
-                      <div
-                        key={tool.name}
-                        onClick={() => {
-                          const isSelected = formData.tool_names.includes(tool.name)
-                          setFormData((prev) => ({
-                            ...prev,
-                            tool_names: isSelected
-                              ? prev.tool_names.filter((n) => n !== tool.name)
-                              : [...prev.tool_names, tool.name],
-                          }))
-                        }}
-                        className={cn(
-                          "group flex items-start gap-3 rounded-2xl border p-4 cursor-pointer transition-all",
-                          formData.tool_names.includes(tool.name)
-                            ? "border-primary bg-primary/5 shadow-inner"
-                            : "border-muted/60 bg-background hover:border-primary/30"
-                        )}
-                      >
-                        <Checkbox
-                          id={`tool-${tool.name}`}
-                          checked={formData.tool_names.includes(tool.name)}
-                          className="mt-0.5 shrink-0"
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <div className="space-y-1 min-w-0">
-                          <Label
-                            htmlFor={`tool-${tool.name}`}
-                            className="text-xs font-bold cursor-pointer block truncate"
-                          >
-                            {tool.name}
-                          </Label>
-                          <p className="text-[10px] text-muted-foreground leading-snug line-clamp-2">
-                            {tool.description}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={toolPage <= 1}
+                    onClick={() => setToolPage((prev) => Math.max(1, prev - 1))}
+                  >
+                    <ChevronLeft className="h-3 w-3" />
+                  </Button>
+                  <span className="min-w-11 text-center text-[10px] font-mono text-muted-foreground">
+                    {toolPage}/{toolTotalPages}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={toolPage >= toolTotalPages}
+                    onClick={() => setToolPage((prev) => Math.min(toolTotalPages, prev + 1))}
+                  >
+                    <ChevronRight className="h-3 w-3" />
+                  </Button>
+                </div>
               </div>
             </div>
+            <div className="bg-muted/20 p-3 rounded-3xl border border-muted/60 shadow-sm">
+              {filteredToolList.length === 0 ? (
+                <div className="text-center py-10 flex items-center justify-center">
+                  <p className="text-xs text-muted-foreground">当前环境下没有可用的插件工具</p>
+                </div>
+              ) : (
+                <div className="grid content-start grid-cols-2 lg:grid-cols-4 gap-2">
+                  {pagedToolList.map((tool, index) => {
+                    const parameterDetails = extractToolParameterDetails(tool.parameters)
+                    const detailedDescription = tool.description || readToolSchemaDescription(tool.parameters) || "无描述"
+                    const columnIndex = index % 4
+                    const isTopRow = index < 4
+                    const hoverPositionClass =
+                      isTopRow
+                        ? "bottom-full mb-2 left-1/2 -translate-x-1/2"
+                        : columnIndex < 2
+                          ? "left-full ml-2 top-1/2 -translate-y-1/2"
+                          : "right-full mr-2 top-1/2 -translate-y-1/2"
+                    const arrowPositionClass =
+                      isTopRow
+                        ? "left-1/2 -translate-x-1/2 top-full -mt-1"
+                        : columnIndex < 2
+                          ? "right-full -mr-1 top-1/2 -translate-y-1/2"
+                          : "left-full -ml-1 top-1/2 -translate-y-1/2"
 
+                    return (
+                    <div
+                      key={tool.name}
+                      onClick={() => {
+                        const isSelected = formData.tool_names.includes(tool.name)
+                        setFormData((prev) => ({
+                          ...prev,
+                          tool_names: isSelected
+                            ? prev.tool_names.filter((n) => n !== tool.name)
+                            : [...prev.tool_names, tool.name],
+                        }))
+                      }}
+                      className={cn(
+                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 cursor-pointer transition-all",
+                        formData.tool_names.includes(tool.name)
+                          ? "border-primary bg-primary/5 shadow-inner"
+                          : "border-muted/60 bg-background hover:border-primary/30"
+                      )}
+                    >
+                      <Checkbox
+                        id={`tool-${tool.name}`}
+                        checked={formData.tool_names.includes(tool.name)}
+                        className="mt-0.5 shrink-0"
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="min-w-0">
+                        <Label
+                          htmlFor={`tool-${tool.name}`}
+                          className="text-[11px] font-bold cursor-pointer block truncate"
+                        >
+                          {tool.name}
+                        </Label>
+                        <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1">
+                          {tool.description || "无描述"}
+                        </p>
+                      </div>
+                      <div
+                        className={cn(
+                          "pointer-events-none absolute z-20 w-80 rounded-2xl border border-primary/25 bg-gradient-to-br from-background via-background to-primary/10 p-3 shadow-2xl shadow-primary/15 opacity-0 backdrop-blur-sm transition-all duration-200 group-hover:opacity-100",
+                          hoverPositionClass,
+                        )}
+                      >
+                        <div className="text-[11px] font-bold text-foreground">{tool.name}</div>
+                        <div className="mt-1 text-[10px] font-semibold text-foreground/90">描述</div>
+                        <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground line-clamp-4">
+                          {detailedDescription}
+                        </p>
+
+                        <div className="mt-2 text-[10px] font-semibold text-foreground/90">参数</div>
+                        {parameterDetails.length === 0 ? (
+                          <p className="mt-0.5 text-[10px] text-muted-foreground">无参数</p>
+                        ) : (
+                          <div className="mt-1 max-h-28 space-y-1 overflow-y-auto custom-scrollbar pr-1">
+                            {parameterDetails.map((parameter) => (
+                              <div key={`${tool.name}-${parameter.name}`} className="rounded-lg border border-muted/50 bg-background/70 px-2 py-1.5">
+                                <div className="flex items-center gap-1.5 text-[10px]">
+                                  <span className="font-semibold text-foreground break-all">
+                                    {parameter.name}{parameter.required ? "*" : ""}
+                                  </span>
+                                  <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                                    {parameter.typeLabel}
+                                  </span>
+                                </div>
+                                <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground line-clamp-2">
+                                  {parameter.description}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div
+                          className={cn(
+                            "absolute h-2.5 w-2.5 rotate-45 border border-primary/25 bg-background",
+                            arrowPositionClass,
+                          )}
+                        />
+                      </div>
+                    </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 第三排：知识库 + MCP */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* 知识库独立卡片 */}
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
@@ -558,6 +836,42 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                     {knowledgeEnabled
                       ? `${agentWorkspaces.length} 个工作区 · ${knowledgeRepoList.length} 个仓库`
                       : "为智能体绑定知识来源"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* MCP 独立卡片 */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
+                <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+                  <Server className="h-4 w-4" />
+                </div>
+                MCP Servers
+              </div>
+              <div
+                onClick={() => setMcpDialogOpen(true)}
+                className={cn(
+                  "flex flex-col items-center justify-center gap-3 p-6 rounded-3xl border cursor-pointer transition-all min-h-[200px]",
+                  mcpEnabledCount > 0
+                    ? "border-primary bg-primary/5 shadow-inner"
+                    : "border-muted/60 bg-muted/20 hover:border-primary/30",
+                )}
+              >
+                <div className={cn(
+                  "p-3 rounded-2xl transition-colors",
+                  mcpEnabledCount > 0 ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+                )}>
+                  <Server className="h-6 w-6" />
+                </div>
+                <div className="text-center space-y-1">
+                  <p className="text-xs font-bold">
+                    {mcpEnabledCount > 0 ? "已绑定 MCP" : "点击配置 MCP"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {mcpEnabledCount > 0
+                      ? `${mcpEnabledCount} 个 server · ${selectedMcpToolCount} 个 tools`
+                      : "为智能体绑定可动态注入的 MCP servers"}
                   </p>
                 </div>
               </div>
@@ -716,7 +1030,66 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             </DialogContent>
           </Dialog>
 
-          {/* 第三排：系统提示词 - 占据整宽 */}
+          <Dialog open={mcpDialogOpen} onOpenChange={setMcpDialogOpen}>
+            <DialogContent className="sm:max-w-3xl max-h-[80vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Server className="h-4 w-4 text-primary" />
+                  MCP 配置
+                </DialogTitle>
+                <DialogDescription>
+                  绑定设置页中已配置的 MCP server，并按 tool 配置白名单。只有后台处于 ready 状态的 server 会在实际对话中注入。
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="flex-1 overflow-y-auto space-y-5 py-2 custom-scrollbar">
+                {mcpServerList.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-muted/60 bg-muted/20 p-6 text-center space-y-3">
+                    <p className="text-sm font-semibold">还没有 MCP Server</p>
+                    <p className="text-xs text-muted-foreground">
+                      先去设置页新增并测试连接，再回来为当前智能体绑定。
+                    </p>
+                    <Button size="sm" variant="outline" onClick={() => navigate("/settings/mcp")}>
+                      前往 MCP 设置页
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {mcpServerList.map((server) => {
+                      const serverId = server.id ?? 0
+                      const binding = mcpBindings.find((item) => item.server_id === serverId) ?? null
+                      const discoveredTools = mcpToolsByServerId[serverId] ?? []
+                      const loadingTools = loadingMcpToolsByServerId[serverId] ?? false
+
+                      return (
+                        <AgentMcpBindingCard
+                          key={serverId}
+                          server={server}
+                          binding={binding}
+                          discoveredTools={discoveredTools}
+                          loadingTools={loadingTools}
+                          onToggleBinding={toggleMcpServerBinding}
+                          onSetFullAccess={setServerFullAccess}
+                          onToggleTool={toggleMcpTool}
+                          onOpenSettings={(targetServerId) => {
+                            navigate(`/settings/mcp/edit?id=${targetServerId}`)
+                          }}
+                        />
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <DialogFooter showCloseButton>
+                <Button size="sm" onClick={() => setMcpDialogOpen(false)}>
+                  完成
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* 第四排：系统提示词 - 占据整宽 */}
           <div className="space-y-4 pb-10">
             <div className="flex items-center gap-2 text-sm font-bold text-foreground px-1">
               <div className="bg-primary/10 p-1.5 rounded-lg text-primary">

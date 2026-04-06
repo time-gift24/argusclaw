@@ -9,7 +9,7 @@ use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogSt
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
-    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, ProviderId, Result,
+    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId, Result,
     SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
@@ -578,6 +578,7 @@ pub struct SessionManager {
     sessions: Arc<DashMap<SessionId, Arc<Session>>>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
+    mcp_tool_resolver: Arc<dyn McpToolResolver>,
     trace_dir: PathBuf,
     thread_pool: Arc<ThreadPool>,
 }
@@ -591,6 +592,7 @@ impl SessionManager {
         llm_provider_repo: Arc<dyn LlmProviderRepository>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
+        mcp_tool_resolver: Arc<dyn McpToolResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
         thread_pool: Arc<ThreadPool>,
@@ -642,9 +644,29 @@ impl SessionManager {
             sessions,
             template_manager,
             provider_resolver,
+            mcp_tool_resolver,
             trace_dir,
             thread_pool,
         }
+    }
+
+    async fn ensure_thread_runtime_with_mcp(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> Result<Arc<tokio::sync::RwLock<argus_agent::Thread>>> {
+        let thread = self
+            .thread_pool
+            .ensure_chat_runtime(session_id, thread_id)
+            .await
+            .map_err(|error| ArgusError::LlmError {
+                reason: error.to_string(),
+            })?;
+        thread
+            .write()
+            .await
+            .set_mcp_tool_resolver(Some(Arc::clone(&self.mcp_tool_resolver)));
+        Ok(thread)
     }
 
     /// Broadcast a ThreadEvent to all active sessions.
@@ -714,8 +736,7 @@ impl SessionManager {
             self.thread_pool
                 .register_chat_thread(session_id, thread_record.id);
             match self
-                .thread_pool
-                .ensure_chat_runtime(session_id, thread_record.id)
+                .ensure_thread_runtime_with_mcp(session_id, thread_record.id)
                 .await
             {
                 Ok(thread) => session.add_thread(thread),
@@ -934,8 +955,7 @@ impl SessionManager {
             })?;
         self.thread_pool.register_chat_thread(session_id, thread_id);
         let thread = match self
-            .thread_pool
-            .ensure_chat_runtime(session_id, thread_id)
+            .ensure_thread_runtime_with_mcp(session_id, thread_id)
             .await
         {
             Ok(thread) => thread,
@@ -1105,6 +1125,8 @@ impl SessionManager {
     ) -> Result<()> {
         let session = self.load(session_id).await?;
         self.ensure_thread_in_session(session_id, thread_id).await?;
+        self.ensure_thread_runtime_with_mcp(session_id, *thread_id)
+            .await?;
         self.thread_pool
             .register_chat_thread(session_id, *thread_id);
         let thread = self
@@ -1368,6 +1390,18 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    struct NoopMcpResolver;
+
+    #[async_trait]
+    impl McpToolResolver for NoopMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            Ok(ResolvedMcpTools::default())
+        }
+    }
+
     use super::{
         recover_messages_from_trace, recover_thread_state_from_trace, SessionManager,
         SessionSchedulerBackend,
@@ -1384,8 +1418,8 @@ mod tests {
         LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
-        ThinkingConfig, ThreadId, TokenUsage,
+        AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, McpToolResolver,
+        ProviderId, ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
@@ -1616,6 +1650,7 @@ mod tests {
             sqlite.clone() as Arc<dyn LlmProviderRepository>,
             Arc::clone(&template_manager),
             provider_resolver,
+            Arc::new(NoopMcpResolver),
             tool_manager,
             temp_dir.path().join("trace"),
             job_manager.thread_pool(),
@@ -2418,4 +2453,5 @@ mod tests {
             "unexpected scheduler error: {error}"
         );
     }
+
 }

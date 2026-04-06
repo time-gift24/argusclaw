@@ -106,6 +106,15 @@ pub fn run() {
             commands::delete_knowledge_repo,
             commands::list_agent_knowledge_workspaces,
             commands::set_agent_knowledge_workspaces,
+            commands::list_mcp_servers,
+            commands::get_mcp_server,
+            commands::upsert_mcp_server,
+            commands::delete_mcp_server,
+            commands::test_mcp_server_input,
+            commands::test_mcp_server_connection,
+            commands::list_mcp_server_tools,
+            commands::list_agent_mcp_bindings,
+            commands::set_agent_mcp_bindings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

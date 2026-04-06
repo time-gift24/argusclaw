@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo } from 'react'
-import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft } from 'lucide-react'
+import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, Server, ChevronRight, ArrowLeft } from 'lucide-react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -122,6 +122,13 @@ function useBreadcrumbItems(pathname: string, search: string): BreadcrumbItem[] 
             items.push({ label: agentName })
           }
         }
+      } else if (pathname.startsWith("/settings/mcp")) {
+        items.push({ label: "MCP", href: "/settings/mcp" })
+        if (pathname === "/settings/mcp/new") {
+          items.push({ label: "新建" })
+        } else if (pathname === "/settings/mcp/edit") {
+          items.push({ label: "编辑" })
+        }
       }
     }
 
@@ -201,6 +208,12 @@ const Navbar = ({
                   <Link to='/settings/providers' className='flex items-center gap-2 w-full'>
                     <Cloud className='h-4 w-4' />
                     <span>LLMProvider 配置</span>
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem>
+                  <Link to='/settings/mcp' className='flex items-center gap-2 w-full'>
+                    <Server className='h-4 w-4' />
+                    <span>MCP 配置</span>
                   </Link>
                 </DropdownMenuItem>
               </DropdownMenuContent>
