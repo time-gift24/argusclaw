@@ -968,6 +968,25 @@ async fn execute_loop(
             usage_baseline_total = None;
         }
         match next_action {
+            NextAction::Return
+            | NextAction::ContinueWithTools { .. } if force_text => {
+                if matches!(next_action, NextAction::ContinueWithTools { .. }) {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        turn_number = %ctx.turn_number,
+                        iteration = %iteration,
+                        "LLM returned tool calls despite force_text (tools were stripped); treating as text response"
+                    );
+                }
+                return Ok(finalize_turn_record(
+                    ctx.turn_number,
+                    ctx.started_at,
+                    history.as_ref(),
+                    turn_messages,
+                    token_usage.clone(),
+                    compacted_during_turn,
+                ));
+            }
             NextAction::Return => {
                 let hook_ctx = build_turn_end_hook_context(ctx);
                 let turn_end_action = fire_hooks(ctx.hooks, &hook_ctx).await;
@@ -2484,22 +2503,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_end_always_continue_hits_max_iterations() {
-        let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
-            content: Some("loop".to_string()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            input_tokens: 1,
-            output_tokens: 1,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        }]));
+    async fn turn_end_always_continue_stopped_by_force_text() {
+        // TurnEnd hook forces continuation on every iteration, but force_text
+        // on the last iteration returns immediately, preventing MaxIterationsReached.
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("loop".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("final".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
 
         let turn = make_turn(provider, vec![Arc::new(AlwaysContinueTurnEndHook)], 2);
         let result = turn.execute().await;
 
-        assert!(matches!(result, Err(TurnError::MaxIterationsReached(2))));
+        // force_text on iteration 1 returns immediately — no MaxIterationsReached
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
     }
 
     #[tokio::test]
