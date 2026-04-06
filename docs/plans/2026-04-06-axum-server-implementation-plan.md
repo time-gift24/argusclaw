@@ -81,7 +81,80 @@ git add Cargo.toml \
 git commit -m "feat: add shared server auth and credential abstractions"
 ```
 
-### Task 2: Decouple provider token exchange from desktop account login
+### Task 2: Add compile-time product feature boundaries
+
+**Files:**
+- Modify: `Cargo.toml`
+- Modify: `crates/argus-repository/Cargo.toml`
+- Modify: `crates/argus-session/Cargo.toml`
+- Modify: `crates/argus-session/src/lib.rs`
+- Modify: `crates/argus-session/src/user_chat_services.rs`
+- Modify: `crates/argus-server/Cargo.toml`
+- Modify: `crates/desktop/src-tauri/Cargo.toml`
+
+**Step 1: Write the failing test**
+
+Add compile-boundary checks that prove:
+
+- `cargo check -p desktop` succeeds without enabling PostgreSQL support
+- `cargo check -p argus-server` succeeds with server-only features enabled
+- server-only exports from `argus-session` are not compiled unless the `server` feature is enabled
+
+Use a combination of:
+
+- `#[cfg(feature = "server")]` module/export tests
+- Makefile or CI-ready command documentation in comments if needed
+
+**Step 2: Run test to verify it fails**
+
+Run:
+
+- `cargo check -p desktop`
+- `cargo check -p argus-server`
+
+Expected: FAIL or reveal that desktop is still compiling server/postgres-only paths transitively.
+
+**Step 3: Write minimal implementation**
+
+Implement:
+
+- `argus-repository`
+  - keep default `sqlite`
+  - keep opt-in `postgres`
+- `argus-session`
+  - add a `server` feature
+  - gate `user_chat_services` and server-only exports behind it
+- `argus-server`
+  - explicitly enables `argus-repository/postgres` and `argus-session/server`
+- `desktop`
+  - remains on default features only
+
+Do not over-gate unrelated code. Keep feature boundaries narrow and product-shaped.
+
+**Step 4: Run test to verify it passes**
+
+Run:
+
+- `cargo check -p desktop`
+- `cargo check -p argus-server`
+- `cargo test -p argus-session`
+
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add Cargo.toml \
+  crates/argus-repository/Cargo.toml \
+  crates/argus-session/Cargo.toml \
+  crates/argus-session/src/lib.rs \
+  crates/argus-session/src/user_chat_services.rs \
+  crates/argus-server/Cargo.toml \
+  crates/desktop/src-tauri/Cargo.toml
+git commit -m "build: gate desktop and server product features"
+```
+
+### Task 3: Decouple provider token exchange from desktop account login
 
 **Files:**
 - Modify: `crates/argus-auth/src/token.rs`
@@ -143,7 +216,7 @@ git add crates/argus-auth/src/token.rs \
 git commit -m "refactor: separate provider token credentials from account login"
 ```
 
-### Task 3: Add PostgreSQL support to argus-repository
+### Task 4: Add PostgreSQL support to argus-repository
 
 **Files:**
 - Modify: `Cargo.toml`
@@ -212,7 +285,7 @@ git add Cargo.toml \
 git commit -m "feat: add postgres repositories for server runtime"
 ```
 
-### Task 4: Extract shared user chat services from desktop-shaped entrypoints
+### Task 5: Extract shared user chat services from desktop-shaped entrypoints
 
 **Files:**
 - Modify: `crates/argus-wing/src/lib.rs`
@@ -277,7 +350,7 @@ git add crates/argus-wing/src/lib.rs \
 git commit -m "refactor: add shared user chat services for server"
 ```
 
-### Task 5: Implement server auth abstractions and dev OAuth2 flow
+### Task 6: Implement server auth abstractions and dev OAuth2 flow
 
 **Files:**
 - Create: `crates/argus-server/Cargo.toml`
@@ -342,7 +415,7 @@ git add Cargo.toml \
 git commit -m "feat: add axum server auth and dev oauth flow"
 ```
 
-### Task 6: Implement user chat HTTP API and SSE
+### Task 7: Implement user chat HTTP API and SSE
 
 **Files:**
 - Create: `crates/argus-server/src/routes/mod.rs`
@@ -400,7 +473,60 @@ git add crates/argus-server/src \
 git commit -m "feat: add server chat api and event streaming"
 ```
 
-### Task 7: Verify desktop regressions and document server startup
+### Task 8: Add Makefile support for server workflows
+
+**Files:**
+- Modify: `Makefile`
+- Modify: `README.md`
+- Modify: `crates/argus-server/README.md`
+
+**Step 1: Write the failing check**
+
+Define the expected developer commands:
+
+- `make server-dev`
+- `make server-check`
+- `make server-test`
+- `make desktop-check`
+
+Run:
+
+- `make server-check`
+
+Expected: FAIL because the target does not exist yet.
+
+**Step 2: Write minimal implementation**
+
+Add `Makefile` targets that wrap the explicit cargo entrypoints:
+
+- `server-dev`
+  - `cargo run -p argus-server`
+- `server-check`
+  - `cargo check -p argus-server`
+- `server-test`
+  - `cargo test -p argus-server`
+- `desktop-check`
+  - `cargo check -p desktop`
+
+Keep target names simple and product-specific.
+
+**Step 3: Run verification**
+
+Run:
+
+- `make server-check`
+- `make desktop-check`
+
+Expected: PASS
+
+**Step 4: Commit**
+
+```bash
+git add Makefile README.md crates/argus-server/README.md
+git commit -m "build: add make targets for server workflows"
+```
+
+### Task 9: Verify desktop regressions and document server startup
 
 **Files:**
 - Modify: `README.md`

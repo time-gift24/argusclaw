@@ -80,6 +80,31 @@ Product composition:
 - `server` uses `UserChatServices`
 - future internal server admin pages may also use `AdminServices`
 
+### Compile-Time Product Gating
+
+The shared workspace should compile different product surfaces for `desktop` and `server` without forcing desktop builds to carry PostgreSQL-related code.
+
+Recommended compile-time boundary:
+
+- `argus-repository`
+  - default feature remains `sqlite`
+  - `postgres` remains opt-in
+- `argus-session`
+  - add a `server` feature
+  - gate `user_chat_services` and other server-only exports behind that feature
+- `argus-server`
+  - explicitly enables:
+    - `argus-repository/postgres`
+    - `argus-session/server`
+- `desktop`
+  - does not enable server or postgres features
+
+Goal:
+
+- desktop builds should not compile or link PostgreSQL support
+- server builds should compile the server-only chat/auth surface explicitly
+- shared runtime crates should keep product-specific code behind narrow feature gates
+
 ### Server Entry
 
 Add a new `axum` crate as the server entrypoint. It will be responsible for:
@@ -397,6 +422,7 @@ This preserves the current experience model:
 - introduce user-aware service boundaries
 - add OAuth2 abstraction
 - add provider token credential abstraction
+- add feature-gated compile boundaries so desktop builds exclude postgres/server-only code
 
 ### Phase 2: PostgreSQL Support
 
@@ -410,6 +436,11 @@ This preserves the current experience model:
 - implement auth routes
 - implement user chat routes
 - wire cookie sessions and SSE
+
+### Phase 3.5: Developer Entry Points
+
+- add `Makefile` targets for server startup and checks
+- ensure `desktop` and `server` can be built independently with explicit cargo targets/features
 
 ### Phase 4: Hardening
 
