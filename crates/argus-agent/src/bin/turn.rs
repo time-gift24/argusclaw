@@ -3,6 +3,7 @@
 //! Usage:
 //!   argus-turn execute --prompt "Hello" [--stream]
 //!   argus-turn tool-test --prompt "What is 2+2?"
+//!   argus-turn compact-test [--rounds 5] [--threshold-ratio 0.1]
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand};
 use serde::Deserialize;
+use tokio::sync::broadcast;
 
 use argus_agent::{LlmThreadCompactor, Thread, ThreadBuilder, TurnCancellation};
 use argus_llm::providers::{
@@ -19,7 +21,7 @@ use argus_llm::providers::{
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{LlmProvider, Role, ToolDefinition};
 use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
-use argus_protocol::{AgentId, AgentRecord, AgentType, SessionId};
+use argus_protocol::{AgentId, AgentRecord, AgentType, SessionId, ThreadEvent};
 use argus_tool::ToolManager;
 
 /// Configuration file structure.
@@ -71,6 +73,8 @@ enum Commands {
     ToolTest(ToolTestArgs),
     /// Test retry behavior with mock providers.
     MockTest(MockTestArgs),
+    /// Test context compaction by running multi-turn conversations.
+    CompactTest(CompactTestArgs),
 }
 
 #[derive(Args)]
@@ -117,6 +121,28 @@ struct MockTestArgs {
     #[arg(long, default_value_t = 3)]
     max_retries: u32,
     /// Enable streaming
+    #[arg(long, default_value_t = false)]
+    stream: bool,
+}
+
+#[derive(Args)]
+struct CompactTestArgs {
+    /// API base URL
+    #[arg(long, env = "ARGUS_LLM_BASE_URL")]
+    base_url: Option<String>,
+    /// API key
+    #[arg(long, env = "ARGUS_LLM_API_KEY")]
+    api_key: Option<String>,
+    /// Model name
+    #[arg(long, env = "ARGUS_LLM_MODEL")]
+    model: Option<String>,
+    /// Number of conversation rounds to run
+    #[arg(long, default_value_t = 5)]
+    rounds: usize,
+    /// Compaction threshold ratio (0.1-0.95). Lower = triggers sooner.
+    #[arg(long, default_value_t = 0.1)]
+    threshold_ratio: f32,
+    /// Enable streaming output
     #[arg(long, default_value_t = false)]
     stream: bool,
 }
@@ -245,6 +271,65 @@ fn build_thread(
     builder
         .build()
         .map_err(|e| anyhow!("Failed to build thread: {}", e))
+}
+
+fn build_compact_thread(provider: Arc<dyn LlmProvider>, threshold_ratio: f32) -> Result<Thread> {
+    let compactor =
+        LlmThreadCompactor::new(Arc::clone(&provider)).with_threshold_ratio(threshold_ratio);
+    ThreadBuilder::new()
+        .provider(Arc::clone(&provider))
+        .compactor(Arc::new(compactor))
+        .agent_record(build_cli_agent_record(
+            "You are a helpful assistant. Respond concisely.",
+            vec![],
+        ))
+        .session_id(SessionId::new())
+        .build()
+        .map_err(|e| anyhow!("Failed to build thread: {}", e))
+}
+
+fn collect_compaction_events(
+    mut rx: broadcast::Receiver<ThreadEvent>,
+) -> tokio::task::JoinHandle<Vec<ThreadEvent>> {
+    tokio::spawn(async move {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(event) => match &event {
+                    ThreadEvent::Compacted { .. }
+                    | ThreadEvent::CompactionStarted { .. }
+                    | ThreadEvent::CompactionFinished { .. }
+                    | ThreadEvent::CompactionFailed { .. } => events.push(event),
+                    _ => {}
+                },
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            }
+        }
+        events
+    })
+}
+
+/// Long prompt template to quickly fill up the context window.
+fn generate_round_prompt(round: usize) -> String {
+    let topic = match round % 5 {
+        0 => {
+            "Explain the architecture of a microservices system in detail, including service discovery, load balancing, API gateways, circuit breakers, and observability patterns."
+        }
+        1 => {
+            "Describe the process of building a real-time collaborative text editor, covering conflict resolution strategies like CRDT and OT, network protocols, and cursor synchronization."
+        }
+        2 => {
+            "Walk through the design of a distributed database, including consensus algorithms (Raft/Paxos), partitioning strategies, replication, and consistency models."
+        }
+        3 => {
+            "Explain how a modern web browser renders a page, from DNS resolution through TCP/TLS, HTML parsing, CSSOM construction, layout, paint, and compositing."
+        }
+        _ => {
+            "Describe the internals of a container runtime like Docker, covering namespaces, cgroups, union filesystems, image layers, and networking bridges."
+        }
+    };
+    format!("Round {}: {}", round + 1, topic)
 }
 
 async fn run_execute_command(args: ExecuteArgs, config: &Config) -> Result<()> {
@@ -429,6 +514,111 @@ async fn mock_test_turn(args: MockTestArgs) -> Result<()> {
     }
 }
 
+async fn compact_test(args: CompactTestArgs, config: &Config) -> Result<()> {
+    let resolved = resolve_config(
+        config,
+        args.base_url.as_deref(),
+        args.api_key.as_deref(),
+        args.model.as_deref(),
+    )?;
+
+    let provider = create_provider(&resolved)?;
+    let context_window = provider.context_window();
+    let threshold = (context_window as f32 * args.threshold_ratio) as u32;
+
+    println!("=== Compaction Test ===");
+    println!(
+        "Provider: {} (context window: {} tokens)",
+        resolved.model, context_window
+    );
+    println!(
+        "Threshold: {} tokens ({:.0}% of context window)",
+        threshold,
+        args.threshold_ratio * 100.0
+    );
+    println!("Rounds: {}", args.rounds);
+    println!();
+
+    let mut thread = build_compact_thread(Arc::clone(&provider), args.threshold_ratio)?;
+    let event_rx = thread.subscribe();
+    let event_collector = collect_compaction_events(event_rx);
+
+    for round in 0..args.rounds {
+        let prompt = generate_round_prompt(round);
+        println!("--- Round {} ---", round + 1);
+
+        let _record = thread
+            .execute_turn(prompt, None, TurnCancellation::new())
+            .await
+            .map_err(|e| anyhow!("Round {} failed: {}", round + 1, e))?;
+
+        let history_count = thread.history_iter().count();
+        let token_count = thread.token_count();
+
+        println!(
+            "  Tokens: {} total | History: {} messages",
+            token_count, history_count
+        );
+
+        if token_count >= threshold {
+            println!(
+                "  Token count ({}) >= threshold ({}) - compaction should trigger on next turn",
+                token_count, threshold
+            );
+        }
+
+        // Give the event collector a moment to process events
+        tokio::task::yield_now().await;
+    }
+
+    // Stop collecting events
+    drop(thread);
+    let compaction_events = event_collector
+        .await
+        .map_err(|e| anyhow!("Event collector failed: {}", e))?;
+    let total_compactions = compaction_events.len();
+
+    println!();
+    println!("=== Results ===");
+    println!("Total compaction events: {}", total_compactions);
+    for event in &compaction_events {
+        match event {
+            ThreadEvent::CompactionStarted { thread_id } => {
+                println!("  [STARTED] thread={}", thread_id);
+            }
+            ThreadEvent::Compacted {
+                thread_id,
+                new_token_count,
+            } => {
+                println!(
+                    "  [COMPACTED] thread={}, new_token_count={}",
+                    thread_id, new_token_count
+                );
+            }
+            ThreadEvent::CompactionFinished { thread_id } => {
+                println!("  [FINISHED] thread={}", thread_id);
+            }
+            ThreadEvent::CompactionFailed { thread_id, error } => {
+                println!("  [FAILED] thread={}, error={}", thread_id, error);
+            }
+            _ => {}
+        }
+    }
+
+    if total_compactions == 0 {
+        println!();
+        println!("No compaction triggered. Try:");
+        println!("  - Increase --rounds (current: {})", args.rounds);
+        println!(
+            "  - Lower --threshold-ratio (current: {})",
+            args.threshold_ratio
+        );
+        println!("  - Use a model with smaller context window");
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -450,6 +640,7 @@ async fn main() -> Result<()> {
         Commands::Execute(args) => run_execute_command(args, &config).await?,
         Commands::ToolTest(args) => tool_test(args, &config).await?,
         Commands::MockTest(args) => mock_test_turn(args).await?,
+        Commands::CompactTest(args) => compact_test(args, &config).await?,
     }
 
     Ok(())
