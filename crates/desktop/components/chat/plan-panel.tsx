@@ -21,13 +21,13 @@ export function PlanPanel({ plan }: PlanPanelProps) {
   const total = plan.length;
 
   return (
-    <div className="w-full rounded-[24px] border border-muted/60 bg-background/95 backdrop-blur-xl shadow-xl overflow-hidden animate-in slide-in-from-bottom-2 duration-300">
+    <div className="w-full rounded-2xl border border-muted/60 bg-background/95 backdrop-blur-xl shadow-xl overflow-hidden animate-in slide-in-from-bottom-2 duration-300">
       {/* Header */}
       <div
-        className="flex cursor-pointer items-center gap-2.5 select-none px-5 py-3 hover:bg-muted/30 transition-colors border-b border-muted/40 bg-muted/10"
+        className="flex cursor-pointer items-center gap-2 select-none px-4 py-2.5 hover:bg-muted/30 transition-colors border-b border-muted/40 bg-muted/10"
         onClick={() => setCollapsed((c) => !c)}
       >
-        <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
+        <div className="bg-primary/10 p-1 rounded-md text-primary">
           <LayoutList className="size-3.5" />
         </div>
         <span className="text-xs font-bold uppercase tracking-widest text-foreground/80">
@@ -56,10 +56,10 @@ export function PlanPanel({ plan }: PlanPanelProps) {
 
       {/* Steps list - Fixed height & Scrollable */}
       {!collapsed && (
-        <div className="max-h-[180px] overflow-y-auto custom-scrollbar px-5 py-4 bg-background/50">
-          <ul className="space-y-3">
+        <div className="max-h-[160px] overflow-y-auto custom-scrollbar px-4 py-3 bg-background/50">
+          <ul className="space-y-2.5">
             {plan.map((item, i) => (
-              <li key={i} className="flex items-start gap-3 text-[13px] animate-in fade-in duration-300">
+              <li key={i} className="flex items-start gap-2.5 text-xs animate-in fade-in duration-300">
                 <StatusIcon status={item.status} />
                 <span
                   className={cn(
