@@ -968,8 +968,9 @@ async fn execute_loop(
             usage_baseline_total = None;
         }
         match next_action {
-            NextAction::Return
-            | NextAction::ContinueWithTools { .. } if force_text => {
+            NextAction::Return | NextAction::ContinueWithTools { .. }
+                if force_text =>
+            {
                 if matches!(next_action, NextAction::ContinueWithTools { .. }) {
                     tracing::warn!(
                         thread_id = %thread_id,
@@ -978,6 +979,28 @@ async fn execute_loop(
                         "LLM returned tool calls despite force_text (tools were stripped); treating as text response"
                     );
                 }
+
+                // Fire TurnEnd hooks for observation (audit/logging), but ignore
+                // ContinueWithMessage — force_text is the last iteration and must return.
+                let hook_ctx = build_turn_end_hook_context(ctx);
+                let turn_end_action = fire_hooks(ctx.hooks, &hook_ctx).await;
+                match turn_end_action {
+                    Ok(HookAction::ContinueWithMessage(_)) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            turn_number = %ctx.turn_number,
+                            "TurnEnd hook requested continuation on force_text iteration (ignored)"
+                        );
+                    }
+                    Ok(HookAction::Block(reason)) => {
+                        tracing::warn!(reason = %reason, "TurnEnd hook returned Block (ignored)");
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "TurnEnd hook failed (ignored)");
+                    }
+                    Ok(HookAction::Continue) => {}
+                }
+
                 return Ok(finalize_turn_record(
                     ctx.turn_number,
                     ctx.started_at,
@@ -2534,6 +2557,64 @@ mod tests {
 
         // force_text on iteration 1 returns immediately — no MaxIterationsReached
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn force_text_handles_llm_returning_tool_calls() {
+        // On the last iteration (force_text), the LLM still returns ToolUse
+        // despite tools being stripped. The turn should succeed regardless.
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("working".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            // Last iteration: force_text is active, but LLM returns tool calls anyway
+            CompletionResponse {
+                content: Some("my final answer".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-2".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let turn = make_turn_with(
+            provider,
+            vec![Arc::new(FixedResultTool)],
+            vec![],
+            2,
+            TurnCancellation::default(),
+            None,
+            vec![ChatMessage::user("start")],
+        );
+
+        let record = turn
+            .execute()
+            .await
+            .expect("turn should succeed despite LLM returning tool calls under force_text");
+
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+        assert!(record
+            .messages
+            .iter()
+            .any(|m| m.content == "my final answer"));
     }
 
     #[tokio::test]
