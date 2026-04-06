@@ -13,7 +13,7 @@ export function ChatStatusBanner() {
 
   if (session?.status === "compacting") {
     return (
-      <div className="rounded-md border border-sky-300 bg-sky-50 px-2.5 py-1.5 text-xs text-sky-700">
+      <div className="rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-700">
         上下文压缩中，发送区暂时不可用。
       </div>
     );
@@ -25,14 +25,14 @@ export function ChatStatusBanner() {
 
   if (isDefaultProviderError) {
     return (
-      <div className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">
+      <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-700">
         智能体未配置 Provider，将使用全局配置的 Provider
       </div>
     );
   }
 
   return (
-    <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+    <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
       {message}
     </div>
   );

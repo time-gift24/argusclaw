@@ -21,9 +21,6 @@ const ToolsPage = React.lazy(() => import("@/app/settings/tools/page"));
 const McpPage = React.lazy(() => import("@/app/settings/mcp/page"));
 const NewMcpPage = React.lazy(() => import("@/app/settings/mcp/new/page"));
 const EditMcpPage = React.lazy(() => import("@/app/settings/mcp/edit/page"));
-const McpPage = React.lazy(() => import("@/app/settings/mcp/page"));
-const NewMcpPage = React.lazy(() => import("@/app/settings/mcp/new/page"));
-const EditMcpPage = React.lazy(() => import("@/app/settings/mcp/edit/page"));
 
 function withSuspense(element: React.ReactNode) {
   return (

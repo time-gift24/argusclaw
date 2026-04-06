@@ -1,10 +1,8 @@
 "use client"
 
 import { useState, useEffect, useMemo } from 'react'
-import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, ChevronRight, ArrowLeft, Server } from 'lucide-react'
-import { useTheme } from 'next-themes'
-import Link from 'next/link'
-import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { BellIcon, MenuIcon, Moon, Sun, Settings, Bot, Cloud, Server, ChevronRight, ArrowLeft } from 'lucide-react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -28,6 +26,7 @@ import NotificationDropdown from '@/components/shadcn-studio/blocks/dropdown-not
 import ProfileDropdown from '@/components/shadcn-studio/blocks/dropdown-profile'
 import { useAuthStore } from '@/components/auth/use-auth-store'
 import { agents, providers } from '@/lib/tauri'
+import { useTheme } from '@/components/theme-provider'
 
 interface BreadcrumbItem {
   label: string
@@ -41,7 +40,7 @@ type NavigationItem = {
 }[]
 
 // Generate breadcrumb items based on current path
-function useBreadcrumbItems(pathname: string, searchParams: ReturnType<typeof useSearchParams>): BreadcrumbItem[] {
+function useBreadcrumbItems(pathname: string, search: string): BreadcrumbItem[] {
   const [agentNames, setAgentNames] = useState<Record<string, string>>({})
   const [providerNames, setProviderNames] = useState<Record<string, string>>({})
 
@@ -70,13 +69,13 @@ function useBreadcrumbItems(pathname: string, searchParams: ReturnType<typeof us
     loadNames()
   }, [])
 
-  const editIds = useMemo(
-    () => ({
-      agentId: pathname === "/settings/agents/edit" ? searchParams?.get("id") ?? null : null,
-      providerId: pathname === "/settings/providers/edit" ? searchParams?.get("id") ?? null : null,
-    }),
-    [pathname, searchParams],
-  )
+  const editIds = useMemo(() => {
+    const params = new URLSearchParams(search)
+    return {
+      agentId: pathname === "/settings/agents/edit" ? params.get("id") : null,
+      providerId: pathname === "/settings/providers/edit" ? params.get("id") : null,
+    }
+  }, [pathname, search])
 
   return useMemo(() => {
     const items: BreadcrumbItem[] = []
@@ -125,7 +124,6 @@ function useBreadcrumbItems(pathname: string, searchParams: ReturnType<typeof us
         }
       } else if (pathname.startsWith("/settings/mcp")) {
         items.push({ label: "MCP", href: "/settings/mcp" })
-
         if (pathname === "/settings/mcp/new") {
           items.push({ label: "新建" })
         } else if (pathname === "/settings/mcp/edit") {
@@ -146,10 +144,10 @@ const Navbar = ({
   const { resolvedTheme, setTheme } = useTheme()
   const { username, isLoggedIn } = useAuthStore()
   const [loginDialogOpen, setLoginDialogOpen] = useState(false)
-  const pathname = usePathname()
-  const searchParams = useSearchParams()
-  const router = useRouter()
-  const breadcrumbItems = useBreadcrumbItems(pathname, searchParams)
+  const location = useLocation()
+  const navigate = useNavigate()
+  const pathname = location.pathname
+  const breadcrumbItems = useBreadcrumbItems(pathname, location.search)
 
   // Get avatar fallback based on auth state
   const avatarFallback = isLoggedIn && username ? username.charAt(0).toUpperCase() : '?'
@@ -169,7 +167,7 @@ const Navbar = ({
     <>
       <header className='bg-background sticky top-0 z-50'>
         <div className='mx-auto flex max-w-screen-2xl items-center justify-between px-6 py-4'>
-          <Link href='/'>
+          <Link to='/'>
             <div className='flex items-center gap-3'>
               <LogoSvg className='size-8' />
               <span className='text-lg font-semibold max-sm:hidden'>ArgusWing</span>
@@ -201,19 +199,19 @@ const Navbar = ({
               </DropdownMenuTrigger>
               <DropdownMenuContent align='end' className='min-w-48'>
                 <DropdownMenuItem>
-                  <Link href='/settings/agents' className='flex items-center gap-2 w-full'>
+                  <Link to='/settings/agents' className='flex items-center gap-2 w-full'>
                     <Bot className='h-4 w-4' />
                     <span>Agent 配置</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem>
-                  <Link href='/settings/providers' className='flex items-center gap-2 w-full'>
+                  <Link to='/settings/providers' className='flex items-center gap-2 w-full'>
                     <Cloud className='h-4 w-4' />
                     <span>LLMProvider 配置</span>
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem>
-                  <Link href='/settings/mcp' className='flex items-center gap-2 w-full'>
+                  <Link to='/settings/mcp' className='flex items-center gap-2 w-full'>
                     <Server className='h-4 w-4' />
                     <span>MCP 配置</span>
                   </Link>
@@ -266,7 +264,7 @@ const Navbar = ({
               <DropdownMenuContent className='w-56' align='end'>
                 {navigationItems.map((item, index) => (
                   <DropdownMenuItem key={index}>
-                    <Link href={item.href}>{item.title}</Link>
+                    <Link to={item.href}>{item.title}</Link>
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
@@ -287,7 +285,7 @@ const Navbar = ({
                 onClick={() => {
                   const parentHref = breadcrumbItems[breadcrumbItems.length - 2]?.href
                   if (parentHref) {
-                    router.push(parentHref)
+                    navigate(parentHref)
                   }
                 }}
               >
@@ -299,7 +297,7 @@ const Navbar = ({
                 <span key={index} className="flex items-center gap-1">
                   {index > 0 && <ChevronRight className="h-4 w-4" />}
                   {item.href ? (
-                    <Link href={item.href} className="hover:text-foreground transition-colors">
+                    <Link to={item.href} className="hover:text-foreground transition-colors">
                       {item.label}
                     </Link>
                   ) : (

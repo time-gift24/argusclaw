@@ -3,7 +3,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { agents, chat, providers, sessions, threadPool } from "@/lib/tauri";
 import type {
-  ChatMessagePayload,
   JobStatusPayload,
   ThreadEventEnvelope,
   ThreadPoolEventReason,
@@ -583,30 +582,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return;
     }
 
-    const sessionKey = state.activeSessionKey;
-    const session = state.sessionsByKey[sessionKey];
+    const session = state.sessionsByKey[state.activeSessionKey];
     if (!session) {
       set({ errorMessage: "当前会话尚未准备好，请稍后重试。" });
       return;
     }
 
-    const localClientId = `local-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 10)}`;
-    const optimisticUserMessage: ChatMessagePayload = {
-      role: "user",
-      content: trimmedContent,
-      local_client_id: localClientId,
-    };
-
-    set((store) => ({
+    set((state) => ({
       errorMessage: null,
       sessionsByKey: {
-        ...store.sessionsByKey,
-        [sessionKey]: {
+        ...state.sessionsByKey,
+        [state.activeSessionKey!]: {
           ...session,
           status: "running",
-          messages: [...session.messages, optimisticUserMessage],
           pendingAssistant: {
             content: "",
             reasoning: "",
@@ -628,27 +616,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (error) {
       const errorMessage = toErrorMessage(error);
       set((store) => ({
-        ...(store.sessionsByKey[sessionKey]
-          ? {
-              errorMessage,
-              sessionsByKey: {
-                ...store.sessionsByKey,
-                [sessionKey]: {
-                  ...store.sessionsByKey[sessionKey],
-                  status: "error",
-                  pendingAssistant: null,
-                  error: errorMessage,
-                  messages: store.sessionsByKey[sessionKey].messages.map((msg) => ({
-                    ...msg,
-                    local_delivery_status:
-                      msg.local_client_id === localClientId
-                        ? "failed"
-                        : msg.local_delivery_status,
-                  })),
-                },
-              },
-            }
-          : { errorMessage }),
+        errorMessage,
+        sessionsByKey: {
+          ...store.sessionsByKey,
+          [state.activeSessionKey!]: {
+            ...store.sessionsByKey[state.activeSessionKey!],
+            status: "error",
+            pendingAssistant: null,
+            error: errorMessage,
+          },
+        },
       }));
     }
   },
@@ -1269,12 +1246,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             },
           },
         }));
-        break;
-
-      case "notice":
-        if (payload.level === "warning" || payload.level === "error") {
-          set({ errorMessage: payload.message });
-        }
         break;
 
       case "turn_failed":
