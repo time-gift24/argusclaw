@@ -7,7 +7,9 @@ use argus_crypto::Cipher;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
 };
+use argus_protocol::ids::ProviderId;
 use argus_repository::traits::AccountRepository;
+use argus_repository::traits::ProviderTokenCredentialRepository;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
@@ -167,6 +169,100 @@ impl TokenSource for AccountTokenSource {
             .post(self.token_url)
             .json(&serde_json::json!({
                 "username": creds.username,
+                "password": decrypted.expose_secret()
+            }))
+            .send()
+            .await
+            .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
+                reason: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            return Err(AuthError::TokenFetchFailed {
+                reason: format!("HTTP {}", response.status()),
+            });
+        }
+
+        let body: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e: reqwest::Error| AuthError::TokenFetchFailed {
+                    reason: format!("Failed to parse response: {e}"),
+                })?;
+
+        body.get("token")
+            .and_then(|t: &serde_json::Value| t.as_str())
+            .map(String::from)
+            .ok_or_else(|| AuthError::TokenFetchFailed {
+                reason: "Response missing 'token' field".to_string(),
+            })
+    }
+
+    fn header_name(&self) -> &str {
+        &self.header_name
+    }
+
+    fn header_prefix(&self) -> &str {
+        &self.header_prefix
+    }
+}
+
+/// TokenSource that fetches credentials from the provider token credential store.
+/// Used by the server product where provider credentials are managed server-side,
+/// independent of the desktop account login.
+pub struct CredentialTokenSource {
+    repo: Arc<dyn ProviderTokenCredentialRepository>,
+    provider_id: ProviderId,
+    cipher: Arc<Cipher>,
+    header_name: String,
+    header_prefix: String,
+    token_url: String,
+}
+
+impl CredentialTokenSource {
+    #[must_use]
+    pub fn new(
+        repo: Arc<dyn ProviderTokenCredentialRepository>,
+        provider_id: ProviderId,
+        cipher: Arc<Cipher>,
+        token_url: String,
+    ) -> Self {
+        Self {
+            repo,
+            provider_id,
+            cipher,
+            header_name: "Authorization".to_string(),
+            header_prefix: "Bearer ".to_string(),
+            token_url,
+        }
+    }
+}
+
+#[async_trait]
+impl TokenSource for CredentialTokenSource {
+    async fn fetch_token(&self, _username: &str, _password: &str) -> Result<String, AuthError> {
+        let cred = self
+            .repo
+            .get_credentials_for_provider(&self.provider_id)
+            .await
+            .map_err(|e| AuthError::DatabaseError {
+                reason: e.to_string(),
+            })?
+            .ok_or(AuthError::TokenNotAvailable)?;
+
+        let decrypted = self
+            .cipher
+            .decrypt(&cred.nonce, &cred.ciphertext)
+            .map_err(|e| AuthError::DecryptionFailed {
+                reason: e.to_string(),
+            })?;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&self.token_url)
+            .json(&serde_json::json!({
+                "username": cred.username,
                 "password": decrypted.expose_secret()
             }))
             .send()

@@ -12,12 +12,14 @@ use argus_crypto::Cipher;
 use chrono::Utc;
 
 use argus_protocol::Result;
+use argus_protocol::ids::ProviderId;
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
     LlmProviderId, LlmProviderRecord, LlmProviderRepository, LlmStreamEvent, ProviderSecretStatus,
     ProviderTestResult, ProviderTestStatus, ToolCall, ToolDefinition,
 };
 use argus_repository::traits::AccountRepository;
+use argus_repository::traits::ProviderTokenCredentialRepository;
 use futures_util::StreamExt;
 
 use crate::providers::{
@@ -25,7 +27,7 @@ use crate::providers::{
     create_openai_compatible_provider,
 };
 use crate::retry::{RetryConfig, RetryProvider};
-use argus_auth::{AccountTokenSource, TokenLLMProvider};
+use argus_auth::{AccountTokenSource, CredentialTokenSource, TokenLLMProvider};
 
 const PROVIDER_TIMEOUT_META_KEY: &str = "timeout_secs";
 
@@ -36,6 +38,7 @@ const PROVIDER_TIMEOUT_META_KEY: &str = "timeout_secs";
 pub struct ProviderManager {
     repository: Arc<dyn LlmProviderRepository>,
     account_repo: Option<Arc<dyn AccountRepository>>,
+    credential_repo: Option<Arc<dyn ProviderTokenCredentialRepository>>,
     cipher: Option<Arc<Cipher>>,
 }
 
@@ -46,6 +49,7 @@ impl ProviderManager {
         Self {
             repository,
             account_repo: None,
+            credential_repo: None,
             cipher: None,
         }
     }
@@ -58,6 +62,24 @@ impl ProviderManager {
         cipher: Arc<Cipher>,
     ) -> Self {
         self.account_repo = Some(account_repo);
+        self.cipher = Some(cipher);
+        self
+    }
+
+    /// Set the provider token credential repository and cipher for server-side
+    /// token exchange providers.
+    #[must_use]
+    pub fn with_credential_repo(
+        mut self,
+        credential_repo: Arc<dyn ProviderTokenCredentialRepository>,
+    ) -> Self {
+        self.credential_repo = Some(credential_repo);
+        self
+    }
+
+    /// Set cipher for encryption/decryption operations.
+    #[must_use]
+    pub fn with_cipher(mut self, cipher: Arc<Cipher>) -> Self {
         self.cipher = Some(cipher);
         self
     }
@@ -230,7 +252,8 @@ impl ProviderManager {
         Ok(run_provider_connection_test(provider_id, model.to_string(), base_url, provider).await)
     }
 
-    async fn build_provider_with_model(
+    /// Build a provider instance from a record with a specific model.
+    pub async fn build_provider_with_model(
         &self,
         record: LlmProviderRecord,
         model: &str,
@@ -244,6 +267,9 @@ impl ProviderManager {
         record: &LlmProviderRecord,
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
+        if record.meta_data.get("provider_token_source") == Some(&"true".to_string()) {
+            return self.build_credential_token_llm_provider(record, model).await;
+        }
         if record.meta_data.get("account_token_source") == Some(&"true".to_string()) {
             return self.build_account_token_llm_provider(record, model).await;
         }
@@ -288,6 +314,55 @@ impl ProviderManager {
             base,
             token_source,
             creds.username,
+            String::new(),
+            Duration::from_secs(300),
+        );
+
+        Ok(Arc::new(wrapped))
+    }
+
+    async fn build_credential_token_llm_provider(
+        &self,
+        record: &LlmProviderRecord,
+        model: &str,
+    ) -> Result<Arc<dyn LlmProvider>> {
+        let cred_repo =
+            self.credential_repo
+                .as_ref()
+                .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+                    reason: "provider_token_source requires credential repository".to_string(),
+                })?;
+        let cipher = self
+            .cipher
+            .as_ref()
+            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+                reason: "provider_token_source requires Cipher".to_string(),
+            })?;
+
+        let base = self.build_base_openai_compatible_provider(record, model)?;
+
+        let provider_id = ProviderId::new(record.id.into_inner());
+        let cred = cred_repo
+            .get_credentials_for_provider(&provider_id)
+            .await
+            .map_err(|e| argus_protocol::ArgusError::LlmError {
+                reason: e.to_string(),
+            })?
+            .ok_or_else(|| argus_protocol::ArgusError::LlmError {
+                reason: "No stored credentials for provider token source".to_string(),
+            })?;
+
+        let token_source = Arc::new(CredentialTokenSource::new(
+            cred_repo.clone(),
+            provider_id,
+            cipher.clone(),
+            record.base_url.clone(),
+        ));
+
+        let wrapped = TokenLLMProvider::new(
+            base,
+            token_source,
+            cred.username,
             String::new(),
             Duration::from_secs(300),
         );
