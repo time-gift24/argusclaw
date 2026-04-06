@@ -894,11 +894,25 @@ async fn execute_loop(
             &mut request_messages,
         );
 
+        // Tier 1 — Nudge: second-to-last iteration injects a system message
+        // asking the model to provide a final answer without further tool calls.
+        if iteration + 2 == max_iterations {
+            request_messages.push(ChatMessage::system(
+                "You are approaching the iteration limit. Provide your best final answer \
+                 using the information you have gathered so far. Do not call any more tools.",
+            ));
+        }
+
+        // Tier 2 — Force text: on the last iteration, strip all tools so the
+        // model is forced to respond with text instead of tool calls.
+        let force_text = iteration + 1 == max_iterations;
+
         tracing::debug!(
             thread_id = %thread_id,
             turn_number = %ctx.turn_number,
             iteration = %iteration,
             max_iterations = %max_iterations,
+            force_text = %force_text,
             message_count = %request_messages.len(),
             "Turn iteration started"
         );
@@ -911,8 +925,13 @@ async fn execute_loop(
             message_count = %request_messages.len(),
             "Calling LLM"
         );
+        let tools_for_request: &[Arc<dyn NamedTool>] = if force_text {
+            &[]
+        } else {
+            ctx.tools
+        };
         let request =
-            build_completion_request(request_messages.clone(), ctx.tools, ctx.agent_record);
+            build_completion_request(request_messages.clone(), tools_for_request, ctx.agent_record);
         let (response, usage_reported) = match call_llm_streaming(
             ctx.provider,
             request,
@@ -2377,6 +2396,85 @@ mod tests {
             .map(|message| message.content.as_str())
             .collect();
         assert!(final_contents.contains(&"done"));
+    }
+
+    #[tokio::test]
+    async fn graceful_max_iteration_nudge_and_force_text() {
+        // max_iterations = 4:
+        //   iteration 0: tool call  → execute tool
+        //   iteration 1: tool call  → execute tool
+        //   iteration 2: nudge injected, tool call → execute tool
+        //   iteration 3: force_text (empty tools), LLM returns text → Return
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("calling tool 1".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("calling tool 2".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-2".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("calling tool 3".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-3".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("final answer".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let turn = make_turn_with(
+            provider,
+            vec![Arc::new(FixedResultTool)],
+            vec![],
+            4,
+            TurnCancellation::default(),
+            None,
+            vec![ChatMessage::user("start")],
+        );
+
+        let record = turn.execute().await.expect("turn should succeed gracefully");
+
+        // Should complete successfully, not with MaxIterationsReached
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+        assert!(record.messages.iter().any(|m| m.content == "final answer"));
     }
 
     #[tokio::test]
