@@ -141,11 +141,11 @@ const Composer: FC = () => {
 
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-[24px] border border-muted/60 bg-background/80 backdrop-blur-2xl px-1 pt-2 shadow-[0_8px_32px_0_rgba(0,0,0,0.15)] shadow-primary/10 transition-all duration-300 has-[textarea:focus-visible]:border-primary/40 has-[textarea:focus-visible]:ring-4 has-[textarea:focus-visible]:ring-primary/5 data-[dragging=true]:border-primary data-[dragging=true]:border-dashed data-[dragging=true]:bg-primary/5">
+      <ComposerPrimitive.AttachmentDropzone className="aui-composer-attachment-dropzone flex w-full flex-col rounded-2xl border border-muted/60 bg-background/80 backdrop-blur-2xl px-1 pt-1.5 shadow-[0_6px_24px_0_rgba(0,0,0,0.14)] shadow-primary/10 transition-all duration-300 has-[textarea:focus-visible]:border-primary/40 has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-primary/5 data-[dragging=true]:border-primary data-[dragging=true]:border-dashed data-[dragging=true]:bg-primary/5">
         <ComposerAttachments />
         <ComposerPrimitive.Input
           placeholder="给 ArgusWing 发送消息..."
-          className="aui-composer-input mb-1 max-h-48 min-h-14 w-full resize-none bg-transparent px-5 pt-3 pb-4 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/50 focus-visible:ring-0 custom-scrollbar"
+          className="aui-composer-input mb-1 max-h-40 min-h-12 w-full resize-none bg-transparent px-4 pt-2.5 pb-3 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/50 focus-visible:ring-0 custom-scrollbar"
           rows={1}
           autoFocus
           disabled={isCompacting}
@@ -707,10 +707,10 @@ const ReasoningBlock: FC = () => {
 const AssistantMessage: FC = () => {
   return (
     <MessagePrimitive.Root
-      className="aui-assistant-message-root fade-in slide-in-from-bottom-2 relative mx-auto w-full max-w-(--thread-max-width) animate-in py-6 px-2 duration-300 ease-out"
+      className="aui-assistant-message-root fade-in slide-in-from-bottom-2 relative mx-auto w-full max-w-(--thread-max-width) animate-in py-4 px-1.5 duration-300 ease-out"
       data-role="assistant"
     >
-      <div className="aui-assistant-message-content wrap-break-word px-2 text-foreground leading-relaxed selection:bg-primary/10">
+      <div className="aui-assistant-message-content wrap-break-word px-1.5 text-foreground leading-relaxed selection:bg-primary/10">
         <MessagePrimitive.Content
           components={{
             Text: MarkdownText,
@@ -721,7 +721,7 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
-      <div className="aui-assistant-message-footer mt-4 ml-2 flex min-h-6 items-center opacity-0 animate-in fade-in fill-mode-forwards delay-500 duration-500">
+      <div className="aui-assistant-message-footer mt-3 ml-1.5 flex min-h-6 items-center opacity-0 animate-in fade-in fill-mode-forwards delay-500 duration-500">
         <BranchPicker />
         <div className="h-4 w-px bg-muted/40 mx-2" />
         <AssistantActionBar />
@@ -747,17 +747,34 @@ const UserActionBar: FC = () => {
 };
 
 const UserMessage: FC = () => {
+  const localDeliveryStatus = useAuiState(
+    (s) =>
+      (s as { message?: { message?: { metadata?: { custom?: { localDeliveryStatus?: string | null } } } } })
+        .message?.message?.metadata?.custom?.localDeliveryStatus ?? null,
+  );
+
   return (
     <MessagePrimitive.Root
-      className="aui-user-message-root fade-in slide-in-from-bottom-2 mx-auto grid w-full max-w-(--thread-max-width) animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 py-6 duration-300 ease-out [&:where(>*)]:col-start-2"
+      className="aui-user-message-root fade-in slide-in-from-bottom-2 mx-auto grid w-full max-w-(--thread-max-width) animate-in auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-1.5 px-1.5 py-4 duration-300 ease-out [&:where(>*)]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />
 
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
-        <div className="aui-user-message-content wrap-break-word rounded-[24px] bg-muted/50 px-5 py-3 text-foreground border border-muted/40 shadow-sm">
+        <div
+          className={cn(
+            "aui-user-message-content wrap-break-word rounded-2xl bg-muted/45 px-4 py-2.5 text-foreground border border-muted/40 shadow-sm",
+            localDeliveryStatus === "failed" &&
+              "border-destructive/40 bg-destructive/5 text-destructive",
+          )}
+        >
           <MessagePrimitive.Parts />
         </div>
+        {localDeliveryStatus === "failed" && (
+          <p className="mt-1.5 pr-1 text-right text-[11px] text-destructive">
+            发送失败
+          </p>
+        )}
         <div className="aui-user-action-bar-wrapper absolute top-1/2 left-0 -translate-x-full -translate-y-1/2 pr-3 opacity-0 group-hover:opacity-100 transition-opacity">
           <UserActionBar />
         </div>
@@ -826,11 +843,11 @@ export const Thread: FC = () => {
     <ThreadPrimitive.Root
       className="aui-root aui-thread-root @container relative flex h-full min-h-0 w-full flex-1 flex-col bg-background overflow-hidden"
       style={{
-        ["--thread-max-width" as string]: "72rem",
-        ["--composer-max-width" as string]: "60rem",
+        ["--thread-max-width" as string]: "68rem",
+        ["--composer-max-width" as string]: "56rem",
       }}
     >
-      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-8 custom-scrollbar">
+      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-3 pt-3 pb-6 custom-scrollbar">
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
@@ -855,8 +872,8 @@ export const Thread: FC = () => {
       </ThreadPrimitive.Viewport>
 
       {/* Floating bottom composer - Truly detached from scroll */}
-      <div className="z-50 pointer-events-none flex justify-center pb-8 pt-4">
-        <div className="w-full max-w-(--composer-max-width) px-4 pointer-events-auto flex flex-col gap-3">
+      <div className="z-50 pointer-events-none flex justify-center pb-6 pt-3">
+        <div className="w-full max-w-(--composer-max-width) px-3 pointer-events-auto flex flex-col gap-2.5">
           <JobStatusArtifacts />
           <PendingAssistantArtifacts />
           <ChatStatusBanner />

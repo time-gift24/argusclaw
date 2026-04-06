@@ -23,6 +23,8 @@ export interface ChatMessagePayload {
   name?: string | null;
   tool_calls?: ToolCallPayload[] | null;
   metadata?: ChatMessageMetadataPayload | null;
+  local_delivery_status?: "failed";
+  local_client_id?: string;
 }
 
 export interface ThreadSnapshotPayload {
