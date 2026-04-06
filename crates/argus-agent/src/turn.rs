@@ -98,7 +98,10 @@ enum NextAction {
 }
 
 enum StreamingCallOutcome {
-    Completed(CompletionResponse),
+    Completed {
+        response: CompletionResponse,
+        usage_reported: bool,
+    },
     Failed(argus_protocol::llm::LlmError),
 }
 
@@ -177,6 +180,7 @@ struct StreamingAccumulator {
     tool_calls: Vec<(Option<String>, Option<String>, String)>,
     input_tokens: u32,
     output_tokens: u32,
+    usage_reported: bool,
     finish_reason: FinishReason,
 }
 
@@ -188,6 +192,7 @@ impl StreamingAccumulator {
             tool_calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            usage_reported: false,
             finish_reason: FinishReason::Stop,
         }
     }
@@ -221,6 +226,7 @@ impl StreamingAccumulator {
             } => {
                 self.input_tokens = input_tokens;
                 self.output_tokens = output_tokens;
+                self.usage_reported = true;
             }
             LlmStreamEvent::Finished { finish_reason } => {
                 self.finish_reason = finish_reason;
@@ -264,6 +270,10 @@ impl StreamingAccumulator {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         }
+    }
+
+    fn usage_reported(&self) -> bool {
+        self.usage_reported
     }
 }
 
@@ -335,6 +345,10 @@ fn estimated_tokens(messages: &[ChatMessage]) -> usize {
         .iter()
         .map(|message| (message.content.len().saturating_add(3)) / 4)
         .sum()
+}
+
+fn estimate_local_message_delta_tokens(messages: &[ChatMessage]) -> u32 {
+    u32::try_from(estimated_tokens(messages)).unwrap_or(u32::MAX)
 }
 
 fn build_turn_record(
@@ -440,10 +454,7 @@ fn build_completion_request(
     request
 }
 
-fn apply_tool_call_limit(
-    tool_calls: Vec<ToolCall>,
-    max_tool_calls: Option<u32>,
-) -> Vec<ToolCall> {
+fn apply_tool_call_limit(tool_calls: Vec<ToolCall>, max_tool_calls: Option<u32>) -> Vec<ToolCall> {
     match max_tool_calls {
         Some(max) if tool_calls.len() > max as usize => {
             tracing::debug!(
@@ -589,6 +600,7 @@ async fn call_llm_streaming(
                     }
                 }
             }
+            let usage_reported = accumulator.usage_reported();
             let response = accumulator.into_response();
             tracing::debug!(
                 thread_id = %thread_id,
@@ -597,13 +609,19 @@ async fn call_llm_streaming(
                 tool_call_count = %response.tool_calls.len(),
                 "LLM stream completed"
             );
-            Ok(StreamingCallOutcome::Completed(response))
+            Ok(StreamingCallOutcome::Completed {
+                response,
+                usage_reported,
+            })
         }
         Err(argus_protocol::llm::LlmError::UnsupportedCapability { .. }) => {
             tracing::debug!("Provider doesn't support streaming, using non-streaming fallback");
             tokio::select! {
                 _ = cancellation.cancelled() => Err(TurnError::Cancelled),
-                result = provider.complete(request) => result.map(StreamingCallOutcome::Completed).map_err(TurnError::LlmFailed),
+                result = provider.complete(request) => result.map(|response| StreamingCallOutcome::Completed {
+                    response,
+                    usage_reported: false,
+                }).map_err(TurnError::LlmFailed),
             }
         }
         Err(error) => Err(TurnError::LlmFailed(error)),
@@ -830,6 +848,8 @@ async fn execute_loop(
     let tool_timeout_secs = ctx.config.tool_timeout_secs.unwrap_or(120);
     let mut token_usage = TokenUsage::default();
     let mut compacted_during_turn = false;
+    let mut usage_baseline_total: Option<u32> = None;
+    let mut local_delta_messages: Vec<ChatMessage> = Vec::new();
 
     for iteration in 0..max_iterations {
         if ctx.cancellation.is_cancelled() {
@@ -838,7 +858,12 @@ async fn execute_loop(
 
         let mut request_messages =
             materialize_messages(system_prompt, history.as_ref(), &turn_messages);
-        let request_token_count = estimated_tokens(&request_messages) as u32;
+        let request_token_count = match usage_baseline_total {
+            Some(baseline) => {
+                baseline.saturating_add(estimate_local_message_delta_tokens(&local_delta_messages))
+            }
+            None => estimated_tokens(&request_messages) as u32,
+        };
         if let Some(compactor) = compactor {
             match compactor
                 .compact(&request_messages, request_token_count)
@@ -848,6 +873,7 @@ async fn execute_loop(
                     compacted_during_turn = true;
                     history = Arc::new(result.messages);
                     turn_messages.clear();
+                    local_delta_messages.clear();
                     request_messages =
                         materialize_messages(system_prompt, history.as_ref(), &turn_messages);
                 }
@@ -887,8 +913,9 @@ async fn execute_loop(
             message_count = %request_messages.len(),
             "Calling LLM"
         );
-        let request = build_completion_request(request_messages.clone(), ctx.tools, ctx.agent_record);
-        let response = match call_llm_streaming(
+        let request =
+            build_completion_request(request_messages.clone(), ctx.tools, ctx.agent_record);
+        let (response, usage_reported) = match call_llm_streaming(
             ctx.provider,
             request,
             ctx.cancellation,
@@ -899,7 +926,10 @@ async fn execute_loop(
         )
         .await?
         {
-            StreamingCallOutcome::Completed(response) => response,
+            StreamingCallOutcome::Completed {
+                response,
+                usage_reported,
+            } => (response, usage_reported),
             StreamingCallOutcome::Failed(error) => return Err(TurnError::LlmFailed(error)),
         };
         tracing::debug!(
@@ -915,6 +945,12 @@ async fn execute_loop(
             &mut token_usage,
             ctx.config.max_tool_calls,
         );
+        if usage_reported {
+            usage_baseline_total = Some(token_usage.total_tokens);
+            local_delta_messages.clear();
+        } else {
+            usage_baseline_total = None;
+        }
         match next_action {
             NextAction::Return => {
                 let hook_ctx = build_turn_end_hook_context(ctx);
@@ -934,7 +970,9 @@ async fn execute_loop(
                 };
 
                 if let Some(message) = continue_message {
-                    turn_messages.push(ChatMessage::user(&message));
+                    let continue_message = ChatMessage::user(&message);
+                    turn_messages.push(continue_message.clone());
+                    local_delta_messages.push(continue_message);
 
                     tracing::debug!(
                         thread_id = %thread_id,
@@ -1010,11 +1048,13 @@ async fn execute_loop(
                         result_preview = %preview,
                         "Tool result added to history"
                     );
-                    turn_messages.push(ChatMessage::tool_result(
+                    let tool_message = ChatMessage::tool_result(
                         result.tool_call_id,
                         result.name,
                         sanitized_content,
-                    ));
+                    );
+                    turn_messages.push(tool_message.clone());
+                    local_delta_messages.push(tool_message);
                 }
             }
             NextAction::LengthExceeded => {
@@ -1078,14 +1118,7 @@ pub(crate) async fn execute_thread_turn(
         "Turn execution started"
     );
 
-    let result = execute_loop(
-        &ctx,
-        system_prompt,
-        history,
-        messages,
-        compactor.as_deref(),
-    )
-    .await;
+    let result = execute_loop(&ctx, system_prompt, history, messages, compactor.as_deref()).await;
 
     tracing::info!(
         thread_id = %thread_id,
@@ -1185,6 +1218,7 @@ impl Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -1273,6 +1307,12 @@ mod tests {
         context_window: u32,
     }
 
+    #[derive(Debug)]
+    struct StreamingSequencedProvider {
+        streams: Mutex<Vec<Vec<LlmStreamEvent>>>,
+        context_window: u32,
+    }
+
     impl SmallWindowSequencedProvider {
         fn new(responses: Vec<CompletionResponse>, context_window: u32) -> Self {
             Self {
@@ -1298,6 +1338,56 @@ mod tests {
         ) -> Result<CompletionResponse, LlmError> {
             let mut responses = self.responses.lock().unwrap();
             Ok(responses.remove(0))
+        }
+
+        fn context_window(&self) -> u32 {
+            self.context_window
+        }
+    }
+
+    impl StreamingSequencedProvider {
+        fn new(streams: Vec<Vec<LlmStreamEvent>>, context_window: u32) -> Self {
+            Self {
+                streams: Mutex::new(streams),
+                context_window,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamingSequencedProvider {
+        fn model_name(&self) -> &str {
+            "streaming-sequenced"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "streaming-sequenced".to_string(),
+                capability: "complete".to_string(),
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            let mut streams = self.streams.lock().unwrap();
+            let events = if streams.is_empty() {
+                vec![LlmStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                }]
+            } else {
+                streams.remove(0)
+            };
+
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
         }
 
         fn context_window(&self) -> u32 {
@@ -1355,6 +1445,34 @@ mod tests {
 
     struct VersionedTool {
         version: &'static str,
+    }
+
+    struct FixedResultTool;
+
+    #[async_trait]
+    impl NamedTool for FixedResultTool {
+        fn name(&self) -> &str {
+            "fixed_tool"
+        }
+
+        fn definition(&self) -> argus_protocol::llm::ToolDefinition {
+            argus_protocol::llm::ToolDefinition {
+                name: "fixed_tool".to_string(),
+                description: "Return a deterministic tool result".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({ "ok": "1" }))
+        }
     }
 
     #[async_trait]
@@ -1440,6 +1558,7 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct TurnCompactorCall {
+        token_count: u32,
         messages: Vec<String>,
         turn_messages: Vec<String>,
     }
@@ -1457,9 +1576,10 @@ mod tests {
         async fn compact(
             &self,
             messages: &[ChatMessage],
-            _token_count: u32,
+            token_count: u32,
         ) -> Result<Option<CompactResult>, CompactError> {
             self.calls.lock().unwrap().push(TurnCompactorCall {
+                token_count,
                 messages: messages
                     .iter()
                     .map(|message| message.content.clone())
@@ -1878,6 +1998,173 @@ mod tests {
                 .any(|content| content == "first"),
             "second turn-compactor pass should see the prior assistant response"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_loop_turn_compactor_uses_usage_baseline_plus_tool_delta() {
+        let provider = Arc::new(StreamingSequencedProvider::new(
+            vec![
+                vec![
+                    LlmStreamEvent::ToolCallDelta(argus_protocol::llm::ToolCallDelta {
+                        index: 0,
+                        id: Some("call-fixed".to_string()),
+                        name: Some("fixed_tool".to_string()),
+                        arguments_delta: Some("{}".to_string()),
+                    }),
+                    LlmStreamEvent::Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::ToolUse,
+                    },
+                ],
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "done".to_string(),
+                    },
+                    LlmStreamEvent::Usage {
+                        input_tokens: 12,
+                        output_tokens: 4,
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+            ],
+            4,
+        ));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::clone(&calls),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None)]))),
+        });
+        let turn = make_turn_with(
+            provider,
+            vec![Arc::new(FixedResultTool)],
+            vec![],
+            5,
+            TurnCancellation::default(),
+            Some(compactor),
+            vec![ChatMessage::user("start")],
+        );
+
+        let _record = turn.execute().await.expect("turn should succeed");
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        let expected_second = 15u32.saturating_add(estimate_local_message_delta_tokens(&[
+            ChatMessage::tool_result("call-fixed", "fixed_tool", r#"{"ok":"1"}"#),
+        ]));
+        assert_eq!(calls[1].token_count, expected_second);
+    }
+
+    #[tokio::test]
+    async fn execute_loop_turn_compactor_uses_usage_baseline_plus_hook_delta() {
+        let provider = Arc::new(StreamingSequencedProvider::new(
+            vec![
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "first".to_string(),
+                    },
+                    LlmStreamEvent::Usage {
+                        input_tokens: 7,
+                        output_tokens: 3,
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "second".to_string(),
+                    },
+                    LlmStreamEvent::Usage {
+                        input_tokens: 8,
+                        output_tokens: 2,
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+            ],
+            4,
+        ));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::clone(&calls),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None)]))),
+        });
+        let turn = make_turn_with(
+            provider,
+            vec![],
+            vec![Arc::new(ContinueOnceTurnEndHook::new())],
+            5,
+            TurnCancellation::default(),
+            Some(compactor),
+            vec![ChatMessage::user("start")],
+        );
+
+        let _record = turn.execute().await.expect("turn should succeed");
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        let expected_second =
+            10u32.saturating_add(estimate_local_message_delta_tokens(&[ChatMessage::user(
+                "continue",
+            )]));
+        assert_eq!(calls[1].token_count, expected_second);
+    }
+
+    #[tokio::test]
+    async fn execute_loop_turn_compactor_falls_back_to_full_estimate_when_usage_missing() {
+        let provider = Arc::new(StreamingSequencedProvider::new(
+            vec![
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "first".to_string(),
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+                vec![
+                    LlmStreamEvent::ContentDelta {
+                        delta: "second".to_string(),
+                    },
+                    LlmStreamEvent::Finished {
+                        finish_reason: FinishReason::Stop,
+                    },
+                ],
+            ],
+            4,
+        ));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let compactor = Arc::new(RecordingTurnCompactor {
+            calls: Arc::clone(&calls),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None)]))),
+        });
+        let turn = make_turn_with(
+            provider,
+            vec![],
+            vec![Arc::new(ContinueOnceTurnEndHook::new())],
+            5,
+            TurnCancellation::default(),
+            Some(compactor),
+            vec![ChatMessage::user("start")],
+        );
+
+        let _record = turn.execute().await.expect("turn should succeed");
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        let expected_second = estimated_tokens(&[
+            ChatMessage::system("You are a test agent."),
+            ChatMessage::user("start"),
+            ChatMessage::assistant("first"),
+            ChatMessage::user("continue"),
+        ]) as u32;
+        assert_eq!(calls[1].token_count, expected_second);
     }
 
     #[tokio::test]
