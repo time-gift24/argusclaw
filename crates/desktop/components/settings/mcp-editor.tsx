@@ -25,7 +25,6 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
 import { useToast } from "@/components/ui/toast"
 import { McpTestDialog } from "@/components/settings/mcp-test-dialog"
 import { cn } from "@/lib/utils"
@@ -40,7 +39,13 @@ interface KeyValueRow {
   value: string
 }
 
+interface StringRow {
+  id: string
+  value: string
+}
+
 let keyValueRowCounter = 0
+let stringRowCounter = 0
 
 function createDefaultFormData(): McpServerRecord {
   return {
@@ -62,17 +67,6 @@ function createDefaultFormData(): McpServerRecord {
   }
 }
 
-function formatList(values: string[]): string {
-  return values.join("\n")
-}
-
-function parseList(text: string): string[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-}
-
 function createKeyValueRow(key = "", value = ""): KeyValueRow {
   keyValueRowCounter += 1
   return {
@@ -82,29 +76,28 @@ function createKeyValueRow(key = "", value = ""): KeyValueRow {
   }
 }
 
-function formatKeyValueLines(values: Record<string, string>): string {
-  return Object.entries(values)
-    .map(([key, value]) => `${key}=${value}`)
-    .join("\n")
+function createStringRow(value = ""): StringRow {
+  stringRowCounter += 1
+  return {
+    id: `string-row-${stringRowCounter}`,
+    value,
+  }
 }
 
-function parseKeyValueLines(text: string): Record<string, string> {
-  const result: Record<string, string> = {}
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith("#")) continue
-    const eqIndex = trimmed.indexOf("=")
-    if (eqIndex === -1) continue
-    const key = trimmed.slice(0, eqIndex).trim()
-    const value = trimmed.slice(eqIndex + 1).trim()
-    if (key) result[key] = value
-  }
-  return result
+function listToRows(values: string[]): StringRow[] {
+  const rows = values.map((value) => createStringRow(value))
+  return rows.length > 0 ? rows : [createStringRow()]
 }
 
 function recordToRows(values: Record<string, string>): KeyValueRow[] {
   const rows = Object.entries(values).map(([key, value]) => createKeyValueRow(key, value))
   return rows.length > 0 ? rows : [createKeyValueRow()]
+}
+
+function rowsToList(rows: StringRow[]): string[] {
+  return rows
+    .map((row) => row.value.trim())
+    .filter(Boolean)
 }
 
 function rowsToRecord(rows: KeyValueRow[]): Record<string, string> {
@@ -138,8 +131,8 @@ export function McpEditor({ serverId }: McpEditorProps) {
   const [saving, setSaving] = React.useState(false)
   const [testing, setTesting] = React.useState(false)
   const [formData, setFormData] = React.useState<McpServerRecord>(createDefaultFormData)
-  const [argsText, setArgsText] = React.useState("--stdio")
-  const [envText, setEnvText] = React.useState("")
+  const [argsRows, setArgsRows] = React.useState<StringRow[]>([createStringRow("--stdio")])
+  const [envRows, setEnvRows] = React.useState<KeyValueRow[]>([createKeyValueRow()])
   const [headerRows, setHeaderRows] = React.useState<KeyValueRow[]>([createKeyValueRow()])
   const [testResult, setTestResult] = React.useState<McpConnectionTestResult | null>(null)
   const [discoveredTools, setDiscoveredTools] = React.useState<McpDiscoveredToolRecord[]>([])
@@ -148,12 +141,12 @@ export function McpEditor({ serverId }: McpEditorProps) {
   const applyRecord = React.useCallback((record: McpServerRecord) => {
     setFormData(record)
     if (record.transport.kind === "stdio") {
-      setArgsText(formatList(record.transport.args))
-      setEnvText(formatKeyValueLines(record.transport.env))
+      setArgsRows(listToRows(record.transport.args))
+      setEnvRows(recordToRows(record.transport.env))
       setHeaderRows([createKeyValueRow()])
     } else {
-      setArgsText("")
-      setEnvText("")
+      setArgsRows([createStringRow()])
+      setEnvRows([createKeyValueRow()])
       setHeaderRows(recordToRows(record.transport.headers))
     }
   }, [])
@@ -203,8 +196,8 @@ export function McpEditor({ serverId }: McpEditorProps) {
       transport = {
         kind: "stdio",
         command: formData.transport.command,
-        args: parseList(argsText),
-        env: parseKeyValueLines(envText),
+        args: rowsToList(argsRows),
+        env: rowsToRecord(envRows),
       }
     } else {
       transport = {
@@ -218,7 +211,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
       ...baseRecord,
       transport,
     }
-  }, [argsText, envText, formData, headerRows])
+  }, [argsRows, envRows, formData, headerRows])
 
   const handleTransportKindChange = (kind: McpTransportConfig["kind"]) => {
     if (kind === formData.transport.kind) return
@@ -233,8 +226,8 @@ export function McpEditor({ serverId }: McpEditorProps) {
           env: {},
         },
       }))
-      setArgsText("--stdio")
-      setEnvText("")
+      setArgsRows([createStringRow("--stdio")])
+      setEnvRows([createKeyValueRow()])
       setHeaderRows([createKeyValueRow()])
       return
     }
@@ -247,10 +240,52 @@ export function McpEditor({ serverId }: McpEditorProps) {
         headers: {},
       },
     }))
-    setArgsText("")
-    setEnvText("")
+    setArgsRows([createStringRow()])
+    setEnvRows([createKeyValueRow()])
     setHeaderRows([createKeyValueRow()])
   }
+
+  const updateArgsRow = React.useCallback((rowId: string, value: string) => {
+    setArgsRows((prev) =>
+      prev.map((row) => (row.id === rowId ? { ...row, value } : row)),
+    )
+  }, [])
+
+  const addArgsRow = React.useCallback(() => {
+    setArgsRows((prev) => [...prev, createStringRow()])
+  }, [])
+
+  const removeArgsRow = React.useCallback((rowId: string) => {
+    setArgsRows((prev) => {
+      if (prev.length === 1) {
+        return [createStringRow()]
+      }
+
+      const next = prev.filter((row) => row.id !== rowId)
+      return next.length > 0 ? next : [createStringRow()]
+    })
+  }, [])
+
+  const updateEnvRow = React.useCallback((rowId: string, field: "key" | "value", value: string) => {
+    setEnvRows((prev) =>
+      prev.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)),
+    )
+  }, [])
+
+  const addEnvRow = React.useCallback(() => {
+    setEnvRows((prev) => [...prev, createKeyValueRow()])
+  }, [])
+
+  const removeEnvRow = React.useCallback((rowId: string) => {
+    setEnvRows((prev) => {
+      if (prev.length === 1) {
+        return [createKeyValueRow()]
+      }
+
+      const next = prev.filter((row) => row.id !== rowId)
+      return next.length > 0 ? next : [createKeyValueRow()]
+    })
+  }, [])
 
   const updateHeaderRow = React.useCallback((rowId: string, field: "key" | "value", value: string) => {
     setHeaderRows((prev) =>
@@ -450,23 +485,89 @@ export function McpEditor({ serverId }: McpEditorProps) {
                     </div>
 
                     <div className="space-y-2">
-                      <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Args (每行一个)</Label>
-                      <Textarea
-                        value={argsText}
-                        onChange={(event) => setArgsText(event.target.value)}
-                        placeholder="--stdio"
-                        className="min-h-[110px] bg-background border-muted/60 text-sm font-mono"
-                      />
+                      <div className="flex items-center justify-between gap-3">
+                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Args</Label>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="outline"
+                          className="h-8 w-8 shrink-0"
+                          onClick={addArgsRow}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </Button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {argsRows.map((row, index) => (
+                          <div
+                            key={row.id}
+                            className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 items-center"
+                          >
+                            <Input
+                              value={row.value}
+                              onChange={(event) => updateArgsRow(row.id, event.target.value)}
+                              placeholder={index === 0 ? "--stdio" : "例如 --transport"}
+                              className="h-10 bg-background border-muted/60 text-sm font-mono"
+                            />
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-9 w-9 shrink-0 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeArgsRow(row.id)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="space-y-2">
-                      <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Environment (KEY=VALUE)</Label>
-                      <Textarea
-                        value={envText}
-                        onChange={(event) => setEnvText(event.target.value)}
-                        placeholder="SLACK_TOKEN=xoxb-..."
-                        className="min-h-[140px] bg-background border-muted/60 text-sm font-mono"
-                      />
+                      <div className="flex items-center justify-between gap-3">
+                        <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">Environment</Label>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="outline"
+                          className="h-8 w-8 shrink-0"
+                          onClick={addEnvRow}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </Button>
+                      </div>
+
+                      <div className="space-y-3">
+                        {envRows.map((row, index) => (
+                          <div
+                            key={row.id}
+                            className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-2 items-center"
+                          >
+                            <Input
+                              value={row.key}
+                              onChange={(event) => updateEnvRow(row.id, "key", event.target.value)}
+                              placeholder={index === 0 ? "变量名" : "例如 SLACK_TOKEN"}
+                              className="h-10 bg-background border-muted/60 text-sm font-mono"
+                            />
+                            <Input
+                              value={row.value}
+                              onChange={(event) => updateEnvRow(row.id, "value", event.target.value)}
+                              placeholder={index === 0 ? "变量值" : "例如 xoxb-..."}
+                              className="h-10 bg-background border-muted/60 text-sm font-mono"
+                            />
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-9 w-9 shrink-0 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeEnvRow(row.id)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </>
                 ) : (
