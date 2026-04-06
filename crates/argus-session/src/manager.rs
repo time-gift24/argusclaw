@@ -1389,7 +1389,6 @@ fn format_turn_log_recovery_error(
 mod tests {
     use std::fs;
     use std::sync::Arc;
-    use std::time::Duration;
 
     struct NoopMcpResolver;
 
@@ -1419,8 +1418,8 @@ mod tests {
         LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, ProviderId, SessionId,
-        ThinkingConfig, ThreadId, TokenUsage,
+        AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, McpToolResolver,
+        ProviderId, ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;

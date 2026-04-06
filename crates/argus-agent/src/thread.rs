@@ -767,8 +767,12 @@ impl Thread {
             let effective_record = guard
                 .prepare_turn_start(msg_override, cancellation.clone())
                 .await;
+            let mcp_tools = guard
+                .resolve_mcp_tools(&effective_record)
+                .await
+                .unwrap_or_default();
             let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
-                guard.build_turn_execution_parts(effective_record.clone());
+                guard.build_turn_execution_parts(effective_record.clone(), mcp_tools);
 
             (
                 thread_id,
@@ -958,8 +962,12 @@ impl Thread {
         let effective_record = self
             .prepare_turn_start(msg_override, cancellation.clone())
             .await;
+        let mcp_tools = self
+            .resolve_mcp_tools(&effective_record)
+            .await
+            .unwrap_or_default();
         let (thread_id, history, tools, hooks, provider, config, thread_event_tx, compactor) =
-            self.build_turn_execution_parts(effective_record.clone());
+            self.build_turn_execution_parts(effective_record.clone(), mcp_tools);
 
         let result = match tokio::spawn(async move {
             turn::execute_thread_turn(

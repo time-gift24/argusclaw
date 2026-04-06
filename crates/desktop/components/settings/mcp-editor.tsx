@@ -1,7 +1,5 @@
-"use client"
-
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import { useNavigate } from "react-router-dom"
 import {
   ArrowLeft,
   CheckCircle2,
@@ -90,6 +88,20 @@ function formatKeyValueLines(values: Record<string, string>): string {
     .join("\n")
 }
 
+function parseKeyValueLines(text: string): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const eqIndex = trimmed.indexOf("=")
+    if (eqIndex === -1) continue
+    const key = trimmed.slice(0, eqIndex).trim()
+    const value = trimmed.slice(eqIndex + 1).trim()
+    if (key) result[key] = value
+  }
+  return result
+}
+
 function recordToRows(values: Record<string, string>): KeyValueRow[] {
   const rows = Object.entries(values).map(([key, value]) => createKeyValueRow(key, value))
   return rows.length > 0 ? rows : [createKeyValueRow()]
@@ -118,7 +130,7 @@ function getStatusTone(status: McpServerRecord["status"]) {
 }
 
 export function McpEditor({ serverId }: McpEditorProps) {
-  const router = useRouter()
+  const navigate = useNavigate()
   const { addToast } = useToast()
   const isEditing = serverId !== undefined
 
@@ -267,7 +279,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
     try {
       const id = await mcp.upsertServer(buildRecord())
       addToast("success", isEditing ? "MCP 配置已更新" : "MCP 配置已创建")
-      router.push(`/settings/mcp/edit?id=${id}`)
+      navigate(`/settings/mcp/edit?id=${id}`)
     } catch (error) {
       console.error("Failed to save MCP server:", error)
       addToast("error", "保存 MCP 配置失败")
@@ -324,7 +336,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
             variant="ghost"
             size="icon"
             className="h-9 w-9 rounded-full hover:bg-muted"
-            onClick={() => router.push("/settings/mcp")}
+            onClick={() => navigate("/settings/mcp")}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -336,7 +348,7 @@ export function McpEditor({ serverId }: McpEditorProps) {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/mcp")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
+          <Button variant="ghost" size="sm" onClick={() => navigate("/settings/mcp")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
             取消
           </Button>
           <Button size="sm" variant="outline" onClick={handleTestConnection} disabled={testing || !canSave} className="h-9 px-4">

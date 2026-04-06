@@ -1,5 +1,3 @@
-"use client"
-
 import { McpEditor } from "@/components/settings"
 
 export default function NewMcpPage() {

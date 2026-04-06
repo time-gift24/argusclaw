@@ -1,7 +1,5 @@
-"use client"
-
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import { useNavigate } from "react-router-dom"
 import { Plus, Server } from "lucide-react"
 
 import { mcp, type McpConnectionTestResult, type McpServerRecord } from "@/lib/tauri"
@@ -9,7 +7,7 @@ import { DeleteConfirmDialog, McpCard, McpTestDialog } from "@/components/settin
 import { Button } from "@/components/ui/button"
 
 export default function McpSettingsPage() {
-  const router = useRouter()
+  const navigate = useNavigate()
   const [serverList, setServerList] = React.useState<McpServerRecord[]>([])
   const [loading, setLoading] = React.useState(true)
   const [deleteId, setDeleteId] = React.useState<number | null>(null)
@@ -101,7 +99,7 @@ export default function McpSettingsPage() {
             管理 MCP server 配置、连接测试结果和工具发现快照。
           </p>
         </div>
-        <Button size="sm" onClick={() => router.push("/settings/mcp/new")} className="h-9 shadow-sm">
+        <Button size="sm" onClick={() => navigate("/settings/mcp/new")} className="h-9 shadow-sm">
           <Plus className="h-4 w-4 mr-1.5" />
           添加 MCP Server
         </Button>
@@ -116,7 +114,7 @@ export default function McpSettingsPage() {
             <p className="font-medium text-muted-foreground">暂无 MCP Server</p>
             <p className="text-xs text-muted-foreground/60">添加一个 stdio、http 或 sse MCP 端点来供智能体使用</p>
           </div>
-          <Button size="sm" onClick={() => router.push("/settings/mcp/new")} className="px-6">
+          <Button size="sm" onClick={() => navigate("/settings/mcp/new")} className="px-6">
             <Plus className="h-4 w-4 mr-1.5" />
             立即添加
           </Button>
@@ -132,7 +130,7 @@ export default function McpSettingsPage() {
                 server={server}
                 latestResult={result}
                 testing={testingServerId === serverId}
-                onEdit={() => router.push(`/settings/mcp/edit?id=${serverId}`)}
+                onEdit={() => navigate(`/settings/mcp/edit?id=${serverId}`)}
                 onTest={() => void handleTestConnection(serverId)}
                 onDelete={() => setDeleteId(serverId)}
                 onViewResult={() => {
