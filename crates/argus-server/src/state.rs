@@ -15,4 +15,7 @@ pub struct AppState {
     pub auth_provider: Arc<dyn OAuth2AuthProvider>,
     pub user_repo: Arc<dyn UserRepository>,
     pub auth_session: Arc<AuthSession>,
+    /// User chat services for the server product.
+    /// `None` when chat is not yet configured (e.g., during initial setup).
+    pub chat_services: Option<Arc<argus_session::UserChatServices>>,
 }

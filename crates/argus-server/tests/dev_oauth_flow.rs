@@ -81,6 +81,7 @@ fn test_app() -> Router {
         auth_provider,
         user_repo,
         auth_session,
+        chat_services: None,
     };
     argus_server::auth::routes::router().with_state(state)
 }

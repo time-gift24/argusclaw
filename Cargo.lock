@@ -316,16 +316,19 @@ version = "0.1.0"
 dependencies = [
  "argus-protocol",
  "argus-repository",
+ "argus-session",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "http-body-util",
  "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
@@ -6271,6 +6274,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

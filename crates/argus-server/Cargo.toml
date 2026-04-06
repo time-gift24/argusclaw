@@ -13,11 +13,13 @@ async-trait = { workspace = true }
 axum = { version = "0.8", features = ["macros"] }
 base64 = { workspace = true }
 chrono = { workspace = true }
+futures-util = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
@@ -25,6 +27,7 @@ uuid = { workspace = true }
 # Argus crates
 argus-protocol = { path = "../argus-protocol" }
 argus-repository = { path = "../argus-repository", default-features = false }
+argus-session = { path = "../argus-session" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
