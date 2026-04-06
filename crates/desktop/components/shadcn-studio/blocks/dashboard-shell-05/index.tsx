@@ -1,8 +1,5 @@
-"use client"
-
 import * as React from "react"
-import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { Link, useLocation } from "react-router-dom"
 import {
   Bell,
   ChevronLeft,
@@ -21,7 +18,7 @@ import {
   BookOpen,
   Server,
 } from "lucide-react"
-import { useTheme } from "next-themes"
+import { useTheme } from "@/components/theme-provider"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -58,7 +55,8 @@ export default function DashboardShell({
   const [isMobileMenuOpen, setIsMobileMenuOpen] = React.useState(false)
   const [loginDialogOpen, setLoginDialogOpen] = React.useState(false)
   const { resolvedTheme, setTheme } = useTheme()
-  const pathname = usePathname()
+  const location = useLocation()
+  const pathname = location.pathname
   const { username, isLoggedIn, logout } = useAuthStore()
 
   const toggleSidebar = () => setIsSidebarCollapsed(!isSidebarCollapsed)
@@ -79,7 +77,7 @@ export default function DashboardShell({
         )}
       >
         <div className="flex h-14 items-center px-4 border-b">
-          <Link href="/" className="flex items-center gap-2 overflow-hidden">
+          <Link to="/" className="flex items-center gap-2 overflow-hidden">
             <LogoSvg className="h-8 w-8 shrink-0" />
             {!isSidebarCollapsed && (
               <span className="font-semibold text-sm whitespace-nowrap">ArgusWing</span>
@@ -92,7 +90,7 @@ export default function DashboardShell({
             {navigationItems.map((item, index) => (
               <Link
                 key={index}
-                href={item.href}
+                to={item.href}
                 className={cn(
                   "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
                   pathname === item.href || item.isActive
@@ -100,173 +98,151 @@ export default function DashboardShell({
                     : "text-muted-foreground"
                 )}
               >
-                <span className="shrink-0">
-                  {item.icon || <Home className="h-4 w-4" />}
-                </span>
-                {!isSidebarCollapsed && (
-                  <span className="whitespace-nowrap">{item.title}</span>
-                )}
+                {item.icon || <Home className="h-4 w-4" />}
+                {item.title}
               </Link>
             ))}
-          </nav>
-
-          <Separator className="my-4 mx-2" />
-
-          <nav className="grid gap-1">
+            <Separator className="my-2" />
             <Link
-              href="/settings/agents"
-              className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
-                pathname.startsWith("/settings/agents")
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground"
-              )}
+              to="/settings/agents"
+              className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
             >
-              <Bot className="h-4 w-4 shrink-0" />
-              {!isSidebarCollapsed && <span className="whitespace-nowrap">智能体配置</span>}
+              <Bot className="h-4 w-4" />
+              智能体配置
             </Link>
             <Link
-              href="/settings/providers"
-              className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
-                pathname.startsWith("/settings/providers")
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground"
-              )}
+              to="/settings/providers"
+              className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
             >
-              <Cloud className="h-4 w-4 shrink-0" />
-              {!isSidebarCollapsed && <span className="whitespace-nowrap">模型配置</span>}
+              <Cloud className="h-4 w-4" />
+              模型配置
             </Link>
             <Link
-              href="/settings/mcp"
-              className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
-                pathname.startsWith("/settings/mcp")
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground"
-              )}
+              to="/settings/mcp"
+              className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
             >
-              <Server className="h-4 w-4 shrink-0" />
-              {!isSidebarCollapsed && <span className="whitespace-nowrap">MCP 配置</span>}
+              <Server className="h-4 w-4" />
+              MCP 配置
             </Link>
             <Link
-              href="/settings/knowledge"
-              className={cn(
-                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
-                pathname.startsWith("/settings/knowledge")
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground"
-              )}
+              to="/settings/knowledge"
+              className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
             >
-              <BookOpen className="h-4 w-4 shrink-0" />
-              {!isSidebarCollapsed && <span className="whitespace-nowrap">知识仓库</span>}
+              <BookOpen className="h-4 w-4" />
+              知识仓库
             </Link>
           </nav>
         </div>
+
+        {/* Sidebar Footer */}
+        <div className="border-t p-3 space-y-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleSidebar}
+            className="w-full h-8"
+          >
+            {isSidebarCollapsed ? (
+              <PanelLeft className="h-4 w-4" />
+            ) : (
+              <ChevronLeft className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
       </aside>
 
-      {/* Main Area */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
-        <header className="flex h-14 items-center justify-between border-b bg-background px-4 md:px-6">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="hidden md:flex"
-              onClick={toggleSidebar}
-            >
-              <PanelLeft className="h-4 w-4" />
-            </Button>
-
+        <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          <div className="flex h-14 items-center px-6 gap-4">
+            {/* Mobile menu toggle */}
             <Button
               variant="ghost"
               size="icon"
               className="md:hidden"
-              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              onClick={() => setIsMobileMenuOpen(true)}
             >
               <Menu className="h-5 w-5" />
             </Button>
 
-            <div className="relative w-64">
-              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                type="search"
-                placeholder="搜索..."
-                className="w-full bg-muted/50 pl-8 h-9 text-sm focus-visible:ring-1 border-none shadow-none"
-              />
+            {/* Search */}
+            <div className="flex-1 max-w-md">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="搜索..."
+                  className="pl-8 h-9 text-sm"
+                />
+              </div>
             </div>
-          </div>
 
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" onClick={toggleTheme}>
-              {resolvedTheme === "dark" ? <Moon className="h-4 w-4" /> : <Sun className="h-4 w-4" />}
-            </Button>
-
-            <Button variant="ghost" size="icon" className="relative">
-              <Bell className="h-4 w-4" />
-              <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-primary" />
-            </Button>
-
-            <Separator orientation="vertical" className="h-6 mx-1" />
-
-            {isLoggedIn ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="sm" className="relative h-8 w-8 rounded-full">
-                    <Avatar className="h-8 w-8">
-                      <AvatarImage src="" />
-                      <AvatarFallback className="text-xs bg-primary text-primary-foreground">
-                        {username ? username.charAt(0).toUpperCase() : <User className="h-4 w-4" />}
-                      </AvatarFallback>
-                    </Avatar>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuLabel>
-                    <div className="flex flex-col space-y-1">
-                      <p className="text-sm font-medium leading-none">{username}</p>
-                      <p className="text-xs leading-none text-muted-foreground">已登录</p>
-                    </div>
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem>
-                    <Settings className="mr-2 h-4 w-4" />
-                    <span>设置</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem>
-                    <User className="mr-2 h-4 w-4" />
-                    <span>个人中心</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem className="text-destructive focus:bg-destructive/10 focus:text-destructive" onClick={handleLogout}>
-                    <LogOut className="mr-2 h-4 w-4" />
-                    <span>退出登录</span>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : (
+            {/* Header Actions */}
+            <div className="flex items-center gap-2">
               <Button
                 variant="ghost"
-                size="sm"
-                className="relative h-8 w-8 rounded-full"
-                onClick={openLoginDialog}
+                size="icon"
+                onClick={toggleTheme}
+                className="h-9 w-9"
               >
-                <Avatar className="h-8 w-8">
-                  <AvatarFallback className="text-xs bg-muted text-muted-foreground">
-                    <User className="h-4 w-4" />
-                  </AvatarFallback>
-                </Avatar>
+                {resolvedTheme === "dark" ? (
+                  <Sun className="h-4 w-4" />
+                ) : (
+                  <Moon className="h-4 w-4" />
+                )}
               </Button>
-            )}
 
-            <LoginDialog open={loginDialogOpen} onOpenChange={setLoginDialogOpen} />
+              {/* Notifications */}
+              <Button variant="ghost" size="icon" className="h-9 w-9">
+                <Bell className="h-4 w-4" />
+              </Button>
+
+              {/* User Menu */}
+              {isLoggedIn ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" className="relative h-9 w-9 rounded-full">
+                      <Avatar className="h-9 w-9">
+                        <AvatarImage alt={username} />
+                        <AvatarFallback>
+                          <User className="h-4 w-4" />
+                        </AvatarFallback>
+                      </Avatar>
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuLabel>
+                      <div className="flex flex-col space-y-1">
+                        <p className="text-sm font-medium">{username}</p>
+                      </div>
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem asChild>
+                      <Link to="/settings">
+                        <Settings className="mr-2 h-4 w-4" />
+                        设置
+                      </Link>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={handleLogout}>
+                      <LogOut className="mr-2 h-4 w-4" />
+                      退出登录
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : (
+                <Button variant="ghost" size="sm" onClick={openLoginDialog}>
+                  <User className="mr-2 h-4 w-4" />
+                  登录
+                </Button>
+              )}
+            </div>
           </div>
         </header>
 
-        {/* Content Area */}
-        <main className="flex-1 relative flex flex-col min-h-0 overflow-hidden">
-          <div className="w-full flex-1 flex flex-col min-h-0">
+        {/* Page Content */}
+        <main className="flex-1 overflow-auto">
+          <div className="container mx-auto py-6">
             {children}
           </div>
         </main>
@@ -277,7 +253,7 @@ export default function DashboardShell({
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm md:hidden">
           <div className="fixed inset-y-0 left-0 z-50 w-64 border-r bg-background p-6 shadow-lg animate-in slide-in-from-left">
              <div className="flex items-center justify-between mb-8">
-                <Link href="/" className="flex items-center gap-2">
+                <Link to="/" className="flex items-center gap-2">
                   <LogoSvg className="h-8 w-8" />
                   <span className="font-semibold">ArgusWing</span>
                 </Link>
@@ -289,7 +265,7 @@ export default function DashboardShell({
                {navigationItems.map((item, index) => (
                  <Link
                    key={index}
-                   href={item.href}
+                   to={item.href}
                    onClick={() => setIsMobileMenuOpen(false)}
                    className={cn(
                      "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground",
@@ -304,7 +280,7 @@ export default function DashboardShell({
                ))}
                <Separator className="my-2" />
                <Link
-                  href="/settings/agents"
+                  to="/settings/agents"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
@@ -312,7 +288,7 @@ export default function DashboardShell({
                   智能体配置
                 </Link>
                 <Link
-                  href="/settings/providers"
+                  to="/settings/providers"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
@@ -320,7 +296,7 @@ export default function DashboardShell({
                   模型配置
                 </Link>
                 <Link
-                  href="/settings/mcp"
+                  to="/settings/mcp"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
@@ -328,7 +304,7 @@ export default function DashboardShell({
                   MCP 配置
                 </Link>
                 <Link
-                  href="/settings/knowledge"
+                  to="/settings/knowledge"
                   onClick={() => setIsMobileMenuOpen(false)}
                   className="flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground"
                 >
