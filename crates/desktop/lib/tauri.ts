@@ -156,34 +156,6 @@ export const tools = {
   list: () => invoke<ToolInfo[]>("list_tools"),
 };
 
-// Knowledge API
-export interface KnowledgeRepoRecord {
-  id: number;
-  repo: string;
-  repo_id: string;
-  provider: string;
-  owner: string;
-  name: string;
-  default_branch: string;
-  manifest_paths: string[];
-  workspace: string;
-}
-
-export const knowledge = {
-  list: () => invoke<KnowledgeRepoRecord[]>("list_knowledge_repos"),
-
-  upsert: (record: KnowledgeRepoRecord) =>
-    invoke<number>("upsert_knowledge_repo", { record }),
-
-  delete: (id: number) => invoke<boolean>("delete_knowledge_repo", { id }),
-
-  listAgentWorkspaces: (agentId: number) =>
-    invoke<string[]>("list_agent_knowledge_workspaces", { agentId }),
-
-  setAgentWorkspaces: (agentId: number, workspaces: string[]) =>
-    invoke<void>("set_agent_knowledge_workspaces", { agentId, workspaces }),
-};
-
 // MCP API
 export type McpServerStatus =
   | "ready"

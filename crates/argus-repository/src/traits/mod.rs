@@ -3,7 +3,6 @@
 mod account;
 mod agent;
 mod job;
-mod knowledge_repo;
 mod mcp;
 mod session;
 mod thread;
@@ -11,7 +10,6 @@ mod thread;
 pub use account::AccountRepository;
 pub use agent::AgentRepository;
 pub use job::JobRepository;
-pub use knowledge_repo::KnowledgeRepoRepository;
 pub use mcp::McpRepository;
 pub use session::{SessionRepository, SessionWithCount};
 pub use thread::ThreadRepository;

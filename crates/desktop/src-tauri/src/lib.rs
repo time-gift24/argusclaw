@@ -100,12 +100,6 @@ pub fn run() {
             commands::login,
             commands::logout,
             commands::get_provider_context_window,
-            // Knowledge repo commands
-            commands::list_knowledge_repos,
-            commands::upsert_knowledge_repo,
-            commands::delete_knowledge_repo,
-            commands::list_agent_knowledge_workspaces,
-            commands::set_agent_knowledge_workspaces,
             commands::list_mcp_servers,
             commands::get_mcp_server,
             commands::upsert_mcp_server,
