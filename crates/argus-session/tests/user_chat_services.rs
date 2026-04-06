@@ -1,4 +1,5 @@
 //! Basic tests for server-facing user chat types.
+#![cfg(feature = "server")]
 
 use argus_session::{UserChatError, UserPrincipal};
 

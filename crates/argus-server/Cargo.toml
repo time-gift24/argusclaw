@@ -33,7 +33,7 @@ argus-llm = { path = "../argus-llm" }
 argus-mcp = { path = "../argus-mcp" }
 argus-protocol = { path = "../argus-protocol" }
 argus-repository = { path = "../argus-repository", default-features = false, features = ["postgres"] }
-argus-session = { path = "../argus-session" }
+argus-session = { path = "../argus-session", features = ["server"] }
 argus-template = { path = "../argus-template" }
 argus-tool = { path = "../argus-tool" }
 

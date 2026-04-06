@@ -1,4 +1,5 @@
 //! User-facing chat service boundary for the server product.
+#![cfg(feature = "server")]
 
 use std::sync::Arc;
 
