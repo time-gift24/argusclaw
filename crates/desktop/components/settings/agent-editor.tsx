@@ -1,8 +1,6 @@
-"use client"
-
 import * as React from "react"
 import { MessageProvider, MessagePrimitive, type ThreadAssistantMessage } from "@assistant-ui/react"
-import { useRouter } from "next/navigation"
+import { useNavigate } from "react-router-dom"
 import { Save, ArrowLeft, Bot, Cpu, Wrench, Settings, Eye, BookOpen, Plus, Trash2, Server } from "lucide-react"
 import {
   agents,
@@ -75,7 +73,7 @@ async function loadAgentMcpBindings(agentId: number) {
 }
 
 export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
-  const router = useRouter()
+  const navigate = useNavigate()
   const { addToast } = useToast()
   const isEditing = agentId !== undefined
 
@@ -281,7 +279,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         }
       }
       addToast("success", isEditing ? "配置已保存" : "创建成功")
-      router.push(`/settings/agents/edit?id=${savedId}`)
+      navigate(`/settings/agents/edit?id=${savedId}`)
     } catch (error) {
       console.error("Failed to save agent:", error)
       addToast("error", "保存失败")
@@ -357,7 +355,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             variant="ghost"
             size="icon"
             className="h-9 w-9 rounded-full hover:bg-muted"
-            onClick={() => router.push("/settings/agents")}
+            onClick={() => navigate("/settings/agents")}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -371,7 +369,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => router.push("/settings/agents")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
+          <Button variant="ghost" size="sm" onClick={() => navigate("/settings/agents")} className="h-9 text-sm text-muted-foreground hover:text-foreground">
             取消
           </Button>
           <Button size="sm" onClick={handleSave} disabled={saving || !canSave} className="h-9 px-6 text-sm font-bold shadow-lg shadow-primary/20">
@@ -883,7 +881,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                     <p className="text-xs text-muted-foreground">
                       先去设置页新增并测试连接，再回来为当前智能体绑定。
                     </p>
-                    <Button size="sm" variant="outline" onClick={() => router.push("/settings/mcp")}>
+                    <Button size="sm" variant="outline" onClick={() => navigate("/settings/mcp")}>
                       前往 MCP 设置页
                     </Button>
                   </div>
@@ -906,7 +904,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                           onSetFullAccess={setServerFullAccess}
                           onToggleTool={toggleMcpTool}
                           onOpenSettings={(targetServerId) => {
-                            router.push(`/settings/mcp/edit?id=${targetServerId}`)
+                            navigate(`/settings/mcp/edit?id=${targetServerId}`)
                           }}
                         />
                       )

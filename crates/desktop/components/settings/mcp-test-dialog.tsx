@@ -1,5 +1,3 @@
-"use client"
-
 import { CheckCircle2, CircleAlert, Loader2, Network, Wrench } from "lucide-react"
 
 import {

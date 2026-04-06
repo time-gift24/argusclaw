@@ -1,5 +1,3 @@
-"use client"
-
 import { Activity, Pencil, Trash2 } from "lucide-react"
 
 import { type McpConnectionTestResult, type McpServerRecord } from "@/lib/tauri"
