@@ -1,0 +1,28 @@
+{
+  "name": "argus-admin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@opentiny/tiny-robot": "latest",
+    "@opentiny/tiny-robot-kit": "latest",
+    "@opentiny/tiny-robot-svgs": "latest",
+    "axios": "^1.14.0",
+    "vue": "^3.5.0",
+    "vue-router": "^4.6.4",
+    "pinia": "^3.0.4",
+    "lucide-vue-next": "^1.0.0"
+  },
+  "devDependencies": {
+    "@opentiny/vue": "^3.29.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "tailwindcss": "^4.2.2",
+    "vite": "^6.0.0"
+  }
+}

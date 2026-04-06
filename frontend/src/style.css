@@ -1,0 +1,208 @@
+@import "tailwindcss";
+
+@theme {
+  /* === 字体系统 === */
+  --font-headline: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-label: "Manrope", ui-sans-serif, system-ui, sans-serif;
+
+  /* === Material Design 3 Color Tokens (Axiom Azure) === */
+  --color-background: #f8f9fa;
+  --color-primary: #003ec7;
+  --color-primary-fixed: #dde1ff;
+  --color-primary-fixed-dim: #b7c4ff;
+  --color-primary-container: #0052ff;
+  --color-on-primary: #ffffff;
+  --color-on-primary-fixed: #001452;
+  --color-on-primary-fixed-variant: #0038b6;
+  --color-on-primary-container: #dfe3ff;
+
+  --color-secondary: #525f71;
+  --color-secondary-fixed: #d6e4f9;
+  --color-secondary-fixed-dim: #bac8dc;
+  --color-secondary-container: #d3e1f6;
+  --color-on-secondary: #ffffff;
+  --color-on-secondary-fixed: #0f1c2c;
+  --color-on-secondary-fixed-variant: #3a4859;
+  --color-on-secondary-container: #566475;
+
+  --color-tertiary: #005761;
+  --color-tertiary-fixed: #9cf0ff;
+  --color-tertiary-fixed-dim: #00daf3;
+  --color-tertiary-container: #00717e;
+  --color-on-tertiary: #ffffff;
+  --color-on-tertiary-fixed: #001f24;
+  --color-on-tertiary-fixed-variant: #004f58;
+  --color-on-tertiary-container: #a7f1ff;
+
+  --color-error: #ba1a1a;
+  --color-error-container: #ffdad6;
+  --color-on-error: #ffffff;
+  --color-on-error-container: #93000a;
+
+  --color-surface: #f8f9fa;
+  --color-surface-dim: #d9dadb;
+  --color-surface-bright: #f8f9fa;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f4f5;
+  --color-surface-container: #edeeef;
+  --color-surface-container-high: #e7e8e9;
+  --color-surface-container-highest: #e1e3e4;
+  --color-surface-variant: #e1e3e4;
+  --color-surface-tint: #004ced;
+
+  --color-on-surface: #191c1d;
+  --color-on-surface-variant: #434656;
+  --color-inverse-surface: #2e3132;
+  --color-inverse-on-surface: #f0f1f2;
+  --color-inverse-primary: #b7c4ff;
+  --color-on-background: #191c1d;
+
+  --color-outline: #737688;
+  --color-outline-variant: #c3c5d9;
+
+  /* === 语义色彩 === */
+  --color-success: #10B981;
+  --color-success-bg: #ECFDF5;
+  --color-warning: #F59E0B;
+  --color-warning-bg: #FFFBEB;
+  --color-danger: #EF4444;
+  --color-danger-bg: #FEF2F2;
+  --color-info: #0EA5E9;
+  --color-info-bg: #E0F2FE;
+
+  /* === 文字层级 === */
+  --color-text: #191c1d;
+  --color-text-secondary: #475569;
+  --color-text-muted: #94A3B8;
+
+  /* === 边框 === */
+  --color-border: #E2E8F0;
+  --color-border-strong: #CBD5E1;
+
+  /* === 阴影 === */
+  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  --shadow-panel: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.07);
+  --shadow-float: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.08);
+
+  /* === 圆角 === */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply font-body bg-surface text-on-surface;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #CBD5E1;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #94A3B8;
+  }
+
+  ::selection {
+    background: #dde1ff;
+    color: #001452;
+  }
+}
+
+/* === Glass Panel === */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+/* === Architectural Grid Background === */
+.architectural-grid {
+  background-size: 40px 40px;
+  background-image:
+    linear-gradient(to right, rgba(195, 197, 217, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(195, 197, 217, 0.1) 1px, transparent 1px);
+}
+
+/* === Global Component Font Override === */
+.tiny-grid,
+.tiny-tabs,
+.tiny-button,
+.tiny-grid-header,
+.tiny-grid-body {
+  font-family: "Manrope", ui-sans-serif, system-ui, sans-serif !important;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace !important;
+}
+
+.font-headline {
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif !important;
+}
+
+/* === Page Transitions === */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+/* === Sidebar Transitions === */
+.sidebar-transition {
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.main-transition {
+  transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* === Stagger Animation === */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.5s ease-out both;
+}
+
+.animate-delay-1 { animation-delay: 0.1s; }
+.animate-delay-2 { animation-delay: 0.2s; }
+.animate-delay-3 { animation-delay: 0.3s; }
+.animate-delay-4 { animation-delay: 0.4s; }
+.animate-delay-5 { animation-delay: 0.5s; }
