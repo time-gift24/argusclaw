@@ -21,8 +21,5 @@ pub trait ProviderTokenCredentialRepository: Send + Sync {
     ) -> Result<Option<ProviderTokenCredential>, DbError>;
 
     /// Save or update credentials for a provider.
-    async fn save_credentials(
-        &self,
-        credential: &ProviderTokenCredential,
-    ) -> Result<(), DbError>;
+    async fn save_credentials(&self, credential: &ProviderTokenCredential) -> Result<(), DbError>;
 }

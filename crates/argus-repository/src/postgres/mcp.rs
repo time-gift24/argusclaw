@@ -8,8 +8,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 
 use argus_protocol::{
-    AgentId, AgentMcpBinding, McpDiscoveredToolRecord, McpServerRecord,
-    mcp::McpServerStatus,
+    AgentId, AgentMcpBinding, McpDiscoveredToolRecord, McpServerRecord, mcp::McpServerStatus,
 };
 
 use crate::error::DbError;
@@ -68,7 +67,7 @@ where
 impl McpRepository for ArgusPostgres {
     async fn upsert_mcp_server(&self, record: &McpServerRecord) -> Result<i64, DbError> {
         let transport_json = encode_json(&record.transport, "mcp server transport")?;
-        let result = sqlx::query(
+        let _result = sqlx::query(
             "INSERT INTO mcp_servers (id, display_name, enabled, transport_json, timeout_ms, status, \
              last_checked_at, last_success_at, last_error, discovered_tool_count, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) \

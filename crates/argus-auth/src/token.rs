@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use argus_crypto::Cipher;
+use argus_protocol::ids::ProviderId;
 use argus_protocol::llm::{
     CompletionRequest, CompletionResponse, LlmError, LlmEventStream, LlmProvider,
 };
-use argus_protocol::ids::ProviderId;
 use argus_repository::traits::AccountRepository;
 use argus_repository::traits::ProviderTokenCredentialRepository;
 use async_trait::async_trait;

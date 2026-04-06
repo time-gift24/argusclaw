@@ -29,10 +29,6 @@ pub async fn send_message(
         None => return ApiError::Unauthorized.into_response(),
     };
 
-    let Some(chat) = &state.chat_services else {
-        return ApiError::Internal("chat services not configured".to_string()).into_response();
-    };
-
     let session_id = match argus_protocol::SessionId::parse(&body.session_id) {
         Ok(id) => id,
         Err(_) => return ApiError::BadRequest("invalid session id".to_string()).into_response(),
@@ -43,11 +39,16 @@ pub async fn send_message(
         Err(_) => return ApiError::BadRequest("invalid thread id".to_string()).into_response(),
     };
 
-    match chat
+    match state
+        .chat_services
         .send_message(&principal, session_id, thread_id, body.content)
         .await
     {
-        Ok(()) => (axum::http::StatusCode::OK, axum::Json(serde_json::json!({}))).into_response(),
+        Ok(()) => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({})),
+        )
+            .into_response(),
         Err(e) => ApiError::from(e).into_response(),
     }
 }

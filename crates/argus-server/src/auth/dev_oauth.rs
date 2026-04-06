@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
 use argus_protocol::OAuth2Identity;
+use async_trait::async_trait;
 
-use super::provider::OAuth2AuthProvider;
 use super::AuthError;
+use super::provider::OAuth2AuthProvider;
 
 /// Short-lived authorization code issued by the dev authorize form.
 struct PendingCode {
@@ -50,7 +50,6 @@ impl DevOAuth2Provider {
         code
     }
 }
-
 
 #[async_trait]
 impl OAuth2AuthProvider for DevOAuth2Provider {

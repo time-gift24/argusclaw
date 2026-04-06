@@ -19,12 +19,9 @@ use sqlx::postgres::PgPoolOptions;
 use argus_protocol::{AgentId, AgentType, ProviderId, SessionId, ThreadId};
 use argus_repository::postgres::ArgusPostgres;
 use argus_repository::traits::{
-    AgentRepository, ProviderTokenCredentialRepository, SessionRepository, ThreadRepository,
-    UserRepository,
+    AgentRepository, ProviderTokenCredentialRepository, ThreadRepository, UserRepository,
 };
-use argus_repository::types::{
-    AgentRecord, OAuth2Identity, ProviderTokenCredential, ThreadRecord,
-};
+use argus_repository::types::{AgentRecord, OAuth2Identity, ProviderTokenCredential, ThreadRecord};
 
 /// Helper to get the test database URL or skip the test.
 fn test_pg_url() -> Option<String> {
@@ -61,7 +58,11 @@ async fn clean_all(pool: &PgPool) {
 }
 
 /// Create a test user via upsert.
-async fn create_test_user(repo: &ArgusPostgres, subject: &str, email: &str) -> argus_repository::types::UserRecord {
+async fn create_test_user(
+    repo: &ArgusPostgres,
+    subject: &str,
+    email: &str,
+) -> argus_repository::types::UserRecord {
     let identity = OAuth2Identity {
         external_subject: subject.to_string(),
         account: email.to_string(),

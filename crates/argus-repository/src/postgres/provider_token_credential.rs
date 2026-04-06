@@ -1,15 +1,13 @@
 //! ProviderTokenCredentialRepository implementation for PostgreSQL.
 
-use async_trait::async_trait;
-use sqlx::Row;
-
-use argus_protocol::ProviderId;
 use crate::error::DbError;
 use crate::traits::ProviderTokenCredentialRepository;
 use crate::types::ProviderTokenCredential;
+use argus_protocol::ProviderId;
+use async_trait::async_trait;
 
-use super::{ArgusPostgres, DbResult};
 use super::user::get_column;
+use super::{ArgusPostgres, DbResult};
 
 #[async_trait]
 impl ProviderTokenCredentialRepository for ArgusPostgres {

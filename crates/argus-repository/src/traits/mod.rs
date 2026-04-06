@@ -14,7 +14,7 @@ pub use agent::AgentRepository;
 pub use job::JobRepository;
 pub use mcp::McpRepository;
 pub use provider_token_credential::ProviderTokenCredentialRepository;
-pub use session::{SessionRepository, SessionWithCount};
+pub use session::{SessionRepository, SessionWithCount, UserSessionRepository};
 pub use thread::ThreadRepository;
 pub use user::UserRepository;
 

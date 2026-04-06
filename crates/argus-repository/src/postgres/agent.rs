@@ -75,15 +75,13 @@ impl AgentRepository for ArgusPostgres {
                 reason: e.to_string(),
             })?;
 
-            let id: i64 = sqlx::query_scalar(
-                "SELECT id FROM agents WHERE display_name = $1",
-            )
-            .bind(&record.display_name)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DbError::QueryFailed {
-                reason: format!("failed to fetch id after upsert: {e}"),
-            })?;
+            let id: i64 = sqlx::query_scalar("SELECT id FROM agents WHERE display_name = $1")
+                .bind(&record.display_name)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: format!("failed to fetch id after upsert: {e}"),
+                })?;
 
             Ok(AgentId::new(id))
         } else {
@@ -290,12 +288,10 @@ where
 }
 
 fn map_agent_record(row: &sqlx::postgres::PgRow) -> DbResult<AgentRecord> {
-    let tool_names: Vec<String> =
-        serde_json::from_str(&get_column::<String>(row, "tool_names")?).map_err(|e| {
-            DbError::QueryFailed {
-                reason: format!("failed to parse tool_names: {e}"),
-            }
-        })?;
+    let tool_names: Vec<String> = serde_json::from_str(&get_column::<String>(row, "tool_names")?)
+        .map_err(|e| DbError::QueryFailed {
+        reason: format!("failed to parse tool_names: {e}"),
+    })?;
     let temperature: Option<f32> =
         get_column::<Option<i64>>(row, "temperature")?.map(|t| t as f32 / 100.0);
     let provider_id: Option<i64> = get_column(row, "provider_id")?;

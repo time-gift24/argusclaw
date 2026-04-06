@@ -7,10 +7,10 @@ pub mod events;
 pub mod sessions;
 pub mod threads;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 
-use crate::auth::session::SESSION_COOKIE_NAME;
+use crate::auth::routes::extract_user_id;
 use crate::state::AppState;
 use argus_session::UserPrincipal;
 
@@ -28,18 +28,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/agents", get(list_agents))
         .route("/api/sessions", get(list_sessions).post(create_session))
-        .route(
-            "/api/sessions/{session_id}/threads",
-            get(list_threads),
-        )
-        .route(
-            "/api/threads/{thread_id}/messages",
-            post(send_message),
-        )
-        .route(
-            "/api/threads/{thread_id}/events",
-            get(stream_events),
-        )
+        .route("/api/sessions/{session_id}/threads", get(list_threads))
+        .route("/api/threads/{thread_id}/messages", post(send_message))
+        .route("/api/threads/{thread_id}/events", get(stream_events))
 }
 
 /// Extract a `UserPrincipal` from the session cookie in request headers.
@@ -56,19 +47,4 @@ pub async fn extract_user_principal(
         account: user.account,
         display_name: user.display_name,
     })
-}
-
-/// Extract the user ID from the session cookie in request headers.
-fn extract_user_id(
-    headers: &axum::http::HeaderMap,
-    session: &crate::auth::session::AuthSession,
-) -> Option<i64> {
-    let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    for cookie in cookie_header.split(';') {
-        let cookie = cookie.trim();
-        if let Some(value) = cookie.strip_prefix(&format!("{SESSION_COOKIE_NAME}=")) {
-            return session.verify_session(value);
-        }
-    }
-    None
 }

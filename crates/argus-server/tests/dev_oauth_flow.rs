@@ -1,41 +1,36 @@
 //! Integration tests for the dev OAuth2 flow.
-//!
-//! Covers:
-//! - GET /auth/login redirects to the dev authorize route
-//! - Authorize form submission leads to callback with code and state
-//! - Callback upserts the user and establishes a cookie session
-//! - GET /api/me returns the authenticated user
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use argus_protocol::UserRecord;
-use argus_repository::{UserRepository, DbError};
+use argus_protocol::{SessionId, ThreadEvent, ThreadId, UserRecord};
+use argus_repository::{DbError, UserRepository};
 use argus_server::auth::dev_oauth::DevOAuth2Provider;
 use argus_server::auth::provider::OAuth2AuthProvider;
 use argus_server::auth::session::AuthSession;
 use argus_server::config::ServerConfig;
 use argus_server::state::AppState;
-
+use argus_session::{SessionSummary, ThreadSummary, UserChatApi, UserChatError, UserPrincipal};
+use async_trait::async_trait;
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use axum::Router;
 use http_body_util::BodyExt;
+use tokio::sync::broadcast;
 use tower::ServiceExt;
 
-/// In-memory user repository for testing.
 struct InMemoryUserRepo {
-    users: std::sync::Mutex<Vec<UserRecord>>,
+    users: Mutex<Vec<UserRecord>>,
 }
 
 impl InMemoryUserRepo {
     fn new() -> Self {
         Self {
-            users: std::sync::Mutex::new(Vec::new()),
+            users: Mutex::new(Vec::new()),
         }
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl UserRepository for InMemoryUserRepo {
     async fn upsert_from_oauth2(
         &self,
@@ -44,291 +39,361 @@ impl UserRepository for InMemoryUserRepo {
         let mut users = self.users.lock().map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
-        // Check existing
-        for user in users.iter_mut() {
-            if user.external_subject == identity.external_subject {
-                user.account = identity.account.clone();
-                user.display_name = identity.display_name.clone();
-                return Ok(user.clone());
-            }
+
+        if let Some(user) = users
+            .iter_mut()
+            .find(|user| user.external_subject == identity.external_subject)
+        {
+            user.account = identity.account.clone();
+            user.display_name = identity.display_name.clone();
+            return Ok(user.clone());
         }
-        // Insert new
-        let record = UserRecord {
-            id: (users.len() as i64) + 1,
+
+        let user = UserRecord {
+            id: users.len() as i64 + 1,
             external_subject: identity.external_subject.clone(),
             account: identity.account.clone(),
             display_name: identity.display_name.clone(),
         };
-        users.push(record.clone());
-        Ok(record)
+        users.push(user.clone());
+        Ok(user)
     }
 
     async fn get_by_id(&self, id: i64) -> Result<Option<UserRecord>, DbError> {
         let users = self.users.lock().map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
         })?;
-        Ok(users.iter().find(|u| u.id == id).cloned())
+        Ok(users.iter().find(|user| user.id == id).cloned())
     }
 }
 
-fn test_app() -> Router {
-    let config = ServerConfig::default();
-    let auth_provider = Arc::new(DevOAuth2Provider::new()) as Arc<dyn OAuth2AuthProvider>;
-    let user_repo = Arc::new(InMemoryUserRepo::new()) as Arc<dyn UserRepository>;
-    let auth_session = Arc::new(AuthSession::new("test-secret-key-for-dev-only"));
-    let state = AppState {
-        config: Arc::new(config),
-        auth_provider,
-        user_repo,
-        auth_session,
-        chat_services: None,
-    };
-    argus_server::auth::routes::router().with_state(state)
+struct DummyChatService;
+
+#[async_trait]
+impl UserChatApi for DummyChatService {
+    async fn list_enabled_agents(&self) -> Vec<argus_protocol::AgentRecord> {
+        Vec::new()
+    }
+
+    async fn create_session(
+        &self,
+        _user: &UserPrincipal,
+        _name: &str,
+    ) -> Result<SessionId, UserChatError> {
+        Err(UserChatError::NotFound)
+    }
+
+    async fn list_sessions(
+        &self,
+        _user: &UserPrincipal,
+    ) -> Result<Vec<SessionSummary>, UserChatError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_threads(
+        &self,
+        _user: &UserPrincipal,
+        _session_id: SessionId,
+    ) -> Result<Vec<ThreadSummary>, UserChatError> {
+        Ok(Vec::new())
+    }
+
+    async fn send_message(
+        &self,
+        _user: &UserPrincipal,
+        _session_id: SessionId,
+        _thread_id: ThreadId,
+        _message: String,
+    ) -> Result<(), UserChatError> {
+        Err(UserChatError::NotFound)
+    }
+
+    async fn subscribe(
+        &self,
+        _user: &UserPrincipal,
+        _session_id: SessionId,
+        _thread_id: ThreadId,
+    ) -> Result<broadcast::Receiver<ThreadEvent>, UserChatError> {
+        Err(UserChatError::NotFound)
+    }
 }
 
-/// Helper to build a POST body as Bytes to avoid type inference issues.
-fn form_body(s: &str) -> axum::body::Body {
-    Body::from(s.to_string())
+fn app() -> Router {
+    let mut config = ServerConfig::default();
+    config.secure_cookies = false;
+
+    let state = AppState {
+        config: Arc::new(config),
+        auth_provider: Arc::new(DevOAuth2Provider::new()) as Arc<dyn OAuth2AuthProvider>,
+        user_repo: Arc::new(InMemoryUserRepo::new()) as Arc<dyn UserRepository>,
+        auth_session: Arc::new(AuthSession::new("test-secret")),
+        chat_services: Arc::new(DummyChatService) as Arc<dyn UserChatApi>,
+    };
+
+    argus_server::build_router(state)
+}
+
+fn oauth_state_cookie(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .find_map(|value| {
+            let cookie = value.to_str().ok()?;
+            cookie
+                .split(';')
+                .find(|part| part.trim().starts_with("argus_oauth_state="))
+                .map(|part| part.trim().to_string())
+        })
+        .unwrap()
 }
 
 #[tokio::test]
-async fn auth_login_redirects_to_dev_authorize() {
-    let app = test_app();
-
-    let response = app
+async fn auth_login_redirects_to_dev_authorize_and_sets_state_cookie() {
+    let response = app()
         .oneshot(
             Request::builder()
                 .uri("/auth/login")
                 .body(Body::empty())
-                .expect("build request"),
+                .unwrap(),
         )
         .await
-        .expect("send request");
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
     let location = response
         .headers()
         .get(header::LOCATION)
-        .expect("location header")
+        .unwrap()
         .to_str()
-        .expect("location as str");
-    assert!(
-        location.contains("/dev-oauth/authorize"),
-        "expected redirect to /dev-oauth/authorize, got: {location}"
-    );
-    assert!(
-        location.contains("state="),
-        "expected state parameter in redirect, got: {location}"
-    );
+        .unwrap();
+    assert!(location.contains("/dev-oauth/authorize"));
+    assert!(location.contains("state="));
+    assert!(oauth_state_cookie(response.headers()).starts_with("argus_oauth_state="));
 }
 
 #[tokio::test]
-async fn dev_authorize_form_returns_html() {
-    let app = test_app();
-
-    let response = app
+async fn callback_rejects_missing_or_mismatched_state_cookie() {
+    let app = app();
+    let login = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri("/dev-oauth/authorize?state=test-state-123")
+                .uri("/auth/login")
                 .body(Body::empty())
-                .expect("build request"),
+                .unwrap(),
         )
         .await
-        .expect("send request");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("collect body").to_bytes();
-    let html = String::from_utf8(body.to_vec()).expect("body as utf8");
-    assert!(html.contains("<form"), "expected HTML form, got: {html}");
-    assert!(
-        html.contains("test-state-123"),
-        "expected state value in form, got: {html}"
-    );
-}
-
-#[tokio::test]
-async fn authorize_submission_redirects_to_callback_with_code_and_state() {
-    let app = test_app();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/dev-oauth/authorize")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(form_body("state=test-state-456&account=testuser@example.com&display_name=TestUser"))
-                .expect("build request"),
-        )
-        .await
-        .expect("send request");
-
-    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-    let location = response
+        .unwrap();
+    let location = login
         .headers()
         .get(header::LOCATION)
-        .expect("location header")
+        .unwrap()
         .to_str()
-        .expect("location as str");
-    assert!(
-        location.contains("/auth/callback?"),
-        "expected redirect to /auth/callback, got: {location}"
-    );
-    assert!(
-        location.contains("code="),
-        "expected code parameter, got: {location}"
-    );
-    assert!(
-        location.contains("state=test-state-456"),
-        "expected state parameter, got: {location}"
-    );
-}
+        .unwrap();
+    let state = location.split("state=").nth(1).unwrap();
 
-#[tokio::test]
-async fn callback_upserts_user_and_sets_session_cookie() {
-    let app = test_app();
-
-    // First, get a valid code by posting the authorize form
-    let response = app
+    let authorize = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/dev-oauth/authorize")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(form_body("state=mystate&account=alice@example.com&display_name=Alice"))
-                .expect("build request"),
+                .body(Body::from(format!(
+                    "state={state}&account=test@example.com&display_name=Test"
+                )))
+                .unwrap(),
         )
         .await
-        .expect("send request");
-
-    let location = response
+        .unwrap();
+    let callback_uri = authorize
         .headers()
         .get(header::LOCATION)
-        .expect("location header")
+        .unwrap()
         .to_str()
-        .expect("location as str");
+        .unwrap();
 
-    // Extract code and state from the callback URL
-    let callback_url = location.trim_start_matches("/auth/callback?");
-    let params: std::collections::HashMap<String, String> = callback_url
-        .split('&')
-        .filter_map(|pair| {
-            let mut kv = pair.splitn(2, '=');
-            let k = kv.next()?;
-            let v = kv.next()?;
-            Some((k.to_string(), v.to_string()))
-        })
-        .collect();
-    let code = params.get("code").expect("code param");
-    let state = params.get("state").expect("state param");
-
-    // Now call the callback
-    let callback_uri = format!("/auth/callback?code={code}&state={state}");
-    let response = app
+    let missing_cookie = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri(&callback_uri)
+                .uri(callback_uri)
                 .body(Body::empty())
-                .expect("build request"),
+                .unwrap(),
         )
         .await
-        .expect("send request");
+        .unwrap();
+    assert_eq!(missing_cookie.status(), StatusCode::UNAUTHORIZED);
 
-    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    let bad_cookie = app
+        .oneshot(
+            Request::builder()
+                .uri(callback_uri)
+                .header(header::COOKIE, "argus_oauth_state=bad")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_cookie.status(), StatusCode::UNAUTHORIZED);
+}
 
-    // Check session cookie
-    let set_cookie = response
+#[tokio::test]
+async fn callback_upserts_user_and_sets_session_cookie() {
+    let app = app();
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/auth/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let state_cookie = oauth_state_cookie(login.headers());
+    let location = login
         .headers()
-        .get(header::SET_COOKIE)
-        .expect("set-cookie header")
+        .get(header::LOCATION)
+        .unwrap()
         .to_str()
-        .expect("cookie as str");
+        .unwrap();
+    let state = location.split("state=").nth(1).unwrap();
+
+    let authorize = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dev-oauth/authorize")
+                .header(header::COOKIE, &state_cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "state={state}&account=alice@example.com&display_name=Alice"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let callback_uri = authorize
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+
+    let callback = app
+        .oneshot(
+            Request::builder()
+                .uri(callback_uri)
+                .header(header::COOKIE, &state_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(callback.status(), StatusCode::TEMPORARY_REDIRECT);
+
+    let cookies: Vec<String> = callback
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|value| value.to_str().unwrap().to_string())
+        .collect();
     assert!(
-        set_cookie.contains("argus_session"),
-        "expected argus_session cookie, got: {set_cookie}"
+        cookies
+            .iter()
+            .any(|cookie| cookie.contains("argus_session="))
+    );
+    assert!(
+        cookies
+            .iter()
+            .any(|cookie| cookie.contains("argus_oauth_state="))
     );
 }
 
 #[tokio::test]
 async fn api_me_returns_authenticated_user() {
-    let app = test_app();
+    let app = app();
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/auth/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let state_cookie = oauth_state_cookie(login.headers());
+    let location = login
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let state = location.split("state=").nth(1).unwrap();
 
-    // Complete the full login flow to get a session cookie
-    let response = app
+    let authorize = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/dev-oauth/authorize")
+                .header(header::COOKIE, &state_cookie)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(form_body("state=me-state&account=bob@example.com&display_name=Bob"))
-                .expect("build request"),
+                .body(Body::from(format!(
+                    "state={state}&account=bob@example.com&display_name=Bob"
+                )))
+                .unwrap(),
         )
         .await
-        .expect("send request");
-
-    let location = response
+        .unwrap();
+    let callback_uri = authorize
         .headers()
         .get(header::LOCATION)
-        .expect("location header")
+        .unwrap()
         .to_str()
-        .expect("location as str");
+        .unwrap();
 
-    let callback_url = location.trim_start_matches("/auth/callback?");
-    let params: std::collections::HashMap<String, String> = callback_url
-        .split('&')
-        .filter_map(|pair| {
-            let mut kv = pair.splitn(2, '=');
-            let k = kv.next()?;
-            let v = kv.next()?;
-            Some((k.to_string(), v.to_string()))
-        })
-        .collect();
-    let code = params.get("code").expect("code param");
-    let state = params.get("state").expect("state param");
-
-    let callback_uri = format!("/auth/callback?code={code}&state={state}");
-    let response = app
+    let callback = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&callback_uri)
+                .uri(callback_uri)
+                .header(header::COOKIE, &state_cookie)
                 .body(Body::empty())
-                .expect("build request"),
+                .unwrap(),
         )
         .await
-        .expect("send request");
-
-    let set_cookie = response
+        .unwrap();
+    let session_cookie = callback
         .headers()
-        .get(header::SET_COOKIE)
-        .expect("set-cookie header")
-        .to_str()
-        .expect("cookie as str");
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .find_map(|value| {
+            let cookie = value.to_str().ok()?;
+            cookie
+                .split(';')
+                .find(|part| part.trim().starts_with("argus_session="))
+                .map(|part| part.trim().to_string())
+        })
+        .unwrap();
 
-    // Extract the cookie value (argus_session=...)
-    let cookie_value = set_cookie
-        .split(';')
-        .find(|s| s.trim().starts_with("argus_session="))
-        .expect("find session cookie")
-        .trim();
-
-    // Use the cookie to access /api/me
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/me")
-                .header(header::COOKIE, cookie_value)
+                .header(header::COOKIE, session_cookie)
                 .body(Body::empty())
-                .expect("build request"),
+                .unwrap(),
         )
         .await
-        .expect("send request");
+        .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("collect body").to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).expect("parse json response");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["account"], "bob@example.com");
     assert_eq!(json["display_name"], "Bob");
 }

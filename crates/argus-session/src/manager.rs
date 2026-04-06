@@ -9,8 +9,8 @@ use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogSt
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
-    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId, Result,
-    SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver,
+    ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -2463,5 +2463,4 @@ mod tests {
             "unexpected scheduler error: {error}"
         );
     }
-
 }

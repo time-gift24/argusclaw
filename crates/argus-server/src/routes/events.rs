@@ -29,10 +29,6 @@ pub async fn stream_events(
         None => return ApiError::Unauthorized.into_response(),
     };
 
-    let Some(chat) = &state.chat_services else {
-        return ApiError::Internal("chat services not configured".to_string()).into_response();
-    };
-
     let session_id = match argus_protocol::SessionId::parse(&query.session_id) {
         Ok(id) => id,
         Err(_) => return ApiError::BadRequest("invalid session id".to_string()).into_response(),
@@ -43,25 +39,26 @@ pub async fn stream_events(
         Err(_) => return ApiError::BadRequest("invalid thread id".to_string()).into_response(),
     };
 
-    let receiver = match chat.subscribe(&principal, session_id, thread_id).await {
-        Some(rx) => rx,
-        None => return ApiError::NotFound("thread not found or access denied".to_string()).into_response(),
+    let receiver = match state
+        .chat_services
+        .subscribe(&principal, session_id, thread_id)
+        .await
+    {
+        Ok(rx) => rx,
+        Err(error) => return ApiError::from(error).into_response(),
     };
 
     let stream = tokio_stream::wrappers::BroadcastStream::new(receiver);
-    let event_stream = stream.filter_map(|result| {
-        match result {
-            Ok(event) => {
-                let data = serde_json::to_string(&event).unwrap_or_default();
-                Some(Ok::<_, Infallible>(Event::default().data(data)))
-            }
-            Err(_) => None,
+    let event_stream = stream.filter_map(|result| match result {
+        Ok(event) => {
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            Some(Ok::<_, Infallible>(Event::default().data(data)))
         }
+        Err(_) => None,
     });
 
     let sse = Sse::new(event_stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(std::time::Duration::from_secs(30)),
+        axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(30)),
     );
 
     sse.into_response()

@@ -31,3 +31,28 @@ pub trait SessionRepository: Send + Sync {
     /// Delete a session (caller is responsible for deleting threads first).
     async fn delete(&self, id: &SessionId) -> Result<bool, DbError>;
 }
+
+/// Repository trait for user-owned session persistence in the server product.
+#[async_trait]
+pub trait UserSessionRepository: Send + Sync {
+    /// Create a session owned by the given user.
+    async fn create_for_user(
+        &self,
+        id: &SessionId,
+        name: &str,
+        owner_user_id: i64,
+    ) -> Result<(), DbError>;
+
+    /// List sessions owned by the given user with thread counts.
+    async fn list_with_counts_for_user(
+        &self,
+        owner_user_id: i64,
+    ) -> Result<Vec<SessionWithCount>, DbError>;
+
+    /// Check whether the given user owns the given session.
+    async fn user_owns_session(
+        &self,
+        owner_user_id: i64,
+        session_id: &SessionId,
+    ) -> Result<bool, DbError>;
+}

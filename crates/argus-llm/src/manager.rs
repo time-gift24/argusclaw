@@ -268,7 +268,9 @@ impl ProviderManager {
         model: &str,
     ) -> Result<Arc<dyn LlmProvider>> {
         if record.meta_data.get("provider_token_source") == Some(&"true".to_string()) {
-            return self.build_credential_token_llm_provider(record, model).await;
+            return self
+                .build_credential_token_llm_provider(record, model)
+                .await;
         }
         if record.meta_data.get("account_token_source") == Some(&"true".to_string()) {
             return self.build_account_token_llm_provider(record, model).await;

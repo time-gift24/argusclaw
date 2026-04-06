@@ -7,11 +7,11 @@
 use async_trait::async_trait;
 use sqlx::Row;
 
+use argus_protocol::ArgusError;
 use argus_protocol::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderKindParseError, LlmProviderRecord,
     LlmProviderRepository, ModelConfig, ProviderSecretStatus, SecretString,
 };
-use argus_protocol::ArgusError;
 
 use crate::error::DbError;
 
@@ -166,14 +166,13 @@ impl LlmProviderRepository for ArgusPostgres {
             reason: e.to_string(),
         })?;
 
-        let exists: i64 =
-            sqlx::query_scalar("SELECT COUNT(1) FROM llm_providers WHERE id = $1")
-                .bind(id.into_inner())
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| DbError::QueryFailed {
-                    reason: e.to_string(),
-                })?;
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(1) FROM llm_providers WHERE id = $1")
+            .bind(id.into_inner())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         if exists == 0 {
             return Err(DbError::NotFound {
@@ -191,15 +190,13 @@ impl LlmProviderRepository for ArgusPostgres {
             reason: e.to_string(),
         })?;
 
-        sqlx::query(
-            "UPDATE llm_providers SET is_default = TRUE, updated_at = NOW() WHERE id = $1",
-        )
-        .bind(id.into_inner())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+        sqlx::query("UPDATE llm_providers SET is_default = TRUE, updated_at = NOW() WHERE id = $1")
+            .bind(id.into_inner())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         tx.commit().await.map_err(|e| DbError::QueryFailed {
             reason: e.to_string(),
@@ -280,14 +277,13 @@ where
 
 fn map_llm_record(row: &sqlx::postgres::PgRow) -> Result<LlmProviderRecord, ArgusError> {
     let _ = map_err; // suppress unused warning
-    let extra_headers: std::collections::HashMap<String, String> = serde_json::from_str(
-        &get_column::<String>(row, "extra_headers").map_err(map_err)?,
-    )
-    .map_err(|e| {
-        ArgusError::from(DbError::QueryFailed {
-            reason: format!("failed to parse extra_headers: {e}"),
-        })
-    })?;
+    let extra_headers: std::collections::HashMap<String, String> =
+        serde_json::from_str(&get_column::<String>(row, "extra_headers").map_err(map_err)?)
+            .map_err(|e| {
+                ArgusError::from(DbError::QueryFailed {
+                    reason: format!("failed to parse extra_headers: {e}"),
+                })
+            })?;
     let meta_data: std::collections::HashMap<String, String> = serde_json::from_str(
         &get_column::<String>(row, "meta_data").map_err(map_err)?,
     )
@@ -296,60 +292,54 @@ fn map_llm_record(row: &sqlx::postgres::PgRow) -> Result<LlmProviderRecord, Argu
             reason: format!("failed to parse meta_data: {e}"),
         })
     })?;
-    let model_config: std::collections::HashMap<String, ModelConfig> = serde_json::from_str(
-        &get_column::<String>(row, "model_config").map_err(map_err)?,
-    )
-    .map_err(|e| {
-        ArgusError::from(DbError::QueryFailed {
-            reason: format!("failed to parse model_config: {e}"),
-        })
-    })?;
+    let model_config: std::collections::HashMap<String, ModelConfig> =
+        serde_json::from_str(&get_column::<String>(row, "model_config").map_err(map_err)?)
+            .map_err(|e| {
+                ArgusError::from(DbError::QueryFailed {
+                    reason: format!("failed to parse model_config: {e}"),
+                })
+            })?;
 
     let models_raw: String = get_column(row, "models").map_err(map_err)?;
     let models: Vec<String> = match serde_json::from_str::<Vec<String>>(&models_raw) {
         Ok(models) => models,
-        Err(_) => {
-            serde_json::from_str::<Vec<serde_json::Value>>(&models_raw)
-                .map_err(|e| {
-                    ArgusError::from(DbError::QueryFailed {
-                        reason: format!("failed to parse models: {e}"),
-                    })
-                })?
-                .into_iter()
-                .map(|v| {
-                    v.get("id")
-                        .or_else(|| v.get("name"))
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| {
-                            ArgusError::from(DbError::QueryFailed {
-                                reason: format!(
-                                    "invalid model object format, expected 'id' or 'name' field: {}",
-                                    v
-                                ),
-                            })
-                        })
+        Err(_) => serde_json::from_str::<Vec<serde_json::Value>>(&models_raw)
+            .map_err(|e| {
+                ArgusError::from(DbError::QueryFailed {
+                    reason: format!("failed to parse models: {e}"),
                 })
-                .collect::<Result<Vec<String>, ArgusError>>()?
-        }
+            })?
+            .into_iter()
+            .map(|v| {
+                v.get("id")
+                    .or_else(|| v.get("name"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        ArgusError::from(DbError::QueryFailed {
+                            reason: format!(
+                                "invalid model object format, expected 'id' or 'name' field: {}",
+                                v
+                            ),
+                        })
+                    })
+            })
+            .collect::<Result<Vec<String>, ArgusError>>()?,
     };
 
-    let kind: LlmProviderKind =
-        get_column::<String>(row, "kind")
-            .map_err(map_err)?
-            .parse()
-            .map_err(|e: LlmProviderKindParseError| {
-                ArgusError::from(DbError::InvalidProviderKind {
-                    kind: e.to_string(),
-                })
-            })?;
+    let kind: LlmProviderKind = get_column::<String>(row, "kind")
+        .map_err(map_err)?
+        .parse()
+        .map_err(|e: LlmProviderKindParseError| {
+            ArgusError::from(DbError::InvalidProviderKind {
+                kind: e.to_string(),
+            })
+        })?;
 
     // For PostgreSQL, the encrypted_api_key is stored as raw bytes.
     // In the server context, we treat the stored bytes as the plaintext API key.
     let api_key_bytes: Vec<u8> = get_column(row, "encrypted_api_key").map_err(map_err)?;
-    let api_key = SecretString::new(
-        String::from_utf8(api_key_bytes).unwrap_or_default(),
-    );
+    let api_key = SecretString::new(String::from_utf8(api_key_bytes).unwrap_or_default());
     // NOTE: from_utf8 may fail on encrypted bytes; unwrap_or_default is
     // intentional because the server stores API keys as UTF-8 plaintext,
     // not encrypted binary. A failed decode means an empty key, which is

@@ -1,15 +1,13 @@
 //! ThreadRepository implementation for PostgreSQL.
 
-use async_trait::async_trait;
-use sqlx::Row;
-
 use crate::error::DbError;
 use crate::traits::ThreadRepository;
 use crate::types::{AgentId, MessageId, MessageRecord, ThreadRecord};
 use argus_protocol::{LlmProviderId, SessionId, ThreadId};
+use async_trait::async_trait;
 
-use super::{ArgusPostgres, DbResult};
 use super::user::get_column;
+use super::{ArgusPostgres, DbResult};
 
 #[async_trait]
 impl ThreadRepository for ArgusPostgres {
@@ -43,7 +41,9 @@ impl ThreadRepository for ArgusPostgres {
         .bind(&thread.updated_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -57,7 +57,9 @@ impl ThreadRepository for ArgusPostgres {
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         row.map(|row| map_thread_record(&row)).transpose()
     }
@@ -71,7 +73,9 @@ impl ThreadRepository for ArgusPostgres {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         rows.iter().map(|row| map_thread_record(row)).collect()
     }
@@ -85,7 +89,9 @@ impl ThreadRepository for ArgusPostgres {
         .bind(session_id.to_string())
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         rows.iter().map(|row| map_thread_record(row)).collect()
     }
@@ -95,7 +101,9 @@ impl ThreadRepository for ArgusPostgres {
             .bind(id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -104,7 +112,9 @@ impl ThreadRepository for ArgusPostgres {
             .bind(session_id.to_string())
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
         Ok(result.rows_affected())
     }
 
@@ -148,7 +158,11 @@ impl ThreadRepository for ArgusPostgres {
         rows.iter().map(|row| map_message_record(row)).collect()
     }
 
-    async fn get_recent_messages(&self, thread_id: &ThreadId, limit: u32) -> DbResult<Vec<MessageRecord>> {
+    async fn get_recent_messages(
+        &self,
+        thread_id: &ThreadId,
+        limit: u32,
+    ) -> DbResult<Vec<MessageRecord>> {
         let rows = sqlx::query(
             "SELECT id, thread_id, seq, role, content, tool_call_id, tool_name, tool_calls, created_at \
              FROM messages WHERE thread_id = $1 ORDER BY seq DESC LIMIT $2",
@@ -159,8 +173,10 @@ impl ThreadRepository for ArgusPostgres {
         .await
         .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
 
-        let mut messages: Vec<MessageRecord> =
-            rows.iter().map(|row| map_message_record(row)).collect::<DbResult<Vec<_>>>()?;
+        let mut messages: Vec<MessageRecord> = rows
+            .iter()
+            .map(|row| map_message_record(row))
+            .collect::<DbResult<Vec<_>>>()?;
         messages.reverse();
         Ok(messages)
     }
@@ -171,11 +187,18 @@ impl ThreadRepository for ArgusPostgres {
             .bind(seq as i64)
             .execute(&self.pool)
             .await
-            .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
         Ok(result.rows_affected())
     }
 
-    async fn update_thread_stats(&self, id: &ThreadId, token_count: u32, turn_count: u32) -> DbResult<()> {
+    async fn update_thread_stats(
+        &self,
+        id: &ThreadId,
+        token_count: u32,
+        turn_count: u32,
+    ) -> DbResult<()> {
         sqlx::query("UPDATE threads SET token_count = $1, turn_count = $2, updated_at = NOW() WHERE id = $3")
             .bind(token_count as i64)
             .bind(turn_count as i64)
@@ -186,7 +209,12 @@ impl ThreadRepository for ArgusPostgres {
         Ok(())
     }
 
-    async fn rename_thread(&self, id: &ThreadId, session_id: &SessionId, title: Option<&str>) -> DbResult<bool> {
+    async fn rename_thread(
+        &self,
+        id: &ThreadId,
+        session_id: &SessionId,
+        title: Option<&str>,
+    ) -> DbResult<bool> {
         let result = sqlx::query(
             "UPDATE threads SET title = $1, updated_at = NOW() WHERE id = $2 AND session_id = $3",
         )
@@ -195,7 +223,9 @@ impl ThreadRepository for ArgusPostgres {
         .bind(session_id.to_string())
         .execute(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -219,7 +249,11 @@ impl ThreadRepository for ArgusPostgres {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn get_thread_in_session(&self, thread_id: &ThreadId, session_id: &SessionId) -> DbResult<Option<ThreadRecord>> {
+    async fn get_thread_in_session(
+        &self,
+        thread_id: &ThreadId,
+        session_id: &SessionId,
+    ) -> DbResult<Option<ThreadRecord>> {
         let row = sqlx::query(
             "SELECT id, provider_id, title, token_count, turn_count, \
                     session_id, template_id, model_override, created_at, updated_at \
@@ -229,7 +263,9 @@ impl ThreadRepository for ArgusPostgres {
         .bind(session_id.to_string())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         row.map(|row| map_thread_record(&row)).transpose()
     }
@@ -242,8 +278,10 @@ fn map_thread_record(row: &sqlx::postgres::PgRow) -> DbResult<ThreadRecord> {
     let template_id = template_id_i64.map(AgentId::new);
 
     Ok(ThreadRecord {
-        id: ThreadId::parse(&get_column::<String>(&row, "id")?).map_err(|e| DbError::QueryFailed {
-            reason: format!("invalid thread id: {e}"),
+        id: ThreadId::parse(&get_column::<String>(&row, "id")?).map_err(|e| {
+            DbError::QueryFailed {
+                reason: format!("invalid thread id: {e}"),
+            }
         })?,
         provider_id: LlmProviderId::new(get_column(&row, "provider_id")?),
         title: get_column(&row, "title")?,

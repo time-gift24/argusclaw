@@ -1,19 +1,12 @@
-//! HTTP error mapping for the chat API.
-//!
-//! Converts service-layer errors into consistent HTTP responses.
+//! HTTP error mapping for the server API.
 
 use axum::response::IntoResponse;
 
-/// API error type that maps to HTTP status codes.
 #[derive(Debug)]
 pub enum ApiError {
-    /// The request lacks valid authentication.
     Unauthorized,
-    /// The requested resource was not found or access denied.
-    NotFound(String),
-    /// The request was malformed.
+    NotFound,
     BadRequest(String),
-    /// An internal server error occurred.
     Internal(String),
 }
 
@@ -23,12 +16,10 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized => {
                 (axum::http::StatusCode::UNAUTHORIZED, "not authenticated").into_response()
             }
-            ApiError::NotFound(msg) => {
-                (axum::http::StatusCode::NOT_FOUND, msg).into_response()
+            ApiError::NotFound => {
+                (axum::http::StatusCode::NOT_FOUND, "resource not found").into_response()
             }
-            ApiError::BadRequest(msg) => {
-                (axum::http::StatusCode::BAD_REQUEST, msg).into_response()
-            }
+            ApiError::BadRequest(msg) => (axum::http::StatusCode::BAD_REQUEST, msg).into_response(),
             ApiError::Internal(msg) => {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             }
@@ -36,15 +27,12 @@ impl IntoResponse for ApiError {
     }
 }
 
-impl From<argus_protocol::ArgusError> for ApiError {
-    fn from(err: argus_protocol::ArgusError) -> Self {
-        match &err {
-            argus_protocol::ArgusError::SessionNotFound(_)
-            | argus_protocol::ArgusError::ThreadNotFound(_)
-            | argus_protocol::ArgusError::TemplateNotFound(_) => {
-                ApiError::NotFound(err.to_string())
-            }
-            _ => ApiError::Internal(err.to_string()),
+impl From<argus_session::UserChatError> for ApiError {
+    fn from(error: argus_session::UserChatError) -> Self {
+        match error {
+            argus_session::UserChatError::NotFound
+            | argus_session::UserChatError::AgentNotEnabled => Self::NotFound,
+            argus_session::UserChatError::Internal { reason } => Self::Internal(reason),
         }
     }
 }

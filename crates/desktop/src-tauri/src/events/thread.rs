@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::{
-    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadNoticeLevel, ThreadPoolEventReason, ThreadPoolRuntimeRef,
-    ThreadPoolSnapshot,
+    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadNoticeLevel, ThreadPoolEventReason,
+    ThreadPoolRuntimeRef, ThreadPoolSnapshot,
 };
 
 /// Envelope for thread events sent to the frontend.

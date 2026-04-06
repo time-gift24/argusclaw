@@ -1,15 +1,13 @@
 //! SessionRepository implementation for PostgreSQL with owner-aware queries.
 
-use async_trait::async_trait;
-use sqlx::Row;
-
 use crate::error::DbError;
-use crate::traits::{SessionRepository, SessionWithCount};
+use crate::traits::{SessionRepository, SessionWithCount, UserSessionRepository};
 use crate::types::SessionRecord;
 use argus_protocol::SessionId;
+use async_trait::async_trait;
 
-use super::{ArgusPostgres, DbResult};
 use super::user::get_column;
+use super::{ArgusPostgres, DbResult};
 
 #[async_trait]
 impl SessionRepository for ArgusPostgres {
@@ -29,15 +27,14 @@ impl SessionRepository for ArgusPostgres {
     }
 
     async fn get(&self, id: &SessionId) -> DbResult<Option<SessionRecord>> {
-        let row = sqlx::query(
-            "SELECT id, name, created_at, updated_at FROM sessions WHERE id = $1",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+        let row =
+            sqlx::query("SELECT id, name, created_at, updated_at FROM sessions WHERE id = $1")
+                .bind(id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| DbError::QueryFailed {
+                    reason: e.to_string(),
+                })?;
 
         row.map(|row| map_session_record(&row)).transpose()
     }
@@ -59,16 +56,14 @@ impl SessionRepository for ArgusPostgres {
     }
 
     async fn rename(&self, id: &SessionId, name: &str) -> DbResult<bool> {
-        let result = sqlx::query(
-            "UPDATE sessions SET name = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(name)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DbError::QueryFailed {
-            reason: e.to_string(),
-        })?;
+        let result = sqlx::query("UPDATE sessions SET name = $1, updated_at = NOW() WHERE id = $2")
+            .bind(name)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -83,6 +78,44 @@ impl SessionRepository for ArgusPostgres {
             })?;
 
         Ok(result.rows_affected() > 0)
+    }
+}
+
+#[async_trait]
+impl UserSessionRepository for ArgusPostgres {
+    async fn create_for_user(
+        &self,
+        id: &SessionId,
+        name: &str,
+        owner_user_id: i64,
+    ) -> DbResult<()> {
+        self.create_session_for_user(id, name, owner_user_id).await
+    }
+
+    async fn list_with_counts_for_user(
+        &self,
+        owner_user_id: i64,
+    ) -> DbResult<Vec<SessionWithCount>> {
+        self.list_sessions_for_user(owner_user_id).await
+    }
+
+    async fn user_owns_session(
+        &self,
+        owner_user_id: i64,
+        session_id: &SessionId,
+    ) -> DbResult<bool> {
+        let owns: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM sessions WHERE id = $1 AND owner_user_id = $2 LIMIT 1",
+        )
+        .bind(session_id.to_string())
+        .bind(owner_user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
+
+        Ok(owns.is_some())
     }
 }
 
@@ -134,8 +167,10 @@ impl ArgusPostgres {
 
 fn map_session_record(row: &sqlx::postgres::PgRow) -> DbResult<SessionRecord> {
     Ok(SessionRecord {
-        id: SessionId::parse(&get_column::<String>(&row, "id")?).map_err(|e| DbError::QueryFailed {
-            reason: format!("invalid session id: {e}"),
+        id: SessionId::parse(&get_column::<String>(&row, "id")?).map_err(|e| {
+            DbError::QueryFailed {
+                reason: format!("invalid session id: {e}"),
+            }
         })?,
         name: get_column(&row, "name")?,
         created_at: get_column(&row, "created_at")?,

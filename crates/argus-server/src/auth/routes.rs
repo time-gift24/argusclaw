@@ -1,31 +1,21 @@
 //! Auth-related HTTP routes.
-//!
-//! Routes:
-//! - GET  /auth/login          -> redirect to dev authorize page
-//! - GET  /dev-oauth/authorize -> render test account form
-//! - POST /dev-oauth/authorize -> issue code, redirect to callback
-//! - GET  /auth/callback       -> exchange code, upsert user, set cookie
-//! - POST /auth/logout         -> clear cookie
-//! - GET  /api/me              -> return authenticated user JSON
 
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use serde::Deserialize;
 
 use super::dev_oauth::DevOAuth2Provider;
-use super::session::{AuthSession, SESSION_COOKIE_NAME};
+use super::session::{AuthSession, OAUTH_STATE_COOKIE_NAME, SESSION_COOKIE_NAME};
 use crate::state::AppState;
 
-/// Query parameters for GET /dev-oauth/authorize.
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeParams {
     state: String,
 }
 
-/// Form data for POST /dev-oauth/authorize.
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeForm {
     state: String,
@@ -33,42 +23,49 @@ pub struct AuthorizeForm {
     display_name: String,
 }
 
-/// Query parameters for GET /auth/callback.
 #[derive(Debug, Deserialize)]
 pub struct CallbackParams {
     code: String,
-    /// CSRF state from the authorize flow. Validated in production providers.
-    #[allow(dead_code)]
     state: String,
 }
 
-/// Build the auth + API routes router.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/auth/login", get(login_handler))
-        .route("/dev-oauth/authorize", get(authorize_form_handler).post(authorize_submit_handler))
+        .route(
+            "/dev-oauth/authorize",
+            get(authorize_form_handler).post(authorize_submit_handler),
+        )
         .route("/auth/callback", get(callback_handler))
         .route("/auth/logout", post(logout_handler))
         .route("/api/me", get(me_handler))
 }
 
-/// GET /auth/login -- redirect to the dev authorize page with a CSRF state.
-async fn login_handler(
-    State(state): State<AppState>,
-) -> Result<Redirect, StatusCode> {
+async fn login_handler(State(state): State<AppState>) -> Result<Response, StatusCode> {
     let csrf_state = uuid::Uuid::now_v7().to_string();
     let url = state
         .auth_provider
         .authorize_url(&csrf_state, "/auth/callback".to_string())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Redirect::temporary(&url))
+
+    let mut response = Redirect::temporary(&url).into_response();
+    let signed_state = state.auth_session.sign_value(&csrf_state);
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        build_cookie(
+            OAUTH_STATE_COOKIE_NAME,
+            &signed_state,
+            &state.config,
+            Some(300),
+        )
+        .parse()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    Ok(response)
 }
 
-/// GET /dev-oauth/authorize -- render a simple HTML form for test accounts.
-async fn authorize_form_handler(
-    Query(params): Query<AuthorizeParams>,
-) -> Html<String> {
+async fn authorize_form_handler(Query(params): Query<AuthorizeParams>) -> Html<String> {
     let html = format!(
         r#"<!DOCTYPE html>
 <html><head><title>Dev OAuth2 Authorize</title></head>
@@ -86,7 +83,6 @@ async fn authorize_form_handler(
     Html(html)
 }
 
-/// POST /dev-oauth/authorize -- generate a code, redirect to callback.
 async fn authorize_submit_handler(
     State(state): State<AppState>,
     axum::Form(form): axum::Form<AuthorizeForm>,
@@ -108,11 +104,14 @@ async fn authorize_submit_handler(
     Ok(Redirect::temporary(&callback_url))
 }
 
-/// GET /auth/callback -- exchange code, upsert user, set session cookie.
 async fn callback_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<CallbackParams>,
 ) -> Result<Response, StatusCode> {
+    validate_oauth_state(&headers, &state.auth_session, &params.state)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
     let identity = state
         .auth_provider
         .exchange_code(&params.code, "/auth/callback".to_string())
@@ -126,35 +125,38 @@ async fn callback_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let cookie_value = state.auth_session.create_session(user.id);
-
-    let response = Redirect::temporary("/");
-    let mut response = response.into_response();
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}={cookie_value}; Path=/; HttpOnly; SameSite=Lax"
+    let mut response = Redirect::temporary("/").into_response();
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        build_cookie(SESSION_COOKIE_NAME, &cookie_value, &state.config, None)
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
-    response
-        .headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?);
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        clear_cookie(OAUTH_STATE_COOKIE_NAME, &state.config)
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
     Ok(response)
 }
 
-/// POST /auth/logout -- clear the session cookie.
-async fn logout_handler() -> Response {
+async fn logout_handler(State(state): State<AppState>) -> Response {
     let mut response = Redirect::temporary("/").into_response();
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+    let session_cookie = clear_cookie(SESSION_COOKIE_NAME, &state.config);
+    let state_cookie = clear_cookie(OAUTH_STATE_COOKIE_NAME, &state.config);
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        session_cookie.parse().unwrap(),
     );
-    response
-        .headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        state_cookie.parse().unwrap(),
+    );
     response
 }
 
-/// GET /api/me -- return the authenticated user.
-async fn me_handler(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Response {
+async fn me_handler(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let user_id = extract_user_id(&headers, &state.auth_session);
     let Some(user_id) = user_id else {
         return (StatusCode::UNAUTHORIZED, "not authenticated").into_response();
@@ -169,20 +171,57 @@ async fn me_handler(
             });
             (StatusCode::OK, axum::Json(body)).into_response()
         }
-        Ok(None) => (StatusCode::UNAUTHORIZED, "user not found").into_response(),
+        Ok(None) => (StatusCode::UNAUTHORIZED, "not authenticated").into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
     }
 }
 
-/// Extract the user ID from the session cookie in request headers.
-fn extract_user_id(headers: &axum::http::HeaderMap, session: &AuthSession) -> Option<i64> {
+pub fn extract_user_id(headers: &axum::http::HeaderMap, session: &AuthSession) -> Option<i64> {
+    let cookie_value = extract_cookie_value(headers, SESSION_COOKIE_NAME)?;
+    session.verify_session(&cookie_value)
+}
+
+fn validate_oauth_state(
+    headers: &axum::http::HeaderMap,
+    session: &AuthSession,
+    callback_state: &str,
+) -> Result<(), ()> {
+    let cookie_value = extract_cookie_value(headers, OAUTH_STATE_COOKIE_NAME).ok_or(())?;
+    let stored_state = session.verify_value(&cookie_value).ok_or(())?;
+    if stored_state == callback_state {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+pub fn extract_cookie_value(headers: &axum::http::HeaderMap, cookie_name: &str) -> Option<String> {
     let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    // Parse cookies manually -- simple key=value pairs
     for cookie in cookie_header.split(';') {
         let cookie = cookie.trim();
-        if let Some(value) = cookie.strip_prefix(&format!("{SESSION_COOKIE_NAME}=")) {
-            return session.verify_session(value);
+        if let Some(value) = cookie.strip_prefix(&format!("{cookie_name}=")) {
+            return Some(value.to_string());
         }
     }
     None
+}
+
+fn build_cookie(
+    name: &str,
+    value: &str,
+    config: &crate::config::ServerConfig,
+    max_age_secs: Option<u32>,
+) -> String {
+    let mut cookie = format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax");
+    if config.secure_cookies {
+        cookie.push_str("; Secure");
+    }
+    if let Some(max_age_secs) = max_age_secs {
+        cookie.push_str(&format!("; Max-Age={max_age_secs}"));
+    }
+    cookie
+}
+
+fn clear_cookie(name: &str, config: &crate::config::ServerConfig) -> String {
+    build_cookie(name, "", config, Some(0))
 }

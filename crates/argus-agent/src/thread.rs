@@ -11,8 +11,9 @@ use crate::turn::{self, TurnCancellation};
 use argus_protocol::llm::{ChatMessage, LlmProvider};
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
-    AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, QueuedUserMessage, SessionId,
-    ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox, ThreadNoticeLevel, TokenUsage,
+    AgentRecord, HookHandler, HookRegistry, McpToolResolver, MessageOverride, QueuedUserMessage,
+    SessionId, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadId, ThreadMailbox,
+    ThreadNoticeLevel, TokenUsage,
 };
 use argus_tool::ToolManager;
 
@@ -1106,7 +1107,11 @@ impl Thread {
         }
     }
 
-    fn build_turn_execution_parts(&self, agent_record: Arc<AgentRecord>, mcp_tools: Vec<Arc<dyn NamedTool>>) -> TurnExecutionParts {
+    fn build_turn_execution_parts(
+        &self,
+        agent_record: Arc<AgentRecord>,
+        mcp_tools: Vec<Arc<dyn NamedTool>>,
+    ) -> TurnExecutionParts {
         let provider = self.provider.clone();
         (
             self.id.to_string(),
@@ -1120,7 +1125,11 @@ impl Thread {
         )
     }
 
-    fn build_shared_turn_tools(&self, agent_record: &AgentRecord, mcp_tools: Vec<Arc<dyn NamedTool>>) -> Vec<Arc<dyn NamedTool>> {
+    fn build_shared_turn_tools(
+        &self,
+        agent_record: &AgentRecord,
+        mcp_tools: Vec<Arc<dyn NamedTool>>,
+    ) -> Vec<Arc<dyn NamedTool>> {
         let enabled_tool_names = agent_record
             .tool_names
             .iter()
@@ -1177,8 +1186,8 @@ mod tests {
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
     use argus_protocol::{
         AgentId, AgentType, McpToolResolver, McpUnavailableServerSummary, ProviderId,
-        ResolvedMcpTools, ThreadCommand, ThreadNoticeLevel, ToolDefinition,
-        ToolError, ToolExecutionContext,
+        ResolvedMcpTools, ThreadCommand, ThreadNoticeLevel, ToolDefinition, ToolError,
+        ToolExecutionContext,
     };
     use async_trait::async_trait;
     use rust_decimal::Decimal;

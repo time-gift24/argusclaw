@@ -2217,7 +2217,11 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let compactor = Arc::new(RecordingTurnCompactor {
             calls: Arc::clone(&calls),
-            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None), Ok(None)]))),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![
+                Ok(None),
+                Ok(None),
+                Ok(None),
+            ]))),
         });
         let turn = make_turn_with(
             provider,

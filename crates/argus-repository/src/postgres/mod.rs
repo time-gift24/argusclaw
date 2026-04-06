@@ -4,7 +4,9 @@
 //! session/thread/job queries alongside the existing SQLite desktop product.
 
 mod agent;
+mod job;
 mod llm_provider;
+mod mcp;
 mod provider_token_credential;
 mod session;
 mod thread;

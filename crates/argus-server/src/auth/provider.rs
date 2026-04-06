@@ -2,8 +2,8 @@
 
 use std::any::Any;
 
-use async_trait::async_trait;
 use argus_protocol::OAuth2Identity;
+use async_trait::async_trait;
 
 use super::AuthError;
 

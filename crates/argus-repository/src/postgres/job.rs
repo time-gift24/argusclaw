@@ -98,10 +98,9 @@ impl JobRepository for ArgusPostgres {
     }
 
     async fn update_result(&self, id: &JobId, result: &JobResult) -> DbResult<()> {
-        let result_json =
-            serde_json::to_string(result).map_err(|e| DbError::QueryFailed {
-                reason: e.to_string(),
-            })?;
+        let result_json = serde_json::to_string(result).map_err(|e| DbError::QueryFailed {
+            reason: e.to_string(),
+        })?;
 
         sqlx::query("UPDATE jobs SET result = $1, updated_at = NOW() WHERE id = $2")
             .bind(&result_json)
@@ -224,17 +223,16 @@ where
 }
 
 fn map_job_record(row: &sqlx::postgres::PgRow) -> DbResult<JobRecord> {
-    let _ = get_column; // suppress unused import warning
     let depends_on: Vec<JobId> =
         serde_json::from_str::<Vec<String>>(&get_column::<String>(row, "depends_on")?)
             .map(|ids| ids.into_iter().map(JobId::new).collect())
             .unwrap_or_default();
-    let thread_id: Option<ThreadId> = get_column::<Option<String>>(row, "thread_id")?
-        .and_then(|s| ThreadId::parse(&s).ok());
+    let thread_id: Option<ThreadId> =
+        get_column::<Option<String>>(row, "thread_id")?.and_then(|s| ThreadId::parse(&s).ok());
     let parent_job_id: Option<JobId> =
         get_column::<Option<String>>(row, "parent_job_id")?.map(|s| JobId::new(&s));
-    let result: Option<JobResult> = get_column::<Option<String>>(row, "result")?
-        .and_then(|s| serde_json::from_str(&s).ok());
+    let result: Option<JobResult> =
+        get_column::<Option<String>>(row, "result")?.and_then(|s| serde_json::from_str(&s).ok());
 
     Ok(JobRecord {
         id: JobId::new(&get_column::<String>(row, "id")?),

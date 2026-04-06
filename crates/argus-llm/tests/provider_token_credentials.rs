@@ -7,15 +7,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use argus_llm::ProviderManager;
+use argus_protocol::ProviderTokenCredential;
+use argus_protocol::ids::ProviderId;
 use argus_protocol::llm::{
     LlmProviderId, LlmProviderKind, LlmProviderRecord, LlmProviderRepository, SecretString,
 };
-use argus_protocol::ProviderTokenCredential;
 use argus_repository::error::DbError;
 use argus_repository::traits::ProviderTokenCredentialRepository;
-use argus_protocol::ids::ProviderId;
 use async_trait::async_trait;
-use argus_llm::ProviderManager;
 
 // --- Mocks ---
 
@@ -49,9 +49,7 @@ impl LlmProviderRepository for MockProviderRepository {
     ) -> Result<Option<LlmProviderRecord>, argus_protocol::ArgusError> {
         Ok(Some(self.record.clone()))
     }
-    async fn list_providers(
-        &self,
-    ) -> Result<Vec<LlmProviderRecord>, argus_protocol::ArgusError> {
+    async fn list_providers(&self) -> Result<Vec<LlmProviderRecord>, argus_protocol::ArgusError> {
         Ok(vec![self.record.clone()])
     }
     async fn get_default_provider(
@@ -78,10 +76,7 @@ impl ProviderTokenCredentialRepository for MockCredentialRepository {
     ) -> Result<Option<ProviderTokenCredential>, DbError> {
         Ok(self.credential.clone())
     }
-    async fn save_credentials(
-        &self,
-        _credential: &ProviderTokenCredential,
-    ) -> Result<(), DbError> {
+    async fn save_credentials(&self, _credential: &ProviderTokenCredential) -> Result<(), DbError> {
         unimplemented!()
     }
 }
@@ -133,7 +128,10 @@ async fn provider_manager_builds_static_key_provider_without_credential_repo() {
     let manager = ProviderManager::new(repo);
 
     let result = manager.build_provider_with_model(record, "gpt-4").await;
-    assert!(result.is_ok(), "static API key should build provider without credential repo");
+    assert!(
+        result.is_ok(),
+        "static API key should build provider without credential repo"
+    );
 }
 
 #[tokio::test]
@@ -183,7 +181,9 @@ async fn account_token_source_still_works_for_desktop_regression() {
     // The old account_token_source metadata key should still be recognized.
     // It should fail gracefully without account_repo, preserving desktop behavior.
     let mut record = make_static_record();
-    record.meta_data.insert("account_token_source".to_string(), "true".to_string());
+    record
+        .meta_data
+        .insert("account_token_source".to_string(), "true".to_string());
 
     let repo = Arc::new(MockProviderRepository {
         record: record.clone(),

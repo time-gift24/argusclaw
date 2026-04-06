@@ -314,13 +314,21 @@ dependencies = [
 name = "argus-server"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "argus-crypto",
+ "argus-job",
+ "argus-llm",
+ "argus-mcp",
  "argus-protocol",
  "argus-repository",
  "argus-session",
+ "argus-template",
+ "argus-tool",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "futures-util",
  "http-body-util",
  "ring",
