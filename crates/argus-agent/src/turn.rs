@@ -980,9 +980,7 @@ async fn execute_loop(
             usage_baseline_total = None;
         }
         match next_action {
-            NextAction::Return | NextAction::ContinueWithTools { .. }
-                if force_text =>
-            {
+            NextAction::Return | NextAction::ContinueWithTools { .. } if force_text => {
                 if matches!(next_action, NextAction::ContinueWithTools { .. }) {
                     tracing::warn!(
                         thread_id = %thread_id,
@@ -2628,10 +2626,12 @@ mod tests {
             .expect("turn should succeed despite LLM returning tool calls under force_text");
 
         assert!(matches!(record.kind, TurnRecordKind::UserTurn));
-        assert!(record
-            .messages
-            .iter()
-            .any(|m| m.content == "my final answer"));
+        assert!(
+            record
+                .messages
+                .iter()
+                .any(|m| m.content == "my final answer")
+        );
         // The last assistant message (from force_text iteration) must not have
         // unpaired tool_calls — force_text strips them before persisting.
         let last_assistant = record

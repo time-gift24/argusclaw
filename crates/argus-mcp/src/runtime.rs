@@ -15,9 +15,9 @@ use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{RoleClient, serve_client};
 
+use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use serde::{Deserialize, Serialize};
 
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -613,10 +613,9 @@ impl McpRuntime {
                 return Ok(());
             }
 
-            let reuse_existing_stdio_session = matches!(
-                entry.record.transport,
-                McpTransportConfig::Stdio { .. }
-            ) && entry.session.is_some();
+            let reuse_existing_stdio_session =
+                matches!(entry.record.transport, McpTransportConfig::Stdio { .. })
+                    && entry.session.is_some();
 
             if !reuse_existing_stdio_session {
                 entry.record.status = if entry.retry_attempts > 0 || entry.urgent_retry {
@@ -675,7 +674,8 @@ impl McpRuntime {
                     self.repo.upsert_mcp_server(&persisted_record).await?;
                 }
                 Err(error) => {
-                    self.record_runtime_disconnect(server_id, error.to_string()).await;
+                    self.record_runtime_disconnect(server_id, error.to_string())
+                        .await;
                 }
             }
 
@@ -3082,10 +3082,16 @@ mod tests {
         };
         let runtime = Arc::new(McpRuntime::new(repo.clone(), connector.clone(), config));
 
-        runtime.poll_once().await.expect("first poll should succeed");
+        runtime
+            .poll_once()
+            .await
+            .expect("first poll should succeed");
         assert_eq!(connector.attempts(31).await, 1);
 
-        runtime.poll_once().await.expect("second poll should reuse session");
+        runtime
+            .poll_once()
+            .await
+            .expect("second poll should reuse session");
 
         let stored = repo.tools_for_server(31).await;
         assert_eq!(stored, vec![tool(31, "post_message", "Send a message")]);
