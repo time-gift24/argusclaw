@@ -761,7 +761,11 @@ impl ThreadPool {
         let started_at = Utc::now().to_rfc3339();
         let estimated_memory_bytes =
             Self::estimate_thread_memory(&thread).await + request.prompt.len() as u64;
-        self.mark_runtime_running(&execution_thread_id, estimated_memory_bytes, started_at.clone());
+        self.mark_runtime_running(
+            &execution_thread_id,
+            estimated_memory_bytes,
+            started_at.clone(),
+        );
         if let Err(error) = self
             .persist_job_status(
                 &request.job_id,
@@ -1757,8 +1761,7 @@ impl ThreadPool {
                 }
             };
         let metadata =
-            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
-                .await?;
+            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job).await?;
         self.sync_relationship_cache(&metadata);
         Ok(Some(metadata))
     }
@@ -1844,9 +1847,9 @@ impl ThreadPool {
             .model_override
             .clone()
             .unwrap_or_else(|| format!("provider-{}", provider_id.inner()));
-        let provider =
-            self.resolve_provider_with_fallback(provider_id, thread_record.model_override.as_deref())
-                .await;
+        let provider = self
+            .resolve_provider_with_fallback(provider_id, thread_record.model_override.as_deref())
+            .await;
         let provider = match provider {
             Ok(provider) => provider,
             Err(error) => {
@@ -1907,8 +1910,7 @@ impl ThreadPool {
             .await
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         let metadata =
-            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job)
-                .await?;
+            Self::recover_and_validate_metadata(&base_dir, thread_id, ThreadTraceKind::Job).await?;
         if metadata.parent_thread_id != Some(request.originating_thread_id) {
             return Err(JobError::ExecutionFailed(format!(
                 "job thread {} is bound to parent {:?}, not {}",
@@ -1924,8 +1926,11 @@ impl ThreadPool {
         let agent_record = metadata.agent_snapshot.clone();
         let provider = if let Some(thread_record) = thread_record.as_ref() {
             let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
-            self.resolve_provider_with_fallback(provider_id, thread_record.model_override.as_deref())
-                .await
+            self.resolve_provider_with_fallback(
+                provider_id,
+                thread_record.model_override.as_deref(),
+            )
+            .await
         } else if let Some(provider_id) = agent_record.provider_id {
             self.resolve_provider_with_fallback(provider_id, agent_record.model_id.as_deref())
                 .await
@@ -2669,6 +2674,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::disabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         template_manager
             .upsert(original_agent_record.clone())
@@ -2774,6 +2780,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template update should succeed");
@@ -2840,6 +2847,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::disabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         template_manager
             .upsert(agent_record.clone())
@@ -2986,6 +2994,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::disabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         template_manager
             .upsert(agent_record.clone())
@@ -3091,6 +3100,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             }))
             .session_id(SessionId::new())
             .build()

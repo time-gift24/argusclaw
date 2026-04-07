@@ -15,6 +15,7 @@ pub mod safety;
 pub mod ssrf;
 pub mod token_usage;
 pub mod tool;
+pub mod user;
 
 pub use account::{AccountCredentials, AccountRepository};
 pub use agent::{AgentRecord, AgentType};
@@ -81,6 +82,8 @@ pub mod provider_resolver;
 pub use provider_resolver::ProviderResolver;
 
 pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
+
+pub use user::{OAuth2Identity, ProviderTokenCredential, UserRecord};
 
 #[cfg(test)]
 #[test]

@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["migrate", "macros"] }
+sqlx = { workspace = true, features = ["migrate", "macros", "runtime-tokio-rustls"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -21,3 +26,4 @@ argus-crypto = { path = "../argus-crypto" }
 
 [dev-dependencies]
 tokio = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "sqlite", "runtime-tokio-rustls", "migrate", "macros"] }

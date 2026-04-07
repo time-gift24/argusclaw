@@ -39,8 +39,8 @@ use argus_protocol::{
     ThreadPoolState,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, JobRepository,
-    LlmProviderRepository, McpRepository, SessionRepository, ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
+    SessionRepository, ThreadRepository,
 };
 
 use argus_repository::types::JobId;
@@ -761,7 +761,6 @@ impl ArgusWing {
                 reason: error.to_string(),
             })
     }
-
 }
 
 // =========================================================================
@@ -888,6 +887,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("agent template should upsert");
@@ -985,6 +985,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::enabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
         wing.upsert_template(default_template)
             .await
@@ -1026,6 +1027,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::enabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         };
 
         let template_id = wing
@@ -1129,6 +1131,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1187,6 +1190,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1252,6 +1256,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1303,6 +1308,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1357,6 +1363,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1450,6 +1457,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1560,6 +1568,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1627,6 +1636,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1688,6 +1698,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");
@@ -1824,6 +1835,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::enabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template should upsert");

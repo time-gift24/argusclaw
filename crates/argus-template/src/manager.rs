@@ -8,7 +8,7 @@ use argus_repository::ArgusSqlite;
 pub struct TemplateManager {
     repository: Arc<dyn AgentRepository>,
     /// Concrete instance for repair operations that need transactions.
-    sqlite: Arc<ArgusSqlite>,
+    sqlite: Option<Arc<ArgusSqlite>>,
 }
 
 fn format_delete_blocked_reason(id: AgentId, thread_count: i64, job_count: i64) -> String {
@@ -65,7 +65,17 @@ impl TemplateManager {
     }
 
     pub fn new(repository: Arc<dyn AgentRepository>, sqlite: Arc<ArgusSqlite>) -> Self {
-        Self { repository, sqlite }
+        Self {
+            repository,
+            sqlite: Some(sqlite),
+        }
+    }
+
+    pub fn new_repository_only(repository: Arc<dyn AgentRepository>) -> Self {
+        Self {
+            repository,
+            sqlite: None,
+        }
     }
 
     /// Upsert (create or update) an agent template.
@@ -94,7 +104,11 @@ impl TemplateManager {
 
     /// Repair legacy placeholder agent IDs that were incorrectly persisted as `0`.
     pub async fn repair_placeholder_ids(&self) -> Result<()> {
-        self.sqlite
+        let Some(sqlite) = &self.sqlite else {
+            return Ok(());
+        };
+
+        sqlite
             .repair_placeholder_ids()
             .await
             .map_err(|e| ArgusError::DatabaseError {

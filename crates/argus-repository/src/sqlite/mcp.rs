@@ -73,6 +73,7 @@ mod tests {
             thinking_config: Some(ThinkingConfig::enabled()),
             parent_agent_id: None,
             agent_type: AgentType::Standard,
+            is_enabled: true,
         }
     }
 

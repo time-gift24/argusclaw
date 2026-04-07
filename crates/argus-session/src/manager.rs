@@ -9,8 +9,8 @@ use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogSt
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
-    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId, Result,
-    SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver,
+    ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -674,6 +674,14 @@ impl SessionManager {
         for session in self.sessions.iter() {
             session.value().broadcast(event.clone());
         }
+    }
+
+    /// List all agent templates for user-facing consumption.
+    ///
+    /// Returns all templates; the caller is responsible for filtering
+    /// (e.g., only enabled agents for server users).
+    pub async fn list_templates_for_user(&self) -> Vec<argus_protocol::AgentRecord> {
+        self.template_manager.list().await.unwrap_or_default()
     }
 
     /// List all sessions (from DB).
@@ -1629,6 +1637,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("agent upsert should succeed");
@@ -1864,6 +1873,7 @@ mod tests {
                 thinking_config: Some(ThinkingConfig::disabled()),
                 parent_agent_id: None,
                 agent_type: AgentType::Standard,
+                is_enabled: true,
             })
             .await
             .expect("template upsert should succeed");
@@ -2453,5 +2463,4 @@ mod tests {
             "unexpected scheduler error: {error}"
         );
     }
-
 }
