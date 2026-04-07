@@ -1184,11 +1184,7 @@ mod tests {
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{
-        AgentId, AgentType, McpToolResolver, McpUnavailableServerSummary, ProviderId,
-        ResolvedMcpTools, ThreadCommand, ThreadNoticeLevel, ToolDefinition, ToolError,
-        ToolExecutionContext,
-    };
+    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 

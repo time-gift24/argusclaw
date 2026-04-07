@@ -39,8 +39,8 @@ use argus_protocol::{
     ThreadPoolState,
 };
 use argus_repository::traits::{
-    AccountRepository, AgentRepository, JobRepository,
-    LlmProviderRepository, McpRepository, SessionRepository, ThreadRepository,
+    AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
+    SessionRepository, ThreadRepository,
 };
 
 use argus_repository::types::JobId;
@@ -761,7 +761,6 @@ impl ArgusWing {
                 reason: error.to_string(),
             })
     }
-
 }
 
 // =========================================================================

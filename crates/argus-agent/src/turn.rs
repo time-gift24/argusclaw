@@ -132,37 +132,43 @@ impl TurnContext<'_> {
 fn build_hook_context(
     ctx: &TurnContext<'_>,
     event: HookEvent,
-    tool_name: String,
-    tool_call_id: String,
-    tool_input: serde_json::Value,
-    tool_result: Option<serde_json::Value>,
-    error: Option<String>,
-    tool_manager: Option<Arc<dyn NamedTool>>,
+    details: HookContextDetails,
 ) -> ToolHookContext {
     ToolHookContext {
         event,
-        tool_name,
-        tool_call_id,
-        tool_input,
-        tool_result,
-        error,
-        tool_manager,
+        tool_name: details.tool_name,
+        tool_call_id: details.tool_call_id,
+        tool_input: details.tool_input,
+        tool_result: details.tool_result,
+        error: details.error,
+        tool_manager: details.tool_manager,
         thread_event_sender: Some(ctx.thread_event_tx.clone()),
         thread_id: Some(ctx.thread_id_str()),
         turn_number: Some(ctx.turn_number),
     }
 }
 
+struct HookContextDetails {
+    tool_name: String,
+    tool_call_id: String,
+    tool_input: serde_json::Value,
+    tool_result: Option<serde_json::Value>,
+    error: Option<String>,
+    tool_manager: Option<Arc<dyn NamedTool>>,
+}
+
 fn build_turn_end_hook_context(ctx: &TurnContext<'_>) -> ToolHookContext {
     build_hook_context(
         ctx,
         HookEvent::TurnEnd,
-        String::new(),
-        String::new(),
-        serde_json::Value::Null,
-        None,
-        None,
-        None,
+        HookContextDetails {
+            tool_name: String::new(),
+            tool_call_id: String::new(),
+            tool_input: serde_json::Value::Null,
+            tool_result: None,
+            error: None,
+            tool_manager: None,
+        },
     )
 }
 
@@ -655,12 +661,14 @@ async fn execute_single_tool(
     let hook_ctx = build_hook_context(
         ctx,
         HookEvent::BeforeToolCall,
-        tool_name.clone(),
-        tool_call_id.clone(),
-        tool_input.clone(),
-        None,
-        None,
-        tool.clone(),
+        HookContextDetails {
+            tool_name: tool_name.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_input: tool_input.clone(),
+            tool_result: None,
+            error: None,
+            tool_manager: tool.clone(),
+        },
     );
 
     if let Ok(HookAction::Block(ref reason)) = fire_hooks(ctx.hooks, &hook_ctx).await {
@@ -669,12 +677,14 @@ async fn execute_single_tool(
         let after_ctx = build_hook_context(
             ctx,
             HookEvent::AfterToolCall,
-            tool_name.clone(),
-            tool_call_id.clone(),
-            tool_input,
-            None,
-            Some(reason.clone()),
-            None,
+            HookContextDetails {
+                tool_name: tool_name.clone(),
+                tool_call_id: tool_call_id.clone(),
+                tool_input,
+                tool_result: None,
+                error: Some(reason.clone()),
+                tool_manager: None,
+            },
         );
         let _ = fire_hooks(ctx.hooks, &after_ctx).await;
 
@@ -813,12 +823,14 @@ async fn execute_single_tool(
     let after_hook_ctx = build_hook_context(
         ctx,
         HookEvent::AfterToolCall,
-        tool_name.clone(),
-        tool_call_id.clone(),
-        tool_input,
-        tool_result,
-        error,
-        None,
+        HookContextDetails {
+            tool_name: tool_name.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_input,
+            tool_result,
+            error,
+            tool_manager: None,
+        },
     );
     let _ = fire_hooks(ctx.hooks, &after_hook_ctx).await;
 
@@ -968,9 +980,7 @@ async fn execute_loop(
             usage_baseline_total = None;
         }
         match next_action {
-            NextAction::Return | NextAction::ContinueWithTools { .. }
-                if force_text =>
-            {
+            NextAction::Return | NextAction::ContinueWithTools { .. } if force_text => {
                 if matches!(next_action, NextAction::ContinueWithTools { .. }) {
                     tracing::warn!(
                         thread_id = %thread_id,
@@ -2616,10 +2626,12 @@ mod tests {
             .expect("turn should succeed despite LLM returning tool calls under force_text");
 
         assert!(matches!(record.kind, TurnRecordKind::UserTurn));
-        assert!(record
-            .messages
-            .iter()
-            .any(|m| m.content == "my final answer"));
+        assert!(
+            record
+                .messages
+                .iter()
+                .any(|m| m.content == "my final answer")
+        );
         // The last assistant message (from force_text iteration) must not have
         // unpaired tool_calls — force_text strips them before persisting.
         let last_assistant = record
