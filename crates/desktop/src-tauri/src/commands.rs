@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage,
-    LlmProviderId, LlmProviderRecord, LlmProviderRecordJson, McpDiscoveredToolRecord,
-    McpServerRecord, McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role,
-    SecretString, SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
+    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage, LlmProviderId,
+    LlmProviderRecord, LlmProviderRecordJson, McpDiscoveredToolRecord, McpServerRecord,
+    McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString,
+    SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};

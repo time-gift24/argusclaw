@@ -1343,10 +1343,8 @@ impl StreamableHttpSession {
             request = request.header(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
         }
 
-        if !skip_session {
-            if let Some(session_id) = self.session_id.lock().await.clone() {
-                request = request.header(MCP_SESSION_ID_HEADER, session_id);
-            }
+        if !skip_session && let Some(session_id) = self.session_id.lock().await.clone() {
+            request = request.header(MCP_SESSION_ID_HEADER, session_id);
         }
 
         let response = request
@@ -2472,10 +2470,10 @@ mod tests {
                 break;
             }
 
-            if let Some((name, value)) = header_line.split_once(':') {
-                if name.eq_ignore_ascii_case("content-length") {
-                    content_length = value.trim().parse::<usize>().unwrap_or_default();
-                }
+            if let Some((name, value)) = header_line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse::<usize>().unwrap_or_default();
             }
         }
 
