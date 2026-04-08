@@ -608,7 +608,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const state = get();
     const existingSession = state.sessionsByKey[sessionId];
     if (existingSession?.threadId === threadId) {
-      set({ activeSessionKey: sessionId, errorMessage: null });
+      set((currentState) => ({
+        activeSessionKey: sessionId,
+        errorMessage: null,
+        sessionsByKey: {
+          ...currentState.sessionsByKey,
+          [sessionId]: {
+            ...existingSession,
+            selectedJobDetailId: null,
+          },
+        },
+      }));
       return;
     }
 
