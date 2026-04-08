@@ -179,19 +179,19 @@ fn scheduler_dispatch_variant() -> serde_json::Value {
             "action": {
                 "type": "string",
                 "enum": ["dispatch_job", "dispath_job"],
-                "description": "Scheduler operation to perform"
+                "description": "调度动作，固定为 dispatch_job（兼容别名 dispath_job），用于把任务派发给指定子代理"
             },
             "prompt": {
                 "type": "string",
-                "description": "Task prompt for dispatch_job"
+                "description": "任务内容，类型为 string。该内容会作为子代理执行任务的主要指令"
             },
             "agent_id": {
                 "type": "integer",
-                "description": "Subagent ID for dispatch_job"
+                "description": "目标子代理 ID，类型为 integer。用于指定由哪个子代理执行当前任务"
             },
             "context": {
                 "type": "object",
-                "description": "Optional context payload for dispatch_job"
+                "description": "可选补充上下文，类型为 object。可传递结构化背景信息，供子代理参考"
             }
         },
         "required": ["action", "prompt", "agent_id"],
@@ -296,7 +296,7 @@ fn scheduler_mark_read_variant() -> serde_json::Value {
 fn scheduler_definition() -> ToolDefinition {
     ToolDefinition {
         name: "scheduler".to_string(),
-        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, get_job_result, send_message, check_inbox, and mark_read operations. Avoid busy polling: after a pending result, wait for the suggested retry interval and prefer mailbox-driven follow-up over immediate repeated lookups.".to_string(),
+        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, get_job_result, send_message, check_inbox, and mark_read operations. 其中 dispatch_job 用于将任务派发给指定子代理并返回 job_id，后续可通过 get_job_result 或 mailbox 获取结果。Avoid busy polling: after a pending result, wait for the suggested retry interval and prefer mailbox-driven follow-up over immediate repeated lookups.".to_string(),
         parameters: serde_json::json!({
             "oneOf": [
                 scheduler_dispatch_variant(),
@@ -633,6 +633,18 @@ mod tests {
         assert_eq!(
             dispatch_variant["required"],
             serde_json::json!(["action", "prompt", "agent_id"])
+        );
+        assert_eq!(
+            dispatch_variant["properties"]["prompt"]["description"],
+            serde_json::json!("任务内容，类型为 string。该内容会作为子代理执行任务的主要指令")
+        );
+        assert_eq!(
+            dispatch_variant["properties"]["agent_id"]["description"],
+            serde_json::json!("目标子代理 ID，类型为 integer。用于指定由哪个子代理执行当前任务")
+        );
+        assert_eq!(
+            dispatch_variant["properties"]["context"]["description"],
+            serde_json::json!("可选补充上下文，类型为 object。可传递结构化背景信息，供子代理参考")
         );
 
         let get_result_variant = variants
