@@ -3,7 +3,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { agents, chat, providers, sessions, threadPool } from "@/lib/tauri";
 import type {
+  JobDetailPayload,
+  JobDetailTimelineItem,
   JobStatusPayload,
+  MailboxMessagePayload,
   ThreadEventEnvelope,
   ThreadPoolEventReason,
   ThreadPoolRuntimeKind,
@@ -31,6 +34,11 @@ const JOB_STATUS_DISPLAY_NAME_LIMIT = 80;
 const JOB_STATUS_DESCRIPTION_LIMIT = 240;
 const JOB_STATUS_PROMPT_LIMIT = 600;
 const JOB_STATUS_MESSAGE_LIMIT = 1600;
+const JOB_DETAIL_DISPLAY_NAME_LIMIT = 80;
+const JOB_DETAIL_DESCRIPTION_LIMIT = 240;
+const JOB_DETAIL_PROMPT_LIMIT = 1200;
+const JOB_DETAIL_SUMMARY_LIMIT = 1600;
+const JOB_DETAIL_RESULT_LIMIT = 12000;
 
 const truncateDisplayText = (value: string, maxChars: number) => {
   const chars = Array.from(value);
@@ -64,6 +72,189 @@ const normalizeJobStatusPayload = (
     JOB_STATUS_DESCRIPTION_LIMIT,
   ),
 });
+
+const normalizeJobDetailPayload = (
+  payload: JobDetailPayload,
+): JobDetailPayload => ({
+  ...payload,
+  agent_display_name: truncateDisplayText(
+    payload.agent_display_name,
+    JOB_DETAIL_DISPLAY_NAME_LIMIT,
+  ),
+  agent_description: truncateOptionalDisplayText(
+    payload.agent_description,
+    JOB_DETAIL_DESCRIPTION_LIMIT,
+  ),
+  prompt: truncateDisplayText(payload.prompt, JOB_DETAIL_PROMPT_LIMIT),
+  summary_text: truncateOptionalDisplayText(
+    payload.summary_text,
+    JOB_DETAIL_SUMMARY_LIMIT,
+  ),
+  result_text: truncateOptionalDisplayText(
+    payload.result_text,
+    JOB_DETAIL_RESULT_LIMIT,
+  ),
+  timeline: payload.timeline.map((entry) => ({
+    ...entry,
+  })),
+});
+
+function appendJobDetailTimelineEntry(
+  jobDetails: Record<string, JobDetailPayload>,
+  jobId: string,
+  entry: JobDetailTimelineItem,
+): Record<string, JobDetailPayload> {
+  const current = jobDetails[jobId];
+  if (!current) return jobDetails;
+  return {
+    ...jobDetails,
+    [jobId]: normalizeJobDetailPayload({
+      ...current,
+      timeline: [...current.timeline, entry],
+    }),
+  };
+}
+
+function buildJobDetailTimelineEntry(
+  kind: JobDetailTimelineItem["kind"],
+  at: string,
+  label: string,
+  status: JobDetailTimelineItem["status"],
+  reason?: ThreadPoolEventReason | null,
+): JobDetailTimelineItem {
+  return {
+    kind,
+    at,
+    label,
+    status,
+    reason,
+  };
+}
+
+function seedJobDetailFromDispatch(
+  jobId: string,
+  agentId: number,
+  prompt: string,
+  at: string,
+  existing?: JobDetailPayload,
+): JobDetailPayload {
+  return normalizeJobDetailPayload({
+    job_id: jobId,
+    agent_id: agentId,
+    agent_display_name: existing?.agent_display_name ?? `Agent ${agentId}`,
+    agent_description: existing?.agent_description ?? "",
+    prompt: existing?.prompt ?? prompt,
+    status: "running",
+    summary_text: existing?.summary_text ?? null,
+    result_text: existing?.result_text ?? null,
+    started_at: existing?.started_at ?? at,
+    finished_at: existing?.finished_at ?? null,
+    input_tokens: existing?.input_tokens ?? null,
+    output_tokens: existing?.output_tokens ?? null,
+    source_message_id: existing?.source_message_id ?? null,
+    thread_id: existing?.thread_id ?? null,
+    timeline: [
+      ...(existing?.timeline ?? []),
+      buildJobDetailTimelineEntry("dispatched", at, "已派发", "running"),
+    ],
+  });
+}
+
+function updateJobDetailFromResult(
+  existing: JobDetailPayload | undefined,
+  payload: Extract<
+    ThreadEventEnvelope["payload"],
+    { type: "job_result" }
+  >,
+  at: string,
+  threadId: string,
+  sourceMessageId?: string | null,
+  resultText?: string | null,
+): JobDetailPayload {
+  const summaryText = existing?.summary_text ?? payload.message;
+  return normalizeJobDetailPayload({
+    job_id: payload.job_id,
+    agent_id: payload.agent_id,
+    agent_display_name: payload.agent_display_name,
+    agent_description: payload.agent_description,
+    prompt: existing?.prompt ?? "",
+    status: payload.success ? "completed" : "failed",
+    summary_text: summaryText,
+    result_text: resultText ?? existing?.result_text ?? payload.message,
+    started_at: existing?.started_at ?? null,
+    finished_at: at,
+    input_tokens:
+      payload.input_tokens ?? existing?.input_tokens ?? null,
+    output_tokens:
+      payload.output_tokens ?? existing?.output_tokens ?? null,
+    source_message_id: sourceMessageId ?? existing?.source_message_id ?? null,
+    thread_id: threadId,
+    timeline: [
+      ...(existing?.timeline ?? []),
+      buildJobDetailTimelineEntry(
+        "result",
+        at,
+        payload.success ? "已完成" : "已失败",
+        payload.success ? "completed" : "failed",
+      ),
+    ],
+  });
+}
+
+function updateJobDetailFromMailboxResult(
+  existing: JobDetailPayload | undefined,
+  message: MailboxMessagePayload,
+): JobDetailPayload {
+  const result = message.message_type;
+  if (result.type !== "job_result") {
+    return existing ?? normalizeJobDetailPayload({
+      job_id: message.id,
+      agent_id: 0,
+      agent_display_name: message.from_label,
+      agent_description: "",
+      prompt: "",
+      status: "running",
+      summary_text: null,
+      result_text: null,
+      started_at: null,
+      finished_at: null,
+      input_tokens: null,
+      output_tokens: null,
+      source_message_id: message.id,
+      thread_id: message.to_thread_id,
+      timeline: [],
+    });
+  }
+
+  const tokenUsage = result.token_usage ?? null;
+  const summaryText = existing?.summary_text ?? message.summary ?? null;
+  return normalizeJobDetailPayload({
+    job_id: result.job_id,
+    agent_id: result.agent_id,
+    agent_display_name: result.agent_display_name,
+    agent_description: result.agent_description,
+    prompt: existing?.prompt ?? "",
+    status: result.success ? "completed" : "failed",
+    summary_text: summaryText,
+    result_text: message.text,
+    started_at: existing?.started_at ?? null,
+    finished_at: message.timestamp,
+    input_tokens: tokenUsage?.input_tokens ?? existing?.input_tokens ?? null,
+    output_tokens:
+      tokenUsage?.output_tokens ?? existing?.output_tokens ?? null,
+    source_message_id: message.id,
+    thread_id: message.to_thread_id,
+    timeline: [
+      ...(existing?.timeline ?? []),
+      buildJobDetailTimelineEntry(
+        "result",
+        message.timestamp,
+        result.success ? "收件箱收到完成结果" : "收件箱收到失败结果",
+        result.success ? "completed" : "failed",
+      ),
+    ],
+  });
+}
 
 export interface ThreadPoolThreadState {
   threadId: string;
@@ -99,6 +290,8 @@ export interface ChatSessionState {
     } | null;
   } | null;
   jobStatuses: Record<string, JobStatusPayload>;
+  jobDetails: Record<string, JobDetailPayload>;
+  selectedJobDetailId: string | null;
   error: string | null;
   tokenCount: number;
   contextWindow: number | null;
@@ -135,6 +328,8 @@ export interface ChatStore {
   selectModel: (providerId: number, model: string) => Promise<void>;
   selectProviderPreference: (providerId: number | null) => Promise<void>;
   selectModelOverride: (model: string | null) => Promise<void>;
+  openJobDetails: (jobId: string) => void;
+  closeJobDetails: () => void;
   sendMessage: (content: string) => Promise<void>;
   cancelTurn: () => Promise<void>;
   stopJob: (jobId: string) => Promise<void>;
@@ -324,6 +519,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         jobStatuses: {},
+        jobDetails: {},
+        selectedJobDetailId: null,
         error: null,
         tokenCount: 0,
         contextWindow: null,
@@ -395,6 +592,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: snapshot.messages,
         pendingAssistant: null,
         jobStatuses: {},
+        jobDetails: {},
+        selectedJobDetailId: null,
         error: null,
         tokenCount: snapshot.token_count,
         contextWindow: null,
@@ -553,6 +752,56 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   async selectModelOverride(model: string | null) {
     set({ selectedModelOverride: model, errorMessage: null });
+  },
+
+  openJobDetails(jobId: string) {
+    const sessionKey = get().activeSessionKey;
+    if (!sessionKey) return;
+
+    set((state) => {
+      const session = state.sessionsByKey[sessionKey];
+      if (!session) return {};
+      if (!jobId) {
+        return {
+          sessionsByKey: {
+            ...state.sessionsByKey,
+            [sessionKey]: {
+              ...session,
+              selectedJobDetailId: null,
+            },
+          },
+        };
+      }
+
+      return {
+        sessionsByKey: {
+          ...state.sessionsByKey,
+          [sessionKey]: {
+            ...session,
+            selectedJobDetailId: jobId,
+          },
+        },
+      };
+    });
+  },
+
+  closeJobDetails() {
+    const sessionKey = get().activeSessionKey;
+    if (!sessionKey) return;
+
+    set((state) => {
+      const session = state.sessionsByKey[sessionKey];
+      if (!session) return {};
+      return {
+        sessionsByKey: {
+          ...state.sessionsByKey,
+          [sessionKey]: {
+            ...session,
+            selectedJobDetailId: null,
+          },
+        },
+      };
+    });
   },
 
   async sendMessage(content: string) {
@@ -735,6 +984,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               : null,
             tokenCount: snapshot.token_count,
             jobStatuses: state.sessionsByKey[sessionKey].jobStatuses,
+            jobDetails: state.sessionsByKey[sessionKey].jobDetails,
+            selectedJobDetailId:
+              state.sessionsByKey[sessionKey].selectedJobDetailId,
           },
         },
       }));
@@ -765,6 +1017,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   _handleThreadEvent(envelope: ThreadEventEnvelope) {
+    const state = get();
+    const sessionKey = Object.keys(state.sessionsByKey).find(
+      (key) =>
+        state.sessionsByKey[key].threadId === envelope.thread_id &&
+        state.sessionsByKey[key].sessionId === envelope.session_id,
+    );
     const poolHandled = (() => {
       const { payload } = envelope;
 
@@ -785,6 +1043,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const now = new Date().toISOString();
       set((state) => {
         const { payload } = envelope;
+        const session = sessionKey ? state.sessionsByKey[sessionKey] : null;
 
         switch (payload.type) {
           case "thread_bound_to_job":
@@ -802,6 +1061,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
+              ...(session
+                ? {
+                    sessionsByKey: {
+                      ...state.sessionsByKey,
+                      [sessionKey!]: {
+                        ...session,
+                        jobDetails: appendJobDetailTimelineEntry(
+                          session.jobDetails,
+                          payload.job_id,
+                          buildJobDetailTimelineEntry(
+                            "dispatched",
+                            now,
+                            "线程已绑定任务",
+                            "running",
+                          ),
+                        ),
+                      },
+                    },
+                  }
+                : {}),
             };
           case "thread_pool_queued":
             return {
@@ -818,6 +1097,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
+              ...(session &&
+              payload.runtime.job_id &&
+              session.jobDetails[payload.runtime.job_id]
+                ? {
+                    sessionsByKey: {
+                      ...state.sessionsByKey,
+                      [sessionKey!]: {
+                        ...session,
+                        jobDetails: appendJobDetailTimelineEntry(
+                          session.jobDetails,
+                          payload.runtime.job_id,
+                          buildJobDetailTimelineEntry(
+                            "queued",
+                            now,
+                            "排队中",
+                            "running",
+                          ),
+                        ),
+                      },
+                    },
+                  }
+                : {}),
             };
           case "thread_pool_started":
             return {
@@ -834,6 +1135,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
+              ...(session &&
+              payload.runtime.job_id &&
+              session.jobDetails[payload.runtime.job_id]
+                ? {
+                    sessionsByKey: {
+                      ...state.sessionsByKey,
+                      [sessionKey!]: {
+                        ...session,
+                        jobDetails: appendJobDetailTimelineEntry(
+                          session.jobDetails,
+                          payload.runtime.job_id,
+                          buildJobDetailTimelineEntry(
+                            "started",
+                            now,
+                            "运行中",
+                            "running",
+                          ),
+                        ),
+                      },
+                    },
+                  }
+                : {}),
             };
           case "thread_pool_cooling":
             return {
@@ -850,6 +1173,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
+              ...(session &&
+              payload.runtime.job_id &&
+              session.jobDetails[payload.runtime.job_id]
+                ? {
+                    sessionsByKey: {
+                      ...state.sessionsByKey,
+                      [sessionKey!]: {
+                        ...session,
+                        jobDetails: appendJobDetailTimelineEntry(
+                          session.jobDetails,
+                          payload.runtime.job_id,
+                          buildJobDetailTimelineEntry(
+                            "cooling",
+                            now,
+                            "冷却中",
+                            "running",
+                          ),
+                        ),
+                      },
+                    },
+                  }
+                : {}),
             };
           case "thread_pool_evicted":
             return {
@@ -866,6 +1211,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
+              ...(session &&
+              payload.runtime.job_id &&
+              session.jobDetails[payload.runtime.job_id]
+                ? {
+                    sessionsByKey: {
+                      ...state.sessionsByKey,
+                      [sessionKey!]: {
+                        ...session,
+                        jobDetails: appendJobDetailTimelineEntry(
+                          session.jobDetails,
+                          payload.runtime.job_id,
+                          buildJobDetailTimelineEntry(
+                            "evicted",
+                            now,
+                            "已驱逐",
+                            "failed",
+                            payload.reason,
+                          ),
+                        ),
+                      },
+                    },
+                  }
+                : {}),
             };
           case "thread_pool_metrics_updated":
             return {
@@ -885,13 +1253,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
       });
     }
-
-    const state = get();
-    const sessionKey = Object.keys(state.sessionsByKey).find(
-      (key) =>
-        state.sessionsByKey[key].threadId === envelope.thread_id &&
-        state.sessionsByKey[key].sessionId === envelope.session_id,
-    );
 
     if (!sessionKey) return;
 
@@ -1108,6 +1469,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
           if (!session) return {};
+          const now = new Date().toISOString();
+          const nextJobDetail = seedJobDetailFromDispatch(
+            payload.job_id,
+            payload.agent_id,
+            payload.prompt,
+            now,
+            session.jobDetails[payload.job_id],
+          );
           const nextJobStatus = normalizeJobStatusPayload({
             job_id: payload.job_id,
             agent_id: payload.agent_id,
@@ -1124,6 +1493,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               ...state.sessionsByKey,
               [sessionKey]: {
                 ...session,
+                jobDetails: {
+                  ...session.jobDetails,
+                  [payload.job_id]: nextJobDetail,
+                },
                 jobStatuses: {
                   ...session.jobStatuses,
                   [payload.job_id]: nextJobStatus,
@@ -1145,6 +1518,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             return { stoppingJobIds };
           }
           const existing = session.jobStatuses[payload.job_id];
+          const nextJobDetail = updateJobDetailFromResult(
+            session.jobDetails[payload.job_id],
+            payload,
+            new Date().toISOString(),
+            session.threadId,
+          );
           const nextJobStatus = normalizeJobStatusPayload({
             job_id: payload.job_id,
             agent_id: payload.agent_id,
@@ -1159,6 +1538,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               ...state.sessionsByKey,
               [sessionKey]: {
                 ...session,
+                jobDetails: {
+                  ...session.jobDetails,
+                  [payload.job_id]: nextJobDetail,
+                },
                 jobStatuses: {
                   ...session.jobStatuses,
                   [payload.job_id]: nextJobStatus,
@@ -1167,6 +1550,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             },
             stoppingJobIds,
           };
+        });
+        break;
+
+      case "mailbox_message_queued":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session) return {};
+          const { message } = payload;
+          if (message.message_type.type === "job_result") {
+            const nextJobDetail = updateJobDetailFromMailboxResult(
+              session.jobDetails[message.message_type.job_id],
+              message,
+            );
+            return {
+              sessionsByKey: {
+                ...state.sessionsByKey,
+                [sessionKey]: {
+                  ...session,
+                  jobDetails: {
+                    ...session.jobDetails,
+                    [message.message_type.job_id]: nextJobDetail,
+                  },
+                },
+              },
+            };
+          }
+          return {};
         });
         break;
 

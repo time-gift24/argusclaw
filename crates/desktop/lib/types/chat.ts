@@ -106,6 +106,82 @@ export interface JobStatusPayload {
   agent_description?: string | null;
 }
 
+export type JobDetailStatus = "running" | "completed" | "failed";
+
+export interface JobDetailTimelineItem {
+  kind:
+    | "dispatched"
+    | "queued"
+    | "started"
+    | "cooling"
+    | "evicted"
+    | "result";
+  at: string;
+  label: string;
+  status: JobDetailStatus;
+  reason?: ThreadPoolEventReason | null;
+}
+
+export interface JobDetailPayload {
+  job_id: string;
+  agent_id: number;
+  agent_display_name: string;
+  agent_description: string | null;
+  prompt: string;
+  status: JobDetailStatus;
+  summary_text: string | null;
+  result_text: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  source_message_id: string | null;
+  thread_id: string | null;
+  timeline: JobDetailTimelineItem[];
+}
+
+export interface MailboxMessageJobResultPayload {
+  type: "job_result";
+  job_id: string;
+  success: boolean;
+  token_usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+  } | null;
+  agent_id: number;
+  agent_display_name: string;
+  agent_description: string;
+}
+
+export interface MailboxMessageTaskAssignmentPayload {
+  type: "task_assignment";
+  task_id: string;
+  subject: string;
+  description: string;
+}
+
+export interface MailboxMessagePlainPayload {
+  type: "plain";
+}
+
+export type MailboxMessageTypePayload =
+  | MailboxMessagePlainPayload
+  | MailboxMessageJobResultPayload
+  | MailboxMessageTaskAssignmentPayload;
+
+export interface MailboxMessagePayload {
+  id: string;
+  from_thread_id: string;
+  to_thread_id: string;
+  from_label: string;
+  message_type: MailboxMessageTypePayload;
+  text: string;
+  timestamp: string;
+  read: boolean;
+  summary?: string | null;
+}
+
 export type ThreadEventPayload =
   | { type: "reasoning_delta"; delta: string }
   | { type: "content_delta"; delta: string }
@@ -183,6 +259,10 @@ export type ThreadEventPayload =
       agent_id: number;
       agent_display_name: string;
       agent_description: string;
+    }
+  | {
+      type: "mailbox_message_queued";
+      message: MailboxMessagePayload;
     };
 
 export interface ThreadEventEnvelope {

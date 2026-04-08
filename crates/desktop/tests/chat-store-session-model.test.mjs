@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const storeSource = readFileSync(new URL("../lib/chat-store.ts", import.meta.url), "utf8");
+const typesSource = readFileSync(
+  new URL("../lib/types/chat.ts", import.meta.url),
+  "utf8",
+);
 
 test("chat store keeps sessions keyed by template and provider preference", () => {
   assert.match(storeSource, /errorMessage:\s*string \| null/);
@@ -138,6 +142,25 @@ test("chat store tracks ephemeral job status outside the transcript", () => {
     /case "job_result":[\s\S]*normalizeJobStatusPayload\(/,
     "job_result should clamp oversized subagent payloads before storing them",
   );
+});
+
+test("desktop types expose mailbox job result payloads and detail state", () => {
+  assert.match(typesSource, /export interface JobDetailPayload/);
+  assert.match(typesSource, /export interface JobDetailTimelineItem/);
+  assert.match(typesSource, /type:\s*"job_result"/);
+  assert.match(typesSource, /type:\s*"mailbox_message_queued"/);
+  assert.match(typesSource, /type:\s*"task_assignment"/);
+});
+
+test("chat store keeps a separate selected job detail and detail records", () => {
+  assert.match(storeSource, /selectedJobDetailId:\s*string \| null/);
+  assert.match(storeSource, /jobDetails:\s*Record<string,\s*JobDetailPayload>/);
+  assert.match(storeSource, /openJobDetails:/);
+  assert.match(storeSource, /closeJobDetails:/);
+  assert.match(storeSource, /case "mailbox_message_queued"/);
+  assert.match(storeSource, /normalizeJobDetailPayload/);
+  assert.match(storeSource, /appendJobDetailTimelineEntry/);
+  assert.match(storeSource, /selectedJobDetailId:\s*null/);
 });
 
 test("chat store waits for idle before refreshing the persisted snapshot", () => {
