@@ -65,7 +65,8 @@ pub struct SchedulerJobResult {
 #[derive(Debug, Clone)]
 pub enum SchedulerJobLookup {
     NotFound,
-    Pending,
+    Pending { retry_after_ms: u64 },
+    CoolingDown { retry_after_ms: u64 },
     Completed(SchedulerJobResult),
     Consumed(SchedulerJobResult),
 }
@@ -178,19 +179,19 @@ fn scheduler_dispatch_variant() -> serde_json::Value {
             "action": {
                 "type": "string",
                 "enum": ["dispatch_job", "dispath_job"],
-                "description": "Scheduler operation to perform"
+                "description": "调度动作，固定为 dispatch_job（兼容别名 dispath_job），用于把任务派发给指定子代理"
             },
             "prompt": {
                 "type": "string",
-                "description": "Task prompt for dispatch_job"
+                "description": "任务内容，类型为 string。该内容会作为子代理执行任务的主要指令"
             },
             "agent_id": {
                 "type": "integer",
-                "description": "Subagent ID for dispatch_job"
+                "description": "目标子代理 ID，类型为 integer。用于指定由哪个子代理执行当前任务"
             },
             "context": {
                 "type": "object",
-                "description": "Optional context payload for dispatch_job"
+                "description": "可选补充上下文，类型为 object。可传递结构化背景信息，供子代理参考"
             }
         },
         "required": ["action", "prompt", "agent_id"],
@@ -295,7 +296,7 @@ fn scheduler_mark_read_variant() -> serde_json::Value {
 fn scheduler_definition() -> ToolDefinition {
     ToolDefinition {
         name: "scheduler".to_string(),
-        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, get_job_result, send_message, check_inbox, and mark_read operations.".to_string(),
+        description: "统一的子代理调度工具，支持 list_subagents、dispatch_job、get_job_result、send_message、check_inbox 和 mark_read。`dispatch_job` 用于把任务派发给指定子代理异步执行，并立即返回 `job_id` 供后续跟踪；适合耗时任务、可并行任务或需要委托给专门子代理处理的任务。查询结果时，优先根据 mailbox 中的后续消息继续推进；如果 `get_job_result` 返回 pending，请等待建议的重试间隔后再查询，避免高频轮询。".to_string(),
         parameters: serde_json::json!({
             "oneOf": [
                 scheduler_dispatch_variant(),
@@ -389,9 +390,15 @@ impl NamedTool for SchedulerTool {
                         "job_id": job_id,
                         "status": "not_found",
                     })),
-                    SchedulerJobLookup::Pending => Ok(serde_json::json!({
+                    SchedulerJobLookup::Pending { retry_after_ms } => Ok(serde_json::json!({
                         "job_id": job_id,
                         "status": "pending",
+                        "retry_after_ms": retry_after_ms,
+                    })),
+                    SchedulerJobLookup::CoolingDown { retry_after_ms } => Ok(serde_json::json!({
+                        "job_id": job_id,
+                        "status": "cooling_down",
+                        "retry_after_ms": retry_after_ms,
                     })),
                     SchedulerJobLookup::Completed(result) => Ok(serde_json::json!({
                         "job_id": job_id,
@@ -569,7 +576,9 @@ mod tests {
             dispatch_job_id: "job-1".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -589,7 +598,9 @@ mod tests {
             dispatch_job_id: "job-1".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -600,6 +611,10 @@ mod tests {
         });
         let tool = SchedulerTool::new(backend);
         let definition = tool.definition();
+        assert!(
+            definition.description.contains("避免高频轮询"),
+            "scheduler description should discourage tight polling loops in Chinese"
+        );
         let variants = definition.parameters["oneOf"]
             .as_array()
             .expect("scheduler definition should use oneOf variants");
@@ -618,6 +633,18 @@ mod tests {
         assert_eq!(
             dispatch_variant["required"],
             serde_json::json!(["action", "prompt", "agent_id"])
+        );
+        assert_eq!(
+            dispatch_variant["properties"]["prompt"]["description"],
+            serde_json::json!("任务内容，类型为 string。该内容会作为子代理执行任务的主要指令")
+        );
+        assert_eq!(
+            dispatch_variant["properties"]["agent_id"]["description"],
+            serde_json::json!("目标子代理 ID，类型为 integer。用于指定由哪个子代理执行当前任务")
+        );
+        assert_eq!(
+            dispatch_variant["properties"]["context"]["description"],
+            serde_json::json!("可选补充上下文，类型为 object。可传递结构化背景信息，供子代理参考")
         );
 
         let get_result_variant = variants
@@ -649,7 +676,9 @@ mod tests {
             dispatch_job_id: "job-42".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -696,7 +725,9 @@ mod tests {
             dispatch_job_id: "job-43".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -738,7 +769,9 @@ mod tests {
                 display_name: "Planner".to_string(),
                 description: "Plans work".to_string(),
             }],
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -756,6 +789,76 @@ mod tests {
 
         assert_eq!(response[0]["agent_id"], serde_json::json!(3));
         assert_eq!(response[0]["display_name"], serde_json::json!("Planner"));
+    }
+
+    #[tokio::test]
+    async fn get_job_result_action_formats_pending_payload_with_retry_after() {
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-42".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
+        });
+        let tool = SchedulerTool::new(backend);
+
+        let response = tool
+            .execute(
+                serde_json::json!({
+                    "action": "get_job_result",
+                    "job_id": "job-42",
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("get_job_result should succeed");
+
+        assert_eq!(response["job_id"], serde_json::json!("job-42"));
+        assert_eq!(response["status"], serde_json::json!("pending"));
+        assert_eq!(response["retry_after_ms"], serde_json::json!(5_000));
+    }
+
+    #[tokio::test]
+    async fn get_job_result_action_formats_cooling_down_payload() {
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-42".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::CoolingDown {
+                retry_after_ms: 2_500,
+            },
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
+        });
+        let tool = SchedulerTool::new(backend);
+
+        let response = tool
+            .execute(
+                serde_json::json!({
+                    "action": "get_job_result",
+                    "job_id": "job-42",
+                }),
+                make_ctx(),
+            )
+            .await
+            .expect("get_job_result should succeed");
+
+        assert_eq!(response["job_id"], serde_json::json!("job-42"));
+        assert_eq!(response["status"], serde_json::json!("cooling_down"));
+        assert_eq!(response["retry_after_ms"], serde_json::json!(2_500));
     }
 
     #[tokio::test]
@@ -799,7 +902,9 @@ mod tests {
             dispatch_job_id: "job-42".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 1,
@@ -846,7 +951,9 @@ mod tests {
             dispatch_job_id: "job-42".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -872,7 +979,9 @@ mod tests {
             dispatch_job_id: "job-42".to_string(),
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
-            lookup_response: SchedulerJobLookup::Pending,
+            lookup_response: SchedulerJobLookup::Pending {
+                retry_after_ms: 5_000,
+            },
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
