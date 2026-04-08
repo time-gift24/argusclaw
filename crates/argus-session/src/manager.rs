@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use argus_agent::thread_trace_store::{
     chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
@@ -9,8 +10,8 @@ use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogSt
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
-    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId, Result,
-    SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver,
+    ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -84,6 +85,7 @@ struct SessionSchedulerBackend {
     template_manager: Arc<TemplateManager>,
     job_manager: Arc<JobManager>,
     sessions: Arc<DashMap<SessionId, Arc<Session>>>,
+    pending_job_result_lookups: Arc<DashMap<String, Instant>>,
 }
 
 impl std::fmt::Debug for SessionSchedulerBackend {
@@ -102,8 +104,11 @@ impl SessionSchedulerBackend {
             template_manager,
             job_manager,
             sessions,
+            pending_job_result_lookups: Arc::new(DashMap::new()),
         }
     }
+
+    const JOB_RESULT_POLL_COOLDOWN: Duration = Duration::from_secs(5);
 
     fn scheduler_error(reason: impl Into<String>) -> ToolError {
         ToolError::ExecutionFailed {
@@ -119,7 +124,9 @@ impl SessionSchedulerBackend {
     fn map_job_lookup(lookup: JobLookup) -> SchedulerJobLookup {
         match lookup {
             JobLookup::NotFound => SchedulerJobLookup::NotFound,
-            JobLookup::Pending => SchedulerJobLookup::Pending,
+            JobLookup::Pending => SchedulerJobLookup::Pending {
+                retry_after_ms: Self::JOB_RESULT_POLL_COOLDOWN.as_millis() as u64,
+            },
             JobLookup::Completed(result) => SchedulerJobLookup::Completed(SchedulerJobResult {
                 success: result.success,
                 message: result.message,
@@ -136,6 +143,35 @@ impl SessionSchedulerBackend {
                 agent_display_name: result.agent_display_name,
                 agent_description: result.agent_description,
             }),
+        }
+    }
+
+    fn pending_lookup_key(thread_id: ThreadId, job_id: &str) -> String {
+        format!("{thread_id}:{job_id}")
+    }
+
+    fn clear_pending_lookup_state(&self, thread_id: ThreadId, job_id: &str) {
+        self.pending_job_result_lookups
+            .remove(&Self::pending_lookup_key(thread_id, job_id));
+    }
+
+    fn pending_lookup_status(&self, thread_id: ThreadId, job_id: &str) -> SchedulerJobLookup {
+        let now = Instant::now();
+        let key = Self::pending_lookup_key(thread_id, job_id);
+        if let Some(mut entry) = self.pending_job_result_lookups.get_mut(&key) {
+            let elapsed = entry.elapsed();
+            if elapsed < Self::JOB_RESULT_POLL_COOLDOWN {
+                return SchedulerJobLookup::CoolingDown {
+                    retry_after_ms: (Self::JOB_RESULT_POLL_COOLDOWN - elapsed).as_millis() as u64,
+                };
+            }
+            *entry = now;
+        } else {
+            self.pending_job_result_lookups.insert(key, now);
+        }
+
+        SchedulerJobLookup::Pending {
+            retry_after_ms: Self::JOB_RESULT_POLL_COOLDOWN.as_millis() as u64,
         }
     }
 
@@ -459,18 +495,30 @@ impl SchedulerBackend for SessionSchedulerBackend {
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
 
-        if request.consume && matches!(lookup, JobLookup::Completed(_)) {
-            self.claim_queued_runtime_result(request.thread_id, &request.job_id)
-                .await?;
-            let consumed_lookup = self
-                .job_manager
-                .get_job_result_status_persisted(request.thread_id, &request.job_id, true)
-                .await
-                .map_err(|error| Self::scheduler_error(error.to_string()))?;
-            return Ok(Self::map_job_lookup(consumed_lookup));
+        match lookup {
+            JobLookup::NotFound => {
+                self.clear_pending_lookup_state(request.thread_id, &request.job_id);
+                Ok(SchedulerJobLookup::NotFound)
+            }
+            JobLookup::Pending => {
+                Ok(self.pending_lookup_status(request.thread_id, &request.job_id))
+            }
+            JobLookup::Completed(_) if request.consume => {
+                self.clear_pending_lookup_state(request.thread_id, &request.job_id);
+                self.claim_queued_runtime_result(request.thread_id, &request.job_id)
+                    .await?;
+                let consumed_lookup = self
+                    .job_manager
+                    .get_job_result_status_persisted(request.thread_id, &request.job_id, true)
+                    .await
+                    .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                Ok(Self::map_job_lookup(consumed_lookup))
+            }
+            JobLookup::Completed(_) | JobLookup::Consumed(_) => {
+                self.clear_pending_lookup_state(request.thread_id, &request.job_id);
+                Ok(Self::map_job_lookup(lookup))
+            }
         }
-
-        Ok(Self::map_job_lookup(lookup))
     }
 
     async fn send_message(
@@ -2403,6 +2451,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_get_job_result_cools_down_repeated_pending_lookups() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let job_id = "job-pending-cooldown".to_string();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some(job_id.clone()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+        JobRepository::create(
+            harness.sqlite.as_ref(),
+            &JobRecord {
+                id: argus_repository::types::JobId::new(job_id.clone()),
+                job_type: JobType::Standalone,
+                name: format!("job:{job_id}"),
+                status: JobStatus::Pending,
+                agent_id: RepoAgentId::new(harness.agent_id.inner()),
+                context: None,
+                prompt: "pending result".to_string(),
+                thread_id: Some(child_thread_id),
+                group_id: None,
+                depends_on: Vec::new(),
+                cron_expr: None,
+                scheduled_at: None,
+                started_at: None,
+                finished_at: None,
+                parent_job_id: None,
+                result: None,
+            },
+        )
+        .await
+        .expect("pending job record should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+
+        let first_lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id: job_id.clone(),
+                consume: false,
+            })
+            .await
+            .expect("first pending lookup should load");
+        match first_lookup {
+            argus_tool::SchedulerJobLookup::Pending { retry_after_ms } => {
+                assert!(retry_after_ms > 0);
+            }
+            other => panic!("expected pending lookup, got {other:?}"),
+        }
+
+        let second_lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id,
+                consume: false,
+            })
+            .await
+            .expect("repeated pending lookup should not error");
+        match second_lookup {
+            argus_tool::SchedulerJobLookup::CoolingDown { retry_after_ms } => {
+                assert!(retry_after_ms > 0);
+            }
+            other => panic!("expected cooling_down lookup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn scheduler_thread_target_recovers_direct_child_relationship_after_restart() {
         let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
             model_name: "routing-test".to_string(),
@@ -2453,5 +2597,4 @@ mod tests {
             "unexpected scheduler error: {error}"
         );
     }
-
 }
