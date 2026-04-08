@@ -430,6 +430,41 @@ function touchThreadPoolThread(
   return sortThreadPoolThreads([nextEntry, ...withoutCurrent]);
 }
 
+function findSessionKeyForEnvelope(
+  sessionsByKey: Record<string, ChatSessionState>,
+  envelope: ThreadEventEnvelope,
+): string | null {
+  const exactMatch =
+    Object.keys(sessionsByKey).find(
+      (key) =>
+        sessionsByKey[key].threadId === envelope.thread_id &&
+        sessionsByKey[key].sessionId === envelope.session_id,
+    ) ?? null;
+  if (exactMatch) return exactMatch;
+
+  const jobId =
+    envelope.payload.type === "thread_bound_to_job"
+      ? envelope.payload.job_id
+      : envelope.payload.type === "thread_pool_queued" ||
+          envelope.payload.type === "thread_pool_started" ||
+          envelope.payload.type === "thread_pool_cooling" ||
+          envelope.payload.type === "thread_pool_evicted"
+        ? envelope.payload.runtime.job_id
+        : null;
+
+  if (!jobId) return null;
+
+  return (
+    Object.keys(sessionsByKey).find((key) => {
+      const session = sessionsByKey[key];
+      return (
+        session.sessionId === envelope.session_id &&
+        !!session.jobDetails[jobId]
+      );
+    }) ?? null
+  );
+}
+
 export const useChatStore = create<ChatStore>((set, get) => ({
   selectedTemplateId: null,
   selectedProviderPreferenceId: null,
@@ -1018,10 +1053,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   _handleThreadEvent(envelope: ThreadEventEnvelope) {
     const state = get();
-    const sessionKey = Object.keys(state.sessionsByKey).find(
-      (key) =>
-        state.sessionsByKey[key].threadId === envelope.thread_id &&
-        state.sessionsByKey[key].sessionId === envelope.session_id,
+    const sessionKey = findSessionKeyForEnvelope(
+      state.sessionsByKey,
+      envelope,
     );
     const poolHandled = (() => {
       const { payload } = envelope;
