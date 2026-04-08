@@ -296,7 +296,7 @@ fn scheduler_mark_read_variant() -> serde_json::Value {
 fn scheduler_definition() -> ToolDefinition {
     ToolDefinition {
         name: "scheduler".to_string(),
-        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, get_job_result, send_message, check_inbox, and mark_read operations. 其中 dispatch_job 用于将任务派发给指定子代理并返回 job_id，后续可通过 get_job_result 或 mailbox 获取结果。Avoid busy polling: after a pending result, wait for the suggested retry interval and prefer mailbox-driven follow-up over immediate repeated lookups.".to_string(),
+        description: "统一的子代理调度工具，支持 list_subagents、dispatch_job、get_job_result、send_message、check_inbox 和 mark_read。`dispatch_job` 用于把任务派发给指定子代理异步执行，并立即返回 `job_id` 供后续跟踪；适合耗时任务、可并行任务或需要委托给专门子代理处理的任务。查询结果时，优先根据 mailbox 中的后续消息继续推进；如果 `get_job_result` 返回 pending，请等待建议的重试间隔后再查询，避免高频轮询。".to_string(),
         parameters: serde_json::json!({
             "oneOf": [
                 scheduler_dispatch_variant(),
@@ -612,8 +612,8 @@ mod tests {
         let tool = SchedulerTool::new(backend);
         let definition = tool.definition();
         assert!(
-            definition.description.contains("Avoid busy polling"),
-            "scheduler description should discourage tight polling loops"
+            definition.description.contains("避免高频轮询"),
+            "scheduler description should discourage tight polling loops in Chinese"
         );
         let variants = definition.parameters["oneOf"]
             .as_array()
