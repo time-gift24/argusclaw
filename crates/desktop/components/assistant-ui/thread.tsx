@@ -12,6 +12,7 @@ import {
   NewSessionButton,
   SessionHistoryButton,
 } from "@/components/assistant-ui/session-selector";
+import { SubagentJobDetailsDrawer } from "@/components/assistant-ui/subagent-job-details-drawer";
 import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
@@ -390,6 +391,7 @@ const JobStatusArtifacts: FC = () => {
   const stoppingJobIds = useChatStore((state) => state.stoppingJobIds);
   const threadPoolThreads = useChatStore((state) => state.threadPoolThreads);
   const stopJob = useChatStore((state) => state.stopJob);
+  const openJobDetails = useChatStore((state) => state.openJobDetails);
   const { addToast } = useToast();
 
   if (jobStatuses.length === 0) return null;
@@ -444,6 +446,10 @@ const JobStatusArtifacts: FC = () => {
         error instanceof Error ? error.message : String(error),
       );
     }
+  };
+
+  const handleOpenJobDetails = (jobId: string) => {
+    openJobDetails(jobId);
   };
 
   return (
@@ -512,7 +518,12 @@ const JobStatusArtifacts: FC = () => {
                 className="rounded-2xl border border-muted/50 bg-background/85 px-4 py-4 text-sm shadow-sm transition-colors"
               >
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-start gap-3 text-left"
+                    aria-label={`查看 ${job.agent_display_name ?? `Agent ${job.agent_id}`} 详情`}
+                    onClick={() => handleOpenJobDetails(job.job_id)}
+                  >
                     <div
                       className={cn(
                         "mt-0.5 rounded-xl p-2",
@@ -562,38 +573,62 @@ const JobStatusArtifacts: FC = () => {
                         </div>
                       )}
                     </div>
-                  </div>
+                  </button>
                   <div className="flex shrink-0 items-center sm:justify-end">
                     {isActionable || isStopping ? (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
+                          onClick={() => handleOpenJobDetails(job.job_id)}
+                        >
+                          查看详情
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className={cn(
+                            "h-11 min-w-28 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40",
+                            isStopping
+                              ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+                              : "border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10",
+                          )}
+                          disabled={isStopping}
+                          aria-label={isStopping ? "正在停止任务" : "停止任务"}
+                          onClick={() => void handleStopJob(job.job_id)}
+                        >
+                          {isStopping ? (
+                            <>
+                              <Loader2 className="mr-2 size-4 animate-spin" />
+                              正在停止
+                            </>
+                          ) : (
+                            <>
+                              <StopCircle className="mr-2 size-4" />
+                              停止任务
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    ) : isFailed ? (
                       <Button
                         type="button"
                         variant="outline"
-                        className={cn(
-                          "h-11 min-w-28 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40",
-                          isStopping
-                            ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
-                            : "border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10",
-                        )}
-                        disabled={isStopping}
-                        aria-label={isStopping ? "正在停止任务" : "停止任务"}
-                        onClick={() => void handleStopJob(job.job_id)}
+                        className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
+                        onClick={() => handleOpenJobDetails(job.job_id)}
                       >
-                        {isStopping ? (
-                          <>
-                            <Loader2 className="mr-2 size-4 animate-spin" />
-                            正在停止
-                          </>
-                        ) : (
-                          <>
-                            <StopCircle className="mr-2 size-4" />
-                            停止任务
-                          </>
-                        )}
+                        查看详情
                       </Button>
-                    ) : isFailed ? (
-                      <div className="text-xs text-muted-foreground">任务已结束</div>
                     ) : (
-                      <div className="text-xs text-muted-foreground">—</div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
+                        onClick={() => handleOpenJobDetails(job.job_id)}
+                      >
+                        查看详情
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -863,6 +898,7 @@ export const Thread: FC = () => {
           <Composer />
         </div>
       </div>
+      <SubagentJobDetailsDrawer />
     </ThreadPrimitive.Root>
   );
 };

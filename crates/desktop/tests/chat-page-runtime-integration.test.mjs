@@ -40,6 +40,9 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(threadSource, /ChatStatusBanner/);
   assert.match(threadSource, /jobStatuses|JobStatus/);
   assert.match(threadSource, /whitespace-pre-wrap break-words[\s\S]*job\.message/);
+  assert.match(threadSource, /SubagentJobDetailsDrawer/);
+  assert.match(threadSource, /openJobDetails/);
+  assert.match(threadSource, /查看详情/);
   assert.match(threadSource, /Reasoning:/);
   assert.match(threadSource, /pendingAssistant\.retry/);
   assert.match(threadSource, /正在重试请求/);
