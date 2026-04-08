@@ -1,0 +1,2 @@
+# One domain suffix per line. Entries are baked into the binary at build time.
+# Leave empty to keep strict TLS verification for every host.

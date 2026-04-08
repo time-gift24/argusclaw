@@ -15,6 +15,7 @@ use crate::tool::ToolError;
 pub struct HttpClientBuilder {
     timeout_secs: Option<u64>,
     dns_pinned_addrs: Option<Vec<SocketAddr>>,
+    allow_insecure_ssl: bool,
 }
 
 impl HttpClientBuilder {
@@ -37,6 +38,13 @@ impl HttpClientBuilder {
     #[must_use]
     pub fn with_dns_pin(mut self, addrs: Vec<SocketAddr>) -> Self {
         self.dns_pinned_addrs = Some(addrs);
+        self
+    }
+
+    /// Allows invalid TLS certificates for the request.
+    #[must_use]
+    pub fn with_insecure_ssl(mut self, allow_insecure_ssl: bool) -> Self {
+        self.allow_insecure_ssl = allow_insecure_ssl;
         self
     }
 
@@ -74,6 +82,10 @@ impl HttpClientBuilder {
             builder = builder.timeout(std::time::Duration::from_secs(timeout));
         }
 
+        if self.allow_insecure_ssl {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
         // Apply DNS pinning if we have resolved addresses
         if let Some(ref addrs) = self.dns_pinned_addrs {
             let resolver = dns::DnsResolver::new(addrs.clone());
@@ -84,6 +96,11 @@ impl HttpClientBuilder {
             tool_name: "http".to_string(),
             reason: format!("failed to build HTTP client: {e}"),
         })
+    }
+
+    #[cfg(test)]
+    fn allows_insecure_ssl_for_tests(&self) -> bool {
+        self.allow_insecure_ssl
     }
 }
 
@@ -146,5 +163,22 @@ pub mod dns {
             let future = PinnedAddrsFuture { addrs: Some(addrs) };
             Box::pin(future)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpClientBuilder;
+
+    #[test]
+    fn builder_defaults_to_strict_tls_verification() {
+        let builder = HttpClientBuilder::new();
+        assert!(!builder.allows_insecure_ssl_for_tests());
+    }
+
+    #[test]
+    fn builder_can_enable_insecure_ssl_verification_override() {
+        let builder = HttpClientBuilder::new().with_insecure_ssl(true);
+        assert!(builder.allows_insecure_ssl_for_tests());
     }
 }

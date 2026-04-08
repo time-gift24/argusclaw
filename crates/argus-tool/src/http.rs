@@ -24,6 +24,13 @@ use url::Url;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
 
+mod generated_insecure_ssl_suffixes {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/generated_http_insecure_ssl_suffixes.rs"
+    ));
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HttpArgs {
@@ -80,6 +87,28 @@ impl Default for HttpTool {
 }
 
 impl HttpTool {
+    fn host_matches_insecure_ssl_whitelist(host: &str, suffixes: &[&str]) -> bool {
+        if host.parse::<IpAddr>().is_ok() {
+            return false;
+        }
+
+        let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+        if normalized_host.is_empty() {
+            return false;
+        }
+
+        suffixes.iter().any(|suffix| {
+            normalized_host == *suffix || normalized_host.ends_with(&format!(".{suffix}"))
+        })
+    }
+
+    fn should_skip_ssl_verification_for_host(host: &str) -> bool {
+        Self::host_matches_insecure_ssl_whitelist(
+            host,
+            generated_insecure_ssl_suffixes::INSECURE_SSL_SUFFIX_WHITELIST,
+        )
+    }
+
     /// Validates URL structure and resolves DNS, checking IPs against blocklist.
     async fn validate_and_resolve(
         url_str: &str,
@@ -254,12 +283,16 @@ impl NamedTool for HttpTool {
         }
 
         // -- SSRF validation + DNS resolution --
-        let (_parsed_url, resolved_addrs) = Self::validate_and_resolve(&args.url).await?;
+        let (parsed_url, resolved_addrs) = Self::validate_and_resolve(&args.url).await?;
+        let skip_ssl_verification = parsed_url
+            .host_str()
+            .is_some_and(Self::should_skip_ssl_verification_for_host);
 
         // -- Build client with DNS pinning --
         let client = HttpClientBuilder::new()
             .with_timeout(timeout_secs)
             .with_dns_pin(resolved_addrs)
+            .with_insecure_ssl(skip_ssl_verification)
             .build()?;
 
         // -- Simple GET: allowed to follow redirects (each hop re-validated) --
@@ -539,5 +572,45 @@ mod tests {
         let params = &def.parameters;
         let props = params.get("properties").and_then(|p| p.as_object());
         assert!(props.is_some_and(|p| p.contains_key("saveTo")));
+    }
+
+    #[test]
+    fn insecure_ssl_whitelist_matches_exact_host() {
+        assert!(HttpTool::host_matches_insecure_ssl_whitelist(
+            "corp.local",
+            &["corp.local"]
+        ));
+    }
+
+    #[test]
+    fn insecure_ssl_whitelist_matches_subdomain_suffix() {
+        assert!(HttpTool::host_matches_insecure_ssl_whitelist(
+            "api.corp.local",
+            &["corp.local"]
+        ));
+    }
+
+    #[test]
+    fn insecure_ssl_whitelist_does_not_match_similar_domain() {
+        assert!(!HttpTool::host_matches_insecure_ssl_whitelist(
+            "evilcorp.local",
+            &["corp.local"]
+        ));
+    }
+
+    #[test]
+    fn insecure_ssl_whitelist_is_case_insensitive() {
+        assert!(HttpTool::host_matches_insecure_ssl_whitelist(
+            "API.CORP.LOCAL",
+            &["corp.local"]
+        ));
+    }
+
+    #[test]
+    fn insecure_ssl_whitelist_does_not_match_ip_hosts() {
+        assert!(!HttpTool::host_matches_insecure_ssl_whitelist(
+            "10.0.0.1",
+            &["0.0.1"]
+        ));
     }
 }
