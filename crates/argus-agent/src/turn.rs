@@ -129,8 +129,7 @@ impl TurnContext<'_> {
     }
 }
 
-fn build_hook_context(
-    ctx: &TurnContext<'_>,
+struct HookContextArgs {
     event: HookEvent,
     tool_name: String,
     tool_call_id: String,
@@ -138,15 +137,17 @@ fn build_hook_context(
     tool_result: Option<serde_json::Value>,
     error: Option<String>,
     tool_manager: Option<Arc<dyn NamedTool>>,
-) -> ToolHookContext {
+}
+
+fn build_hook_context(ctx: &TurnContext<'_>, args: HookContextArgs) -> ToolHookContext {
     ToolHookContext {
-        event,
-        tool_name,
-        tool_call_id,
-        tool_input,
-        tool_result,
-        error,
-        tool_manager,
+        event: args.event,
+        tool_name: args.tool_name,
+        tool_call_id: args.tool_call_id,
+        tool_input: args.tool_input,
+        tool_result: args.tool_result,
+        error: args.error,
+        tool_manager: args.tool_manager,
         thread_event_sender: Some(ctx.thread_event_tx.clone()),
         thread_id: Some(ctx.thread_id_str()),
         turn_number: Some(ctx.turn_number),
@@ -156,13 +157,15 @@ fn build_hook_context(
 fn build_turn_end_hook_context(ctx: &TurnContext<'_>) -> ToolHookContext {
     build_hook_context(
         ctx,
-        HookEvent::TurnEnd,
-        String::new(),
-        String::new(),
-        serde_json::Value::Null,
-        None,
-        None,
-        None,
+        HookContextArgs {
+            event: HookEvent::TurnEnd,
+            tool_name: String::new(),
+            tool_call_id: String::new(),
+            tool_input: serde_json::Value::Null,
+            tool_result: None,
+            error: None,
+            tool_manager: None,
+        },
     )
 }
 
@@ -654,13 +657,15 @@ async fn execute_single_tool(
 
     let hook_ctx = build_hook_context(
         ctx,
-        HookEvent::BeforeToolCall,
-        tool_name.clone(),
-        tool_call_id.clone(),
-        tool_input.clone(),
-        None,
-        None,
-        tool.clone(),
+        HookContextArgs {
+            event: HookEvent::BeforeToolCall,
+            tool_name: tool_name.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_input: tool_input.clone(),
+            tool_result: None,
+            error: None,
+            tool_manager: tool.clone(),
+        },
     );
 
     if let Ok(HookAction::Block(ref reason)) = fire_hooks(ctx.hooks, &hook_ctx).await {
@@ -668,13 +673,15 @@ async fn execute_single_tool(
 
         let after_ctx = build_hook_context(
             ctx,
-            HookEvent::AfterToolCall,
-            tool_name.clone(),
-            tool_call_id.clone(),
-            tool_input,
-            None,
-            Some(reason.clone()),
-            None,
+            HookContextArgs {
+                event: HookEvent::AfterToolCall,
+                tool_name: tool_name.clone(),
+                tool_call_id: tool_call_id.clone(),
+                tool_input,
+                tool_result: None,
+                error: Some(reason.clone()),
+                tool_manager: None,
+            },
         );
         let _ = fire_hooks(ctx.hooks, &after_ctx).await;
 
@@ -812,13 +819,15 @@ async fn execute_single_tool(
     };
     let after_hook_ctx = build_hook_context(
         ctx,
-        HookEvent::AfterToolCall,
-        tool_name.clone(),
-        tool_call_id.clone(),
-        tool_input,
-        tool_result,
-        error,
-        None,
+        HookContextArgs {
+            event: HookEvent::AfterToolCall,
+            tool_name: tool_name.clone(),
+            tool_call_id: tool_call_id.clone(),
+            tool_input,
+            tool_result,
+            error,
+            tool_manager: None,
+        },
     );
     let _ = fire_hooks(ctx.hooks, &after_hook_ctx).await;
 
@@ -2216,7 +2225,11 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let compactor = Arc::new(RecordingTurnCompactor {
             calls: Arc::clone(&calls),
-            results: Arc::new(Mutex::new(VecDeque::from(vec![Ok(None), Ok(None), Ok(None)]))),
+            results: Arc::new(Mutex::new(VecDeque::from(vec![
+                Ok(None),
+                Ok(None),
+                Ok(None),
+            ]))),
         });
         let turn = make_turn_with(
             provider,
