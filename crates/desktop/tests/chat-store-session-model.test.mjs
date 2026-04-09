@@ -209,7 +209,7 @@ test("turn_failed clears any pending assistant state before snapshot refresh", (
   );
 });
 
-test("store defers session creation until explicit new-session or first send", () => {
+test("store keeps new-session selection as a draft until the first send", () => {
   const initializeBranch = storeSource.match(
     /async initialize\(\) \{(?<branch>[\s\S]*?)\n  \},/,
   );
@@ -245,13 +245,28 @@ test("store defers session creation until explicit new-session or first send", (
     "changing model preference should not auto-create a session",
   );
 
-  const activateSessionBranch = storeSource.match(
-    /async activateSession\(templateId: number\) \{(?<branch>[\s\S]*?)\n  \},/,
+  const draftBranch = storeSource.match(
+    /startNewSessionDraft:\s*\(templateId\?:\s*number\s*\|\s*null\)\s*=>\s*\{(?<branch>[\s\S]*?)\n  \},/,
   );
-  assert.ok(activateSessionBranch?.groups?.branch, "activateSession branch should exist");
+  assert.ok(draftBranch?.groups?.branch, "draft session branch should exist");
+  assert.match(
+    draftBranch.groups.branch,
+    /activeSessionKey:\s*null/,
+    "starting a new-session draft should clear the active session",
+  );
   assert.doesNotMatch(
-    activateSessionBranch.groups.branch,
-    /sessionId === state\.activeSessionKey|existingById/,
-    "explicit new-session activation should always create a fresh session",
+    draftBranch.groups.branch,
+    /createChatSession|activateSession/,
+    "starting a new-session draft should not create a backend session",
+  );
+
+  const sendBranch = storeSource.match(
+    /async sendMessage\(content: string\) \{(?<branch>[\s\S]*?)\n  \},/,
+  );
+  assert.ok(sendBranch?.groups?.branch, "sendMessage branch should exist");
+  assert.match(
+    sendBranch.groups.branch,
+    /if \(!state\.activeSessionKey\)[\s\S]*await get\(\)\.activateSession\(fallbackTemplateId\)/,
+    "first send should still materialize the draft as a real session",
   );
 });

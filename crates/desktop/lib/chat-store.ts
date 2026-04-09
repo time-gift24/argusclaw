@@ -126,6 +126,7 @@ export interface ChatStore {
 
   initialize: () => Promise<void>;
   activateSession: (templateId: number) => Promise<void>;
+  startNewSessionDraft: (templateId?: number | null) => void;
   switchToSession: (sessionId: string) => Promise<void>;
   switchToThread: (sessionId: string, threadId: string) => Promise<void>;
   loadSessionList: () => Promise<void>;
@@ -158,6 +159,18 @@ function clearStoppingJobId(
   const nextStoppingJobIds = { ...stoppingJobIds };
   delete nextStoppingJobIds[jobId];
   return nextStoppingJobIds;
+}
+
+function getTemplateDraftSelection(
+  templates: Awaited<ReturnType<typeof agents.list>>,
+  templateId: number | null,
+) {
+  const agent = templates.find((entry) => entry.id === templateId);
+  return {
+    selectedTemplateId: templateId,
+    selectedProviderPreferenceId: agent?.provider_id ?? null,
+    selectedModelOverride: agent?.model_id ?? null,
+  };
 }
 
 function mapRuntimeSummaryToThreadState(
@@ -291,9 +304,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set({ errorMessage: "当前没有可用的 Agent 模板。" });
       }
       void get().refreshThreadPoolSnapshot();
-      // NOTE: Do NOT auto-create a session here. Sessions are created only when:
-      // 1. User explicitly clicks "New Session" (handleNewSession in session-selector)
-      // 2. User sends a message without an active session (sendMessage fallback)
+      // NOTE: Do NOT auto-create a session here.
+      // Session/thread materialization happens only on first send.
     } catch (error) {
       set({ errorMessage: toErrorMessage(error) });
     }
@@ -357,6 +369,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
       throw error;
     }
+  },
+
+  startNewSessionDraft: (templateId?: number | null) => {
+    set((state) => {
+      const nextDraftSelection =
+        templateId == null
+          ? {}
+          : getTemplateDraftSelection(state.templates, templateId);
+
+      return {
+        ...nextDraftSelection,
+        activeSessionKey: null,
+        errorMessage: null,
+      };
+    });
   },
 
   async switchToSession(sessionId: string) {
@@ -483,13 +510,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   selectTemplate(templateId: number) {
-    const state = get();
-    const agent = state.templates.find((t) => t.id === templateId);
     set({
-      selectedTemplateId: templateId,
-      selectedProviderPreferenceId: agent?.provider_id ?? null,
-      // Apply the agent's configured provider/model as the next-session draft selection.
-      selectedModelOverride: agent?.model_id ?? null,
+      ...getTemplateDraftSelection(get().templates, templateId),
       errorMessage: null,
     });
   },

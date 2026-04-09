@@ -26,7 +26,9 @@ export function AgentSelector() {
   );
   const selectedTemplateId = useChatStore((state) => state.selectedTemplateId);
   const selectTemplate = useChatStore((state) => state.selectTemplate);
-  const activateSession = useChatStore((state) => state.activateSession);
+  const startNewSessionDraft = useChatStore(
+    (state) => state.startNewSessionDraft,
+  );
   const [open, setOpen] = React.useState(false);
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [pendingTemplateId, setPendingTemplateId] = React.useState<
@@ -45,10 +47,9 @@ export function AgentSelector() {
   const handleConfirmPendingSwitch = React.useCallback(() => {
     if (pendingTemplateId == null) return;
     setConfirmOpen(false);
-    useChatStore.getState().selectTemplate(pendingTemplateId);
-    void activateSession(pendingTemplateId);
+    void startNewSessionDraft(pendingTemplateId);
     setPendingTemplateId(null);
-  }, [activateSession, pendingTemplateId]);
+  }, [pendingTemplateId, startNewSessionDraft]);
 
   if (templates.length === 0) return null;
 
@@ -229,13 +230,13 @@ export function AgentSelector() {
         >
           <DialogHeader className="space-y-2">
             <DialogTitle className="text-base font-bold tracking-tight">
-              切换智能体需要新建会话
+              切换智能体将开始新的会话草稿
             </DialogTitle>
             <DialogDescription>
               已选择 {pendingTemplate?.display_name ?? "新的智能体"}
               。当前会话仍在使用{" "}
               {selectedTemplate?.display_name ?? "当前智能体"}
-              ，需要新建会话才能生效。是否立即新建？
+              ，发送首条消息时才会创建。是否切换到新的会话草稿？
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2 sm:gap-2">

@@ -41,6 +41,12 @@ test("session actions are split into new-session and history entry points", () =
   assert.doesNotMatch(sessionSelectorSource, /基于当前智能体创建/);
 });
 
+test("new-session button enters draft mode without creating a backend session", () => {
+  assert.match(sessionSelectorSource, /const startNewSessionDraft = useChatStore/);
+  assert.match(sessionSelectorSource, /void startNewSessionDraft\(\)/);
+  assert.doesNotMatch(sessionSelectorSource, /const activateSession = useChatStore/);
+});
+
 test("history dialog uses a left-right session and thread layout", () => {
   assert.match(sessionSelectorSource, /selectedSessionId/);
   assert.match(sessionSelectorSource, /loadThreads\(selectedSessionId\)/);
