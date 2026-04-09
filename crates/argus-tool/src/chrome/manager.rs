@@ -440,11 +440,20 @@ impl ChromeManager {
         session_id: &str,
         url: &str,
     ) -> Result<OpenedSession, ChromeToolError> {
-        let metadata = self
+        let metadata = match self
             .session_interaction(session_id)
             .await?
             .navigate(url)
-            .await?;
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) if self.should_retry_after_navigation_failure(&error) => {
+                return self
+                    .reopen_session_after_navigation_failure(session_id, url)
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
@@ -701,6 +710,68 @@ impl ChromeManager {
         ChromeToolError::SessionNotFound {
             session_id: session_id.to_string(),
         }
+    }
+
+    fn should_retry_after_navigation_failure(&self, error: &ChromeToolError) -> bool {
+        if self.session_limit != Self::PRODUCTION_SESSION_LIMIT {
+            return false;
+        }
+
+        let reason = match error {
+            ChromeToolError::NavigationFailed { reason, .. }
+            | ChromeToolError::PageReadFailed { reason }
+            | ChromeToolError::SessionShutdownFailed { reason }
+            | ChromeToolError::TabOperationFailed { reason } => reason,
+            ChromeToolError::InvalidArguments { .. }
+            | ChromeToolError::MissingRequiredField { .. }
+            | ChromeToolError::ActionNotAllowed { .. }
+            | ChromeToolError::SessionNotFound { .. }
+            | ChromeToolError::SharedSessionUnavailable
+            | ChromeToolError::DirectoryCreateFailed { .. }
+            | ChromeToolError::DriverDownloadFailed { .. }
+            | ChromeToolError::ChromeNotInstalled
+            | ChromeToolError::DriverNotInstalled { .. }
+            | ChromeToolError::InstallUnavailable
+            | ChromeToolError::UnsupportedPlatform { .. }
+            | ChromeToolError::ChromeVersionDetectFailed { .. }
+            | ChromeToolError::DriverArchiveInvalid { .. }
+            | ChromeToolError::DriverPatchFailed { .. }
+            | ChromeToolError::DriverStartFailed { .. }
+            | ChromeToolError::FileReadFailed { .. }
+            | ChromeToolError::FileWriteFailed { .. }
+            | ChromeToolError::InteractionFailed { .. }
+            | ChromeToolError::TabNotFound { .. }
+            | ChromeToolError::CannotCloseLastTab { .. } => return false,
+        };
+
+        let reason = reason.to_ascii_lowercase();
+        [
+            "session already closed",
+            "invalid session",
+            "session deleted",
+            "chrome not reachable",
+            "disconnected",
+            "target window already closed",
+            "no such window",
+            "web view not found",
+        ]
+        .iter()
+        .any(|needle| reason.contains(needle))
+    }
+
+    async fn reopen_session_after_navigation_failure(
+        &self,
+        session_id: &str,
+        url: &str,
+    ) -> Result<OpenedSession, ChromeToolError> {
+        self.remove_session_order_entry(session_id).await;
+        let session = self.sessions.write().await.remove(session_id);
+        if let Some(session) = session {
+            let _ = session.interaction().shutdown().await;
+        }
+        let _ = self.clear_shared_session_state();
+        let opened = self.backend.open(url).await?;
+        self.store_backend_opened_session(opened).await
     }
 }
 
@@ -1563,6 +1634,148 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct FlakyNavigateBackend {
+        open_urls: Arc<StdMutex<Vec<String>>>,
+        shutdowns: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl FlakyNavigateBackend {
+        fn open_urls(&self) -> Vec<String> {
+            self.open_urls.lock().unwrap().clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct FlakyNavigateSession {
+        current_url: StdMutex<String>,
+        current_title: StdMutex<String>,
+        fail_navigation: bool,
+        shutdown_label: String,
+        shutdowns: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserSession for FlakyNavigateSession {
+        async fn extract_text(&self, _selector: Option<&str>) -> Result<String, ChromeToolError> {
+            Ok(String::new())
+        }
+
+        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
+            Ok(Vec::new())
+        }
+
+        async fn network_requests(
+            &self,
+            _max_requests: Option<u32>,
+        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
+            Ok(Vec::new())
+        }
+
+        async fn shutdown(&self) -> Result<(), ChromeToolError> {
+            self.shutdowns
+                .lock()
+                .unwrap()
+                .push(self.shutdown_label.clone());
+            Ok(())
+        }
+
+        async fn click(&self, _selector: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _selector: &str, _text: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn current_url(&self) -> Result<String, ChromeToolError> {
+            Ok(self.current_url.lock().unwrap().clone())
+        }
+
+        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+            Ok(Vec::new())
+        }
+
+        async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+            if self.fail_navigation {
+                return Err(ChromeToolError::NavigationFailed {
+                    url: url.to_string(),
+                    reason: "chrome not reachable: target window already closed".to_string(),
+                });
+            }
+
+            *self.current_url.lock().unwrap() = url.to_string();
+            *self.current_title.lock().unwrap() = format!("Navigated to {url}");
+            Ok(PageMetadata {
+                final_url: self.current_url.lock().unwrap().clone(),
+                page_title: self.current_title.lock().unwrap().clone(),
+            })
+        }
+
+        async fn create_new_tab(
+            &self,
+            _url: &str,
+        ) -> Result<(String, PageMetadata), ChromeToolError> {
+            Err(ChromeToolError::TabOperationFailed {
+                reason: "not implemented in flaky test session".to_string(),
+            })
+        }
+
+        async fn switch_to_window(
+            &self,
+            _window_handle: &str,
+        ) -> Result<PageMetadata, ChromeToolError> {
+            Err(ChromeToolError::TabOperationFailed {
+                reason: "not implemented in flaky test session".to_string(),
+            })
+        }
+
+        async fn close_current_window(&self) -> Result<(), ChromeToolError> {
+            Err(ChromeToolError::TabOperationFailed {
+                reason: "not implemented in flaky test session".to_string(),
+            })
+        }
+
+        async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
+            Ok(vec![(
+                "handle-1".to_string(),
+                self.current_url.lock().unwrap().clone(),
+                self.current_title.lock().unwrap().clone(),
+            )])
+        }
+
+        async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
+            Ok("handle-1".to_string())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for FlakyNavigateBackend {
+        async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            let mut open_urls = self.open_urls.lock().unwrap();
+            open_urls.push(url.to_string());
+            let open_count = open_urls.len();
+            drop(open_urls);
+
+            let session: Arc<dyn BrowserSession> = Arc::new(FlakyNavigateSession {
+                current_url: StdMutex::new(url.to_string()),
+                current_title: StdMutex::new(format!("Opened {url}")),
+                fail_navigation: open_count == 1,
+                shutdown_label: format!("open-{open_count}"),
+                shutdowns: Arc::clone(&self.shutdowns),
+            });
+
+            Ok(BackendOpenResult {
+                backend_session_id: None,
+                metadata: PageMetadata {
+                    final_url: url.to_string(),
+                    page_title: format!("Opened {url}"),
+                },
+                session,
+            })
+        }
+    }
+
     fn sample_backend() -> Arc<FakeBrowserBackend> {
         Arc::new(
             FakeBrowserBackend::default()
@@ -1787,6 +2000,44 @@ mod tests {
         assert_eq!(opened.final_url, "https://example.com");
         assert_eq!(opened.page_title, "Example");
         assert!(!opened.session_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn manager_reopens_single_session_when_navigation_fails_after_browser_closes() {
+        let backend = Arc::new(FlakyNavigateBackend::default());
+        let temp_dir = tempdir().unwrap();
+        let manager = ChromeManager::new_with_session_limit(
+            backend.clone(),
+            None,
+            ChromePaths::from_home(temp_dir.path()),
+            ChromeManager::PRODUCTION_SESSION_LIMIT,
+        );
+
+        let opened = manager
+            .open(OpenArgs {
+                url: "https://example.com".into(),
+            })
+            .await
+            .expect("initial open should succeed");
+
+        let reopened = manager
+            .navigate(&opened.session_id, "https://example.org")
+            .await
+            .expect("navigate should recover by reopening a fresh session");
+
+        assert_ne!(reopened.session_id, opened.session_id);
+        assert_eq!(reopened.final_url, "https://example.org");
+        assert_eq!(reopened.page_title, "Opened https://example.org");
+        assert_eq!(
+            backend.open_urls(),
+            vec![
+                "https://example.com".to_string(),
+                "https://example.org".to_string()
+            ]
+        );
+
+        let err = manager.session(&opened.session_id).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SessionNotFound { .. }));
     }
 
     #[tokio::test]
