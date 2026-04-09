@@ -62,8 +62,8 @@ test("agent selector prefers the active session template for display", () => {
   );
 });
 
-test("agent selector confirms before creating a new session for another agent", () => {
-  assert.match(agentSelectorSource, /const activateSession = useChatStore/);
+test("agent selector confirms before starting a new draft for another agent", () => {
+  assert.match(agentSelectorSource, /const startNewSessionDraft = useChatStore/);
   assert.match(agentSelectorSource, /const \[pendingTemplateId, setPendingTemplateId\]/);
   assert.match(
     agentSelectorSource,
@@ -71,12 +71,11 @@ test("agent selector confirms before creating a new session for another agent", 
   );
   assert.match(agentSelectorSource, /setPendingTemplateId\(templateId\)/);
   assert.match(agentSelectorSource, /setConfirmOpen\(true\)/);
-  assert.match(agentSelectorSource, /需要新建会话才能生效/);
-  assert.match(agentSelectorSource, /切换智能体需要新建会话/);
+  assert.match(agentSelectorSource, /发送首条消息时才会创建/);
+  assert.match(agentSelectorSource, /切换智能体将开始新的会话草稿/);
   assert.match(agentSelectorSource, /继续当前会话/);
   assert.match(agentSelectorSource, /新建会话/);
-  assert.match(agentSelectorSource, /useChatStore\.getState\(\)\.selectTemplate\(pendingTemplateId\)/);
-  assert.match(agentSelectorSource, /void activateSession\(pendingTemplateId\)/);
+  assert.match(agentSelectorSource, /void startNewSessionDraft\(pendingTemplateId\)/);
   assert.match(agentSelectorSource, /setPendingTemplateId\(null\)/);
   assert.match(agentSelectorSource, /setConfirmOpen\(false\)/);
 });

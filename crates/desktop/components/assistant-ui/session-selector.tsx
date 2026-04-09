@@ -103,11 +103,11 @@ function getContextMenuPosition(x: number, y: number) {
 
 export function NewSessionButton() {
   const selectedTemplateId = useChatStore((s) => s.selectedTemplateId);
-  const activateSession = useChatStore((s) => s.activateSession);
+  const startNewSessionDraft = useChatStore((s) => s.startNewSessionDraft);
 
   const handleNewSession = () => {
     if (!selectedTemplateId) return;
-    void activateSession(selectedTemplateId);
+    void startNewSessionDraft();
   };
 
   return (
