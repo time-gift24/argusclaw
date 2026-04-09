@@ -17,6 +17,9 @@ use thirtyfour::session::handle::SessionHandle;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use super::error::ChromeToolError;
 use super::installer::{
     ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
@@ -89,6 +92,8 @@ struct ManagedChromeSupport {
 
 const SHARED_DRIVER_PORT: u16 = 19_515;
 const SHARED_DRIVER_SERVER_URL: &str = "http://127.0.0.1:19515";
+#[cfg(any(test, windows))]
+const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SharedSessionState {
@@ -996,7 +1001,8 @@ impl SystemChromeHost {
             return Ok(process);
         }
 
-        let mut child = Command::new(driver_binary)
+        let mut command = background_command(driver_binary);
+        let mut child = command
             .arg(format!("--port={SHARED_DRIVER_PORT}"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1051,14 +1057,14 @@ async fn chrome_version_command_output(
 ) -> Result<std::process::Output, ChromeToolError> {
     let mut command = if std::env::consts::OS == "windows" {
         let escaped_path = browser_binary.to_string_lossy().replace('\'', "''");
-        let mut command = Command::new("powershell");
+        let mut command = background_command("powershell");
         command.arg("-NoProfile").arg("-Command").arg(format!(
             "(Get-Item '{}').VersionInfo.ProductVersion",
             escaped_path
         ));
         command
     } else {
-        let mut command = Command::new(browser_binary);
+        let mut command = background_command(browser_binary);
         command.arg("--version");
         command
     };
@@ -1070,6 +1076,35 @@ async fn chrome_version_command_output(
             path: browser_binary.to_path_buf(),
             reason: e.to_string(),
         })
+}
+
+fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    configure_background_command(&mut command);
+    command
+}
+
+fn configure_background_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command
+            .as_std_mut()
+            .creation_flags(background_command_creation_flags_for_os("windows"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
+#[cfg(any(test, windows))]
+fn background_command_creation_flags_for_os(os: &str) -> u32 {
+    if os == "windows" {
+        WINDOWS_CREATE_NO_WINDOW
+    } else {
+        0
+    }
 }
 
 fn parse_browser_version_output(output: &str) -> Option<String> {
@@ -1311,8 +1346,9 @@ mod tests {
 
     use super::{
         BackendOpenResult, BrowserBackend, ChromeHost, ChromeManager, ManagedChromeSupport,
-        SessionMode, SystemChromeHost, build_chrome_capabilities, interactive_user_agent_for_os,
-        parse_browser_version_output,
+        SessionMode, SystemChromeHost, WINDOWS_CREATE_NO_WINDOW,
+        background_command_creation_flags_for_os, build_chrome_capabilities,
+        interactive_user_agent_for_os, parse_browser_version_output,
     };
 
     #[derive(Debug, Clone)]
@@ -2310,6 +2346,15 @@ mod tests {
             parse_browser_version_output("ProductVersion\r\n124.0.6367.91\r\n"),
             Some("124.0.6367.91".to_string())
         );
+    }
+
+    #[test]
+    fn background_command_creation_flags_hide_console_on_windows() {
+        assert_eq!(
+            background_command_creation_flags_for_os("windows"),
+            WINDOWS_CREATE_NO_WINDOW
+        );
+        assert_eq!(background_command_creation_flags_for_os("macos"), 0);
     }
 
     #[test]
