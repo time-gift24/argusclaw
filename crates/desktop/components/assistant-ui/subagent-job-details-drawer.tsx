@@ -4,10 +4,7 @@ import type { FC } from "react";
 
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { useChatStore } from "@/lib/chat-store";
-import {
-  Dialog,
-  DialogContent,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import type { JobDetailPayload } from "@/lib/types/chat";
 import { cn } from "@/lib/utils";
@@ -52,6 +49,8 @@ function statusBadgeClass(status: "running" | "completed" | "failed") {
 export const SubagentJobDetailsPanel: FC<{
   detail: JobDetailPayload | null;
 }> = ({ detail }) => {
+  if (!detail) return null;
+
   const outputLabel = detail?.result_text
     ? "最终产出"
     : detail?.summary_text
@@ -61,8 +60,6 @@ export const SubagentJobDetailsPanel: FC<{
     detail?.result_text ??
     detail?.summary_text ??
     "任务已结束，但详细结果暂不可用";
-
-  if (!detail) return null;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -116,25 +113,33 @@ export const SubagentJobDetailsPanel: FC<{
               <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
                 开始时间
               </dt>
-              <dd className="text-sm text-foreground">{formatTimestamp(detail.started_at)}</dd>
+              <dd className="text-sm text-foreground">
+                {formatTimestamp(detail.started_at)}
+              </dd>
             </div>
             <div className="space-y-1">
               <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
                 完成时间
               </dt>
-              <dd className="text-sm text-foreground">{formatTimestamp(detail.finished_at)}</dd>
+              <dd className="text-sm text-foreground">
+                {formatTimestamp(detail.finished_at)}
+              </dd>
             </div>
             <div className="space-y-1">
               <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
                 输入 Tokens
               </dt>
-              <dd className="text-sm text-foreground">{detail.input_tokens ?? "—"}</dd>
+              <dd className="text-sm text-foreground">
+                {detail.input_tokens ?? "—"}
+              </dd>
             </div>
             <div className="space-y-1">
               <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
                 输出 Tokens
               </dt>
-              <dd className="text-sm text-foreground">{detail.output_tokens ?? "—"}</dd>
+              <dd className="text-sm text-foreground">
+                {detail.output_tokens ?? "—"}
+              </dd>
             </div>
           </dl>
           <div className="rounded-2xl border border-border/60 bg-muted/15 px-4 py-3">
@@ -154,7 +159,10 @@ export const SubagentJobDetailsPanel: FC<{
           <div className="space-y-3 rounded-2xl border border-border/60 bg-background/80 p-4">
             {detail.timeline.length > 0 ? (
               detail.timeline.map((entry, index) => (
-                <div key={`${entry.kind}-${entry.at}-${index}`} className="flex gap-3">
+                <div
+                  key={`${entry.kind}-${entry.at}-${index}`}
+                  className="flex gap-3"
+                >
                   <div className="mt-1 flex flex-col items-center">
                     <div
                       className={cn(
@@ -186,7 +194,9 @@ export const SubagentJobDetailsPanel: FC<{
                 </div>
               ))
             ) : (
-              <div className="text-sm text-muted-foreground">暂未记录执行过程</div>
+              <div className="text-sm text-muted-foreground">
+                暂未记录执行过程
+              </div>
             )}
           </div>
         </section>
@@ -201,12 +211,17 @@ export const SubagentJobDetailsDrawer: FC = () => {
 
   const selectedJobId = session?.selectedJobDetailId ?? null;
   const detail =
-    selectedJobId && session ? session.jobDetails[selectedJobId] ?? null : null;
+    selectedJobId && session
+      ? (session.jobDetails[selectedJobId] ?? null)
+      : null;
   const open = !!detail;
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && closeJobDetails()}>
-    <DialogContent
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => !nextOpen && closeJobDetails()}
+    >
+      <DialogContent
         showCloseButton
         className="left-auto right-0 top-0 h-dvh w-full max-w-none translate-x-0 translate-y-0 gap-0 rounded-none border-l border-border/60 p-0 text-sm shadow-2xl sm:w-[40rem] sm:max-w-[40rem]"
       >

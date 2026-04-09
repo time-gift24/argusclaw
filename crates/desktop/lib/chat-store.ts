@@ -6,6 +6,7 @@ import type {
   JobDetailPayload,
   JobDetailTimelineItem,
   JobStatusPayload,
+  MailboxMessageJobResultPayload,
   MailboxMessagePayload,
   ThreadEventEnvelope,
   ThreadPoolEventReason,
@@ -94,9 +95,6 @@ const normalizeJobDetailPayload = (
     payload.result_text,
     JOB_DETAIL_RESULT_LIMIT,
   ),
-  timeline: payload.timeline.map((entry) => ({
-    ...entry,
-  })),
 });
 
 function appendJobDetailTimelineEntry(
@@ -162,10 +160,7 @@ function seedJobDetailFromDispatch(
 
 function updateJobDetailFromResult(
   existing: JobDetailPayload | undefined,
-  payload: Extract<
-    ThreadEventEnvelope["payload"],
-    { type: "job_result" }
-  >,
+  payload: Extract<ThreadEventEnvelope["payload"], { type: "job_result" }>,
   at: string,
   threadId: string,
   sourceMessageId?: string | null,
@@ -183,10 +178,8 @@ function updateJobDetailFromResult(
     result_text: resultText ?? existing?.result_text ?? payload.message,
     started_at: existing?.started_at ?? null,
     finished_at: at,
-    input_tokens:
-      payload.input_tokens ?? existing?.input_tokens ?? null,
-    output_tokens:
-      payload.output_tokens ?? existing?.output_tokens ?? null,
+    input_tokens: payload.input_tokens ?? existing?.input_tokens ?? null,
+    output_tokens: payload.output_tokens ?? existing?.output_tokens ?? null,
     source_message_id: sourceMessageId ?? existing?.source_message_id ?? null,
     thread_id: threadId,
     timeline: [
@@ -204,28 +197,8 @@ function updateJobDetailFromResult(
 function updateJobDetailFromMailboxResult(
   existing: JobDetailPayload | undefined,
   message: MailboxMessagePayload,
+  result: MailboxMessageJobResultPayload,
 ): JobDetailPayload {
-  const result = message.message_type;
-  if (result.type !== "job_result") {
-    return existing ?? normalizeJobDetailPayload({
-      job_id: message.id,
-      agent_id: 0,
-      agent_display_name: message.from_label,
-      agent_description: "",
-      prompt: "",
-      status: "running",
-      summary_text: null,
-      result_text: null,
-      started_at: null,
-      finished_at: null,
-      input_tokens: null,
-      output_tokens: null,
-      source_message_id: message.id,
-      thread_id: message.to_thread_id,
-      timeline: [],
-    });
-  }
-
   const tokenUsage = result.token_usage ?? null;
   const summaryText = existing?.summary_text ?? message.summary ?? null;
   return normalizeJobDetailPayload({
@@ -240,8 +213,7 @@ function updateJobDetailFromMailboxResult(
     started_at: existing?.started_at ?? null,
     finished_at: message.timestamp,
     input_tokens: tokenUsage?.input_tokens ?? existing?.input_tokens ?? null,
-    output_tokens:
-      tokenUsage?.output_tokens ?? existing?.output_tokens ?? null,
+    output_tokens: tokenUsage?.output_tokens ?? existing?.output_tokens ?? null,
     source_message_id: message.id,
     thread_id: message.to_thread_id,
     timeline: [
@@ -376,16 +348,14 @@ function mapRuntimeSummaryToThreadState(
 function sortThreadPoolThreads(
   threads: ThreadPoolThreadState[],
 ): ThreadPoolThreadState[] {
-  return threads
-    .slice()
-    .sort((left, right) => {
-      const leftTime = left.lastActiveAt ?? "";
-      const rightTime = right.lastActiveAt ?? "";
-      if (leftTime === rightTime) {
-        return right.eventCount - left.eventCount;
-      }
-      return rightTime.localeCompare(leftTime);
-    });
+  return threads.slice().sort((left, right) => {
+    const leftTime = left.lastActiveAt ?? "";
+    const rightTime = right.lastActiveAt ?? "";
+    if (leftTime === rightTime) {
+      return right.eventCount - left.eventCount;
+    }
+    return rightTime.localeCompare(leftTime);
+  });
 }
 
 function touchThreadPoolThread(
@@ -458,11 +428,34 @@ function findSessionKeyForEnvelope(
     Object.keys(sessionsByKey).find((key) => {
       const session = sessionsByKey[key];
       return (
-        session.sessionId === envelope.session_id &&
-        !!session.jobDetails[jobId]
+        session.sessionId === envelope.session_id && !!session.jobDetails[jobId]
       );
     }) ?? null
   );
+}
+
+function updateSessionJobDetailTimeline(
+  sessionsByKey: Record<string, ChatSessionState>,
+  sessionKey: string | null,
+  jobId: string | null,
+  entry: JobDetailTimelineItem,
+): Record<string, ChatSessionState> | null {
+  if (!sessionKey || !jobId) return null;
+
+  const session = sessionsByKey[sessionKey];
+  if (!session?.jobDetails[jobId]) return null;
+
+  return {
+    ...sessionsByKey,
+    [sessionKey]: {
+      ...session,
+      jobDetails: appendJobDetailTimelineEntry(
+        session.jobDetails,
+        jobId,
+        entry,
+      ),
+    },
+  };
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
@@ -806,17 +799,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => {
       const session = state.sessionsByKey[sessionKey];
       if (!session) return {};
-      if (!jobId) {
-        return {
-          sessionsByKey: {
-            ...state.sessionsByKey,
-            [sessionKey]: {
-              ...session,
-              selectedJobDetailId: null,
-            },
-          },
-        };
-      }
 
       return {
         sessionsByKey: {
@@ -1063,10 +1045,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   _handleThreadEvent(envelope: ThreadEventEnvelope) {
     const state = get();
-    const sessionKey = findSessionKeyForEnvelope(
-      state.sessionsByKey,
-      envelope,
-    );
+    const sessionKey = findSessionKeyForEnvelope(state.sessionsByKey, envelope);
     const poolHandled = (() => {
       const { payload } = envelope;
 
@@ -1087,10 +1066,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const now = new Date().toISOString();
       set((state) => {
         const { payload } = envelope;
-        const session = sessionKey ? state.sessionsByKey[sessionKey] : null;
 
         switch (payload.type) {
-          case "thread_bound_to_job":
+          case "thread_bound_to_job": {
+            const nextSessionsByKey = updateSessionJobDetailTimeline(
+              state.sessionsByKey,
+              sessionKey,
+              payload.job_id,
+              buildJobDetailTimelineEntry(
+                "dispatched",
+                now,
+                "线程已绑定任务",
+                "running",
+              ),
+            );
             return {
               threadPoolThreads: touchThreadPoolThread(
                 state.threadPoolThreads,
@@ -1105,28 +1094,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(session
-                ? {
-                    sessionsByKey: {
-                      ...state.sessionsByKey,
-                      [sessionKey!]: {
-                        ...session,
-                        jobDetails: appendJobDetailTimelineEntry(
-                          session.jobDetails,
-                          payload.job_id,
-                          buildJobDetailTimelineEntry(
-                            "dispatched",
-                            now,
-                            "线程已绑定任务",
-                            "running",
-                          ),
-                        ),
-                      },
-                    },
-                  }
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
-          case "thread_pool_queued":
+          }
+          case "thread_pool_queued": {
+            const nextSessionsByKey = updateSessionJobDetailTimeline(
+              state.sessionsByKey,
+              sessionKey,
+              payload.runtime.job_id,
+              buildJobDetailTimelineEntry("queued", now, "排队中", "running"),
+            );
             return {
               threadPoolThreads: touchThreadPoolThread(
                 state.threadPoolThreads,
@@ -1141,30 +1120,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(session &&
-              payload.runtime.job_id &&
-              session.jobDetails[payload.runtime.job_id]
-                ? {
-                    sessionsByKey: {
-                      ...state.sessionsByKey,
-                      [sessionKey!]: {
-                        ...session,
-                        jobDetails: appendJobDetailTimelineEntry(
-                          session.jobDetails,
-                          payload.runtime.job_id,
-                          buildJobDetailTimelineEntry(
-                            "queued",
-                            now,
-                            "排队中",
-                            "running",
-                          ),
-                        ),
-                      },
-                    },
-                  }
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
-          case "thread_pool_started":
+          }
+          case "thread_pool_started": {
+            const nextSessionsByKey = updateSessionJobDetailTimeline(
+              state.sessionsByKey,
+              sessionKey,
+              payload.runtime.job_id,
+              buildJobDetailTimelineEntry("started", now, "运行中", "running"),
+            );
             return {
               threadPoolThreads: touchThreadPoolThread(
                 state.threadPoolThreads,
@@ -1179,30 +1146,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(session &&
-              payload.runtime.job_id &&
-              session.jobDetails[payload.runtime.job_id]
-                ? {
-                    sessionsByKey: {
-                      ...state.sessionsByKey,
-                      [sessionKey!]: {
-                        ...session,
-                        jobDetails: appendJobDetailTimelineEntry(
-                          session.jobDetails,
-                          payload.runtime.job_id,
-                          buildJobDetailTimelineEntry(
-                            "started",
-                            now,
-                            "运行中",
-                            "running",
-                          ),
-                        ),
-                      },
-                    },
-                  }
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
-          case "thread_pool_cooling":
+          }
+          case "thread_pool_cooling": {
+            const nextSessionsByKey = updateSessionJobDetailTimeline(
+              state.sessionsByKey,
+              sessionKey,
+              payload.runtime.job_id,
+              buildJobDetailTimelineEntry("cooling", now, "冷却中", "running"),
+            );
             return {
               threadPoolThreads: touchThreadPoolThread(
                 state.threadPoolThreads,
@@ -1217,30 +1172,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(session &&
-              payload.runtime.job_id &&
-              session.jobDetails[payload.runtime.job_id]
-                ? {
-                    sessionsByKey: {
-                      ...state.sessionsByKey,
-                      [sessionKey!]: {
-                        ...session,
-                        jobDetails: appendJobDetailTimelineEntry(
-                          session.jobDetails,
-                          payload.runtime.job_id,
-                          buildJobDetailTimelineEntry(
-                            "cooling",
-                            now,
-                            "冷却中",
-                            "running",
-                          ),
-                        ),
-                      },
-                    },
-                  }
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
-          case "thread_pool_evicted":
+          }
+          case "thread_pool_evicted": {
+            const nextSessionsByKey = updateSessionJobDetailTimeline(
+              state.sessionsByKey,
+              sessionKey,
+              payload.runtime.job_id,
+              buildJobDetailTimelineEntry(
+                "evicted",
+                now,
+                "已驱逐",
+                "failed",
+                payload.reason,
+              ),
+            );
             return {
               threadPoolThreads: touchThreadPoolThread(
                 state.threadPoolThreads,
@@ -1255,30 +1204,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 },
                 state.threadPoolSnapshot,
               ),
-              ...(session &&
-              payload.runtime.job_id &&
-              session.jobDetails[payload.runtime.job_id]
-                ? {
-                    sessionsByKey: {
-                      ...state.sessionsByKey,
-                      [sessionKey!]: {
-                        ...session,
-                        jobDetails: appendJobDetailTimelineEntry(
-                          session.jobDetails,
-                          payload.runtime.job_id,
-                          buildJobDetailTimelineEntry(
-                            "evicted",
-                            now,
-                            "已驱逐",
-                            "failed",
-                            payload.reason,
-                          ),
-                        ),
-                      },
-                    },
-                  }
+              ...(nextSessionsByKey
+                ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
+          }
           case "thread_pool_metrics_updated":
             return {
               threadPoolSnapshot: payload.snapshot,
@@ -1302,48 +1232,48 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     const { payload } = envelope;
 
-      switch (payload.type) {
-        case "retry_attempt":
-          set((state) => {
-            const session = state.sessionsByKey[sessionKey];
-            if (!session?.pendingAssistant) return {};
-            return {
-              sessionsByKey: {
-                ...state.sessionsByKey,
-                [sessionKey]: {
-                  ...session,
-                  pendingAssistant: {
-                    ...session.pendingAssistant,
-                    retry: {
-                      attempt: payload.attempt,
-                      maxRetries: payload.max_retries,
-                      error: payload.error,
-                    },
-                  },
-                },
-              },
-            };
-          });
-          break;
-
-        case "reasoning_delta":
-          set((state) => {
-            const session = state.sessionsByKey[sessionKey];
-            if (!session?.pendingAssistant) return {};
-            return {
+    switch (payload.type) {
+      case "retry_attempt":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session?.pendingAssistant) return {};
+          return {
             sessionsByKey: {
               ...state.sessionsByKey,
-                [sessionKey]: {
-                  ...session,
-                  pendingAssistant: {
-                    ...session.pendingAssistant,
-                    reasoning: session.pendingAssistant.reasoning + payload.delta,
-                    retry: null,
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  retry: {
+                    attempt: payload.attempt,
+                    maxRetries: payload.max_retries,
+                    error: payload.error,
                   },
                 },
               },
-            };
-          });
+            },
+          };
+        });
+        break;
+
+      case "reasoning_delta":
+        set((state) => {
+          const session = state.sessionsByKey[sessionKey];
+          if (!session?.pendingAssistant) return {};
+          return {
+            sessionsByKey: {
+              ...state.sessionsByKey,
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  reasoning: session.pendingAssistant.reasoning + payload.delta,
+                  retry: null,
+                },
+              },
+            },
+          };
+        });
         break;
 
       case "content_delta":
@@ -1353,17 +1283,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
-                [sessionKey]: {
-                  ...session,
-                  pendingAssistant: {
-                    ...session.pendingAssistant,
-                    content: session.pendingAssistant.content + payload.delta,
-                    retry: null,
-                  },
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  content: session.pendingAssistant.content + payload.delta,
+                  retry: null,
                 },
               },
-            };
-          });
+            },
+          };
+        });
         break;
 
       case "tool_call_delta": {
@@ -1397,17 +1327,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
-                [sessionKey]: {
-                  ...session,
-                  pendingAssistant: {
-                    ...session.pendingAssistant,
-                    toolCalls,
-                    retry: null,
-                  },
+              [sessionKey]: {
+                ...session,
+                pendingAssistant: {
+                  ...session.pendingAssistant,
+                  toolCalls,
+                  retry: null,
                 },
               },
-            };
-          });
+            },
+          };
+        });
         break;
       }
 
@@ -1606,6 +1536,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const nextJobDetail = updateJobDetailFromMailboxResult(
               session.jobDetails[message.message_type.job_id],
               message,
+              message.message_type,
             );
             return {
               sessionsByKey: {
@@ -1631,7 +1562,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...state.sessionsByKey[sessionKey],
               tokenCount: payload.total_tokens,
-              pendingAssistant: state.sessionsByKey[sessionKey]?.pendingAssistant
+              pendingAssistant: state.sessionsByKey[sessionKey]
+                ?.pendingAssistant
                 ? {
                     ...state.sessionsByKey[sessionKey].pendingAssistant!,
                     retry: null,

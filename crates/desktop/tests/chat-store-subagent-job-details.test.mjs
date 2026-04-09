@@ -31,3 +31,23 @@ test("thread-pool job timeline updates resolve the parent session by session id 
     /session\.sessionId === envelope\.session_id[\s\S]*session\.jobDetails\[jobId\]/,
   );
 });
+
+test("job detail normalization avoids redundant timeline cloning", () => {
+  assert.doesNotMatch(storeSource, /timeline:\s*payload\.timeline\.map\(/);
+});
+
+test("job detail store does not keep dead guards or non-null assertions", () => {
+  assert.doesNotMatch(
+    storeSource,
+    /openJobDetails\(jobId: string\)\s*{[\s\S]*selectedJobDetailId:\s*null[\s\S]*selectedJobDetailId:\s*jobId/,
+  );
+  assert.doesNotMatch(storeSource, /sessionKey!/);
+});
+
+test("mailbox job detail updates are specialized for job result payloads", () => {
+  assert.match(
+    storeSource,
+    /function updateJobDetailFromMailboxResult\(\s*existing: JobDetailPayload \| undefined,\s*message: MailboxMessagePayload,\s*result: MailboxMessageJobResultPayload,/,
+  );
+  assert.doesNotMatch(storeSource, /result\.type !== "job_result"/);
+});

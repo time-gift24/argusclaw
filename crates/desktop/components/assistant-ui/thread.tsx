@@ -3,7 +3,10 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
-import { ToolFallbackImpl, ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import {
+  ToolFallbackImpl,
+  ToolFallback,
+} from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { TokenRing } from "@/components/token-ring";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
@@ -63,7 +66,7 @@ import { useEffect, useRef } from "react";
 
 const ComposerAction: FC = () => {
   const session = useActiveChatSession();
-  const isRunning = useAuiState(s => s.thread.isRunning);
+  const isRunning = useAuiState((s) => s.thread.isRunning);
   const isCompacting = session?.status === "compacting";
   const aui = useAui();
 
@@ -126,7 +129,16 @@ const ComposerAction: FC = () => {
           </Button>
         ) : (
           <ComposerPrimitive.Send asChild>
-            <TooltipIconButton tooltip={isCompacting ? "上下文压缩中" : "发送消息"} side="top" type="button" variant="default" size="icon" className="aui-composer-send size-8 rounded-full shadow-lg shadow-primary/20 transition-all active:scale-95" aria-label="Send message" disabled={isCompacting}>
+            <TooltipIconButton
+              tooltip={isCompacting ? "上下文压缩中" : "发送消息"}
+              side="top"
+              type="button"
+              variant="default"
+              size="icon"
+              className="aui-composer-send size-8 rounded-full shadow-lg shadow-primary/20 transition-all active:scale-95"
+              aria-label="Send message"
+              disabled={isCompacting}
+            >
               <ArrowUpIcon className="aui-composer-send-icon size-4" />
             </TooltipIconButton>
           </ComposerPrimitive.Send>
@@ -161,11 +173,9 @@ const Composer: FC = () => {
 const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
   !!message.metadata?.synthetic &&
   !!message.metadata?.collapsed_by_default &&
-  [
-    "compaction_prompt",
-    "compaction_summary",
-    "compaction_replay",
-  ].includes(message.metadata.mode ?? "");
+  ["compaction_prompt", "compaction_summary", "compaction_replay"].includes(
+    message.metadata.mode ?? "",
+  );
 
 const CompactionGroups: FC = () => {
   const session = useActiveChatSession();
@@ -256,7 +266,10 @@ const ThreadSuggestionItem: FC = () => {
   return (
     <div className="aui-thread-welcome-suggestion-display fade-in slide-in-from-bottom-2 @md:nth-[n+3]:block nth-[n+3]:hidden animate-in fill-mode-both duration-300">
       <SuggestionPrimitive.Trigger send asChild>
-        <Button variant="ghost" className="aui-thread-welcome-suggestion h-auto w-full @md:flex-col flex-wrap items-start justify-start gap-1.5 rounded-[20px] border border-muted/60 bg-muted/10 px-5 py-4 text-left text-sm transition-all hover:bg-muted hover:border-primary/30 group">
+        <Button
+          variant="ghost"
+          className="aui-thread-welcome-suggestion h-auto w-full @md:flex-col flex-wrap items-start justify-start gap-1.5 rounded-[20px] border border-muted/60 bg-muted/10 px-5 py-4 text-left text-sm transition-all hover:bg-muted hover:border-primary/30 group"
+        >
           <span className="aui-thread-welcome-suggestion-text-1 font-bold group-hover:text-primary transition-colors">
             <SuggestionPrimitive.Title />
           </span>
@@ -288,7 +301,9 @@ const MessageError: FC = () => {
         <div className="flex items-start gap-3">
           <CircleAlert className="size-4 shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="font-bold uppercase tracking-tight text-[10px] opacity-70">发生错误</p>
+            <p className="font-bold uppercase tracking-tight text-[10px] opacity-70">
+              发生错误
+            </p>
             <ErrorPrimitive.Message className="aui-message-error-message leading-relaxed" />
           </div>
         </div>
@@ -362,10 +377,10 @@ const PendingAssistantArtifacts: FC = () => {
               调用了 {toolCalls.length} 个工具
             </span>
             <div className="ml-auto flex items-center gap-2">
-               {toolCalls.some(tc => tc.status === "running" || tc.status === "streaming") && (
-                 <Loader2 className="size-3 animate-spin text-primary" />
-               )}
-               <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/tools:rotate-180" />
+              {toolCalls.some(
+                (tc) => tc.status === "running" || tc.status === "streaming",
+              ) && <Loader2 className="size-3 animate-spin text-primary" />}
+              <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/tools:rotate-180" />
             </div>
           </summary>
           <div className="mt-2 flex max-h-[min(18rem,35vh)] flex-col gap-1 overflow-y-auto custom-scrollbar border-l-2 border-muted/30 pl-4 pr-1 ml-4">
@@ -393,6 +408,7 @@ const JobStatusArtifacts: FC = () => {
   const stopJob = useChatStore((state) => state.stopJob);
   const openJobDetails = useChatStore((state) => state.openJobDetails);
   const { addToast } = useToast();
+  const detailActionLabel = "查看详情";
 
   if (jobStatuses.length === 0) return null;
 
@@ -441,15 +457,8 @@ const JobStatusArtifacts: FC = () => {
       await stopJob(jobId);
       addToast("success", "已发送停止请求");
     } catch (error) {
-      addToast(
-        "error",
-        error instanceof Error ? error.message : String(error),
-      );
+      addToast("error", error instanceof Error ? error.message : String(error));
     }
-  };
-
-  const handleOpenJobDetails = (jobId: string) => {
-    openJobDetails(jobId);
   };
 
   return (
@@ -465,176 +474,170 @@ const JobStatusArtifacts: FC = () => {
           <div className="ml-auto flex items-center gap-2">
             {sorted.some((job) => {
               const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
-              return stoppingJobIds[job.job_id] || runtimeStatus === "queued" || job.status === "running";
-            }) && (
-              <Loader2 className="size-3 animate-spin text-primary" />
-            )}
+              return (
+                stoppingJobIds[job.job_id] ||
+                runtimeStatus === "queued" ||
+                job.status === "running"
+              );
+            }) && <Loader2 className="size-3 animate-spin text-primary" />}
             <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/jobs:rotate-180" />
           </div>
         </summary>
 
         <div className="mt-3 max-h-[min(22rem,40vh)] overflow-y-auto custom-scrollbar pr-1">
           <div className="flex flex-col gap-2">
-          {sorted.map((job) => {
-            const isStopping = !!stoppingJobIds[job.job_id];
-            const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
-            const uiStatus =
-              isStopping
+            {sorted.map((job) => {
+              const isStopping = !!stoppingJobIds[job.job_id];
+              const runtimeStatus = runtimeStatusByJobId.get(job.job_id);
+              const uiStatus = isStopping
                 ? "stopping"
                 : runtimeStatus === "queued"
                   ? "queued"
                   : job.status;
-            const isRunning = uiStatus === "running";
-            const isQueued = uiStatus === "queued";
-            const isFailed = uiStatus === "failed";
-            const isCompleted = uiStatus === "completed";
-            const isActionable = (job.status === "running" || isQueued) && !isStopping;
+              const isRunning = uiStatus === "running";
+              const isQueued = uiStatus === "queued";
+              const isFailed = uiStatus === "failed";
+              const isCompleted = uiStatus === "completed";
+              const isActionable =
+                (job.status === "running" || isQueued) && !isStopping;
+              const detailAction = (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
+                  onClick={() => openJobDetails(job.job_id)}
+                >
+                  {detailActionLabel}
+                </Button>
+              );
 
-            const statusLabel =
-              uiStatus === "stopping"
-                ? "正在停止"
-                : uiStatus === "queued"
-                  ? "排队中"
-                : uiStatus === "running"
-                  ? "运行中"
-                  : uiStatus === "failed"
-                    ? "失败"
-                    : "已完成";
+              const statusLabel =
+                uiStatus === "stopping"
+                  ? "正在停止"
+                  : uiStatus === "queued"
+                    ? "排队中"
+                    : uiStatus === "running"
+                      ? "运行中"
+                      : uiStatus === "failed"
+                        ? "失败"
+                        : "已完成";
 
-            const statusBadgeClass =
-              uiStatus === "stopping"
-                ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                : uiStatus === "queued"
-                  ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
-                : uiStatus === "running"
-                  ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
-                  : uiStatus === "failed"
-                    ? "border-destructive/30 bg-destructive/10 text-destructive"
-                    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+              const statusBadgeClass =
+                uiStatus === "stopping"
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  : uiStatus === "queued"
+                    ? "border-cyan-500/30 bg-cyan-500/10 text-cyan-700 dark:text-cyan-300"
+                    : uiStatus === "running"
+                      ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                      : uiStatus === "failed"
+                        ? "border-destructive/30 bg-destructive/10 text-destructive"
+                        : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
 
-            return (
-              <div
-                key={job.job_id}
-                className="rounded-2xl border border-muted/50 bg-background/85 px-4 py-4 text-sm shadow-sm transition-colors"
-              >
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-start gap-3 text-left"
-                    aria-label={`查看 ${job.agent_display_name ?? `Agent ${job.agent_id}`} 详情`}
-                    onClick={() => handleOpenJobDetails(job.job_id)}
-                  >
-                    <div
-                      className={cn(
-                        "mt-0.5 rounded-xl p-2",
-                        isStopping && "bg-amber-500/10 text-amber-700 dark:text-amber-300",
-                        isQueued && "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
-                        isRunning && "bg-primary/10 text-primary",
-                        isFailed && "bg-destructive/10 text-destructive",
-                        isCompleted && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-                      )}
+              return (
+                <div
+                  key={job.job_id}
+                  className="rounded-2xl border border-muted/50 bg-background/85 px-4 py-4 text-sm shadow-sm transition-colors"
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-start gap-3 text-left"
+                      aria-label={`查看 ${job.agent_display_name ?? `Agent ${job.agent_id}`} 详情`}
+                      onClick={() => openJobDetails(job.job_id)}
                     >
-                      {isStopping || isRunning || isQueued ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : isFailed ? (
-                        <CircleAlert className="size-4" />
+                      <div
+                        className={cn(
+                          "mt-0.5 rounded-xl p-2",
+                          isStopping &&
+                            "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+                          isQueued &&
+                            "bg-cyan-500/10 text-cyan-700 dark:text-cyan-300",
+                          isRunning && "bg-primary/10 text-primary",
+                          isFailed && "bg-destructive/10 text-destructive",
+                          isCompleted &&
+                            "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+                        )}
+                      >
+                        {isStopping || isRunning || isQueued ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : isFailed ? (
+                          <CircleAlert className="size-4" />
+                        ) : (
+                          <CheckIcon className="size-4" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="truncate font-semibold text-foreground">
+                            {job.agent_display_name ?? `Agent ${job.agent_id}`}
+                          </span>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "rounded-full px-2.5 py-0.5 text-[10px] uppercase tracking-[0.18em]",
+                              statusBadgeClass,
+                            )}
+                          >
+                            {statusLabel}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          <span className="line-clamp-2 break-words">
+                            {job.agent_description || "后台子 agent 任务"}
+                          </span>
+                        </div>
+                        {job.prompt && (
+                          <div className="mt-2 rounded-xl border border-muted/40 bg-muted/20 px-3 py-2 text-xs leading-relaxed text-foreground/80">
+                            {job.prompt}
+                          </div>
+                        )}
+                        {job.message && (
+                          <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-muted/40 bg-muted/35 px-3 py-2 text-xs leading-relaxed text-foreground/80">
+                            {job.message}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                    <div className="flex shrink-0 items-center sm:justify-end">
+                      {isActionable || isStopping ? (
+                        <div className="flex items-center gap-2">
+                          {detailAction}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className={cn(
+                              "h-11 min-w-28 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40",
+                              isStopping
+                                ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+                                : "border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10",
+                            )}
+                            disabled={isStopping}
+                            aria-label={
+                              isStopping ? "正在停止任务" : "停止任务"
+                            }
+                            onClick={() => void handleStopJob(job.job_id)}
+                          >
+                            {isStopping ? (
+                              <>
+                                <Loader2 className="mr-2 size-4 animate-spin" />
+                                正在停止
+                              </>
+                            ) : (
+                              <>
+                                <StopCircle className="mr-2 size-4" />
+                                停止任务
+                              </>
+                            )}
+                          </Button>
+                        </div>
                       ) : (
-                        <CheckIcon className="size-4" />
+                        detailAction
                       )}
                     </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate font-semibold text-foreground">
-                          {job.agent_display_name ?? `Agent ${job.agent_id}`}
-                        </span>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "rounded-full px-2.5 py-0.5 text-[10px] uppercase tracking-[0.18em]",
-                            statusBadgeClass,
-                          )}
-                        >
-                          {statusLabel}
-                        </Badge>
-                      </div>
-                      <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
-                        <span className="line-clamp-2 break-words">
-                          {job.agent_description || "后台子 agent 任务"}
-                        </span>
-                      </div>
-                      {job.prompt && (
-                        <div className="mt-2 rounded-xl border border-muted/40 bg-muted/20 px-3 py-2 text-xs leading-relaxed text-foreground/80">
-                          {job.prompt}
-                        </div>
-                      )}
-                      {job.message && (
-                        <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-muted/40 bg-muted/35 px-3 py-2 text-xs leading-relaxed text-foreground/80">
-                          {job.message}
-                        </div>
-                      )}
-                    </div>
-                  </button>
-                  <div className="flex shrink-0 items-center sm:justify-end">
-                    {isActionable || isStopping ? (
-                      <div className="flex items-center gap-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
-                          onClick={() => handleOpenJobDetails(job.job_id)}
-                        >
-                          查看详情
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className={cn(
-                            "h-11 min-w-28 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40",
-                            isStopping
-                              ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
-                              : "border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10",
-                          )}
-                          disabled={isStopping}
-                          aria-label={isStopping ? "正在停止任务" : "停止任务"}
-                          onClick={() => void handleStopJob(job.job_id)}
-                        >
-                          {isStopping ? (
-                            <>
-                              <Loader2 className="mr-2 size-4 animate-spin" />
-                              正在停止
-                            </>
-                          ) : (
-                            <>
-                              <StopCircle className="mr-2 size-4" />
-                              停止任务
-                            </>
-                          )}
-                        </Button>
-                      </div>
-                    ) : isFailed ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
-                        onClick={() => handleOpenJobDetails(job.job_id)}
-                      >
-                        查看详情
-                      </Button>
-                    ) : (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="h-11 rounded-xl border px-4 text-sm font-medium shadow-sm transition-all focus-visible:ring-2 focus-visible:ring-primary/40"
-                        onClick={() => handleOpenJobDetails(job.job_id)}
-                      >
-                        查看详情
-                      </Button>
-                    )}
                   </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
           </div>
         </div>
       </details>
@@ -666,7 +669,10 @@ const AssistantActionBar: FC = () => {
       </ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
-          <TooltipIconButton tooltip="更多" className="data-[state=open]:bg-accent">
+          <TooltipIconButton
+            tooltip="更多"
+            className="data-[state=open]:bg-accent"
+          >
             <MoreHorizontalIcon />
           </TooltipIconButton>
         </ActionBarMorePrimitive.Trigger>
@@ -677,7 +683,8 @@ const AssistantActionBar: FC = () => {
         >
           <ActionBarPrimitive.ExportMarkdown asChild>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item flex cursor-pointer select-none items-center gap-2.5 rounded-xl px-3 py-2 text-xs font-medium outline-none hover:bg-muted transition-colors">
-              <DownloadIcon className="size-3.5 opacity-70" />导出为 Markdown
+              <DownloadIcon className="size-3.5 opacity-70" />
+              导出为 Markdown
             </ActionBarMorePrimitive.Item>
           </ActionBarPrimitive.ExportMarkdown>
         </ActionBarMorePrimitive.Content>
@@ -717,13 +724,17 @@ const ReasoningBlock: FC = () => {
           <MessagePartPrimitive.InProgress>
             <>
               <Loader2 className="size-3 animate-spin text-primary" />
-              <span className="text-[11px] font-bold uppercase tracking-widest text-primary/80">思考中...</span>
+              <span className="text-[11px] font-bold uppercase tracking-widest text-primary/80">
+                思考中...
+              </span>
             </>
           </MessagePartPrimitive.InProgress>
           <AuiIf condition={(s) => s.part.status.type !== "running"}>
             <>
               <div className="size-1.5 rounded-full bg-emerald-500/50" />
-              <span className="text-[11px] font-bold uppercase tracking-widest opacity-70">思考完成</span>
+              <span className="text-[11px] font-bold uppercase tracking-widest opacity-70">
+                思考完成
+              </span>
             </>
           </AuiIf>
           <ChevronDownIcon className="ml-auto size-3.5 shrink-0 opacity-40 transition-transform duration-300 group-open:rotate-180" />
@@ -773,7 +784,10 @@ const UserActionBar: FC = () => {
       className="aui-user-action-bar-root flex flex-col items-end"
     >
       <ActionBarPrimitive.Edit asChild>
-        <TooltipIconButton tooltip="修改消息" className="aui-user-action-edit size-8 rounded-full hover:bg-muted">
+        <TooltipIconButton
+          tooltip="修改消息"
+          className="aui-user-action-edit size-8 rounded-full hover:bg-muted"
+        >
           <PencilIcon className="size-3.5" />
         </TooltipIconButton>
       </ActionBarPrimitive.Edit>
@@ -813,10 +827,21 @@ const EditComposer: FC = () => {
         />
         <div className="aui-edit-composer-footer mx-4 mb-4 flex items-center gap-2 self-end">
           <ComposerPrimitive.Cancel asChild>
-            <Button variant="ghost" size="sm" className="rounded-xl text-xs font-bold uppercase tracking-wider">取消</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-xl text-xs font-bold uppercase tracking-wider"
+            >
+              取消
+            </Button>
           </ComposerPrimitive.Cancel>
           <ComposerPrimitive.Send asChild>
-            <Button size="sm" className="rounded-xl px-5 text-xs font-bold uppercase tracking-wider shadow-lg shadow-primary/10">更新消息</Button>
+            <Button
+              size="sm"
+              className="rounded-xl px-5 text-xs font-bold uppercase tracking-wider shadow-lg shadow-primary/10"
+            >
+              更新消息
+            </Button>
           </ComposerPrimitive.Send>
         </div>
       </ComposerPrimitive.Root>
@@ -865,7 +890,10 @@ export const Thread: FC = () => {
         ["--composer-max-width" as string]: "60rem",
       }}
     >
-      <ThreadPrimitive.Viewport autoScroll className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-8 custom-scrollbar">
+      <ThreadPrimitive.Viewport
+        autoScroll
+        className="aui-thread-viewport relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth px-4 pt-4 pb-8 custom-scrollbar"
+      >
         <AuiIf condition={(s) => s.thread.isEmpty}>
           <ThreadWelcome />
         </AuiIf>
