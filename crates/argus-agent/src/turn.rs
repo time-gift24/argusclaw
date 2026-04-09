@@ -129,8 +129,26 @@ impl TurnContext<'_> {
     }
 }
 
-struct HookContextArgs {
+fn build_hook_context(
+    ctx: &TurnContext<'_>,
     event: HookEvent,
+    details: HookContextDetails,
+) -> ToolHookContext {
+    ToolHookContext {
+        event,
+        tool_name: details.tool_name,
+        tool_call_id: details.tool_call_id,
+        tool_input: details.tool_input,
+        tool_result: details.tool_result,
+        error: details.error,
+        tool_manager: details.tool_manager,
+        thread_event_sender: Some(ctx.thread_event_tx.clone()),
+        thread_id: Some(ctx.thread_id_str()),
+        turn_number: Some(ctx.turn_number),
+    }
+}
+
+struct HookContextDetails {
     tool_name: String,
     tool_call_id: String,
     tool_input: serde_json::Value,
@@ -139,26 +157,11 @@ struct HookContextArgs {
     tool_manager: Option<Arc<dyn NamedTool>>,
 }
 
-fn build_hook_context(ctx: &TurnContext<'_>, args: HookContextArgs) -> ToolHookContext {
-    ToolHookContext {
-        event: args.event,
-        tool_name: args.tool_name,
-        tool_call_id: args.tool_call_id,
-        tool_input: args.tool_input,
-        tool_result: args.tool_result,
-        error: args.error,
-        tool_manager: args.tool_manager,
-        thread_event_sender: Some(ctx.thread_event_tx.clone()),
-        thread_id: Some(ctx.thread_id_str()),
-        turn_number: Some(ctx.turn_number),
-    }
-}
-
 fn build_turn_end_hook_context(ctx: &TurnContext<'_>) -> ToolHookContext {
     build_hook_context(
         ctx,
-        HookContextArgs {
-            event: HookEvent::TurnEnd,
+        HookEvent::TurnEnd,
+        HookContextDetails {
             tool_name: String::new(),
             tool_call_id: String::new(),
             tool_input: serde_json::Value::Null,
@@ -657,8 +660,8 @@ async fn execute_single_tool(
 
     let hook_ctx = build_hook_context(
         ctx,
-        HookContextArgs {
-            event: HookEvent::BeforeToolCall,
+        HookEvent::BeforeToolCall,
+        HookContextDetails {
             tool_name: tool_name.clone(),
             tool_call_id: tool_call_id.clone(),
             tool_input: tool_input.clone(),
@@ -673,8 +676,8 @@ async fn execute_single_tool(
 
         let after_ctx = build_hook_context(
             ctx,
-            HookContextArgs {
-                event: HookEvent::AfterToolCall,
+            HookEvent::AfterToolCall,
+            HookContextDetails {
                 tool_name: tool_name.clone(),
                 tool_call_id: tool_call_id.clone(),
                 tool_input,
@@ -819,8 +822,8 @@ async fn execute_single_tool(
     };
     let after_hook_ctx = build_hook_context(
         ctx,
-        HookContextArgs {
-            event: HookEvent::AfterToolCall,
+        HookEvent::AfterToolCall,
+        HookContextDetails {
             tool_name: tool_name.clone(),
             tool_call_id: tool_call_id.clone(),
             tool_input,
@@ -903,11 +906,25 @@ async fn execute_loop(
             &mut request_messages,
         );
 
+        // Tier 1 — Nudge: second-to-last iteration injects a system message
+        // asking the model to provide a final answer without further tool calls.
+        if iteration + 2 == max_iterations {
+            request_messages.push(ChatMessage::system(
+                "You are approaching the iteration limit. Provide your best final answer \
+                 using the information you have gathered so far. Do not call any more tools.",
+            ));
+        }
+
+        // Tier 2 — Force text: on the last iteration, strip all tools so the
+        // model is forced to respond with text instead of tool calls.
+        let force_text = iteration + 1 == max_iterations;
+
         tracing::debug!(
             thread_id = %thread_id,
             turn_number = %ctx.turn_number,
             iteration = %iteration,
             max_iterations = %max_iterations,
+            force_text = %force_text,
             message_count = %request_messages.len(),
             "Turn iteration started"
         );
@@ -920,8 +937,12 @@ async fn execute_loop(
             message_count = %request_messages.len(),
             "Calling LLM"
         );
-        let request =
-            build_completion_request(request_messages.clone(), ctx.tools, ctx.agent_record);
+        let tools_for_request: &[Arc<dyn NamedTool>] = if force_text { &[] } else { ctx.tools };
+        let request = build_completion_request(
+            request_messages.clone(),
+            tools_for_request,
+            ctx.agent_record,
+        );
         let (response, usage_reported) = match call_llm_streaming(
             ctx.provider,
             request,
@@ -959,6 +980,51 @@ async fn execute_loop(
             usage_baseline_total = None;
         }
         match next_action {
+            NextAction::Return | NextAction::ContinueWithTools { .. } if force_text => {
+                if matches!(next_action, NextAction::ContinueWithTools { .. }) {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        turn_number = %ctx.turn_number,
+                        iteration = %iteration,
+                        "LLM returned tool calls despite force_text (tools were stripped); treating as text response"
+                    );
+                    // Strip tool_calls from the last assistant message to avoid
+                    // persisting unpaired tool calls (no corresponding tool results).
+                    if let Some(last) = turn_messages.last_mut() {
+                        last.tool_calls = None;
+                    }
+                }
+
+                // Fire TurnEnd hooks for observation (audit/logging), but ignore
+                // ContinueWithMessage — force_text is the last iteration and must return.
+                let hook_ctx = build_turn_end_hook_context(ctx);
+                let turn_end_action = fire_hooks(ctx.hooks, &hook_ctx).await;
+                match turn_end_action {
+                    Ok(HookAction::ContinueWithMessage(_)) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            turn_number = %ctx.turn_number,
+                            "TurnEnd hook requested continuation on force_text iteration (ignored)"
+                        );
+                    }
+                    Ok(HookAction::Block(reason)) => {
+                        tracing::warn!(reason = %reason, "TurnEnd hook returned Block (ignored)");
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "TurnEnd hook failed (ignored)");
+                    }
+                    Ok(HookAction::Continue) => {}
+                }
+
+                return Ok(finalize_turn_record(
+                    ctx.turn_number,
+                    ctx.started_at,
+                    history.as_ref(),
+                    turn_messages,
+                    token_usage.clone(),
+                    compacted_during_turn,
+                ));
+            }
             NextAction::Return => {
                 let hook_ctx = build_turn_end_hook_context(ctx);
                 let turn_end_action = fire_hooks(ctx.hooks, &hook_ctx).await;
@@ -1239,7 +1305,7 @@ mod tests {
     use crate::compact::{CompactResult, Compactor};
     use crate::error::CompactError;
     use crate::thread::ThreadBuilder;
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, Role};
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
         AgentId, AgentType, HookAction, HookEvent, HookHandler, HookRegistry, ProviderId,
@@ -2393,22 +2459,190 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_end_always_continue_hits_max_iterations() {
-        let provider = Arc::new(SequencedProvider::new(vec![CompletionResponse {
-            content: Some("loop".to_string()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            input_tokens: 1,
-            output_tokens: 1,
-            finish_reason: FinishReason::Stop,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        }]));
+    async fn graceful_max_iteration_nudge_and_force_text() {
+        // max_iterations = 4:
+        //   iteration 0: tool call  → execute tool
+        //   iteration 1: tool call  → execute tool
+        //   iteration 2: nudge injected, tool call → execute tool
+        //   iteration 3: force_text (empty tools), LLM returns text → Return
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("calling tool 1".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("calling tool 2".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-2".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("calling tool 3".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-3".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("final answer".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let turn = make_turn_with(
+            provider,
+            vec![Arc::new(FixedResultTool)],
+            vec![],
+            4,
+            TurnCancellation::default(),
+            None,
+            vec![ChatMessage::user("start")],
+        );
+
+        let record = turn
+            .execute()
+            .await
+            .expect("turn should succeed gracefully");
+
+        // Should complete successfully, not with MaxIterationsReached
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+        assert!(record.messages.iter().any(|m| m.content == "final answer"));
+    }
+
+    #[tokio::test]
+    async fn turn_end_always_continue_stopped_by_force_text() {
+        // TurnEnd hook forces continuation on every iteration, but force_text
+        // on the last iteration returns immediately, preventing MaxIterationsReached.
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("loop".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            CompletionResponse {
+                content: Some("final".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
 
         let turn = make_turn(provider, vec![Arc::new(AlwaysContinueTurnEndHook)], 2);
         let result = turn.execute().await;
 
-        assert!(matches!(result, Err(TurnError::MaxIterationsReached(2))));
+        // force_text on iteration 1 returns immediately — no MaxIterationsReached
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn force_text_handles_llm_returning_tool_calls() {
+        // On the last iteration (force_text), the LLM still returns ToolUse
+        // despite tools being stripped. The turn should succeed regardless.
+        let provider = Arc::new(SequencedProvider::new(vec![
+            CompletionResponse {
+                content: Some("working".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            // Last iteration: force_text is active, but LLM returns tool calls anyway
+            CompletionResponse {
+                content: Some("my final answer".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-2".to_string(),
+                    name: "fixed_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        ]));
+
+        let turn = make_turn_with(
+            provider,
+            vec![Arc::new(FixedResultTool)],
+            vec![],
+            2,
+            TurnCancellation::default(),
+            None,
+            vec![ChatMessage::user("start")],
+        );
+
+        let record = turn
+            .execute()
+            .await
+            .expect("turn should succeed despite LLM returning tool calls under force_text");
+
+        assert!(matches!(record.kind, TurnRecordKind::UserTurn));
+        assert!(
+            record
+                .messages
+                .iter()
+                .any(|m| m.content == "my final answer")
+        );
+        // The last assistant message (from force_text iteration) must not have
+        // unpaired tool_calls — force_text strips them before persisting.
+        let last_assistant = record
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::Assistant));
+        assert!(
+            last_assistant.is_some_and(|m| m.tool_calls.is_none()),
+            "force_text should strip tool_calls from the last assistant message"
+        );
     }
 
     #[tokio::test]

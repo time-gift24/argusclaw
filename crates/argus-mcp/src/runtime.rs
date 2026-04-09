@@ -14,7 +14,10 @@ use rmcp::model::{CallToolRequestParams, ClientInfo, ProtocolVersion, Tool as Rm
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{RoleClient, serve_client};
+
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use argus_protocol::tool::NamedTool;
 use argus_protocol::{
@@ -160,6 +163,9 @@ const LEGACY_SSE_CLIENT_NAME: &str = "argusclaw";
 const STREAMABLE_HTTP_ACCEPT: &str = "application/json, text/event-stream";
 const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 type PendingLegacySseResponse = Result<serde_json::Value, McpRuntimeError>;
 type PendingLegacySseSender = tokio::sync::oneshot::Sender<PendingLegacySseResponse>;
@@ -593,7 +599,7 @@ impl McpRuntime {
     async fn refresh_server(&self, server_id: i64) -> Result<(), McpRuntimeError> {
         let now = Instant::now();
         let checked_at = Utc::now().to_rfc3339();
-        let record = {
+        let (record, existing_session) = {
             let mut state = self.state_guard();
             let entry = state
                 .servers
@@ -607,16 +613,74 @@ impl McpRuntime {
                 return Ok(());
             }
 
-            entry.record.status = if entry.retry_attempts > 0 || entry.urgent_retry {
-                McpServerStatus::Retrying
-            } else {
-                McpServerStatus::Connecting
-            };
+            let reuse_existing_stdio_session =
+                matches!(entry.record.transport, McpTransportConfig::Stdio { .. })
+                    && entry.session.is_some();
+
+            if !reuse_existing_stdio_session {
+                entry.record.status = if entry.retry_attempts > 0 || entry.urgent_retry {
+                    McpServerStatus::Retrying
+                } else {
+                    McpServerStatus::Connecting
+                };
+            }
+
             entry.record.last_checked_at = Some(checked_at.clone());
             entry.last_checked_instant = Some(now);
             entry.urgent_retry = false;
-            entry.record.clone()
+
+            (
+                entry.record.clone(),
+                if reuse_existing_stdio_session {
+                    entry.session.clone()
+                } else {
+                    None
+                },
+            )
         };
+
+        if let Some(session) = existing_session {
+            match timeout_operation(
+                record.timeout_ms,
+                session.list_tools(),
+                || McpRuntimeError::ConnectFailed {
+                    server_id,
+                    reason: format!("tool discovery timed out after {}ms", record.timeout_ms),
+                },
+                |error| error,
+            )
+            .await
+            {
+                Ok(tools) => {
+                    let normalized_tools = normalize_tools(server_id, tools);
+                    let persisted_record = {
+                        let mut state = self.state_guard();
+                        let entry = state
+                            .servers
+                            .get_mut(&server_id)
+                            .ok_or(McpRuntimeError::ServerNotFound { server_id })?;
+                        entry.tools = normalized_tools.clone();
+                        entry.record.status = McpServerStatus::Ready;
+                        entry.record.last_checked_at = Some(checked_at.clone());
+                        entry.record.last_success_at = Some(checked_at.clone());
+                        entry.record.last_error = None;
+                        entry.record.discovered_tool_count = normalized_tools.len() as u32;
+                        entry.record.clone()
+                    };
+
+                    self.repo
+                        .replace_mcp_server_tools(server_id, &normalized_tools)
+                        .await?;
+                    self.repo.upsert_mcp_server(&persisted_record).await?;
+                }
+                Err(error) => {
+                    self.record_runtime_disconnect(server_id, error.to_string())
+                        .await;
+                }
+            }
+
+            return Ok(());
+        }
 
         match timeout_operation(
             record.timeout_ms,
@@ -812,6 +876,8 @@ impl McpConnector for RmcpConnector {
                 process.args(args);
                 process.envs(env);
                 process.kill_on_drop(true);
+                #[cfg(windows)]
+                process.creation_flags(CREATE_NO_WINDOW);
                 let transport = TokioChildProcess::new(process).map_err(|error| {
                     McpRuntimeError::ConnectFailed {
                         server_id,
@@ -3000,6 +3066,40 @@ mod tests {
             .expect("server snapshot should exist");
         assert_eq!(snapshot.status, McpServerStatus::Ready);
         assert_eq!(snapshot.retry_attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn ready_stdio_session_is_reused_during_poll_refresh() {
+        let repo = Arc::new(FakeRepo::new(vec![server(31, "Docs", true)]));
+        let connector = Arc::new(FakeConnector::new());
+        connector
+            .push_success(31, vec![tool(31, "post_message", "Send a message")])
+            .await;
+
+        let config = McpRuntimeConfig {
+            ready_recheck_interval: Duration::ZERO,
+            ..McpRuntimeConfig::default()
+        };
+        let runtime = Arc::new(McpRuntime::new(repo.clone(), connector.clone(), config));
+
+        runtime
+            .poll_once()
+            .await
+            .expect("first poll should succeed");
+        assert_eq!(connector.attempts(31).await, 1);
+
+        runtime
+            .poll_once()
+            .await
+            .expect("second poll should reuse session");
+
+        let stored = repo.tools_for_server(31).await;
+        assert_eq!(stored, vec![tool(31, "post_message", "Send a message")]);
+        let snapshot = runtime
+            .server_snapshot(31)
+            .expect("server snapshot should exist");
+        assert_eq!(snapshot.status, McpServerStatus::Ready);
+        assert_eq!(connector.attempts(31).await, 1);
     }
 
     #[tokio::test]
