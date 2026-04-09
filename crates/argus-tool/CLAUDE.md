@@ -1,100 +1,33 @@
-# Argus-Tool 工具注册表
+# Argus-Tool
 
-> 特性：工具注册表，基于 DashMap 提供 NamedTool 工具的注册和查找。
+> 特性：`ToolManager` 与内置 filesystem、shell、browser、scheduler、clap tools。
 
-## 模块结构
+## 核心职责
 
-```
-src/
-├── lib.rs           # 公共 API、ToolManager
-├── glob.rs          # GlobTool：文件 glob 匹配
-├── grep.rs          # GrepTool：内容搜索
-├── http.rs          # HttpTool：HTTP 请求
-├── read.rs          # ReadTool：文件读取
-├── scheduler.rs     # SchedulerTool：子智能体任务调度
-└── shell.rs         # ShellTool：Shell 执行
-```
+- `ToolManager` 负责注册、发现、执行与风险查询
+- 内置文件工具：`glob`、`grep`、`read`、`list_dir`、`write_file`、`apply_patch`
+- 执行与网络工具：`shell`、`http`
+- 编排工具：`scheduler`
+- 浏览器工具：`ChromeTool`
+- CLI 适配：`ClapTool`
 
-## 核心概念
+## 关键模块
 
-### 1. NamedTool Trait
+- `src/lib.rs`
+- `src/scheduler.rs`
+- `src/clap_tool.rs`
+- `src/chrome/*`
+- `src/path_utils.rs`
 
-**NamedTool** 定义工具接口（来自 `argus-protocol`）：
+## 公开入口
 
-```rust
-pub trait NamedTool: Send + Sync {
-    fn name(&self) -> &str;
-    fn definition(&self) -> ToolDefinition;
-    fn risk_level(&self) -> RiskLevel;
-    async fn execute(&self, args: ToolInput) -> Result<ToolOutput, ToolError>;
-}
-```
+- `ToolManager`
+- 各内置 tool 类型
+- `SchedulerBackend`
+- `ClapTool`、`ClapExecutor`
 
-### 2. ToolManager
+## 修改守则
 
-**ToolManager** 管理工具注册：
-
-```rust
-pub struct ToolManager {
-    tools: DashMap<String, Arc<dyn NamedTool>>,  // 线程安全的工具注册表
-}
-```
-
-**关键方法**：
-- `register(tool)`：注册工具
-- `get(name)`：获取工具
-- `list_definitions()`：获取所有工具定义（供 LLM 使用）
-- `execute(name, args)`：执行工具
-- `get_risk_level(name)`：获取工具风险等级
-
-## 内置工具
-
-| 工具 | 风险等级 | 说明 |
-|------|---------|------|
-| `glob` | Medium | 文件路径模式匹配 |
-| `grep` | Medium | 文件内容搜索 |
-| `http` | Medium | HTTP 请求 |
-| `read` | Low | 文件读取 |
-| `scheduler` | Medium | 子智能体任务调度（dispatch/list/result） |
-| `shell` | Critical | Shell 命令执行 |
-
-## 公共 API
-
-```rust
-use argus_tool::{ToolManager, GlobTool, ShellTool};
-use argus_protocol::risk_level::RiskLevel;
-
-// 创建 Manager
-let manager = ToolManager::new();
-
-// 注册工具
-manager.register(Arc::new(GlobTool::new()));
-manager.register(Arc::new(ShellTool::new()));
-
-// 获取工具定义（供 LLM 使用）
-let definitions = manager.list_definitions();
-
-// 执行工具
-let result = manager.execute("glob", serde_json::json!({
-    "pattern": "**/*.rs"
-})).await?;
-```
-
-## 依赖关系
-
-### 上游依赖
-- `argus-protocol`：NamedTool trait、RiskLevel
-
-### 下游消费者
-- `argus-turn`：执行工具调用
-- `argus-thread`：管理工具生命周期
-
-## 设计原则
-
-### 1. 工具注册表
-- DashMap 提供线程安全的并发访问
-- 工具按名称注册，支持覆盖
-
-### 2. 风险等级
-- 每个工具有对应的风险等级
-- 高风险工具（如 shell）需要审批
+- tool schema、风险等级与执行语义必须在实现里自洽，不能只靠 prompt 约定
+- 任何会读写文件或执行命令的工具都要经过路径校验或明确的安全边界
+- `ClapTool` 的 discoverability / alias / hide 规则见同目录 `AGENTS.md`

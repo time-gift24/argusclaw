@@ -1,62 +1,26 @@
-# Argus-Test-Support 测试辅助
+# Argus-Test-Support
 
-> 特性：测试辅助模块，提供 Mock Provider 等测试工具。
+> 特性：为 LLM、agent 与 retry 测试提供 mock providers 和辅助类型。
 
-## 模块结构
+## 核心职责
 
-```
-src/
-├── lib.rs           # 公共 API 导出
-└── providers.rs     # Mock providers
-```
+- 提供稳定、可组合的测试 provider
+- 覆盖“始终失败”“间歇失败”等常见异常路径
+- 让上层 crate 不必在各自测试里重复造轮子
 
-## 核心概念
+## 关键模块
 
-### 1. Mock Providers
+- `src/providers/always_fail.rs`
+- `src/providers/intermittent.rs`
+- `src/providers/mod.rs`
 
-**AlwaysFailProvider**：总是失败的 Provider（用于测试重试）：
+## 公开入口
 
-```rust
-pub struct AlwaysFailProvider;
+- `AlwaysFailProvider`
+- `IntermittentFailureProvider`
 
-impl LlmProvider for AlwaysFailProvider {
-    // 所有调用都返回错误
-}
-```
+## 修改守则
 
-**IntermittentFailureProvider**：间歇性失败的 Provider：
-
-```rust
-pub struct IntermittentFailureProvider {
-    failure_count: u32,
-    interval: u32,
-}
-
-impl LlmProvider for IntermittentFailureProvider {
-    // 前 N 次调用失败，之后成功
-}
-```
-
-## 公共 API
-
-```rust
-use argus_test_support::{AlwaysFailProvider, IntermittentFailureProvider};
-
-// 测试重试机制
-let provider = AlwaysFailProvider::new();
-let retry_provider = RetryProvider::new(Arc::new(provider), RetryConfig { max_retries: 3 });
-```
-
-## 依赖关系
-
-### 上游依赖
-- `argus-protocol`：LlmProvider trait
-
-### 下游消费者
-- 各 crate 的测试代码
-
-## 设计原则
-
-### 1. 仅测试使用
-- 此 crate 仅用于测试
-- 不应在生产代码中使用
+- 只服务测试场景，不要让生产代码依赖这个 crate
+- mock 行为要保持可预测，避免引入隐式随机性
+- 若新增测试 provider，优先覆盖上层确实重复出现的失败模式

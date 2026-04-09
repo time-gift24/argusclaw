@@ -1,102 +1,29 @@
-# Argus-Session 会话管理
+# Argus-Session
 
-> 特性：会话管理，协调 log、template、thread、tool 等模块。
+> 特性：session 聚合层，负责 thread 装载、恢复、scheduler backend 与 job / mailbox 协调。
 
-## 模块结构
+## 核心职责
 
-```
-src/
-├── lib.rs              # 公共 API 导出
-├── manager.rs          # SessionManager：会话生命周期管理
-├── session.rs          # Session：会话容器（多线程）
-└── provider_resolver.rs # ProviderResolver：LLM Provider 解析接口
-```
+- `SessionManager` 创建、加载、重命名、删除 session 与 thread
+- 从 `argus-agent` 的 trace / turn log 恢复 thread 状态
+- 为 `scheduler` tool 提供 backend，把 template、job、mailbox 组合成会话层能力
+- 持有内存态 `Session` 缓存，并把事件广播给上层
 
-## 核心概念
+## 关键模块
 
-### 1. Session 结构
+- `src/manager.rs`：`SessionManager`、恢复逻辑、scheduler backend
+- `src/session.rs`：`Session`、`SessionSummary`、`ThreadSummary`
+- `src/provider_resolver.rs`：对 `argus-protocol::ProviderResolver` 的 re-export
 
-**Session** 是多个 Thread 的容器：
+## 公开入口
 
-```rust
-pub struct Session {
-    pub id: SessionId,
-    pub name: String,
-    threads: DashMap<ThreadId, Arc<Mutex<Thread>>>,  // 内存中的线程
-}
-```
+- `SessionManager`
+- `Session`
+- `SessionSummary`
+- `ThreadSummary`
 
-### 2. SessionManager
+## 修改守则
 
-**SessionManager** 管理会话的持久化和加载：
-
-```rust
-pub struct SessionManager {
-    pool: SqlitePool,                              // 数据库连接
-    sessions: DashMap<SessionId, Arc<Session>>,   // 内存中的会话
-    template_manager: Arc<TemplateManager>,
-    provider_resolver: Arc<dyn ProviderResolver>,
-    tool_manager: Arc<ToolManager>,
-    compactor_manager: Arc<CompactorManager>,    // 上下文压缩器
-    trace_dir: PathBuf,                          // 执行追踪目录
-    job_manager: Arc<JobManager>,                 // 后台任务管理
-}
-```
-
-**关键特性**：
-- 惰性加载：会话按需从数据库加载到内存
-- 多层存储：内存 + SQLite 持久化
-- Thread 聚合管理
-- 自动注册 scheduler 工具（统一封装 dispatch_job / get_job_result / list_subagents）
-
-### 3. ProviderResolver Trait
-
-```rust
-pub trait ProviderResolver: Send + Sync {
-    fn resolve(&self, provider_id: &ProviderId) -> Result<Arc<dyn LlmProvider>>;
-}
-```
-
-## 公共 API
-
-```rust
-use argus_session::{SessionManager, Session};
-
-// 列出所有会话
-let sessions = session_manager.list_sessions().await?;
-
-// 加载会话到内存
-let session = session_manager.load(session_id).await?;
-
-// 获取会话中的线程
-let thread = session.get_thread(&thread_id)?;
-```
-
-## 依赖关系
-
-### 上游依赖
-- `argus-protocol`：SessionId、ThreadId、ProviderResolver 等核心类型
-- `argus-template`：TemplateManager
-- `argus-thread`：Thread 实现
-- `argus-turn`：TurnConfig、TraceConfig
-- `argus-tool`：ToolManager
-- `argus-llm`：LlmProvider
-- `argus-job`：JobManager
-
-### 下游消费者
-- `argus-wing`：应用入口
-- `cli`：命令行界面
-
-## 设计原则
-
-### 1. 惰性加载
-- 会话数据按需从数据库加载
-- 避免启动时加载所有会话到内存
-
-### 2. 多层存储
-- 内存：DashMap 缓存活跃会话
-- 持久化：SQLite 存储会话元数据
-
-### 3. Session 聚合
-- Session 是 Thread 的聚合容器
-- 提供会话级别的操作（列出线程、统计等）
+- session 是 orchestration layer，不要把 provider/tool 实现细节塞进这里
+- 恢复逻辑必须与 `argus-agent` 的 trace / turn 语义保持一致
+- `scheduler`、mailbox 或 inbox 语义变更时，要同步检查 `argus-tool` 协议与桌面端消费者

@@ -1,6 +1,8 @@
 # argus-tool AGENTS Guide
 
-本文件补充 `CLAUDE.md`，专门说明 `ClapTool` 的原理，以及后续在 `argus-tool` 中继续开发时应该如何使用它。
+先熟悉同目录 `CLAUDE.md`。
+
+以下内容补充 `ClapTool` 的设计细节和后续开发约束。
 
 ## ClapTool 是什么
 
