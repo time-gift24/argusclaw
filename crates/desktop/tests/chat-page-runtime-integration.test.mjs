@@ -80,3 +80,26 @@ test("thread job actions keep a single detail trigger path", () => {
   assert.doesNotMatch(threadSource, /const handleOpenJobDetails/);
   assert.equal((threadSource.match(/查看详情/g) ?? []).length, 1);
 });
+
+test("pending runtime messages use stable synthetic timestamps", () => {
+  assert.match(
+    chatRuntimeSource,
+    /function buildSyntheticMessageDate\(seed: number\): Date \{/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /buildPendingUserMessage\([\s\S]*createdAt:\s*buildSyntheticMessageDate\(/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /if \(session\.pendingAssistant\) \{[\s\S]*createdAt:\s*buildSyntheticMessageDate\(/,
+  );
+  assert.doesNotMatch(
+    chatRuntimeSource,
+    /buildPendingUserMessage\([\s\S]*createdAt:\s*new Date\(\)/,
+  );
+  assert.doesNotMatch(
+    chatRuntimeSource,
+    /if \(session\.pendingAssistant\) \{[\s\S]*createdAt:\s*new Date\(\)/,
+  );
+});

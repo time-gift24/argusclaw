@@ -128,11 +128,15 @@ function buildTextParts(content: string): AssistantUiMessagePart[] {
   return [{ type: "text", text: content }];
 }
 
+function buildSyntheticMessageDate(seed: number): Date {
+  return new Date(seed);
+}
+
 function convertNonAssistantSnapshotMessage(
   msg: ChatMessagePayload,
   index: number,
 ): AssistantUiMessage | null {
-  const createdAt = new Date(index);
+  const createdAt = buildSyntheticMessageDate(index);
 
   if (msg.role === "tool" || msg.role === "assistant") return null;
 
@@ -251,7 +255,7 @@ function flushAssistantTurn(
     id: `assistant-${turn.startedAtIndex}`,
     role: "assistant",
     content: buildTextParts(turn.finalContent),
-    createdAt: new Date(turn.startedAtIndex),
+    createdAt: buildSyntheticMessageDate(turn.startedAtIndex),
     metadata: {
       ...createEmptyAssistantMetadata(),
       custom: {
@@ -266,6 +270,7 @@ function flushAssistantTurn(
 
 function buildPendingUserMessage(
   session: NonNullable<ReturnType<typeof useActiveChatSession>>,
+  seed: number,
 ): AssistantUiMessage | null {
   if (!session.pendingUserMessage) return null;
 
@@ -273,7 +278,7 @@ function buildPendingUserMessage(
     id: `pending-user-${session.threadId}`,
     role: "user",
     content: session.pendingUserMessage,
-    createdAt: new Date(),
+    createdAt: buildSyntheticMessageDate(seed),
     attachments: [],
     metadata: { custom: { messageMetadata: null } },
   };
@@ -329,7 +334,7 @@ function buildAggregatedAssistantMessages(
 
   activeAssistantTurn = flushAssistantTurn(messages, activeAssistantTurn);
 
-  const pendingUserMessage = buildPendingUserMessage(session);
+  const pendingUserMessage = buildPendingUserMessage(session, messages.length + 1);
   if (pendingUserMessage) {
     messages.push(pendingUserMessage);
   }
@@ -339,7 +344,7 @@ function buildAggregatedAssistantMessages(
       id: `pending-${session.threadId}`,
       role: "assistant",
       content: buildTextParts(session.pendingAssistant.content),
-      createdAt: new Date(),
+      createdAt: buildSyntheticMessageDate(messages.length + 1),
       status: { type: "running" },
       metadata: createEmptyAssistantMetadata(),
     });
