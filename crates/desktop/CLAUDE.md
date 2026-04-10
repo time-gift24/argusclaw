@@ -32,3 +32,16 @@ pnpm tauri build
 - 共享状态优先放在 `lib/*` 或 `hooks/*`，不要在页面组件里偷偷造全局单例
 - Tauri contract 变更时，要同步检查 `src-tauri`、`lib/tauri.ts` 与相关测试
 - `dist/`、`node_modules/` 不是事实来源，不在里面做手改
+
+## Chat 数据流
+
+- `lib/chat-store.ts` 维护 desktop chat 的权威前端状态；聊天链路变更优先落在 store，而不是散落到页面组件里临时修
+- `lib/chat-runtime.ts` 只负责把 store/session 状态转换成 assistant-ui runtime message；不要在组件里重复拼装 transcript
+- 后端快照 `session.messages` 是已落库 transcript；前端临时态只用于“快照尚未刷新前”的可见性补偿
+- 同一轮 assistant/tool 循环要在 runtime 中聚合成一个 assistant turn，并通过 `metadata.custom.turnArtifacts` 传给 UI
+
+## Chat 交互不变量
+
+- 用户点击发送后，当前轮的用户消息必须立刻可见；不能等到 `idle -> refreshSnapshot` 之后才出现
+- `pendingAssistant`、`pendingUserMessage` 这类前端临时态必须在成功 refresh 或失败收口时被清理，避免跨 thread/session 泄漏
+- 修改 chat 体验时，至少同时检查 `lib/chat-store.ts`、`lib/chat-runtime.ts`、`components/assistant-ui/thread.tsx` 和对应 `tests/`
