@@ -38,7 +38,7 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatRuntimeSource, /turnArtifacts/);
   assert.match(chatRuntimeSource, /pending-user-/);
   assert.match(chatRuntimeSource, /createEmptyAssistantMetadata/);
-  assert.match(chatRuntimeSource, /onNew:/);
+  assert.match(chatRuntimeSource, /const onNew = React\.useCallback|const onNew = useCallback|onNew:/);
   assert.match(chatScreenSource, /AssistantRuntimeProvider/);
   assert.match(chatScreenSource, /useChatRuntime\(\)/);
   assert.match(chatScreenSource, /TabsTrigger value="chat"/);
@@ -79,4 +79,65 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
 test("thread job actions keep a single detail trigger path", () => {
   assert.doesNotMatch(threadSource, /const handleOpenJobDetails/);
   assert.equal((threadSource.match(/查看详情/g) ?? []).length, 1);
+});
+
+test("pending runtime messages use stable synthetic timestamps", () => {
+  assert.match(
+    chatRuntimeSource,
+    /function buildSyntheticMessageDate\(seed: number\): Date \{/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /buildPendingUserMessage\([\s\S]*createdAt:\s*buildSyntheticMessageDate\(/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /if \(session\.pendingAssistant\) \{[\s\S]*createdAt:\s*buildSyntheticMessageDate\(/,
+  );
+  assert.doesNotMatch(
+    chatRuntimeSource,
+    /buildPendingUserMessage\([\s\S]*createdAt:\s*new Date\(\)/,
+  );
+  assert.doesNotMatch(
+    chatRuntimeSource,
+    /if \(session\.pendingAssistant\) \{[\s\S]*createdAt:\s*new Date\(\)/,
+  );
+});
+
+test("chat runtime memoizes external-store inputs to avoid feedback loops", () => {
+  assert.match(
+    chatRuntimeSource,
+    /import \* as React from "react";|from "react"/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /const messages = React\.useMemo\([\s\S]*buildAggregatedAssistantMessages\(session\)[\s\S]*\[session\][\s\S]*\);|const messages = useMemo\([\s\S]*buildAggregatedAssistantMessages\(session\)[\s\S]*\[session\][\s\S]*\);/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /const convertMessage = React\.useCallback\([\s\S]*message[\s\S]*=>[\s\S]*message[\s\S]*\[\][\s\S]*\);|const convertMessage = useCallback\([\s\S]*message[\s\S]*=>[\s\S]*message[\s\S]*\[\][\s\S]*\);/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /const onNew = React\.useCallback\([\s\S]*sendMessage[\s\S]*\);|const onNew = useCallback\([\s\S]*sendMessage[\s\S]*\);/,
+  );
+  assert.match(
+    chatRuntimeSource,
+    /useExternalStoreRuntime<AssistantUiMessage>\(\{[\s\S]*messages,[\s\S]*convertMessage,[\s\S]*onNew,[\s\S]*\}\)/,
+  );
+});
+
+test("assistant turn artifacts avoid fresh selector objects inside useAuiState", () => {
+  assert.match(
+    threadSource,
+    /const rawTurnArtifacts = useAuiState\([\s\S]*s\.message\.metadata\.custom\.turnArtifacts[\s\S]*\);/,
+  );
+  assert.match(
+    threadSource,
+    /const turnArtifacts = useMemo\([\s\S]*readTurnArtifacts\(rawTurnArtifacts\)[\s\S]*\[rawTurnArtifacts\][\s\S]*\);|const turnArtifacts = React\.useMemo\([\s\S]*readTurnArtifacts\(rawTurnArtifacts\)[\s\S]*\[rawTurnArtifacts\][\s\S]*\);/,
+  );
+  assert.doesNotMatch(
+    threadSource,
+    /const turnArtifacts = useAuiState\(\(s\) =>\s*readTurnArtifacts\(/,
+  );
 });

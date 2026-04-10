@@ -88,7 +88,40 @@ test("chat store tracks pending reasoning alongside streamed assistant text", ()
   );
   assert.match(
     storeSource,
-    /case "reasoning_delta":[\s\S]*?pendingAssistant:[\s\S]*?reasoning:\s*session\.pendingAssistant\.reasoning \+ payload\.delta/,
+    /case "reasoning_delta":[\s\S]*?ensurePendingAssistantSession\(session\)[\s\S]*?pendingAssistant:[\s\S]*?reasoning:\s*sessionWithPending\.pendingAssistant\.reasoning \+ payload\.delta/,
+  );
+});
+
+test("chat store bootstraps pending assistant state for mailbox-triggered wakeups", () => {
+  assert.match(
+    storeSource,
+    /const ensurePendingAssistantSession = \(\s*session: ChatSessionState,\s*\):[\s\S]*pendingAssistant:\s*PendingAssistantState[\s\S]*=> \(\{/,
+    "store should expose a helper that can initialize pending assistant state outside manual sends",
+  );
+  assert.match(
+    storeSource,
+    /const createPendingAssistant = \(\): PendingAssistantState => \(\{[\s\S]*retry:\s*null[\s\S]*\}\);[\s\S]*const ensurePendingAssistantSession = \(/,
+    "bootstrapped wakeups should create a full pending assistant shell when needed",
+  );
+  assert.match(
+    storeSource,
+    /const ensurePendingAssistantSession = \(\s*session: ChatSessionState,\s*\):[\s\S]*=> \(\{[\s\S]*status:\s*"running"/,
+    "bootstrapped wakeups should surface as a running session",
+  );
+  assert.match(
+    storeSource,
+    /case "reasoning_delta":[\s\S]*ensurePendingAssistantSession\(session\)/,
+    "reasoning deltas should create pending assistant state when a mailbox-triggered turn starts",
+  );
+  assert.match(
+    storeSource,
+    /case "content_delta":[\s\S]*ensurePendingAssistantSession\(session\)/,
+    "content deltas should create pending assistant state when a mailbox-triggered turn starts",
+  );
+  assert.match(
+    storeSource,
+    /case "tool_started":[\s\S]*ensurePendingAssistantSession\(session\)/,
+    "tool_started should create pending assistant state when a mailbox-triggered turn starts with a tool",
   );
 });
 

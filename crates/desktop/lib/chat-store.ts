@@ -228,6 +228,24 @@ function updateJobDetailFromMailboxResult(
   });
 }
 
+type PendingAssistantState = NonNullable<ChatSessionState["pendingAssistant"]>;
+
+const createPendingAssistant = (): PendingAssistantState => ({
+  content: "",
+  reasoning: "",
+  toolCalls: [],
+  plan: null,
+  retry: null,
+});
+
+const ensurePendingAssistantSession = (
+  session: ChatSessionState,
+): ChatSessionState & { pendingAssistant: PendingAssistantState } => ({
+  ...session,
+  status: "running",
+  pendingAssistant: session.pendingAssistant ?? createPendingAssistant(),
+});
+
 export interface ThreadPoolThreadState {
   threadId: string;
   kind: ThreadPoolRuntimeKind;
@@ -1265,14 +1283,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "retry_attempt":
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
+          if (!session) return {};
+          const sessionWithPending = ensurePendingAssistantSession(session);
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
-                ...session,
+                ...sessionWithPending,
                 pendingAssistant: {
-                  ...session.pendingAssistant,
+                  ...sessionWithPending.pendingAssistant,
                   retry: {
                     attempt: payload.attempt,
                     maxRetries: payload.max_retries,
@@ -1288,15 +1307,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "reasoning_delta":
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
+          if (!session) return {};
+          const sessionWithPending = ensurePendingAssistantSession(session);
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
-                ...session,
+                ...sessionWithPending,
                 pendingAssistant: {
-                  ...session.pendingAssistant,
-                  reasoning: session.pendingAssistant.reasoning + payload.delta,
+                  ...sessionWithPending.pendingAssistant,
+                  reasoning:
+                    sessionWithPending.pendingAssistant.reasoning + payload.delta,
                   retry: null,
                 },
               },
@@ -1308,15 +1329,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "content_delta":
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
+          if (!session) return {};
+          const sessionWithPending = ensurePendingAssistantSession(session);
           return {
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
-                ...session,
+                ...sessionWithPending,
                 pendingAssistant: {
-                  ...session.pendingAssistant,
-                  content: session.pendingAssistant.content + payload.delta,
+                  ...sessionWithPending.pendingAssistant,
+                  content:
+                    sessionWithPending.pendingAssistant.content + payload.delta,
                   retry: null,
                 },
               },
@@ -1328,8 +1351,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "tool_call_delta": {
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
-          const toolCalls = [...session.pendingAssistant.toolCalls];
+          if (!session) return {};
+          const sessionWithPending = ensurePendingAssistantSession(session);
+          const toolCalls = [...sessionWithPending.pendingAssistant.toolCalls];
           while (toolCalls.length <= payload.index) {
             toolCalls.push({
               tool_call_id: "",
@@ -1357,9 +1381,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
-                ...session,
+                ...sessionWithPending,
                 pendingAssistant: {
-                  ...session.pendingAssistant,
+                  ...sessionWithPending.pendingAssistant,
                   toolCalls,
                   retry: null,
                 },
@@ -1373,11 +1397,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "tool_started": {
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
-          const existingIndex = session.pendingAssistant.toolCalls.findIndex(
+          if (!session) return {};
+          const sessionWithPending = ensurePendingAssistantSession(session);
+          const existingIndex = sessionWithPending.pendingAssistant.toolCalls.findIndex(
             (tc) => tc.tool_call_id === payload.tool_call_id,
           );
-          const toolCalls = [...session.pendingAssistant.toolCalls];
+          const toolCalls = [...sessionWithPending.pendingAssistant.toolCalls];
           if (existingIndex >= 0) {
             toolCalls[existingIndex] = {
               ...toolCalls[existingIndex],
@@ -1394,7 +1419,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
           const updates: Partial<ChatSessionState> = {
             pendingAssistant: {
-              ...session.pendingAssistant,
+              ...sessionWithPending.pendingAssistant,
               toolCalls,
               retry: null,
             },
@@ -1412,7 +1437,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
-                ...session,
+                ...sessionWithPending,
                 ...updates,
               },
             },
@@ -1424,12 +1449,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case "tool_completed": {
         set((state) => {
           const session = state.sessionsByKey[sessionKey];
-          if (!session?.pendingAssistant) return {};
-          const existingIndex = session.pendingAssistant.toolCalls.findIndex(
+          if (!session) return {};
+          const sessionWithPending = ensurePendingAssistantSession(session);
+          const existingIndex = sessionWithPending.pendingAssistant.toolCalls.findIndex(
             (tc) => tc.tool_call_id === payload.tool_call_id,
           );
           if (existingIndex < 0) return {};
-          const toolCalls = [...session.pendingAssistant.toolCalls];
+          const toolCalls = [...sessionWithPending.pendingAssistant.toolCalls];
           toolCalls[existingIndex] = {
             ...toolCalls[existingIndex],
             tool_name: payload.tool_name,
@@ -1439,7 +1465,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           };
           const updates: Partial<ChatSessionState> = {
             pendingAssistant: {
-              ...session.pendingAssistant,
+              ...sessionWithPending.pendingAssistant,
               toolCalls,
               retry: null,
             },
@@ -1459,7 +1485,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             sessionsByKey: {
               ...state.sessionsByKey,
               [sessionKey]: {
-                ...session,
+                ...sessionWithPending,
                 ...updates,
               },
             },
