@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useExternalStoreRuntime } from "@assistant-ui/react";
 
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
@@ -378,13 +379,22 @@ function extractUserText(
 export function useChatRuntime(): ReturnType<typeof useExternalStoreRuntime<AssistantUiMessage>> {
   const sendMessage = useChatStore((state) => state.sendMessage);
   const session = useActiveChatSession();
+  const messages = React.useMemo(
+    () => buildAggregatedAssistantMessages(session),
+    [session],
+  );
+  const convertMessage = React.useCallback((message: AssistantUiMessage) => message, []);
+  const onNew = React.useCallback(
+    async (message: { content: string | { text?: string } | ReadonlyArray<unknown> }) => {
+      await sendMessage(extractUserText(message.content));
+    },
+    [sendMessage],
+  );
 
   return useExternalStoreRuntime<AssistantUiMessage>({
     isRunning: session?.status === "running",
-    messages: buildAggregatedAssistantMessages(session),
-    convertMessage: (message) => message,
-    onNew: async (message) => {
-      await sendMessage(extractUserText(message.content));
-    },
+    messages,
+    convertMessage,
+    onNew,
   });
 }
