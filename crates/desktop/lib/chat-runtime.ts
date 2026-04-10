@@ -14,25 +14,24 @@ type JsonValue =
 
 type JsonObject = { readonly [key: string]: JsonValue };
 
-type AssistantUiMessagePart =
-  | {
-      readonly type: "text";
-      readonly text: string;
-    }
-  | {
-      readonly type: "reasoning";
-      readonly text: string;
-      readonly parentId?: string;
-    }
-  | {
-      readonly type: "tool-call";
-      readonly toolCallId: string;
-      readonly toolName: string;
-      readonly args?: JsonObject;
-      readonly argsText: string;
-      readonly result?: unknown;
-      readonly isError?: boolean;
-    };
+type AssistantUiMessagePart = {
+  readonly type: "text";
+  readonly text: string;
+};
+
+type TurnToolCall = {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args?: JsonObject;
+  readonly argsText: string;
+  readonly result?: unknown;
+  readonly isError?: boolean;
+};
+
+type TurnArtifacts = {
+  readonly reasoning: string;
+  readonly toolCalls: readonly TurnToolCall[];
+};
 
 type AssistantUiMessage = {
   readonly id: string;
@@ -115,49 +114,27 @@ const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
     "compaction_replay",
   ].includes(message.metadata.mode ?? "");
 
-function convertSnapshotMessage(msg: ChatMessagePayload, index: number): AssistantUiMessage | null {
+type AssistantTurnAccumulator = {
+  readonly startedAtIndex: number;
+  finalContent: string;
+  messageMetadata: ChatMessagePayload["metadata"] | null | undefined;
+  reasoningSegments: string[];
+  toolCalls: TurnToolCall[];
+  toolCallIndexById: Map<string, number>;
+};
+
+function buildTextParts(content: string): AssistantUiMessagePart[] {
+  if (content.trim().length === 0) return [];
+  return [{ type: "text", text: content }];
+}
+
+function convertNonAssistantSnapshotMessage(
+  msg: ChatMessagePayload,
+  index: number,
+): AssistantUiMessage | null {
   const createdAt = new Date(index);
 
-  if (msg.role === "tool") return null;
-
-  if (msg.role === "assistant") {
-    const content: AssistantUiMessagePart[] = [];
-
-    if (msg.content.trim().length > 0) {
-      content.push({ type: "text", text: msg.content });
-    }
-
-    if ((msg.reasoning_content ?? "").trim().length > 0) {
-      content.push({
-        type: "reasoning",
-        text: msg.reasoning_content ?? "",
-        parentId: `assistant-reasoning-${index}`,
-      });
-    }
-
-    for (const toolCall of msg.tool_calls ?? []) {
-      content.push({
-        type: "tool-call",
-        toolCallId: toolCall.id,
-        toolName: toolCall.name,
-        args: toReadonlyJsonObject(toolCall.arguments),
-        argsText: stringifyValue(toolCall.arguments),
-      });
-    }
-
-    return {
-      id: `assistant-${index}`,
-      role: "assistant",
-      content,
-      createdAt,
-      metadata: {
-        ...createEmptyAssistantMetadata(),
-        custom: {
-          messageMetadata: msg.metadata ?? null,
-        },
-      },
-    };
-  }
+  if (msg.role === "tool" || msg.role === "assistant") return null;
 
   if (msg.role === "user") {
     return {
@@ -179,17 +156,121 @@ function convertSnapshotMessage(msg: ChatMessagePayload, index: number): Assista
   };
 }
 
-function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSession>): AssistantUiMessage[] {
+function createAssistantTurnAccumulator(
+  msg: ChatMessagePayload,
+  index: number,
+): AssistantTurnAccumulator {
+  const turn: AssistantTurnAccumulator = {
+    startedAtIndex: index,
+    finalContent: "",
+    messageMetadata: msg.metadata ?? null,
+    reasoningSegments: [],
+    toolCalls: [],
+    toolCallIndexById: new Map(),
+  };
+
+  appendAssistantMessageToTurn(turn, msg);
+  return turn;
+}
+
+function appendAssistantMessageToTurn(
+  turn: AssistantTurnAccumulator,
+  msg: ChatMessagePayload,
+) {
+  if (msg.content.trim().length > 0) {
+    turn.finalContent = msg.content;
+  }
+
+  if ((msg.reasoning_content ?? "").trim().length > 0) {
+    turn.reasoningSegments.push(msg.reasoning_content ?? "");
+  }
+
+  for (const toolCall of msg.tool_calls ?? []) {
+    const existingIndex = turn.toolCallIndexById.get(toolCall.id);
+    const nextToolCall: TurnToolCall = {
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      args: toReadonlyJsonObject(toolCall.arguments),
+      argsText: stringifyValue(toolCall.arguments),
+    };
+
+    if (existingIndex === undefined) {
+      turn.toolCallIndexById.set(toolCall.id, turn.toolCalls.length);
+      turn.toolCalls.push(nextToolCall);
+      continue;
+    }
+
+    turn.toolCalls[existingIndex] = {
+      ...turn.toolCalls[existingIndex]!,
+      ...nextToolCall,
+    };
+  }
+
+  if (msg.metadata) {
+    turn.messageMetadata = msg.metadata;
+  }
+}
+
+function attachToolResultToTurn(
+  turn: AssistantTurnAccumulator,
+  msg: ChatMessagePayload,
+) {
+  if (!msg.tool_call_id) return;
+
+  const toolCallIndex = turn.toolCallIndexById.get(msg.tool_call_id);
+  if (toolCallIndex === undefined) return;
+
+  turn.toolCalls[toolCallIndex] = {
+    ...turn.toolCalls[toolCallIndex]!,
+    toolName: msg.name ?? turn.toolCalls[toolCallIndex]!.toolName,
+    result: parseMessageContent(msg.content),
+  };
+}
+
+function buildTurnArtifacts(turn: AssistantTurnAccumulator): TurnArtifacts {
+  return {
+    reasoning: turn.reasoningSegments.join("\n\n").trim(),
+    toolCalls: turn.toolCalls,
+  };
+}
+
+function flushAssistantTurn(
+  messages: AssistantUiMessage[],
+  turn: AssistantTurnAccumulator | null,
+) {
+  if (!turn) return null;
+
+  const turnArtifacts = buildTurnArtifacts(turn);
+  const hasText = turn.finalContent.trim().length > 0;
+  const hasArtifacts =
+    turnArtifacts.reasoning.length > 0 || turnArtifacts.toolCalls.length > 0;
+
+  if (!hasText && !hasArtifacts) return null;
+
+  messages.push({
+    id: `assistant-${turn.startedAtIndex}`,
+    role: "assistant",
+    content: buildTextParts(turn.finalContent),
+    createdAt: new Date(turn.startedAtIndex),
+    metadata: {
+      ...createEmptyAssistantMetadata(),
+      custom: {
+        messageMetadata: turn.messageMetadata ?? null,
+        turnArtifacts,
+      },
+    },
+  });
+
+  return null;
+}
+
+function buildAggregatedAssistantMessages(
+  session: ReturnType<typeof useActiveChatSession>,
+): AssistantUiMessage[] {
   if (!session) return [];
 
   const messages: AssistantUiMessage[] = [];
-  const toolCallLocations = new Map<
-    string,
-    {
-      messageIndex: number;
-      partIndex: number;
-    }
-  >();
+  let activeAssistantTurn: AssistantTurnAccumulator | null = null;
 
   for (let index = 0; index < session.messages.length; index += 1) {
     const msg = session.messages[index];
@@ -209,63 +290,35 @@ function buildAssistantUiMessages(session: ReturnType<typeof useActiveChatSessio
       }
     }
 
-    if (msg.role === "tool" && msg.tool_call_id) {
-      const location = toolCallLocations.get(msg.tool_call_id);
-      if (!location) continue;
-
-      const targetMessage = messages[location.messageIndex];
-      if (!targetMessage || !Array.isArray(targetMessage.content)) continue;
-
-      const nextContent = targetMessage.content.map((part, partIndex) => {
-        if (partIndex !== location.partIndex || part.type !== "tool-call") return part;
-
-        return {
-          ...part,
-          toolName: msg.name ?? part.toolName,
-          result: parseMessageContent(msg.content),
-        };
-      });
-
-      messages[location.messageIndex] = {
-        ...targetMessage,
-        content: nextContent,
-      };
+    if (msg.role === "assistant") {
+      activeAssistantTurn ??= createAssistantTurnAccumulator(msg, index);
+      if (activeAssistantTurn.startedAtIndex !== index) {
+        appendAssistantMessageToTurn(activeAssistantTurn, msg);
+      }
       continue;
     }
 
-    const converted = convertSnapshotMessage(msg, index);
-    if (!converted) continue;
-
-    const messageIndex = messages.push(converted) - 1;
-    if (converted.role !== "assistant" || !Array.isArray(converted.content)) continue;
-
-    converted.content.forEach((part, partIndex) => {
-      if (part.type === "tool-call") {
-        toolCallLocations.set(part.toolCallId, { messageIndex, partIndex });
+    if (msg.role === "tool") {
+      if (activeAssistantTurn) {
+        attachToolResultToTurn(activeAssistantTurn, msg);
       }
-    });
+      continue;
+    }
+
+    activeAssistantTurn = flushAssistantTurn(messages, activeAssistantTurn);
+
+    const converted = convertNonAssistantSnapshotMessage(msg, index);
+    if (!converted) continue;
+    messages.push(converted);
   }
 
+  activeAssistantTurn = flushAssistantTurn(messages, activeAssistantTurn);
+
   if (session.pendingAssistant) {
-    const pendingContent: AssistantUiMessagePart[] = [];
-
-    if (session.pendingAssistant.content) {
-      pendingContent.push({ type: "text", text: session.pendingAssistant.content });
-    }
-
-    if (session.pendingAssistant.reasoning.trim().length > 0) {
-      pendingContent.push({
-        type: "reasoning",
-        text: session.pendingAssistant.reasoning,
-        parentId: `pending-reasoning-${session.threadId}`,
-      });
-    }
-
-
     messages.push({
       id: `pending-${session.threadId}`,
       role: "assistant",
-      content: pendingContent,
+      content: buildTextParts(session.pendingAssistant.content),
       createdAt: new Date(),
       status: { type: "running" },
       metadata: createEmptyAssistantMetadata(),
@@ -303,7 +356,7 @@ export function useChatRuntime(): ReturnType<typeof useExternalStoreRuntime<Assi
 
   return useExternalStoreRuntime<AssistantUiMessage>({
     isRunning: session?.status === "running",
-    messages: buildAssistantUiMessages(session),
+    messages: buildAggregatedAssistantMessages(session),
     convertMessage: (message) => message,
     onNew: async (message) => {
       await sendMessage(extractUserText(message.content));

@@ -3,10 +3,7 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
-import {
-  ToolFallbackImpl,
-  ToolFallback,
-} from "@/components/assistant-ui/tool-fallback";
+import { ToolFallbackImpl } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { TokenRing } from "@/components/token-ring";
 import { AgentSelector } from "@/components/assistant-ui/agent-selector";
@@ -20,7 +17,7 @@ import { ChatStatusBanner } from "@/components/chat/chat-status-banner";
 import { PlanPanel } from "@/components/chat/plan-panel";
 import { useActiveChatSession } from "@/hooks/use-active-chat-session";
 import { useChatStore } from "@/lib/chat-store";
-import type { ChatStore } from "@/lib/chat-store";
+import type { ChatStore, PendingToolCall } from "@/lib/chat-store";
 import { providers } from "@/lib/tauri";
 import { Badge } from "@/components/ui/badge";
 import type { ChatMessagePayload } from "@/lib/types/chat";
@@ -34,7 +31,6 @@ import {
   BranchPickerPrimitive,
   ComposerPrimitive,
   ErrorPrimitive,
-  MessagePartPrimitive,
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
@@ -177,6 +173,115 @@ const isFoldedCompactionMessage = (message: ChatMessagePayload) =>
     message.metadata.mode ?? "",
   );
 
+type ToolCallDisplayStatus =
+  | { type: "complete" }
+  | { type: "running" }
+  | { type: "incomplete"; reason: "cancelled" | "error"; error?: unknown };
+
+type RenderableToolCall = {
+  toolCallId: string;
+  toolName: string;
+  argsText: string;
+  result?: unknown;
+  status: ToolCallDisplayStatus;
+};
+
+type RenderableTurnArtifacts = {
+  reasoning: string;
+  toolCalls: readonly RenderableToolCall[];
+};
+
+const ManualToolFallback = ToolFallbackImpl as (props: {
+  toolName: string;
+  argsText: string;
+  result: unknown;
+  status: ToolCallDisplayStatus;
+}) => React.ReactElement;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const toManualToolStatus = (
+  status: "streaming" | "running" | "completed",
+): ToolCallDisplayStatus =>
+  status === "completed"
+    ? ({ type: "complete" } as const)
+    : status === "running"
+      ? ({ type: "running" } as const)
+      : ({ type: "incomplete", reason: "cancelled" } as const);
+
+const toSettledToolStatus = (value: Record<string, unknown>): ToolCallDisplayStatus =>
+  value.isError === true
+    ? ({ type: "incomplete", reason: "error", error: value.result } as const)
+    : ({ type: "complete" } as const);
+
+const toRenderablePendingToolCall = (
+  toolCall: PendingToolCall,
+): RenderableToolCall => ({
+  toolCallId: toolCall.tool_call_id,
+  toolName: toolCall.tool_name,
+  argsText: toolCall.arguments_text,
+  result: toolCall.result,
+  status: toManualToolStatus(toolCall.status),
+});
+
+const toRenderableStoredToolCall = (
+  value: unknown,
+): RenderableToolCall | null => {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.toolCallId !== "string" ||
+    typeof value.toolName !== "string" ||
+    typeof value.argsText !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    toolCallId: value.toolCallId,
+    toolName: value.toolName,
+    argsText: value.argsText,
+    result: value.result,
+    status: toSettledToolStatus(value),
+  };
+};
+
+const readTurnArtifacts = (value: unknown): RenderableTurnArtifacts | null => {
+  if (!isRecord(value)) return null;
+
+  const reasoning = typeof value.reasoning === "string" ? value.reasoning : "";
+  const toolCalls = Array.isArray(value.toolCalls)
+    ? value.toolCalls
+        .map((toolCall) => toRenderableStoredToolCall(toolCall))
+        .filter((toolCall): toolCall is RenderableToolCall => toolCall !== null)
+    : [];
+
+  if (reasoning.trim().length === 0 && toolCalls.length === 0) return null;
+
+  return {
+    reasoning,
+    toolCalls,
+  };
+};
+
+const buildPendingTurnArtifacts = (
+  pendingAssistant: NonNullable<ReturnType<typeof useActiveChatSession>>["pendingAssistant"],
+): RenderableTurnArtifacts | null => {
+  if (!pendingAssistant) return null;
+
+  const reasoning = pendingAssistant.reasoning;
+  const toolCalls = pendingAssistant.toolCalls.map((toolCall) =>
+    toRenderablePendingToolCall(toolCall),
+  );
+
+  if (reasoning.trim().length === 0 && toolCalls.length === 0) return null;
+
+  return {
+    reasoning,
+    toolCalls,
+  };
+};
+
 const CompactionGroups: FC = () => {
   const session = useActiveChatSession();
   if (!session) return null;
@@ -312,12 +417,141 @@ const MessageError: FC = () => {
   );
 };
 
-const toManualToolStatus = (status: "streaming" | "running" | "completed") =>
-  status === "completed"
-    ? ({ type: "complete" } as const)
-    : status === "running"
-      ? ({ type: "running" } as const)
-      : ({ type: "incomplete", reason: "cancelled" } as const);
+const ToolCallList = ({
+  toolCalls,
+}: {
+  toolCalls: readonly RenderableToolCall[];
+}) => {
+  if (toolCalls.length === 0) return null;
+
+  const hasRunningTool = toolCalls.some(
+    (toolCall) => toolCall.status.type === "running",
+  );
+
+  return (
+    <div className="rounded-xl border border-muted/40 bg-muted/20 px-3 py-2.5">
+      <div className="flex items-center gap-2.5 text-muted-foreground">
+        <div className="rounded-lg bg-primary/10 p-1.5 text-primary">
+          <Wrench className="size-3.5" />
+        </div>
+        <span className="text-[11px] font-bold uppercase tracking-widest">
+          工具调用
+        </span>
+        {hasRunningTool && (
+          <Loader2 className="ml-auto size-3 animate-spin text-primary" />
+        )}
+      </div>
+      <div className="mt-2 flex max-h-[min(18rem,35vh)] flex-col gap-1 overflow-y-auto custom-scrollbar border-l-2 border-muted/30 pl-4 pr-1 ml-4">
+        {toolCalls.map((toolCall) => (
+          <ManualToolFallback
+            key={toolCall.toolCallId}
+            toolName={toolCall.toolName}
+            argsText={toolCall.argsText}
+            result={toolCall.result}
+            status={toolCall.status}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const TurnReasoningBlock = ({
+  reasoning,
+  isRunning,
+}: {
+  reasoning: string;
+  isRunning?: boolean;
+}) => {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const handleScroll = () => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
+      isAtBottomRef.current = atBottom;
+    };
+
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && isAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  });
+
+  if (reasoning.trim().length === 0) return null;
+
+  return (
+    <div className="aui-reasoning-block mb-4 text-sm animate-in fade-in slide-in-from-top-1 duration-300">
+      <details className="group w-full" open>
+        <summary className="flex w-full cursor-pointer list-none items-center gap-2.5 rounded-xl bg-muted/30 px-3 py-2 text-muted-foreground transition-all hover:bg-muted/50 [&::-webkit-details-marker]:hidden border border-muted/40">
+          {isRunning ? (
+            <>
+              <Loader2 className="size-3 animate-spin text-primary" />
+              <span className="text-[11px] font-bold uppercase tracking-widest text-primary/80">
+                思考中...
+              </span>
+            </>
+          ) : (
+            <>
+              <div className="size-1.5 rounded-full bg-emerald-500/50" />
+              <span className="text-[11px] font-bold uppercase tracking-widest opacity-70">
+                思考完成
+              </span>
+            </>
+          )}
+          <ChevronDownIcon className="ml-auto size-3.5 shrink-0 opacity-40 transition-transform duration-300 group-open:rotate-180" />
+        </summary>
+        <div
+          ref={scrollRef}
+          className="max-h-[200px] overflow-y-auto mt-2 px-4 py-3 text-xs leading-relaxed text-muted-foreground/80 border-l-2 border-muted/40 ml-3 whitespace-pre-wrap break-words italic bg-muted/5 rounded-r-xl"
+        >
+          {reasoning}
+        </div>
+      </details>
+    </div>
+  );
+};
+
+const TurnArtifactsPanel = ({
+  turnArtifacts,
+  isRunning = false,
+}: {
+  turnArtifacts: RenderableTurnArtifacts | null;
+  isRunning?: boolean;
+}) => {
+  if (!turnArtifacts) return null;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <TurnReasoningBlock
+        reasoning={turnArtifacts.reasoning}
+        isRunning={isRunning}
+      />
+      <ToolCallList toolCalls={turnArtifacts.toolCalls} />
+    </div>
+  );
+};
+
+const AssistantTurnArtifacts: FC = () => {
+  const turnArtifacts = useAuiState((s) =>
+    readTurnArtifacts(s.message.metadata.custom.turnArtifacts),
+  );
+  const isRunning = useAuiState((s) => s.message.status?.type === "running");
+
+  if (!turnArtifacts) return null;
+
+  return (
+    <TurnArtifactsPanel turnArtifacts={turnArtifacts} isRunning={isRunning} />
+  );
+};
 
 const PendingAssistantArtifacts: FC = () => {
   const session = useActiveChatSession();
@@ -327,19 +561,9 @@ const PendingAssistantArtifacts: FC = () => {
 
   const hasPlan = !!pendingAssistant.plan && pendingAssistant.plan.length > 0;
   const retryState = pendingAssistant.retry;
-  const toolCalls = pendingAssistant.toolCalls;
+  const turnArtifacts = buildPendingTurnArtifacts(pendingAssistant);
 
-  if (!hasPlan && !retryState && toolCalls.length === 0) return null;
-
-  const ManualToolFallback = ToolFallbackImpl as (props: {
-    toolName: string;
-    argsText: string;
-    result: unknown;
-    status:
-      | { type: "complete" }
-      | { type: "running" }
-      | { type: "incomplete"; reason: "cancelled" };
-  }) => React.ReactElement;
+  if (!hasPlan && !retryState && !turnArtifacts) return null;
 
   return (
     <div className="mx-auto w-full max-w-(--thread-max-width) px-4 pb-2 flex flex-col gap-3">
@@ -367,35 +591,7 @@ const PendingAssistantArtifacts: FC = () => {
         </div>
       )}
       {hasPlan && <PlanPanel plan={pendingAssistant.plan!} />}
-      {toolCalls.length > 0 && (
-        <details className="group/tools w-full" open={false}>
-          <summary className="flex w-full cursor-pointer list-none items-center gap-2.5 rounded-xl bg-muted/30 px-3 py-2 text-muted-foreground transition-all hover:bg-muted/50 [&::-webkit-details-marker]:hidden border border-muted/40">
-            <div className="bg-primary/10 p-1.5 rounded-lg text-primary">
-              <Wrench className="size-3.5" />
-            </div>
-            <span className="text-[11px] font-bold uppercase tracking-widest">
-              调用了 {toolCalls.length} 个工具
-            </span>
-            <div className="ml-auto flex items-center gap-2">
-              {toolCalls.some(
-                (tc) => tc.status === "running" || tc.status === "streaming",
-              ) && <Loader2 className="size-3 animate-spin text-primary" />}
-              <ChevronDown className="size-3.5 opacity-40 transition-transform duration-300 group-open/tools:rotate-180" />
-            </div>
-          </summary>
-          <div className="mt-2 flex max-h-[min(18rem,35vh)] flex-col gap-1 overflow-y-auto custom-scrollbar border-l-2 border-muted/30 pl-4 pr-1 ml-4">
-            {toolCalls.map((tc) => (
-              <ManualToolFallback
-                key={tc.tool_call_id}
-                toolName={tc.tool_name}
-                argsText={tc.arguments_text}
-                result={tc.result}
-                status={toManualToolStatus(tc.status)}
-              />
-            ))}
-          </div>
-        </details>
-      )}
+      <TurnArtifactsPanel turnArtifacts={turnArtifacts} isRunning />
     </div>
   );
 };
@@ -693,63 +889,6 @@ const AssistantActionBar: FC = () => {
   );
 };
 
-const ReasoningBlock: FC = () => {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const isAtBottomRef = useRef(true);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const handleScroll = () => {
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 1;
-      isAtBottomRef.current = atBottom;
-    };
-
-    el.addEventListener("scroll", handleScroll, { passive: true });
-    return () => el.removeEventListener("scroll", handleScroll);
-  }, []);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && isAtBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-  });
-
-  return (
-    <div className="aui-reasoning-block mb-4 text-sm animate-in fade-in slide-in-from-top-1 duration-300">
-      <details className="group w-full" open>
-        <summary className="flex w-full cursor-pointer list-none items-center gap-2.5 rounded-xl bg-muted/30 px-3 py-2 text-muted-foreground transition-all hover:bg-muted/50 [&::-webkit-details-marker]:hidden border border-muted/40">
-          <MessagePartPrimitive.InProgress>
-            <>
-              <Loader2 className="size-3 animate-spin text-primary" />
-              <span className="text-[11px] font-bold uppercase tracking-widest text-primary/80">
-                思考中...
-              </span>
-            </>
-          </MessagePartPrimitive.InProgress>
-          <AuiIf condition={(s) => s.part.status.type !== "running"}>
-            <>
-              <div className="size-1.5 rounded-full bg-emerald-500/50" />
-              <span className="text-[11px] font-bold uppercase tracking-widest opacity-70">
-                思考完成
-              </span>
-            </>
-          </AuiIf>
-          <ChevronDownIcon className="ml-auto size-3.5 shrink-0 opacity-40 transition-transform duration-300 group-open:rotate-180" />
-        </summary>
-        <div
-          ref={scrollRef}
-          className="max-h-[200px] overflow-y-auto mt-2 px-4 py-3 text-muted-foreground/80 leading-relaxed border-l-2 border-muted/40 ml-3 text-xs italic bg-muted/5 rounded-r-xl"
-        >
-          <MarkdownText />
-        </div>
-      </details>
-    </div>
-  );
-};
-
 const AssistantMessage: FC = () => {
   return (
     <MessagePrimitive.Root
@@ -757,13 +896,8 @@ const AssistantMessage: FC = () => {
       data-role="assistant"
     >
       <div className="aui-assistant-message-content wrap-break-word px-2 text-foreground leading-relaxed selection:bg-primary/10">
-        <MessagePrimitive.Content
-          components={{
-            Text: MarkdownText,
-            Reasoning: ReasoningBlock,
-            tools: { Fallback: ToolFallback },
-          }}
-        />
+        <AssistantTurnArtifacts />
+        <MessagePrimitive.Content components={{ Text: MarkdownText }} />
         <MessageError />
       </div>
 

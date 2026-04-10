@@ -29,11 +29,12 @@ const threadSource = readFileSync(
 test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatRuntimeSource, /useExternalStoreRuntime/);
   assert.match(chatRuntimeSource, /pendingAssistant/);
-  assert.match(chatRuntimeSource, /type:\s*"reasoning"/);
+  assert.match(chatRuntimeSource, /type TurnArtifacts = \{/);
   assert.match(chatRuntimeSource, /msg\.reasoning_content/);
-  assert.match(chatRuntimeSource, /tool_calls|tool-call|toolCallId/);
-  assert.match(chatRuntimeSource, /toolCallLocations/);
+  assert.match(chatRuntimeSource, /tool_calls|toolCallId/);
+  assert.match(chatRuntimeSource, /buildAggregatedAssistantMessages/);
   assert.match(chatRuntimeSource, /result:\s*parseMessageContent/);
+  assert.match(chatRuntimeSource, /turnArtifacts/);
   assert.match(chatRuntimeSource, /createEmptyAssistantMetadata/);
   assert.match(chatRuntimeSource, /onNew:/);
   assert.match(chatScreenSource, /AssistantRuntimeProvider/);
@@ -60,14 +61,14 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   );
   assert.match(threadSource, /ChatStatusBanner/);
   assert.match(threadSource, /jobStatuses|JobStatus/);
-  assert.match(
-    threadSource,
-    /whitespace-pre-wrap break-words[\s\S]*job\.message/,
-  );
+  assert.match(threadSource, /whitespace-pre-wrap break-words[\s\S]*job\.message/);
   assert.match(threadSource, /SubagentJobDetailsDrawer/);
   assert.match(threadSource, /openJobDetails/);
   assert.match(threadSource, /查看详情/);
-  assert.match(threadSource, /Reasoning:/);
+  assert.match(threadSource, /AssistantTurnArtifacts/);
+  assert.match(threadSource, /TurnArtifactsPanel/);
+  assert.match(threadSource, /ToolCallList/);
+  assert.match(threadSource, /pendingAssistant\.reasoning/);
   assert.match(threadSource, /pendingAssistant\.retry/);
   assert.match(threadSource, /正在重试请求/);
   assert.match(pageSource, /<ChatScreen \/>/);
