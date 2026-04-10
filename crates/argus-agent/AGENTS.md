@@ -1,3 +1,7 @@
+先熟悉同目录 `CLAUDE.md`。
+
+以下内容是在 `CLAUDE.md` 之上的补充不变量，主要约束 thread / turn / trace 的事实来源与结算语义。
+
 ## Thread / Turn Design Standard
 
 ### Core Truth

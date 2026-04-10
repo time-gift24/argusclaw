@@ -1,80 +1,33 @@
 # Argus-Crypto
 
-> 特性：AES-256-GCM 加密工具，支持主密钥管理。
+> 特性：凭证加解密与密钥来源抽象，供账号、provider 和持久化层复用。
 
-## 模块结构
+## 核心职责
 
-```
-src/
-├── lib.rs           # 公共 API 导出
-├── cipher.rs       # Cipher、EncryptedSecret
-├── key_source.rs   # KeyMaterialSource、FileKeySource
-└── error.rs        # CryptoError
-```
+- `Cipher` 负责加解密 secret
+- `EncryptedSecret` 表达持久化后的密文载荷
+- `KeyMaterialSource` 抽象主密钥来源，支持文件或静态字节
 
-## 核心概念
+## 关键模块
 
-### 1. Cipher
+- `src/cipher.rs`：`Cipher`、`EncryptedSecret`
+- `src/key_source.rs`：`KeyMaterialSource`、`FileKeySource`、`StaticKeySource`
+- `src/error.rs`：`CryptoError`
 
-**Cipher** 提供 AES-256-GCM 加密：
+## 公开入口
 
-```rust
-pub struct Cipher {
-    key: [u8; 32],  // 256-bit key
-}
+- `Cipher`
+- `EncryptedSecret`
+- `KeyMaterialSource`
+- `FileKeySource`、`StaticKeySource`
 
-pub struct EncryptedSecret {
-    nonce: [u8; 12],     // 96-bit nonce
-    ciphertext: Vec<u8>,  // 密文
-    tag: [u8; 16],       // 认证标签
-}
-```
+## 依赖边界
 
-### 2. KeyMaterialSource
+- 上游依赖：`argus-protocol` 的 `SecretString`
+- 下游消费者：`argus-auth`、`argus-repository`、`argus-llm`
 
-**KeyMaterialSource** trait 支持多种密钥来源：
+## 修改守则
 
-```rust
-pub trait KeyMaterialSource: Send + Sync {
-    fn get_key(&self) -> Result<[u8; 32], CryptoError>;
-}
-```
-
-**内置实现**：
-- `StaticKeySource`：静态密钥
-- `FileKeySource`：从文件读取密钥
-
-## 公共 API
-
-```rust
-use argus_crypto::{Cipher, EncryptedSecret, FileKeySource};
-
-// 创建 Cipher
-let key_source = FileKeySource::new("master.key")?;
-let cipher = Cipher::new(key_source)?;
-
-// 加密
-let encrypted = cipher.encrypt(plaintext)?;
-
-// 解密
-let plaintext = cipher.decrypt(&encrypted)?;
-```
-
-## 依赖关系
-
-### 上游依赖
-- `argus-protocol`：SecretString 类型
-
-### 下游消费者
-- `argus-auth`：凭证加密
-- `argus-llm`：API key 加密
-
-## 设计原则
-
-### 1. AEAD 加密
-- 使用 AES-256-GCM
-- 提供认证加密
-
-### 2. 密钥管理
-- 支持多种密钥来源
-- 主密钥自管理
+- 保持密钥来源与业务逻辑解耦；不要在这里感知账号或 provider 语义
+- 兼顾现有读密钥回退场景，避免破坏已持久化 secret 的解密能力
+- 所有密文结构变更都要同步检查 repository 读写路径

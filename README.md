@@ -1,77 +1,52 @@
-# ArgusWing
+# ArgusClaw
 
-AI Agent 框架，支持 CLI 和桌面应用。
+ArgusClaw 是一个以 Rust workspace 为中心的 AI Agent 运行时，核心包含线程化对话执行、后台 job thread pool、工具系统、MCP 运行时，以及基于 Tauri 的桌面端。
 
-## 项目结构
+## 快速开始
 
-```
-argusclaw/
-├── crates/
-│   ├── argus-protocol/    # 核心类型（叶子模块）
-│   ├── argus-session/     # 会话管理
-│   ├── argus-thread/      # 线程管理
-│   ├── argus-turn/        # 轮次执行
-│   ├── argus-llm/        # LLM 抽象层
-│   ├── argus-tool/       # 工具注册表
-│   ├── argus-repository/ # 持久化层
-│   ├── claw/             # 核心库门面
-│   ├── cli/              # CLI 前端
-│   └── desktop/          # Tauri 桌面应用
+```bash
+cargo install prek
+prek install
+
+cargo test
+cargo deny check
+prek
 ```
 
-## 编译 Desktop
-
-### 前置要求
-
-- **Rust** (via [rustup](https://rustup.rs/))
-- **pnpm** (`npm install -g pnpm`)
-- **macOS**: Xcode Command Line Tools
-
-### 1. 安装前端依赖
+## 桌面端开发
 
 ```bash
 cd crates/desktop
 pnpm install
-```
-
-### 2. 开发模式
-
-```bash
-# 启动 Tauri 开发服务器（会自动启动 Next.js 前端）
 pnpm tauri dev
 ```
 
-### 3. 生产构建
+桌面端由两部分组成：
 
-```bash
-# 构建前端 + Rust 后端
-pnpm tauri build
-```
+- `crates/desktop`：React 19 + Vite 8 前端
+- `crates/desktop/src-tauri`：Tauri Rust bridge，负责 command / subscription / bootstrapping
 
-产物输出到 `src-tauri/target/release/bundle/` 目录。
+## 工作区结构
 
-### 常见问题
+| 路径 | 角色 |
+| --- | --- |
+| `crates/argus-protocol` | 核心类型与跨 crate trait，叶子模块 |
+| `crates/argus-repository` | 唯一允许编写 SQL 的持久化层 |
+| `crates/argus-crypto` | 密钥来源与凭证加解密 |
+| `crates/argus-auth` | 账号与 token 包装 provider |
+| `crates/argus-llm` | provider 管理、OpenAI-compatible provider、retry |
+| `crates/argus-tool` | 工具注册表与内置 filesystem / shell / browser / scheduler tools |
+| `crates/argus-agent` | thread-owned turn runtime、compact、trace、plan |
+| `crates/argus-job` | 后台 job 调度与统一 thread pool |
+| `crates/argus-session` | session 聚合、thread 恢复、scheduler backend |
+| `crates/argus-template` | agent 模板管理与 builtin agents seed |
+| `crates/argus-mcp` | MCP server runtime、supervision、tool adapter |
+| `crates/argus-wing` | 面向应用层的 facade，组合所有子系统 |
+| `crates/argus-test-support` | 测试辅助 provider 与 harness |
+| `crates/desktop` | 桌面端 UI 与前端测试 |
 
-**Q: 编译卡住不动**
-- 首次编译需要下载 Rust 依赖，可能需要几分钟
-- 确保网络通畅
+## 文档约定
 
-**Q: 权限错误 (macOS)**
-- 运行 `sudo xcode-select --reset` 重置 Xcode 路径
-
-**Q: Windows 构建失败**
-- 需要 Visual Studio Build Tools
-- 确保安装 "Desktop development with C++" 工作负载
-
-## CLI 开发
-
-```bash
-cargo build --release -p cli
-./target/release/arguswing --help
-```
-
-## 开发检查
-
-```bash
-prek  # 静态检查（commit 前必须通过）
-```
+- 根目录与各 crate 维护本地 `CLAUDE.md`，记录职责边界与修改守则。
+- 同级 `AGENTS.md` 负责提醒代理先读最近的 `CLAUDE.md`；如果同目录还有额外规则，也放在 `AGENTS.md`。
+- 进入更深目录工作时，以更近的 `CLAUDE.md` / `AGENTS.md` 为准。

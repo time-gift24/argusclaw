@@ -1,58 +1,26 @@
-# Argus-Template 模板
+# Argus-Template
 
-> 特性：模板模块，提供可配置的 Agent 和 Tool 模板。
+> 特性：agent 模板管理与 builtin agents seed，统一维护 `AgentRecord` 的可持久化来源。
 
-## 模块结构
+## 核心职责
 
-```
-src/
-├── lib.rs           # 公共 API 导出
-├── config.rs        # 模板配置
-├── manager.rs       # TemplateManager：模板管理
-└── generated_agents.rs  # 自动生成的 Agent 模板
-```
+- `TemplateManager` 提供模板的 upsert / get / list / delete
+- 从 `generated_agents.rs` 中的嵌入式 TOML seed builtin agents
+- 维护 subagent 绑定与删除前引用校验
 
-## 核心概念
+## 关键模块
 
-### 1. TemplateManager
+- `src/manager.rs`
+- `src/config.rs`
+- `src/generated_agents.rs`
 
-**TemplateManager** 管理 Agent 和 Tool 模板：
+## 公开入口
 
-```rust
-pub struct TemplateManager {
-    // 模板存储
-}
-```
+- `TemplateManager`
+- `AgentRecord`
 
-### 2. AgentRecord
+## 修改守则
 
-**AgentRecord** 是从模板生成的 Agent 配置：
-
-```rust
-pub use argus_protocol::AgentRecord;
-```
-
-## 公共 API
-
-```rust
-use argus_template::{TemplateManager, AgentRecord};
-
-let manager = TemplateManager::new();
-
-// 获取 Agent 模板
-let agent = manager.get_agent("default").await?;
-```
-
-## 依赖关系
-
-### 上游依赖
-- `argus-protocol`：`AgentRecord` 类型定义
-
-### 下游消费者
-- `argus-session`：使用模板创建会话
-
-## 设计原则
-
-### 1. 模板驱动
-- Agent 配置通过模板定义
-- 支持运行时模板参数化
+- builtin agent 定义来自嵌入式 TOML 与 `generated_agents.rs`，不要在运行时散落默认值
+- 删除模板前必须尊重引用阻塞规则
+- 模板数据模型应紧贴 `argus_protocol::AgentRecord`，不要派生第二套配置格式
