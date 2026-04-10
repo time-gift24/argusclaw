@@ -126,3 +126,18 @@ test("chat runtime memoizes external-store inputs to avoid feedback loops", () =
     /useExternalStoreRuntime<AssistantUiMessage>\(\{[\s\S]*messages,[\s\S]*convertMessage,[\s\S]*onNew,[\s\S]*\}\)/,
   );
 });
+
+test("assistant turn artifacts avoid fresh selector objects inside useAuiState", () => {
+  assert.match(
+    threadSource,
+    /const rawTurnArtifacts = useAuiState\([\s\S]*s\.message\.metadata\.custom\.turnArtifacts[\s\S]*\);/,
+  );
+  assert.match(
+    threadSource,
+    /const turnArtifacts = useMemo\([\s\S]*readTurnArtifacts\(rawTurnArtifacts\)[\s\S]*\[rawTurnArtifacts\][\s\S]*\);|const turnArtifacts = React\.useMemo\([\s\S]*readTurnArtifacts\(rawTurnArtifacts\)[\s\S]*\[rawTurnArtifacts\][\s\S]*\);/,
+  );
+  assert.doesNotMatch(
+    threadSource,
+    /const turnArtifacts = useAuiState\(\(s\) =>\s*readTurnArtifacts\(/,
+  );
+});

@@ -58,7 +58,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import type { FC } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 const ComposerAction: FC = () => {
   const session = useActiveChatSession();
@@ -541,8 +541,12 @@ const TurnArtifactsPanel = ({
 };
 
 const AssistantTurnArtifacts: FC = () => {
-  const turnArtifacts = useAuiState((s) =>
-    readTurnArtifacts(s.message.metadata.custom.turnArtifacts),
+  const rawTurnArtifacts = useAuiState(
+    (s) => s.message.metadata.custom.turnArtifacts,
+  );
+  const turnArtifacts = useMemo(
+    () => readTurnArtifacts(rawTurnArtifacts),
+    [rawTurnArtifacts],
   );
   const isRunning = useAuiState((s) => s.message.status?.type === "running");
 
