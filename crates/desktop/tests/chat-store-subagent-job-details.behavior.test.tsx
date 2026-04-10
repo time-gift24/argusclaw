@@ -82,6 +82,7 @@ function makeSession(overrides: Partial<ChatSessionState> & Pick<ChatSessionStat
     effectiveModel: overrides.effectiveModel ?? null,
     status: overrides.status ?? "idle",
     messages: overrides.messages ?? [],
+    pendingUserMessage: overrides.pendingUserMessage ?? null,
     pendingAssistant: overrides.pendingAssistant ?? null,
     jobStatuses: overrides.jobStatuses ?? {},
     jobDetails: overrides.jobDetails ?? {},

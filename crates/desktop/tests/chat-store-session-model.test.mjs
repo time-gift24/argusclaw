@@ -92,6 +92,25 @@ test("chat store tracks pending reasoning alongside streamed assistant text", ()
   );
 });
 
+test("chat store keeps an optimistic pending user message until the persisted snapshot catches up", () => {
+  assert.match(
+    storeSource,
+    /pendingUserMessage:\s*string \| null/,
+  );
+  assert.match(
+    storeSource,
+    /async sendMessage\(content: string\) \{[\s\S]*?pendingUserMessage:\s*trimmedContent/,
+  );
+  assert.match(
+    storeSource,
+    /refreshSnapshot:[\s\S]*?pendingUserMessage:\s*null/,
+  );
+  assert.match(
+    storeSource,
+    /case "turn_failed":[\s\S]*?pendingUserMessage:\s*null/,
+  );
+});
+
 test("chat store surfaces retry attempts on the pending assistant and clears them once output resumes", () => {
   assert.match(
     storeSource,

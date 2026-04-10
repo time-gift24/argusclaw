@@ -250,6 +250,7 @@ export interface ChatSessionState {
   effectiveModel: string | null;
   status: "idle" | "running" | "compacting" | "error";
   messages: ThreadSnapshotPayload["messages"];
+  pendingUserMessage: string | null;
   pendingAssistant: {
     content: string;
     reasoning: string;
@@ -557,6 +558,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         effectiveModel: session.effective_model,
         status: "idle",
         messages: snapshot.messages,
+        pendingUserMessage: null,
         pendingAssistant: null,
         jobStatuses: {},
         jobDetails: {},
@@ -655,6 +657,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         effectiveModel: activated.effective_model,
         status: "idle",
         messages: snapshot.messages,
+        pendingUserMessage: null,
         pendingAssistant: null,
         jobStatuses: {},
         jobDetails: {},
@@ -893,6 +896,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         [state.activeSessionKey!]: {
           ...session,
           status: "running",
+          pendingUserMessage: trimmedContent,
           pendingAssistant: {
             content: "",
             reasoning: "",
@@ -920,6 +924,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           [state.activeSessionKey!]: {
             ...store.sessionsByKey[state.activeSessionKey!],
             status: "error",
+            pendingUserMessage: null,
             pendingAssistant: null,
             error: errorMessage,
           },
@@ -1026,6 +1031,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           [sessionKey]: {
             ...state.sessionsByKey[sessionKey],
             messages: snapshot.messages,
+            pendingUserMessage: null,
             pendingAssistant: null,
             status: options?.preserveError ? "error" : "idle",
             error: options?.preserveError
@@ -1047,6 +1053,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           ...state.sessionsByKey,
           [sessionKey]: {
             ...state.sessionsByKey[sessionKey],
+            pendingUserMessage: null,
             pendingAssistant: null,
             status: "error",
             error: errorMessage,
@@ -1664,6 +1671,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             [sessionKey]: {
               ...store.sessionsByKey[sessionKey],
               status: "error",
+              pendingUserMessage: null,
               pendingAssistant: null,
               error: payload.error,
             },

@@ -264,6 +264,21 @@ function flushAssistantTurn(
   return null;
 }
 
+function buildPendingUserMessage(
+  session: NonNullable<ReturnType<typeof useActiveChatSession>>,
+): AssistantUiMessage | null {
+  if (!session.pendingUserMessage) return null;
+
+  return {
+    id: `pending-user-${session.threadId}`,
+    role: "user",
+    content: session.pendingUserMessage,
+    createdAt: new Date(),
+    attachments: [],
+    metadata: { custom: { messageMetadata: null } },
+  };
+}
+
 function buildAggregatedAssistantMessages(
   session: ReturnType<typeof useActiveChatSession>,
 ): AssistantUiMessage[] {
@@ -313,6 +328,11 @@ function buildAggregatedAssistantMessages(
   }
 
   activeAssistantTurn = flushAssistantTurn(messages, activeAssistantTurn);
+
+  const pendingUserMessage = buildPendingUserMessage(session);
+  if (pendingUserMessage) {
+    messages.push(pendingUserMessage);
+  }
 
   if (session.pendingAssistant) {
     messages.push({

@@ -29,12 +29,14 @@ const threadSource = readFileSync(
 test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(chatRuntimeSource, /useExternalStoreRuntime/);
   assert.match(chatRuntimeSource, /pendingAssistant/);
+  assert.match(chatRuntimeSource, /pendingUserMessage/);
   assert.match(chatRuntimeSource, /type TurnArtifacts = \{/);
   assert.match(chatRuntimeSource, /msg\.reasoning_content/);
   assert.match(chatRuntimeSource, /tool_calls|toolCallId/);
   assert.match(chatRuntimeSource, /buildAggregatedAssistantMessages/);
   assert.match(chatRuntimeSource, /result:\s*parseMessageContent/);
   assert.match(chatRuntimeSource, /turnArtifacts/);
+  assert.match(chatRuntimeSource, /pending-user-/);
   assert.match(chatRuntimeSource, /createEmptyAssistantMetadata/);
   assert.match(chatRuntimeSource, /onNew:/);
   assert.match(chatScreenSource, /AssistantRuntimeProvider/);
