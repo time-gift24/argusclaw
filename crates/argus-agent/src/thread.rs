@@ -31,6 +31,7 @@ use super::turn_log_store::{
 use super::types::{ThreadInfo, ThreadState};
 /// Default broadcast channel capacity.
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
+const SCHEDULER_TOOL_NAME: &str = "scheduler";
 
 type TurnExecutionParts = (
     String,
@@ -1136,7 +1137,7 @@ impl Thread {
             .map(String::as_str)
             .collect::<std::collections::HashSet<_>>();
         if !agent_record.subagent_names.is_empty() {
-            enabled_tool_names.insert("scheduler");
+            enabled_tool_names.insert(SCHEDULER_TOOL_NAME);
         }
         let mut tools = self
             .tool_manager
@@ -1337,7 +1338,9 @@ mod tests {
     #[test]
     fn build_shared_turn_tools_includes_scheduler_for_dispatch_capable_agents() {
         let tool_manager = Arc::new(ToolManager::new());
-        tool_manager.register(Arc::new(StubTool { name: "scheduler" }));
+        tool_manager.register(Arc::new(StubTool {
+            name: SCHEDULER_TOOL_NAME,
+        }));
 
         let thread = ThreadBuilder::new()
             .provider(Arc::new(DummyProvider))
@@ -1355,7 +1358,7 @@ mod tests {
         let tool_names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
         assert!(
-            tool_names.iter().any(|name| name == "scheduler"),
+            tool_names.iter().any(|name| name == SCHEDULER_TOOL_NAME),
             "dispatch-capable agents should automatically receive scheduler"
         );
     }

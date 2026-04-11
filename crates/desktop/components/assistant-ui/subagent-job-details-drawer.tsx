@@ -51,15 +51,12 @@ export const SubagentJobDetailsPanel: FC<{
 }> = ({ detail }) => {
   if (!detail) return null;
 
-  const outputLabel = detail?.result_text
+  const outputLabel = detail.result_text
     ? "最终产出"
-    : detail?.summary_text
+    : detail.summary_text
       ? "结果摘要"
-      : "暂无详细结果";
-  const outputBody =
-    detail?.result_text ??
-    detail?.summary_text ??
-    "任务已结束，但详细结果暂不可用";
+      : null;
+  const outputBody = detail.result_text ?? detail.summary_text;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
@@ -88,60 +85,20 @@ export const SubagentJobDetailsPanel: FC<{
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-5 py-5 custom-scrollbar">
-        <section className="space-y-3">
-          <div className="flex items-center justify-between gap-3">
+        {outputLabel && outputBody && (
+          <section className="space-y-3">
             <h3 className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">
               {outputLabel}
             </h3>
-            <span className="text-[11px] text-muted-foreground">
-              Job {detail.job_id}
-            </span>
-          </div>
-          <div className="rounded-2xl border border-border/60 bg-muted/20 px-4 py-3">
-            <div className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90">
-              {outputBody}
+            <div className="rounded-2xl border border-border/60 bg-muted/20 px-4 py-3">
+              <div className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90">
+                {outputBody}
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
+        )}
 
         <section className="space-y-3">
-          <h3 className="text-[11px] font-bold uppercase tracking-[0.18em] text-muted-foreground">
-            任务信息
-          </h3>
-          <dl className="grid gap-3 rounded-2xl border border-border/60 bg-background/80 p-4 sm:grid-cols-2">
-            <div className="space-y-1">
-              <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                开始时间
-              </dt>
-              <dd className="text-sm text-foreground">
-                {formatTimestamp(detail.started_at)}
-              </dd>
-            </div>
-            <div className="space-y-1">
-              <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                完成时间
-              </dt>
-              <dd className="text-sm text-foreground">
-                {formatTimestamp(detail.finished_at)}
-              </dd>
-            </div>
-            <div className="space-y-1">
-              <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                输入 Tokens
-              </dt>
-              <dd className="text-sm text-foreground">
-                {detail.input_tokens ?? "—"}
-              </dd>
-            </div>
-            <div className="space-y-1">
-              <dt className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                输出 Tokens
-              </dt>
-              <dd className="text-sm text-foreground">
-                {detail.output_tokens ?? "—"}
-              </dd>
-            </div>
-          </dl>
           <div className="rounded-2xl border border-border/60 bg-muted/15 px-4 py-3">
             <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-muted-foreground">
               原始 Prompt
