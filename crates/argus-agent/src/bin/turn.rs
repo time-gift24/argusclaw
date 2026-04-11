@@ -19,7 +19,7 @@ use argus_llm::providers::{
 use argus_llm::retry::{RetryConfig, RetryProvider};
 use argus_protocol::llm::{LlmProvider, Role, ToolDefinition};
 use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
-use argus_protocol::{AgentId, AgentRecord, AgentType, SessionId};
+use argus_protocol::{AgentId, AgentRecord, SessionId};
 use argus_tool::ToolManager;
 
 /// Configuration file structure.
@@ -218,11 +218,10 @@ fn build_cli_agent_record(
         model_id: None,
         system_prompt: system_prompt.into(),
         tool_names: tool_names.into_iter().map(str::to_string).collect(),
+        subagent_names: vec![],
         max_tokens: None,
         temperature: None,
         thinking_config: None,
-        parent_agent_id: None,
-        agent_type: AgentType::Standard,
     })
 }
 

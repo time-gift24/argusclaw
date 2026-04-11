@@ -1184,7 +1184,7 @@ mod tests {
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand};
+    use argus_protocol::{AgentId, ProviderId, ThreadCommand};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
@@ -1268,11 +1268,10 @@ mod tests {
             model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: None,
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         })
     }
 
