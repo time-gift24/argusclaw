@@ -9,10 +9,6 @@ pub enum JobError {
     #[error("agent not found: {0}")]
     AgentNotFound(i64),
 
-    /// Subagent cannot dispatch jobs.
-    #[error("subagent cannot dispatch jobs")]
-    SubagentCannotDispatch,
-
     /// Job not found.
     #[error("job not found: {0}")]
     JobNotFound(String),

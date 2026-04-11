@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use argus_agent::{LlmThreadCompactor, ThreadBuilder, TurnCancellation};
 use argus_llm::{Cipher, FileKeySource, ProviderManager};
 use argus_protocol::llm::{ChatMessage, LlmProviderId, LlmStreamEvent, Role};
-use argus_protocol::{AgentId, AgentRecord, AgentType, ProviderId, SessionId, ThreadEvent};
+use argus_protocol::{AgentId, AgentRecord, ProviderId, SessionId, ThreadEvent};
 use argus_repository::traits::AccountRepository;
 use argus_repository::{ArgusSqlite, connect, connect_path, migrate};
 use clap::Parser;
@@ -120,11 +120,10 @@ fn build_smoke_agent_record(
         model_id: None,
         system_prompt: system_prompt.unwrap_or_default(),
         tool_names: Vec::new(),
+        subagent_names: Vec::new(),
         max_tokens: None,
         temperature: None,
         thinking_config: None,
-        parent_agent_id: None,
-        agent_type: AgentType::Standard,
     })
 }
 

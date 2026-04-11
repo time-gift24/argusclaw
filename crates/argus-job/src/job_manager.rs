@@ -681,7 +681,7 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentRecord, AgentType, LlmProvider, ProviderId, SessionId, ThinkingConfig, ThreadId,
+        AgentRecord, LlmProvider, ProviderId, SessionId, ThinkingConfig, ThreadId,
         ThreadRuntimeStatus,
     };
     use argus_repository::ArgusSqlite;
@@ -834,11 +834,10 @@ mod tests {
             model_id: Some("capturing".to_string()),
             system_prompt: "You are a cancellable test agent.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         };
         template_manager
             .upsert(agent_record.clone())

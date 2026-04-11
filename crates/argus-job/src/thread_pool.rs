@@ -2444,7 +2444,7 @@ mod tests {
     use super::*;
     use argus_agent::{Compactor, ThreadBuilder};
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, LlmEventStream};
-    use argus_protocol::{AgentRecord, AgentType, ProviderId, ThinkingConfig};
+    use argus_protocol::{AgentRecord, ProviderId, ThinkingConfig};
     use argus_repository::ArgusSqlite;
     use argus_repository::error::DbError;
     use argus_repository::migrate;
@@ -2669,11 +2669,10 @@ mod tests {
             model_id: Some("job-test".to_string()),
             system_prompt: "You are the original job snapshot agent.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::disabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         };
         template_manager
             .upsert(original_agent_record.clone())
@@ -2774,11 +2773,10 @@ mod tests {
                 model_id: Some("job-test-v2".to_string()),
                 system_prompt: "You are the mutated job snapshot agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::disabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template update should succeed");
@@ -2840,11 +2838,10 @@ mod tests {
             model_id: Some("job-test".to_string()),
             system_prompt: "You recover child jobs from trace.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::disabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         };
         template_manager
             .upsert(agent_record.clone())
@@ -2986,11 +2983,10 @@ mod tests {
             model_id: Some("job-test".to_string()),
             system_prompt: "You clean up after failures.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::disabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         };
         template_manager
             .upsert(agent_record.clone())
@@ -3091,11 +3087,10 @@ mod tests {
                 model_id: None,
                 system_prompt: String::new(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::disabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             }))
             .session_id(SessionId::new())
             .build()
