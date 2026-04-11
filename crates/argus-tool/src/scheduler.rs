@@ -125,8 +125,11 @@ pub struct MarkReadRequest {
     pub message_id: String,
 }
 
-/// Backend integration point implemented by orchestration crates.
+/// Maximum allowed nesting depth for job dispatch chains.
+pub const MAX_DISPATCH_DEPTH: u32 = 3;
+
 #[async_trait]
+/// Backend integration point implemented by orchestration crates.
 pub trait SchedulerBackend: Send + Sync {
     async fn dispatch_job(&self, request: SchedulerDispatchRequest) -> Result<String, ToolError>;
 

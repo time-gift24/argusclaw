@@ -394,25 +394,6 @@ impl ArgusWing {
         self.template_manager.delete(id).await
     }
 
-    /// List all subagents of a given parent agent.
-    pub async fn list_subagents(&self, parent_id: AgentId) -> Result<Vec<AgentRecord>> {
-        self.template_manager.list_subagents(parent_id).await
-    }
-
-    /// Add a subagent to a parent agent (set child's parent_agent_id).
-    pub async fn add_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
-        self.template_manager
-            .add_subagent(parent_id, child_id)
-            .await
-    }
-
-    /// Remove a subagent from its parent (clear child's parent_agent_id).
-    pub async fn remove_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
-        self.template_manager
-            .remove_subagent(parent_id, child_id)
-            .await
-    }
-
     /// Get the default agent template.
     ///
     /// Returns the template record for the default "arguswing" agent if it exists.
@@ -781,8 +762,8 @@ mod tests {
 
     use super::*;
     use argus_protocol::{
-        AgentMcpBinding, AgentMcpServerBinding, AgentRecord, AgentType, McpServerRecord,
-        McpServerStatus, McpTransportConfig, ThinkingConfig,
+        AgentMcpBinding, AgentMcpServerBinding, AgentRecord, McpServerRecord, McpServerStatus,
+        McpTransportConfig, ThinkingConfig,
     };
 
     async fn make_test_wing() -> Arc<ArgusWing> {
@@ -882,11 +863,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "Use MCP when needed.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("agent template should upsert");
@@ -979,11 +959,10 @@ mod tests {
             model_id: None,
             system_prompt: "You are ArgusWing, a helpful AI assistant.".to_string(),
             tool_names: vec!["shell".to_string(), "read".to_string()],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         };
         wing.upsert_template(default_template)
             .await
@@ -1020,11 +999,10 @@ mod tests {
             model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         };
 
         let template_id = wing
@@ -1077,9 +1055,11 @@ mod tests {
             .expect("template listing should succeed");
 
         assert!(templates.iter().all(|template| template.id.inner() != 0));
-        assert!(templates
+        let repaired_template = templates
             .iter()
-            .any(|template| template.display_name == "Legacy Zero Agent"));
+            .find(|template| template.display_name == "Legacy Zero Agent")
+            .expect("legacy placeholder agent should still exist after repair");
+        assert_eq!(repaired_template.subagent_names, vec!["Chrome Explore"]);
     }
 
     #[tokio::test]
@@ -1123,11 +1103,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You are a test agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1181,11 +1160,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You are a fallback agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1246,11 +1224,10 @@ mod tests {
                 model_id: Some("gpt-5".to_string()),
                 system_prompt: "You are a pinned-model agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1297,11 +1274,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You help verify pool cleanup.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1351,11 +1327,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You help verify session cleanup.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1444,11 +1419,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You are a mutable-model agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1554,11 +1528,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You help validate runtime ownership.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1621,11 +1594,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You help validate subscriptions.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1682,11 +1654,10 @@ mod tests {
                 model_id: None,
                 system_prompt: "You are a dispatch test agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");
@@ -1818,11 +1789,10 @@ mod tests {
                 model_id: Some("gpt-4o-mini".to_string()),
                 system_prompt: "You are a dispatch test agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::enabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template should upsert");

@@ -92,8 +92,7 @@ export interface AgentRecord {
   model_id?: string | null;
   system_prompt: string;
   tool_names: string[];
-  parent_agent_id?: number;
-  agent_type?: "standard" | "subagent";
+  subagent_names: string[];
   max_tokens?: number;
   temperature?: number;
   thinking_config?: ThinkingConfig;
@@ -140,15 +139,6 @@ export const agents = {
     }).then((id) => parseInt(id, 10)),
 
   delete: (id: number) => invoke<boolean>("delete_agent_template", { id }),
-
-  listSubagents: (parentId: number) =>
-    invoke<AgentRecord[]>("list_subagents", { parentId }),
-
-  addSubagent: (parentId: number, childId: number) =>
-    invoke<void>("add_subagent", { parentId, childId }),
-
-  removeSubagent: (parentId: number, childId: number) =>
-    invoke<void>("remove_subagent", { parentId, childId }),
 };
 
 // Tools API

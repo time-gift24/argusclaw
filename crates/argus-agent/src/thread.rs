@@ -1130,15 +1130,19 @@ impl Thread {
         agent_record: &AgentRecord,
         mcp_tools: Vec<Arc<dyn NamedTool>>,
     ) -> Vec<Arc<dyn NamedTool>> {
-        let enabled_tool_names = agent_record
+        let mut enabled_tool_names = agent_record
             .tool_names
             .iter()
+            .map(String::as_str)
             .collect::<std::collections::HashSet<_>>();
+        if !agent_record.subagent_names.is_empty() {
+            enabled_tool_names.insert("scheduler");
+        }
         let mut tools = self
             .tool_manager
             .list_ids()
             .iter()
-            .filter(|name| enabled_tool_names.contains(name))
+            .filter(|name| enabled_tool_names.contains(name.as_str()))
             .filter_map(|name| self.tool_manager.get(name))
             .collect::<Vec<_>>();
         let plan_tool: Arc<dyn NamedTool> =
@@ -1183,8 +1187,9 @@ mod tests {
     use crate::thread_trace_store::chat_thread_base_dir;
     use crate::trace::TraceConfig;
     use crate::turn_log_store::recover_thread_log_state;
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError};
-    use argus_protocol::{AgentId, AgentType, ProviderId, ThreadCommand};
+    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, ToolDefinition};
+    use argus_protocol::tool::{NamedTool, ToolError, ToolExecutionContext};
+    use argus_protocol::{AgentId, ProviderId, ThreadCommand};
     use async_trait::async_trait;
     use rust_decimal::Decimal;
 
@@ -1197,6 +1202,33 @@ mod tests {
     }
 
     struct DummyProvider;
+
+    struct StubTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl NamedTool for StubTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: format!("stub {}", self.name),
+                parameters: serde_json::json!({ "type": "object" }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({}))
+        }
+    }
 
     #[async_trait]
     impl LlmProvider for DummyProvider {
@@ -1268,11 +1300,10 @@ mod tests {
             model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: None,
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         })
     }
 
@@ -1301,6 +1332,32 @@ mod tests {
             .session_id(SessionId::new())
             .build()
             .expect("thread should build")
+    }
+
+    #[test]
+    fn build_shared_turn_tools_includes_scheduler_for_dispatch_capable_agents() {
+        let tool_manager = Arc::new(ToolManager::new());
+        tool_manager.register(Arc::new(StubTool { name: "scheduler" }));
+
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .tool_manager(Arc::clone(&tool_manager))
+            .agent_record(Arc::new(AgentRecord {
+                subagent_names: vec!["Researcher".to_string()],
+                ..(*test_agent_record()).clone()
+            }))
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+
+        let tools = thread.build_shared_turn_tools(thread.agent_record.as_ref(), Vec::new());
+        let tool_names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+
+        assert!(
+            tool_names.iter().any(|name| name == "scheduler"),
+            "dispatch-capable agents should automatically receive scheduler"
+        );
     }
 
     #[test]

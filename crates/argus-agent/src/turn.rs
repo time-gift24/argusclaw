@@ -1308,8 +1308,8 @@ mod tests {
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, Role};
     use argus_protocol::tool::{NamedTool, ToolError};
     use argus_protocol::{
-        AgentId, AgentType, HookAction, HookEvent, HookHandler, HookRegistry, ProviderId,
-        SessionId, ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext,
+        AgentId, HookAction, HookEvent, HookHandler, HookRegistry, ProviderId, SessionId,
+        ThreadEvent, TokenUsage, ToolExecutionContext, ToolHookContext,
     };
     use async_trait::async_trait;
     use rust_decimal::Decimal;
@@ -1686,11 +1686,10 @@ mod tests {
             model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: vec![],
+            subagent_names: vec![],
             max_tokens: None,
             temperature: None,
             thinking_config: None,
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         })
     }
 

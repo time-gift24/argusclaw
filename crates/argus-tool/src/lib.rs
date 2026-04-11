@@ -37,7 +37,7 @@ pub use read::ReadTool;
 pub use scheduler::{
     CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
     SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
-    SchedulerTool, SendMessageRequest, SendMessageResponse,
+    SchedulerTool, SendMessageRequest, SendMessageResponse, MAX_DISPATCH_DEPTH,
 };
 pub use shell::ShellTool;
 pub use write::WriteFileTool;
@@ -116,6 +116,11 @@ mod tests {
 
     // Import async_trait to implement NamedTool from argus_protocol
     use async_trait::async_trait;
+
+    #[test]
+    fn re_exports_max_dispatch_depth() {
+        assert_eq!(MAX_DISPATCH_DEPTH, scheduler::MAX_DISPATCH_DEPTH);
+    }
 
     /// A test tool that echoes back its input arguments.
     struct EchoTool;

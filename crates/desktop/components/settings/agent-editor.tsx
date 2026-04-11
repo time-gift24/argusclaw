@@ -35,7 +35,6 @@ import { cn } from "@/lib/utils"
 
 interface AgentEditorProps {
   agentId?: number
-  parentId?: number
 }
 
 function getPreferredProviderId(providersData: LlmProviderSummary[]): number | null {
@@ -56,10 +55,33 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
     model_id: null,
     system_prompt: "",
     tool_names: [],
+    subagent_names: [],
     max_tokens: undefined,
     temperature: undefined,
     thinking_config: { type: "enabled", clear_thinking: false },
   }
+}
+
+function ensureSchedulerToolState(
+  record: AgentRecord,
+  schedulerExplicitlySelected: boolean,
+): AgentRecord {
+  const hasScheduler = record.tool_names.includes("scheduler")
+
+  if (record.subagent_names.length > 0) {
+    return hasScheduler
+      ? record
+      : { ...record, tool_names: [...record.tool_names, "scheduler"] }
+  }
+
+  if (!schedulerExplicitlySelected && hasScheduler) {
+    return {
+      ...record,
+      tool_names: record.tool_names.filter((name) => name !== "scheduler"),
+    }
+  }
+
+  return record
 }
 
 const TOOL_PAGE_SIZE = 8
@@ -134,7 +156,7 @@ async function loadAgentMcpBindings(agentId: number) {
   return await mcp.listAgentBindings(agentId)
 }
 
-export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
+export function AgentEditor({ agentId }: AgentEditorProps) {
   const navigate = useNavigate()
   const { addToast } = useToast()
   const isEditing = agentId !== undefined
@@ -147,9 +169,10 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
   const [mcpBindings, setMcpBindings] = React.useState<AgentMcpBinding[]>([])
   const [mcpToolsByServerId, setMcpToolsByServerId] = React.useState<Record<number, McpDiscoveredToolRecord[]>>({})
   const mcpToolsByServerIdRef = React.useRef<Record<number, McpDiscoveredToolRecord[]>>({})
-  const [parentAgentList, setParentAgentList] = React.useState<AgentRecord[]>([])
+  const [availableSubagents, setAvailableSubagents] = React.useState<AgentRecord[]>([])
   const [mcpDialogOpen, setMcpDialogOpen] = React.useState(false)
   const [loadingMcpToolsByServerId, setLoadingMcpToolsByServerId] = React.useState<Record<number, boolean>>({})
+  const [schedulerExplicitlySelected, setSchedulerExplicitlySelected] = React.useState(false)
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -174,13 +197,17 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
     () => providerList.find((provider) => provider.id === formData.provider_id) ?? null,
     [formData.provider_id, providerList],
   )
-  const excludedAgentIds = React.useMemo(
-    () => getExcludedAgentIds(agentId, parentAgentList),
-    [agentId, parentAgentList],
-  )
   const uniqueToolList = React.useMemo(
     () => [...new Map(toolList.map((tool) => [tool.name, tool])).values()],
     [toolList],
+  )
+  const schedulerRequired = formData.subagent_names.length > 0
+  const missingSubagentNames = React.useMemo(
+    () =>
+      formData.subagent_names.filter(
+        (name) => !availableSubagents.some((agent) => agent.display_name === name),
+      ),
+    [availableSubagents, formData.subagent_names],
   )
   const [toolPage, setToolPage] = React.useState(1)
   const toolTotalPages = React.useMemo(
@@ -290,10 +317,10 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
         setProviderList(providersData)
         setToolList(toolsData)
         setMcpServerList(mcpServersData)
-        const candidates = allAgents.filter(
-          (a) => !a.parent_agent_id && a.agent_type !== "subagent" && a.id !== agentId
-        )
-        setParentAgentList(candidates)
+        const candidates = allAgents
+          .filter((agent) => agent.id !== agentId)
+          .sort((left, right) => left.display_name.localeCompare(right.display_name))
+        setAvailableSubagents(candidates)
 
         const preferredProviderId = getPreferredProviderId(providersData)
         if (agentId !== undefined) {
@@ -301,18 +328,24 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
             agents.get(agentId),
             loadAgentMcpBindings(agentId).catch(() => []),
           ])
-          if (agent) setFormData(agent)
+          if (agent) {
+            const schedulerWasExplicit =
+              agent.tool_names.includes("scheduler") && (agent.subagent_names?.length ?? 0) === 0
+            const normalizedAgent = ensureSchedulerToolState({
+              ...agent,
+              subagent_names: agent.subagent_names ?? [],
+            }, schedulerWasExplicit)
+            setSchedulerExplicitlySelected(schedulerWasExplicit)
+            setFormData(normalizedAgent)
+          }
           setMcpBindings(bindings)
           await Promise.all(
             bindings.map((binding) => loadMcpTools(binding.server_id)),
           )
         } else {
           setMcpBindings([])
-          if (parentId !== undefined) {
-            setFormData({ ...createDefaultFormData(preferredProviderId), parent_agent_id: parentId })
-          } else {
-            setFormData(createDefaultFormData(preferredProviderId))
-          }
+          setSchedulerExplicitlySelected(false)
+          setFormData(createDefaultFormData(preferredProviderId))
         }
       } catch (error) {
         console.error("Failed to load data:", error)
@@ -321,13 +354,20 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       }
     }
     loadData()
-  }, [agentId, loadMcpTools, parentId])
+  }, [agentId, loadMcpTools])
 
   const handleSave = async () => {
     if (!canSave) return
     setSaving(true)
     try {
-      const savedId = await agents.upsert(formData)
+      const cleanedFormData = ensureSchedulerToolState({
+        ...formData,
+        subagent_names: formData.subagent_names.filter(
+          (name) => !missingSubagentNames.includes(name),
+        ),
+      }, schedulerExplicitlySelected)
+      setFormData(cleanedFormData)
+      const savedId = await agents.upsert(cleanedFormData)
       if (isEditing || savedId) {
         const targetId = isEditing ? agentId! : savedId
         await mcp.setAgentBindings(targetId, mcpBindings).catch((wsError) => {
@@ -368,7 +408,7 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
           </Button>
           <div className="space-y-0.5">
             <h1 className="text-lg font-bold tracking-tight">
-              {parentId !== undefined ? "新建子智能体" : isEditing && formData.parent_agent_id ? "编辑子智能体" : isEditing ? "编辑智能体" : "新建智能体"}
+              {isEditing ? "编辑智能体" : "新建智能体"}
             </h1>
             <p className="text-[11px] text-muted-foreground uppercase tracking-wider font-semibold opacity-70">
               {isEditing ? `Agent Configuration / ${formData.display_name}` : "Agent Configuration / New Assistant"}
@@ -431,28 +471,67 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                     />
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="parent_agent_id" className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">继承自</Label>
-                  <select
-                    id="parent_agent_id"
-                    value={formData.parent_agent_id?.toString() ?? ""}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        parent_agent_id: e.target.value ? parseInt(e.target.value) : undefined,
-                      })
-                    }
-                    className="flex h-10 w-full rounded-md border border-muted/60 bg-background px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/20 transition-all appearance-none"
-                  >
-                    <option value="">独立智能体 (无继承)</option>
-                    {parentAgentList
-                      .filter((a) => !excludedAgentIds.has(a.id))
-                      .map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.display_name} (v{a.version})
-                        </option>
-                      ))}
-                  </select>
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <Label className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider ml-1">可调度子代理</Label>
+                    <p className="text-[11px] text-muted-foreground ml-1">
+                      勾选后，当前智能体可通过 scheduler 将任务分派给这些智能体。
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-muted/60 bg-background/80 p-3 shadow-inner">
+                    {availableSubagents.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        当前没有其他可选智能体。
+                      </p>
+                    ) : (
+                      <div className="max-h-40 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
+                        {availableSubagents.map((agent) => {
+                          const selected = formData.subagent_names.includes(agent.display_name)
+                          return (
+                            <label
+                              key={agent.id}
+                              className={cn(
+                                "flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2 transition-all",
+                                selected
+                                  ? "border-primary bg-primary/5"
+                                  : "border-muted/50 hover:border-primary/30 hover:bg-muted/30",
+                              )}
+                            >
+                              <Checkbox
+                                checked={selected}
+                                onCheckedChange={(checked) => {
+                                  setFormData((prev) =>
+                                    ensureSchedulerToolState({
+                                      ...prev,
+                                      subagent_names: checked
+                                        ? [...prev.subagent_names, agent.display_name]
+                                        : prev.subagent_names.filter((name) => name !== agent.display_name),
+                                    }, schedulerExplicitlySelected),
+                                  )
+                                }}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="truncate text-sm font-semibold">{agent.display_name}</span>
+                                  <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-mono text-muted-foreground">
+                                    v{agent.version}
+                                  </span>
+                                </div>
+                                <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                                  {agent.description || "未填写简介"}
+                                </p>
+                              </div>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  {missingSubagentNames.length > 0 && (
+                    <div className="rounded-2xl border border-amber-200 bg-amber-50/80 px-3 py-2 text-[11px] text-amber-900">
+                      以下子代理名称当前未在本地模板中找到，将在下次保存后移除：{missingSubagentNames.join("、")}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -629,6 +708,9 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                   {pagedToolList.map((tool, index) => {
                     const parameterDetails = extractToolParameterDetails(tool.parameters)
                     const detailedDescription = tool.description || readToolSchemaDescription(tool.parameters) || "无描述"
+                    const isSchedulerTool = tool.name === "scheduler"
+                    const isLockedScheduler = isSchedulerTool && schedulerRequired
+                    const isSelected = isLockedScheduler || formData.tool_names.includes(tool.name)
                     const columnIndex = index % 4
                     const isTopRow = index < 4
                     const hoverPositionClass =
@@ -648,24 +730,29 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                     <div
                       key={tool.name}
                       onClick={() => {
-                        const isSelected = formData.tool_names.includes(tool.name)
+                        if (isLockedScheduler) return
                         setFormData((prev) => ({
                           ...prev,
                           tool_names: isSelected
                             ? prev.tool_names.filter((n) => n !== tool.name)
                             : [...prev.tool_names, tool.name],
                         }))
+                        if (isSchedulerTool) {
+                          setSchedulerExplicitlySelected(!isSelected)
+                        }
                       }}
                       className={cn(
-                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 cursor-pointer transition-all",
-                        formData.tool_names.includes(tool.name)
+                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 transition-all",
+                        isLockedScheduler ? "cursor-not-allowed border-primary/40 bg-primary/10 shadow-inner" : "cursor-pointer",
+                        isSelected
                           ? "border-primary bg-primary/5 shadow-inner"
                           : "border-muted/60 bg-background hover:border-primary/30"
                       )}
                     >
                       <Checkbox
                         id={`tool-${tool.name}`}
-                        checked={formData.tool_names.includes(tool.name)}
+                        checked={isSelected}
+                        disabled={isLockedScheduler}
                         className="mt-0.5 shrink-0"
                         onClick={(e) => e.stopPropagation()}
                       />
@@ -679,6 +766,11 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
                         <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1">
                           {tool.description || "无描述"}
                         </p>
+                        {isLockedScheduler && (
+                          <p className="mt-1 text-[10px] font-medium text-primary">
+                            因子代理配置自动启用
+                          </p>
+                        )}
                       </div>
                       <div
                         className={cn(
@@ -884,21 +976,4 @@ export function AgentEditor({ agentId, parentId }: AgentEditorProps) {
       </div>
     </div>
   )
-}
-
-function getExcludedAgentIds(agentId: number | undefined, allAgents: AgentRecord[]): Set<number> {
-  if (agentId === undefined) return new Set()
-  const excluded = new Set<number>()
-  const queue = [agentId]
-  while (queue.length > 0) {
-    const current = queue.shift()!
-    const children = allAgents.filter((a) => a.parent_agent_id === current)
-    for (const child of children) {
-      if (!excluded.has(child.id)) {
-        excluded.add(child.id)
-        queue.push(child.id)
-      }
-    }
-  }
-  return excluded
 }

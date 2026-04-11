@@ -183,6 +183,7 @@ impl ArgusSqlite {
             model_id: Option<String>,
             system_prompt: String,
             tool_names: String,
+            subagent_names: String,
             max_tokens: Option<i64>,
             temperature: Option<i64>,
             thinking_config: Option<String>,
@@ -202,7 +203,7 @@ impl ArgusSqlite {
         // Read all placeholder rows into memory first
         let placeholder: AgentRow = sqlx::query_as(
             "SELECT display_name, description, version, provider_id, model_id, system_prompt,
-                    tool_names, max_tokens, temperature, thinking_config
+                    tool_names, subagent_names, max_tokens, temperature, thinking_config
              FROM agents WHERE id = 0",
         )
         .fetch_one(&self.pool)
@@ -219,6 +220,7 @@ impl ArgusSqlite {
             model_id,
             system_prompt,
             tool_names,
+            subagent_names,
             max_tokens,
             temperature,
             thinking_config,
@@ -239,8 +241,8 @@ impl ArgusSqlite {
         // Re-insert with auto-generated id; ON CONFLICT: if name exists, do nothing
         sqlx::query(
             "INSERT INTO agents (display_name, description, version, provider_id, model_id,
-                                 system_prompt, tool_names, max_tokens, temperature, thinking_config)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 system_prompt, tool_names, subagent_names, max_tokens, temperature, thinking_config)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(display_name) DO NOTHING",
         )
         .bind(&display_name)
@@ -250,6 +252,7 @@ impl ArgusSqlite {
         .bind(&model_id)
         .bind(&system_prompt)
         .bind(&tool_names)
+        .bind(&subagent_names)
         .bind(max_tokens)
         .bind(temperature)
         .bind(&thinking_config)
@@ -303,8 +306,8 @@ impl ArgusSqlite {
     pub async fn insert_legacy_agent_for_test(&self) -> DbResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
-            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', NULL, NULL, datetime('now'), datetime('now'))
+            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, subagent_names, max_tokens, temperature, created_at, updated_at)
+            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', '["Chrome Explore"]', NULL, NULL, datetime('now'), datetime('now'))
             "#,
         )
         .execute(&self.pool)
@@ -359,5 +362,420 @@ mod tests {
             table_names.iter().all(|name| name != "workflows"),
             "legacy workflows table should no longer be created"
         );
+    }
+
+    #[tokio::test]
+    async fn flatten_subagent_migration_preserves_parent_child_bindings() {
+        let pool = super::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE llm_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '1.0.0',
+                provider_id INTEGER REFERENCES llm_providers(id) ON DELETE RESTRICT,
+                model_id TEXT,
+                system_prompt TEXT NOT NULL,
+                tool_names TEXT NOT NULL DEFAULT '[]',
+                max_tokens INTEGER,
+                temperature INTEGER,
+                parent_agent_id INTEGER REFERENCES agents(id),
+                agent_type TEXT NOT NULL DEFAULT 'standard' CHECK(agent_type IN ('standard', 'subagent')),
+                thinking_config TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy schema should be created");
+
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, parent_agent_id, agent_type, thinking_config)
+            VALUES
+                (1, 'Parent', 'parent', '1.0.0', NULL, NULL, 'parent prompt', '[]', NULL, NULL, NULL, 'standard', NULL),
+                (2, 'Child A', 'child', '1.0.0', NULL, NULL, 'child prompt', '[]', NULL, NULL, 1, 'subagent', NULL),
+                (3, 'Child B', 'child', '1.0.0', NULL, NULL, 'child prompt', '[]', NULL, NULL, 1, 'subagent', NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy agents should insert");
+
+        let migration_sql = std::fs::read_to_string(format!(
+            "{}/migrations/20260411000000_flatten_subagent_persistence.sql",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("flatten-subagent migration should exist");
+
+        sqlx::raw_sql(&migration_sql)
+            .execute(&pool)
+            .await
+            .expect("flatten-subagent migration should run");
+
+        let parent_subagent_names: String =
+            sqlx::query_scalar("SELECT subagent_names FROM agents WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("parent should still exist");
+        let child_subagent_names: String =
+            sqlx::query_scalar("SELECT subagent_names FROM agents WHERE id = 2")
+                .fetch_one(&pool)
+                .await
+                .expect("child should still exist");
+
+        assert_eq!(parent_subagent_names, r#"["Child A","Child B"]"#);
+        assert_eq!(child_subagent_names, "[]");
+    }
+
+    #[tokio::test]
+    async fn flatten_subagent_migration_succeeds_with_existing_agent_foreign_keys() {
+        let pool = super::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys should be enabled");
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE llm_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '1.0.0',
+                provider_id INTEGER REFERENCES llm_providers(id) ON DELETE RESTRICT,
+                model_id TEXT,
+                system_prompt TEXT NOT NULL,
+                tool_names TEXT NOT NULL DEFAULT '[]',
+                max_tokens INTEGER,
+                temperature INTEGER,
+                parent_agent_id INTEGER REFERENCES agents(id),
+                agent_type TEXT NOT NULL DEFAULT 'standard' CHECK(agent_type IN ('standard', 'subagent')),
+                thinking_config TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                provider_id INTEGER NOT NULL REFERENCES llm_providers(id) ON DELETE RESTRICT,
+                title TEXT,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                session_id INTEGER,
+                template_id INTEGER REFERENCES agents(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY NOT NULL,
+                job_type TEXT NOT NULL DEFAULT 'standalone',
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+                context TEXT,
+                prompt TEXT NOT NULL,
+                thread_id TEXT,
+                group_id TEXT,
+                depends_on TEXT NOT NULL DEFAULT '[]',
+                cron_expr TEXT,
+                scheduled_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                parent_job_id TEXT,
+                result TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE mcp_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE agent_mcp_servers (
+                agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+                use_tool_whitelist INTEGER NOT NULL DEFAULT 0 CHECK (use_tool_whitelist IN (0, 1)),
+                PRIMARY KEY (agent_id, server_id)
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy schema with agent foreign keys should be created");
+
+        sqlx::query("INSERT INTO llm_providers (id) VALUES (1)")
+            .execute(&pool)
+            .await
+            .expect("provider should insert");
+        sqlx::query("INSERT INTO mcp_servers (id) VALUES (1)")
+            .execute(&pool)
+            .await
+            .expect("mcp server should insert");
+
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, parent_agent_id, agent_type, thinking_config)
+            VALUES
+                (1, 'Parent', 'parent', '1.0.0', 1, NULL, 'parent prompt', '[]', NULL, NULL, NULL, 'standard', NULL),
+                (2, 'Child', 'child', '1.0.0', 1, NULL, 'child prompt', '[]', NULL, NULL, 1, 'subagent', NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy agents should insert");
+
+        sqlx::query(
+            "INSERT INTO threads (id, provider_id, template_id) VALUES ('thread-1', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("thread should insert");
+        sqlx::query(
+            "INSERT INTO jobs (id, name, agent_id, prompt) VALUES ('job-1', 'Job', 2, 'work')",
+        )
+        .execute(&pool)
+        .await
+        .expect("job should insert");
+        sqlx::query(
+            "INSERT INTO agent_mcp_servers (agent_id, server_id, use_tool_whitelist) VALUES (1, 1, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("agent mcp binding should insert");
+
+        let migration_sql = std::fs::read_to_string(format!(
+            "{}/migrations/20260411000000_flatten_subagent_persistence.sql",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("flatten-subagent migration should exist");
+
+        sqlx::raw_sql(&migration_sql)
+            .execute(&pool)
+            .await
+            .expect("flatten-subagent migration should preserve foreign-keyed agent rows");
+
+        let thread_template_id: i64 =
+            sqlx::query_scalar("SELECT template_id FROM threads WHERE id = 'thread-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("thread should still reference an agent");
+        let job_agent_id: i64 = sqlx::query_scalar("SELECT agent_id FROM jobs WHERE id = 'job-1'")
+            .fetch_one(&pool)
+            .await
+            .expect("job should still reference an agent");
+        let binding_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_mcp_servers WHERE agent_id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("mcp binding should still reference the agent");
+
+        assert_eq!(thread_template_id, 1);
+        assert_eq!(job_agent_id, 2);
+        assert_eq!(binding_count, 1);
+    }
+
+    #[tokio::test]
+    async fn flatten_subagent_migration_via_sqlx_migrator_succeeds_with_existing_agent_foreign_keys() {
+        let db_path = std::env::temp_dir().join(format!(
+            "argus-repository-migrate-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let pool = super::connect_path(&db_path)
+            .await
+            .expect("sqlite file should connect");
+
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("foreign keys should be enabled");
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE llm_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '1.0.0',
+                provider_id INTEGER REFERENCES llm_providers(id) ON DELETE RESTRICT,
+                model_id TEXT,
+                system_prompt TEXT NOT NULL,
+                tool_names TEXT NOT NULL DEFAULT '[]',
+                max_tokens INTEGER,
+                temperature INTEGER,
+                parent_agent_id INTEGER REFERENCES agents(id),
+                agent_type TEXT NOT NULL DEFAULT 'standard' CHECK(agent_type IN ('standard', 'subagent')),
+                thinking_config TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                provider_id INTEGER NOT NULL REFERENCES llm_providers(id) ON DELETE RESTRICT,
+                title TEXT,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                session_id INTEGER,
+                template_id INTEGER REFERENCES agents(id),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY NOT NULL,
+                job_type TEXT NOT NULL DEFAULT 'standalone',
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+                context TEXT,
+                prompt TEXT NOT NULL,
+                thread_id TEXT,
+                group_id TEXT,
+                depends_on TEXT NOT NULL DEFAULT '[]',
+                cron_expr TEXT,
+                scheduled_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                parent_job_id TEXT,
+                result TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE mcp_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE agent_mcp_servers (
+                agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                server_id INTEGER NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+                use_tool_whitelist INTEGER NOT NULL DEFAULT 0 CHECK (use_tool_whitelist IN (0, 1)),
+                PRIMARY KEY (agent_id, server_id)
+            );
+
+            CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy schema with migrations table should be created");
+
+        let migrator =
+            sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/migrations"
+            )))
+            .await
+            .expect("migrator should load repository migrations");
+
+        for migration in migrator.iter().filter(|migration| migration.version < 20260411000000) {
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (?1, ?2, 1, ?3, 0)",
+            )
+            .bind(migration.version)
+            .bind(migration.description.as_ref())
+            .bind(migration.checksum.as_ref())
+            .execute(&pool)
+            .await
+            .expect("previous migration record should insert");
+        }
+
+        sqlx::query("INSERT INTO llm_providers (id) VALUES (1)")
+            .execute(&pool)
+            .await
+            .expect("provider should insert");
+        sqlx::query("INSERT INTO mcp_servers (id) VALUES (1)")
+            .execute(&pool)
+            .await
+            .expect("mcp server should insert");
+
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, parent_agent_id, agent_type, thinking_config)
+            VALUES
+                (1, 'Parent', 'parent', '1.0.0', 1, NULL, 'parent prompt', '[]', NULL, NULL, NULL, 'standard', NULL),
+                (2, 'Child', 'child', '1.0.0', 1, NULL, 'child prompt', '[]', NULL, NULL, 1, 'subagent', NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy agents should insert");
+
+        sqlx::query(
+            "INSERT INTO threads (id, provider_id, template_id) VALUES ('thread-1', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("thread should insert");
+        sqlx::query(
+            "INSERT INTO jobs (id, name, agent_id, prompt) VALUES ('job-1', 'Job', 2, 'work')",
+        )
+        .execute(&pool)
+        .await
+        .expect("job should insert");
+        sqlx::query(
+            "INSERT INTO agent_mcp_servers (agent_id, server_id, use_tool_whitelist) VALUES (1, 1, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("agent mcp binding should insert");
+
+        let migrate_result = super::migrate(&pool).await;
+        if migrate_result.is_ok() {
+            let parent_subagent_names: String =
+                sqlx::query_scalar("SELECT subagent_names FROM agents WHERE id = 1")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("parent should still exist after migrator run");
+            let thread_template_id: i64 =
+                sqlx::query_scalar("SELECT template_id FROM threads WHERE id = 'thread-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("thread should still reference an agent after migrator run");
+            let job_agent_id: i64 =
+                sqlx::query_scalar("SELECT agent_id FROM jobs WHERE id = 'job-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("job should still reference an agent after migrator run");
+
+            assert_eq!(parent_subagent_names, r#"["Child"]"#);
+            assert_eq!(thread_template_id, 1);
+            assert_eq!(job_agent_id, 2);
+        }
+        if db_path.exists() {
+            let _ = std::fs::remove_file(&db_path);
+        }
+        migrate_result.expect("sqlx migrator should apply flatten migration successfully");
     }
 }
