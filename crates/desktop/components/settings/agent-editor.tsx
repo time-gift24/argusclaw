@@ -62,6 +62,28 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
   }
 }
 
+function ensureSchedulerToolState(
+  record: AgentRecord,
+  schedulerExplicitlySelected: boolean,
+): AgentRecord {
+  const hasScheduler = record.tool_names.includes("scheduler")
+
+  if (record.subagent_names.length > 0) {
+    return hasScheduler
+      ? record
+      : { ...record, tool_names: [...record.tool_names, "scheduler"] }
+  }
+
+  if (!schedulerExplicitlySelected && hasScheduler) {
+    return {
+      ...record,
+      tool_names: record.tool_names.filter((name) => name !== "scheduler"),
+    }
+  }
+
+  return record
+}
+
 const TOOL_PAGE_SIZE = 8
 
 interface ToolParameterDetail {
@@ -150,6 +172,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const [availableSubagents, setAvailableSubagents] = React.useState<AgentRecord[]>([])
   const [mcpDialogOpen, setMcpDialogOpen] = React.useState(false)
   const [loadingMcpToolsByServerId, setLoadingMcpToolsByServerId] = React.useState<Record<number, boolean>>({})
+  const [schedulerExplicitlySelected, setSchedulerExplicitlySelected] = React.useState(false)
 
   const [formData, setFormData] = React.useState<AgentRecord>(() => createDefaultFormData(null))
 
@@ -178,6 +201,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     () => [...new Map(toolList.map((tool) => [tool.name, tool])).values()],
     [toolList],
   )
+  const schedulerRequired = formData.subagent_names.length > 0
   const missingSubagentNames = React.useMemo(
     () =>
       formData.subagent_names.filter(
@@ -305,10 +329,14 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             loadAgentMcpBindings(agentId).catch(() => []),
           ])
           if (agent) {
-            setFormData({
+            const schedulerWasExplicit =
+              agent.tool_names.includes("scheduler") && (agent.subagent_names?.length ?? 0) === 0
+            const normalizedAgent = ensureSchedulerToolState({
               ...agent,
               subagent_names: agent.subagent_names ?? [],
-            })
+            }, schedulerWasExplicit)
+            setSchedulerExplicitlySelected(schedulerWasExplicit)
+            setFormData(normalizedAgent)
           }
           setMcpBindings(bindings)
           await Promise.all(
@@ -316,6 +344,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           )
         } else {
           setMcpBindings([])
+          setSchedulerExplicitlySelected(false)
           setFormData(createDefaultFormData(preferredProviderId))
         }
       } catch (error) {
@@ -331,12 +360,12 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     if (!canSave) return
     setSaving(true)
     try {
-      const cleanedFormData = {
+      const cleanedFormData = ensureSchedulerToolState({
         ...formData,
         subagent_names: formData.subagent_names.filter(
           (name) => !missingSubagentNames.includes(name),
         ),
-      }
+      }, schedulerExplicitlySelected)
       setFormData(cleanedFormData)
       const savedId = await agents.upsert(cleanedFormData)
       if (isEditing || savedId) {
@@ -471,12 +500,14 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                               <Checkbox
                                 checked={selected}
                                 onCheckedChange={(checked) => {
-                                  setFormData((prev) => ({
-                                    ...prev,
-                                    subagent_names: checked
-                                      ? [...prev.subagent_names, agent.display_name]
-                                      : prev.subagent_names.filter((name) => name !== agent.display_name),
-                                  }))
+                                  setFormData((prev) =>
+                                    ensureSchedulerToolState({
+                                      ...prev,
+                                      subagent_names: checked
+                                        ? [...prev.subagent_names, agent.display_name]
+                                        : prev.subagent_names.filter((name) => name !== agent.display_name),
+                                    }, schedulerExplicitlySelected),
+                                  )
                                 }}
                               />
                               <div className="min-w-0 flex-1">
@@ -677,6 +708,9 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                   {pagedToolList.map((tool, index) => {
                     const parameterDetails = extractToolParameterDetails(tool.parameters)
                     const detailedDescription = tool.description || readToolSchemaDescription(tool.parameters) || "无描述"
+                    const isSchedulerTool = tool.name === "scheduler"
+                    const isLockedScheduler = isSchedulerTool && schedulerRequired
+                    const isSelected = isLockedScheduler || formData.tool_names.includes(tool.name)
                     const columnIndex = index % 4
                     const isTopRow = index < 4
                     const hoverPositionClass =
@@ -696,24 +730,29 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                     <div
                       key={tool.name}
                       onClick={() => {
-                        const isSelected = formData.tool_names.includes(tool.name)
+                        if (isLockedScheduler) return
                         setFormData((prev) => ({
                           ...prev,
                           tool_names: isSelected
                             ? prev.tool_names.filter((n) => n !== tool.name)
                             : [...prev.tool_names, tool.name],
                         }))
+                        if (isSchedulerTool) {
+                          setSchedulerExplicitlySelected(!isSelected)
+                        }
                       }}
                       className={cn(
-                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 cursor-pointer transition-all",
-                        formData.tool_names.includes(tool.name)
+                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 transition-all",
+                        isLockedScheduler ? "cursor-not-allowed border-primary/40 bg-primary/10 shadow-inner" : "cursor-pointer",
+                        isSelected
                           ? "border-primary bg-primary/5 shadow-inner"
                           : "border-muted/60 bg-background hover:border-primary/30"
                       )}
                     >
                       <Checkbox
                         id={`tool-${tool.name}`}
-                        checked={formData.tool_names.includes(tool.name)}
+                        checked={isSelected}
+                        disabled={isLockedScheduler}
                         className="mt-0.5 shrink-0"
                         onClick={(e) => e.stopPropagation()}
                       />
@@ -727,6 +766,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                         <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1">
                           {tool.description || "无描述"}
                         </p>
+                        {isLockedScheduler && (
+                          <p className="mt-1 text-[10px] font-medium text-primary">
+                            因子代理配置自动启用
+                          </p>
+                        )}
                       </div>
                       <div
                         className={cn(

@@ -106,12 +106,31 @@ test("agent editor treats provider as optional when deciding whether the form ca
   );
   assert.match(
     agentEditorSource,
-    /const cleanedFormData = \{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\}/,
+    /const cleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\}, schedulerExplicitlySelected\)/,
   );
   assert.match(agentEditorSource, /setFormData\(cleanedFormData\)/);
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(cleanedFormData\)/);
   assert.match(agentEditorSource, /navigate\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
   assert.doesNotMatch(providerSelectBlock, /required/);
+});
+
+test("agent editor auto-enables scheduler when subagents are configured", () => {
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(
+    agentEditorSource,
+    /const schedulerRequired = formData\.subagent_names\.length > 0/,
+  );
+  assert.match(
+    agentEditorSource,
+    /const isLockedScheduler = isSchedulerTool && schedulerRequired/,
+  );
+  assert.match(
+    agentEditorSource,
+    /const cleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*\}, schedulerExplicitlySelected\)/,
+  );
+  assert.match(agentEditorSource, /disabled=\{isLockedScheduler\}/);
+  assert.match(agentEditorSource, /因子代理配置自动启用/);
 });
 
 test("settings layout keeps edit pages inside a shrinkable scroll container", () => {
