@@ -1,30 +1,10 @@
 "use client"
 
 import { Bot, Pencil, Trash2 } from "lucide-react"
-import type { LlmProviderSummary } from "@/lib/tauri"
+import type { AgentRecord, LlmProviderSummary } from "@/lib/tauri"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-
-export interface AgentRecord {
-  id: number
-  display_name: string
-  description: string
-  version: string
-  provider_id: number | null
-  system_prompt: string
-  tool_names: string[]
-  max_tokens?: number
-  temperature?: number
-  thinking_config?: ThinkingConfig
-  parent_agent_id?: number
-  agent_type?: "standard" | "subagent"
-}
-
-export interface ThinkingConfig {
-  type: "enabled" | "disabled"
-  clear_thinking: boolean
-}
 
 interface AgentCardProps {
   agent: AgentRecord
@@ -46,6 +26,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
     agent.provider_id ||
     "未指定"
   const toolNames = [...new Set(agent.tool_names.filter(Boolean))]
+  const dispatchCapable = agent.subagent_names.length > 0
 
   return (
     <Card className="group overflow-hidden border-muted/60 transition-all hover:border-primary/30 hover:shadow-md bg-background">
@@ -61,15 +42,13 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
               <Badge variant="outline" className="text-[9px] h-3.5 px-1 font-mono opacity-50 shrink-0 border-muted-foreground/20 font-bold uppercase">
                 v{agent.version}
               </Badge>
-              {agent.agent_type === "subagent" ? (
-                <Badge className="text-[9px] h-3.5 px-1 bg-amber-50 text-amber-600 border-amber-200/50 hover:bg-amber-50 shrink-0 shadow-none font-bold uppercase">
-                  子智能体
-                </Badge>
-              ) : (
-                <Badge className="text-[9px] h-3.5 px-1 bg-blue-50 text-blue-600 border-blue-200/50 hover:bg-blue-50 shrink-0 shadow-none font-bold uppercase">
-                  标准
-                </Badge>
-              )}
+              <Badge className={`text-[9px] h-3.5 px-1 shrink-0 shadow-none font-bold uppercase ${
+                dispatchCapable
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200/50 hover:bg-emerald-50"
+                  : "bg-slate-50 text-slate-600 border-slate-200/50 hover:bg-slate-50"
+              }`}>
+                {dispatchCapable ? "可调度" : "单体"}
+              </Badge>
             </div>
             <p className="text-[11px] text-muted-foreground truncate mt-1.5 leading-none">
               {agent.description || "暂无描述内容"}
@@ -84,8 +63,8 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
             <span className="text-[11px] font-medium truncate max-w-[80px] leading-none">{providerName}</span>
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest leading-none">工具</span>
-            <span className="text-[11px] font-medium leading-none">{toolNames.length > 0 ? `${toolNames.length} 个` : "无"}</span>
+            <span className="text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest leading-none">子代理</span>
+            <span className="text-[11px] font-medium leading-none">{agent.subagent_names.length > 0 ? `${agent.subagent_names.length} 个` : "无"}</span>
           </div>
           <div className="flex flex-col gap-1">
             <span className="text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest leading-none">温度</span>

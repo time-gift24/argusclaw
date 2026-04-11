@@ -35,6 +35,7 @@ function createDefaultFormData(providers: LlmProviderSummary[]): AgentRecord {
     model_id: null,
     system_prompt: "",
     tool_names: [],
+    subagent_names: [],
     max_tokens: undefined,
     temperature: undefined,
   }
