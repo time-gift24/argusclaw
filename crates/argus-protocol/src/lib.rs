@@ -17,7 +17,7 @@ pub mod token_usage;
 pub mod tool;
 
 pub use account::{AccountCredentials, AccountRepository};
-pub use agent::{AgentRecord, AgentType};
+pub use agent::AgentRecord;
 pub use error::{ArgusError, Result};
 pub use events::{
     MailboxMessage, MailboxMessageType, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
