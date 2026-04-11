@@ -158,34 +158,25 @@ impl TemplateManager {
         Ok(())
     }
 
-    /// List all subagents of a given parent agent.
-    pub async fn list_subagents(&self, parent_id: AgentId) -> Result<Vec<AgentRecord>> {
-        self.repository
-            .list_by_parent_id(&parent_id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })
-    }
+    /// Resolve subagent records by display name, skipping missing entries.
+    pub async fn list_subagents_by_names(&self, names: &[String]) -> Result<Vec<AgentRecord>> {
+        let mut results = Vec::new();
+        for name in names {
+            if let Some(record) =
+                self.repository
+                    .find_by_display_name(name)
+                    .await
+                    .map_err(|e| ArgusError::DatabaseError {
+                        reason: e.to_string(),
+                    })?
+            {
+                results.push(record);
+            } else {
+                tracing::warn!("subagent '{}' not found, skipping", name);
+            }
+        }
 
-    /// Add a subagent to a parent agent.
-    pub async fn add_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
-        self.repository
-            .add_subagent(&parent_id, &child_id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })
-    }
-
-    /// Remove a subagent from its parent.
-    pub async fn remove_subagent(&self, parent_id: AgentId, child_id: AgentId) -> Result<()> {
-        self.repository
-            .remove_subagent(&parent_id, &child_id)
-            .await
-            .map_err(|e| ArgusError::DatabaseError {
-                reason: e.to_string(),
-            })
+        Ok(results)
     }
 }
 
@@ -227,5 +218,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(record.tool_names, vec!["chrome"]);
+    }
+
+    #[tokio::test]
+    async fn list_subagents_by_names_skips_missing_records() {
+        let manager = make_template_manager_for_test().await;
+        manager
+            .upsert(argus_protocol::AgentRecord {
+                id: argus_protocol::AgentId::new(0),
+                display_name: "Worker".to_string(),
+                description: "Does work".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "Work.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: None,
+            })
+            .await
+            .expect("worker should upsert");
+
+        let records = manager
+            .list_subagents_by_names(&["Worker".to_string(), "Missing".to_string()])
+            .await
+            .expect("lookup should succeed");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].display_name, "Worker");
     }
 }
