@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use argus_protocol::{
@@ -6,8 +7,6 @@ use argus_protocol::{
     ThreadPoolRuntimeSummary, ThreadRuntimeStatus,
 };
 use tokio::sync::broadcast;
-
-use crate::thread_trace_store::ThreadTraceKind;
 
 #[derive(Debug)]
 struct RuntimeEntry {
@@ -26,7 +25,6 @@ struct ThreadRuntimeStore {
 pub struct ThreadRegistration {
     pub thread_id: ThreadId,
     pub kind: ThreadPoolRuntimeKind,
-    pub trace_kind: ThreadTraceKind,
     pub session_id: Option<SessionId>,
     pub parent_thread_id: Option<ThreadId>,
     pub job_id: Option<String>,
@@ -46,7 +44,8 @@ impl ThreadRuntime {
 
     pub fn register_thread(&self, registration: ThreadRegistration) {
         let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
-        Self::upsert_runtime_entry(&mut store, registration);
+        Self::sync_relationship_cache(&mut store, &registration);
+        Self::upsert_runtime_summary(&mut store, registration);
     }
 
     #[must_use]
@@ -69,10 +68,28 @@ impl ThreadRuntime {
             .map(|entry| entry.summary.clone())
     }
 
-    fn upsert_runtime_entry(
-        store: &mut ThreadRuntimeStore,
-        registration: ThreadRegistration,
-    ) {
+    fn sync_relationship_cache(store: &mut ThreadRuntimeStore, registration: &ThreadRegistration) {
+        if let Some(previous_parent_thread_id) = store
+            .parent_thread_by_child
+            .get(&registration.thread_id)
+            .copied()
+            && Some(previous_parent_thread_id) != registration.parent_thread_id
+        {
+            let mut remove_parent_entry = false;
+            if let Some(children) = store
+                .child_threads_by_parent
+                .get_mut(&previous_parent_thread_id)
+            {
+                children.retain(|child_thread_id| child_thread_id != &registration.thread_id);
+                remove_parent_entry = children.is_empty();
+            }
+            if remove_parent_entry {
+                store
+                    .child_threads_by_parent
+                    .remove(&previous_parent_thread_id);
+            }
+        }
+
         if let Some(parent_thread_id) = registration.parent_thread_id {
             store
                 .parent_thread_by_child
@@ -84,46 +101,46 @@ impl ThreadRuntime {
             if !children.contains(&registration.thread_id) {
                 children.push(registration.thread_id);
             }
+        } else {
+            store.parent_thread_by_child.remove(&registration.thread_id);
         }
+    }
 
-        if !store.runtimes.contains_key(&registration.thread_id) {
-            let (sender, _) = broadcast::channel(128);
-            store.runtimes.insert(
-                registration.thread_id,
-                RuntimeEntry {
-                    summary: ThreadPoolRuntimeSummary {
-                        runtime: ThreadPoolRuntimeRef {
-                            thread_id: registration.thread_id,
-                            kind: registration.kind,
-                            session_id: registration.session_id,
-                            job_id: registration.job_id,
-                        },
-                        status: ThreadRuntimeStatus::Inactive,
-                        estimated_memory_bytes: 0,
-                        last_active_at: None,
-                        recoverable: registration.recoverable,
-                        last_reason: None,
-                    },
-                    sender,
-                },
-            );
+    fn upsert_runtime_summary(store: &mut ThreadRuntimeStore, registration: ThreadRegistration) {
+        let summary = ThreadPoolRuntimeSummary {
+            runtime: ThreadPoolRuntimeRef {
+                thread_id: registration.thread_id,
+                kind: registration.kind,
+                session_id: registration.session_id,
+                job_id: registration.job_id,
+            },
+            status: ThreadRuntimeStatus::Inactive,
+            estimated_memory_bytes: 0,
+            last_active_at: None,
+            recoverable: registration.recoverable,
+            last_reason: None,
+        };
+
+        match store.runtimes.entry(registration.thread_id) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().summary = summary;
+            }
+            Entry::Vacant(entry) => {
+                let (sender, _) = broadcast::channel(128);
+                entry.insert(RuntimeEntry { summary, sender });
+            }
         }
-
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::{
-        SessionId, ThreadId, ThreadPoolRuntimeKind, ThreadRuntimeStatus,
-    };
-
-    use crate::thread_trace_store::ThreadTraceKind;
+    use argus_protocol::{SessionId, ThreadId, ThreadPoolRuntimeKind, ThreadRuntimeStatus};
 
     use super::{ThreadRegistration, ThreadRuntime};
 
-    #[tokio::test]
-    async fn register_thread_exposes_subscription_and_summary() {
+    #[test]
+    fn register_thread_exposes_subscription_and_summary() {
         let runtime = ThreadRuntime::new();
         let thread_id = ThreadId::new();
         let session_id = SessionId::new();
@@ -131,7 +148,6 @@ mod tests {
         runtime.register_thread(ThreadRegistration {
             thread_id,
             kind: ThreadPoolRuntimeKind::Chat,
-            trace_kind: ThreadTraceKind::ChatRoot,
             session_id: Some(session_id),
             parent_thread_id: None,
             job_id: None,
@@ -147,6 +163,42 @@ mod tests {
         assert_eq!(summary.runtime.session_id, Some(session_id));
         assert_eq!(summary.runtime.job_id, None);
         assert_eq!(summary.status, ThreadRuntimeStatus::Inactive);
+        assert!(runtime.subscribe(&thread_id).is_some());
+    }
+
+    #[test]
+    fn register_thread_updates_summary_for_existing_thread() {
+        let runtime = ThreadRuntime::new();
+        let thread_id = ThreadId::new();
+        let first_session_id = SessionId::new();
+        let second_session_id = SessionId::new();
+
+        runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(first_session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        });
+
+        runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: Some(second_session_id),
+            parent_thread_id: None,
+            job_id: Some("job-123".to_string()),
+            recoverable: false,
+        });
+
+        let summary = runtime
+            .runtime_summary(&thread_id)
+            .expect("re-registered thread should update its summary");
+
+        assert_eq!(summary.runtime.kind, ThreadPoolRuntimeKind::Job);
+        assert_eq!(summary.runtime.session_id, Some(second_session_id));
+        assert_eq!(summary.runtime.job_id.as_deref(), Some("job-123"));
+        assert!(!summary.recoverable);
         assert!(runtime.subscribe(&thread_id).is_some());
     }
 }
