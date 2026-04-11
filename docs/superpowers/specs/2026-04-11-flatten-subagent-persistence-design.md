@@ -60,7 +60,10 @@ CREATE TABLE agents_new (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 -- Copy data, drop old, rename.
--- Rebuild indexes (including unique on display_name).
+-- Rebuild indexes:
+--   idx_agents_provider_id ON agents(provider_id)             -- kept
+--   idx_agents_display_name_unique ON agents(display_name)     -- kept (UNIQUE)
+--   idx_agents_parent_agent_id ON agents(parent_agent_id)      -- intentionally dropped
 ```
 
 ### 3. Repository Layer Changes (argus-repository)
@@ -95,7 +98,11 @@ display_name = "ArgusWing"
 subagent_names = ["Chrome Explore"]
 ```
 
-### 5. Scheduler and Runtime Changes (argus-session, argus-job)
+### 5. Scheduler and Runtime Changes (argus-tool, argus-session, argus-job)
+
+**`argus-tool` (SchedulerBackend trait definition):**
+- Review `SchedulerSubagent` type description and `SchedulerTool` tool description string for terminology alignment
+- Add `MAX_DISPATCH_DEPTH: u32 = 3` constant alongside `SchedulerBackend` trait
 
 **`SessionSchedulerBackend::list_subagents()`:**
 - Read `subagent_names` from the current agent's record
@@ -108,7 +115,7 @@ subagent_names = ["Chrome Explore"]
 **Recursion guard:**
 - Introduce `dispatch_depth: u32` in the dispatch context
 - Each nested dispatch increments depth by 1
-- Reject when depth exceeds threshold (default: 3)
+- Reject when depth exceeds `MAX_DISPATCH_DEPTH` (default: 3, defined in `argus-tool/src/scheduler.rs`)
 - Depth is passed through the dispatch chain, not persisted
 
 ### 6. Wing Facade and Desktop Changes
@@ -121,22 +128,46 @@ subagent_names = ["Chrome Explore"]
 - Remove `add_subagent` / `remove_subagent` commands
 - Agent DTOs include `subagent_names` field
 
-**Frontend (desktop):**
-- Agent config UI: add subagent name list editor
-- Dispatch capability indicator: derived from `subagent_names.length > 0`
+**Frontend (desktop) — expanded scope:**
+
+TypeScript type changes (`crates/desktop/lib/tauri.ts`):
+1. Remove `parent_agent_id` and `agent_type` from the `AgentRecord` type
+2. Add `subagent_names: string[]`
+3. Remove `listSubagents`, `addSubagent`, `removeSubagent` from the `agents` API object
+
+UI component changes:
+1. Rewrite `app/settings/agents/page.tsx` — remove the standard/subagent split and subagent visibility toggle
+2. Rewrite `components/settings/agent-card.tsx` — remove subagent badge rendering
+3. Rewrite `components/settings/agent-editor.tsx` — remove `parent_agent_id` / `agent_type` filtering, add subagent name list editor
+4. Update `components/assistant-ui/agent-selector.tsx` — derive dispatch capability from `subagent_names.length > 0` instead of `agent_type`
+
+Test file updates:
+- `tests/chat-subagent-job-details-drawer.test.mjs`
+- `tests/chat-subagent-job-details-drawer.behavior.test.tsx`
+- `tests/chat-store-subagent-job-details.test.mjs`
+- `tests/chat-store-session-model.test.mjs`
+- `tests/chat-page-runtime-integration.test.mjs`
 
 ### 7. Files Changed (Summary)
 
 | Crate | Change |
 |-------|--------|
-| `argus-protocol` | Remove `AgentType`, update `AgentRecord` |
-| `argus-repository` | Remove subagent methods, update SQL, add migration |
-| `argus-template` | Update TOML config, remove subagent methods, add `list_subagents_by_names` |
-| `argus-session` | Update `SchedulerBackend` |
-| `argus-job` | Update recursion guard |
-| `argus-wing` | Remove subagent API |
+| `argus-protocol` | Remove `AgentType`, update `AgentRecord`, update `lib.rs` re-exports |
+| `argus-repository` | Remove subagent methods, update SQL, add migration, update `sqlite/agent.rs` imports |
+| `argus-template` | Update TOML config, remove subagent methods, add `list_subagents_by_names`, update `CLAUDE.md`/`AGENTS.md` |
+| `argus-tool` | Add `MAX_DISPATCH_DEPTH` constant, review `SchedulerSubagent`/`SchedulerTool` descriptions |
+| `argus-session` | Update `SchedulerBackend` impl |
+| `argus-agent` | Update `turn.rs`, `thread.rs`, update ~5 test blocks |
+| `argus-job` | Update recursion guard, update ~6 test blocks |
+| `argus-wing` | Remove subagent API, update ~10 test blocks |
 | `desktop/src-tauri` | Remove subagent commands |
-| `desktop` | Update frontend agent config UI |
+| `desktop` | Rewrite agent settings page, agent-card, agent-editor, agent-selector; update 5 test files |
+
+**Test code scope:** All test code constructing `AgentRecord` must be updated to remove `parent_agent_id` and `agent_type` fields. This affects approximately 20+ test blocks across `argus-agent`, `argus-job`, `argus-session`, `argus-wing`, and `argus-repository`.
+
+**Documentation sync:** Update crate-level `CLAUDE.md` and `AGENTS.md` files in `argus-template`, `argus-repository`, and any other crates that reference `AgentType`, `parent_agent_id`, or subagent methods.
+
+**API breaking change:** Removing `AgentType` from `argus-protocol` public exports (`lib.rs`) will cause compile errors in all crates that import it. Remove the enum and fix all downstream compile errors in a single commit.
 
 ## Risks and Mitigations
 
@@ -145,4 +176,4 @@ subagent_names = ["Chrome Explore"]
 | Existing subagent data lost during migration | Migration step 2 preserves parent-child data by converting to `subagent_names` |
 | Circular subagent references (A names B, B names A) | Runtime depth limit prevents infinite dispatch loops |
 | Subagent names become stale after rename | `list_subagents_by_names` returns only found agents; missing names are silently skipped with a warning log |
-| Thread snapshots reference old `AgentType` field | Thread trace snapshots are self-contained; old traces remain valid. New traces omit the removed field. |
+| Thread snapshots reference old `AgentType` field | Serde compatibility: `AgentRecord` does not use `deny_unknown_fields`, so old trace files containing `parent_agent_id` and `agent_type` fields will deserialize successfully with those fields silently ignored. No migration of on-disk traces is required. |
