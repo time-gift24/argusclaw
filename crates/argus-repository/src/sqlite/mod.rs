@@ -183,6 +183,7 @@ impl ArgusSqlite {
             model_id: Option<String>,
             system_prompt: String,
             tool_names: String,
+            subagent_names: String,
             max_tokens: Option<i64>,
             temperature: Option<i64>,
             thinking_config: Option<String>,
@@ -202,7 +203,7 @@ impl ArgusSqlite {
         // Read all placeholder rows into memory first
         let placeholder: AgentRow = sqlx::query_as(
             "SELECT display_name, description, version, provider_id, model_id, system_prompt,
-                    tool_names, max_tokens, temperature, thinking_config
+                    tool_names, subagent_names, max_tokens, temperature, thinking_config
              FROM agents WHERE id = 0",
         )
         .fetch_one(&self.pool)
@@ -219,6 +220,7 @@ impl ArgusSqlite {
             model_id,
             system_prompt,
             tool_names,
+            subagent_names,
             max_tokens,
             temperature,
             thinking_config,
@@ -239,8 +241,8 @@ impl ArgusSqlite {
         // Re-insert with auto-generated id; ON CONFLICT: if name exists, do nothing
         sqlx::query(
             "INSERT INTO agents (display_name, description, version, provider_id, model_id,
-                                 system_prompt, tool_names, max_tokens, temperature, thinking_config)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 system_prompt, tool_names, subagent_names, max_tokens, temperature, thinking_config)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(display_name) DO NOTHING",
         )
         .bind(&display_name)
@@ -250,6 +252,7 @@ impl ArgusSqlite {
         .bind(&model_id)
         .bind(&system_prompt)
         .bind(&tool_names)
+        .bind(&subagent_names)
         .bind(max_tokens)
         .bind(temperature)
         .bind(&thinking_config)
@@ -303,8 +306,8 @@ impl ArgusSqlite {
     pub async fn insert_legacy_agent_for_test(&self) -> DbResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, max_tokens, temperature, created_at, updated_at)
-            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', NULL, NULL, datetime('now'), datetime('now'))
+            INSERT INTO agents (id, display_name, description, version, provider_id, system_prompt, tool_names, subagent_names, max_tokens, temperature, created_at, updated_at)
+            VALUES (0, 'Legacy Zero Agent', 'legacy', '1.0.0', NULL, 'prompt', '[]', '["Chrome Explore"]', NULL, NULL, datetime('now'), datetime('now'))
             "#,
         )
         .execute(&self.pool)

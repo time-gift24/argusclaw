@@ -104,7 +104,12 @@ test("agent editor treats provider as optional when deciding whether the form ca
     agentEditorSource,
     /<Button[\s\S]*size="sm"[\s\S]*onClick=\{handleSave\}[\s\S]*disabled=\{saving \|\| !canSave\}[\s\S]*>/,
   );
-  assert.match(agentEditorSource, /const savedId = await agents\.upsert\(formData\)/);
+  assert.match(
+    agentEditorSource,
+    /const cleanedFormData = \{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\}/,
+  );
+  assert.match(agentEditorSource, /setFormData\(cleanedFormData\)/);
+  assert.match(agentEditorSource, /const savedId = await agents\.upsert\(cleanedFormData\)/);
   assert.match(agentEditorSource, /navigate\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
   assert.doesNotMatch(providerSelectBlock, /required/);
 });

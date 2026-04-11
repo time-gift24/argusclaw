@@ -11,7 +11,12 @@ pub struct TemplateManager {
     sqlite: Arc<ArgusSqlite>,
 }
 
-fn format_delete_blocked_reason(id: AgentId, thread_count: i64, job_count: i64) -> String {
+fn format_delete_blocked_reason(
+    id: AgentId,
+    thread_count: i64,
+    job_count: i64,
+    subagent_ref_count: usize,
+) -> String {
     let mut blockers = Vec::new();
 
     if thread_count > 0 {
@@ -20,9 +25,12 @@ fn format_delete_blocked_reason(id: AgentId, thread_count: i64, job_count: i64) 
     if job_count > 0 {
         blockers.push(format!("{} 个任务", job_count));
     }
+    if subagent_ref_count > 0 {
+        blockers.push(format!("{} 个智能体的 subagent_names 配置", subagent_ref_count));
+    }
 
     format!(
-        "无法删除智能体 {}：当前仍被 {} 引用，请先删除相关会话或任务。",
+        "无法删除智能体 {}：当前仍被 {} 引用，请先移除相关会话、任务或调度配置。",
         id.inner(),
         blockers.join("、")
     )
@@ -134,6 +142,7 @@ impl TemplateManager {
 
     /// Delete a template.
     pub async fn delete(&self, id: AgentId) -> Result<()> {
+        let target_display_name = self.get(id).await?.map(|record| record.display_name);
         let (thread_count, job_count) =
             self.repository
                 .count_references(&id)
@@ -141,10 +150,25 @@ impl TemplateManager {
                 .map_err(|e| ArgusError::DatabaseError {
                     reason: e.to_string(),
                 })?;
+        let subagent_ref_count = if let Some(display_name) = target_display_name {
+            self.list()
+                .await?
+                .into_iter()
+                .filter(|record| record.id != id)
+                .filter(|record| record.subagent_names.iter().any(|name| name == &display_name))
+                .count()
+        } else {
+            0
+        };
 
-        if thread_count > 0 || job_count > 0 {
+        if thread_count > 0 || job_count > 0 || subagent_ref_count > 0 {
             return Err(ArgusError::DatabaseError {
-                reason: format_delete_blocked_reason(id, thread_count, job_count),
+                reason: format_delete_blocked_reason(
+                    id,
+                    thread_count,
+                    job_count,
+                    subagent_ref_count,
+                ),
             });
         }
 
@@ -183,17 +207,16 @@ impl TemplateManager {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use argus_repository::{connect_path, migrate, AgentRepository, ArgusSqlite};
 
     use super::TemplateManager;
 
+    static NEXT_TEST_DB_ID: AtomicU64 = AtomicU64::new(0);
+
     async fn make_template_manager_for_test() -> TemplateManager {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after UNIX_EPOCH")
-            .as_nanos();
+        let unique = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
         let db_path = std::env::temp_dir().join(format!("argus-template-test-{unique}.sqlite"));
         let pool = connect_path(&db_path)
             .await
@@ -248,5 +271,55 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].display_name, "Worker");
+    }
+
+    #[tokio::test]
+    async fn delete_blocks_when_other_agents_reference_target_subagent_name() {
+        let manager = make_template_manager_for_test().await;
+        let worker_id = manager
+            .upsert(argus_protocol::AgentRecord {
+                id: argus_protocol::AgentId::new(0),
+                display_name: "Worker".to_string(),
+                description: "Does work".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "Work.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: None,
+            })
+            .await
+            .expect("worker should upsert");
+        manager
+            .upsert(argus_protocol::AgentRecord {
+                id: argus_protocol::AgentId::new(0),
+                display_name: "Dispatcher".to_string(),
+                description: "Routes work".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "Dispatch.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Worker".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: None,
+            })
+            .await
+            .expect("dispatcher should upsert");
+
+        let error = manager
+            .delete(worker_id)
+            .await
+            .expect_err("delete should be blocked by subagent reference");
+
+        let argus_protocol::ArgusError::DatabaseError { reason } = error else {
+            panic!("expected database error when delete is blocked");
+        };
+        assert!(reason.contains("subagent_names"));
+        assert!(reason.contains("调度配置"));
     }
 }

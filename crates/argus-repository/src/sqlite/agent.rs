@@ -1,6 +1,7 @@
 //! AgentRepository implementation for SQLite.
 
 use async_trait::async_trait;
+use sqlx::Row;
 
 use crate::error::DbError;
 use crate::traits::AgentRepository;
@@ -73,6 +74,18 @@ impl AgentRepository for ArgusSqlite {
 
             Ok(AgentId::new(id))
         } else {
+            let mut tx = self.pool.begin().await.map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
+            let previous_display_name: Option<String> =
+                sqlx::query_scalar("SELECT display_name FROM agents WHERE id = ?1")
+                    .bind(record.id.into_inner())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| DbError::QueryFailed {
+                        reason: format!("failed to fetch existing agent before update: {e}"),
+                    })?;
+
             sqlx::query(
                 "INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, subagent_names, max_tokens, temperature, thinking_config)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
@@ -102,9 +115,22 @@ impl AgentRepository for ArgusSqlite {
             .bind(record.max_tokens.map(|t| t as i64))
             .bind(temperature_int)
             .bind(&thinking_config_json)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| DbError::QueryFailed { reason: e.to_string() })?;
+            if let Some(old_display_name) =
+                previous_display_name.filter(|name| name != &record.display_name)
+            {
+                self.rewrite_subagent_references(
+                    &mut tx,
+                    &old_display_name,
+                    &record.display_name,
+                )
+                .await?;
+            }
+            tx.commit().await.map_err(|e| DbError::QueryFailed {
+                reason: e.to_string(),
+            })?;
 
             Ok(record.id)
         }
@@ -196,6 +222,71 @@ impl AgentRepository for ArgusSqlite {
 }
 
 impl ArgusSqlite {
+    async fn rewrite_subagent_references(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        old_display_name: &str,
+        new_display_name: &str,
+    ) -> DbResult<()> {
+        let candidate_rows = sqlx::query(
+            "SELECT id, subagent_names FROM agents
+             WHERE subagent_names LIKE '%' || ?1 || '%'",
+        )
+        .bind(old_display_name)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| DbError::QueryFailed {
+            reason: format!("failed to fetch subagent references for rename: {e}"),
+        })?;
+
+        for row in candidate_rows {
+            let id = row.get::<i64, _>("id");
+            let subagent_names: Vec<String> = serde_json::from_str(
+                &row.get::<String, _>("subagent_names"),
+            )
+            .map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to parse subagent_names during rename rewrite: {e}"),
+            })?;
+            let mut changed = false;
+            let rewritten_names: Vec<String> = subagent_names
+                .into_iter()
+                .map(|name| {
+                    if name == old_display_name {
+                        changed = true;
+                        new_display_name.to_string()
+                    } else {
+                        name
+                    }
+                })
+                .collect();
+            if !changed {
+                continue;
+            }
+
+            let rewritten_json =
+                serde_json::to_string(&rewritten_names).map_err(|e| DbError::QueryFailed {
+                    reason: format!(
+                        "failed to serialize rewritten subagent_names during rename rewrite: {e}"
+                    ),
+                })?;
+
+            sqlx::query(
+                "UPDATE agents
+                 SET subagent_names = ?1, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = ?2",
+            )
+            .bind(rewritten_json)
+            .bind(id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| DbError::QueryFailed {
+                reason: format!("failed to persist rewritten subagent_names: {e}"),
+            })?;
+        }
+
+        Ok(())
+    }
+
     fn map_agent_record(&self, row: sqlx::sqlite::SqliteRow) -> DbResult<AgentRecord> {
         let tool_names: Vec<String> =
             serde_json::from_str(&Self::get_column::<String>(&row, "tool_names")?).map_err(
@@ -238,5 +329,66 @@ impl ArgusSqlite {
             temperature,
             thinking_config,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{connect, migrate, traits::AgentRepository};
+    use argus_protocol::{AgentId, AgentRecord};
+
+    use super::ArgusSqlite;
+
+    fn sample_agent(display_name: &str, subagent_names: Vec<String>) -> AgentRecord {
+        AgentRecord {
+            id: AgentId::new(0),
+            display_name: display_name.to_string(),
+            description: format!("{display_name} description"),
+            version: "1.0.0".to_string(),
+            provider_id: None,
+            model_id: None,
+            system_prompt: format!("{display_name} prompt"),
+            tool_names: vec![],
+            subagent_names,
+            max_tokens: None,
+            temperature: None,
+            thinking_config: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn renaming_agent_rewrites_inbound_subagent_names() {
+        let pool = connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        migrate(&pool)
+            .await
+            .expect("repository migrations should succeed");
+        let sqlite = ArgusSqlite::new(pool);
+
+        let worker_id = AgentRepository::upsert(&sqlite, &sample_agent("Worker", vec![]))
+            .await
+            .expect("worker should upsert");
+        let _ = AgentRepository::upsert(
+            &sqlite,
+            &sample_agent("Dispatcher", vec!["Worker".to_string()]),
+        )
+        .await
+        .expect("dispatcher should upsert");
+
+        let mut renamed_worker = AgentRepository::get(&sqlite, &worker_id)
+            .await
+            .expect("worker lookup should succeed")
+            .expect("worker should exist");
+        renamed_worker.display_name = "Worker Renamed".to_string();
+        AgentRepository::upsert(&sqlite, &renamed_worker)
+            .await
+            .expect("rename should upsert");
+
+        let dispatcher = AgentRepository::find_by_display_name(&sqlite, "Dispatcher")
+            .await
+            .expect("dispatcher lookup should succeed")
+            .expect("dispatcher should exist");
+        assert_eq!(dispatcher.subagent_names, vec!["Worker Renamed"]);
     }
 }

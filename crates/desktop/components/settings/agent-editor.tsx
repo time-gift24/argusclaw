@@ -331,7 +331,14 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     if (!canSave) return
     setSaving(true)
     try {
-      const savedId = await agents.upsert(formData)
+      const cleanedFormData = {
+        ...formData,
+        subagent_names: formData.subagent_names.filter(
+          (name) => !missingSubagentNames.includes(name),
+        ),
+      }
+      setFormData(cleanedFormData)
+      const savedId = await agents.upsert(cleanedFormData)
       if (isEditing || savedId) {
         const targetId = isEditing ? agentId! : savedId
         await mcp.setAgentBindings(targetId, mcpBindings).catch((wsError) => {

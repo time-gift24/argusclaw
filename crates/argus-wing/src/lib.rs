@@ -1055,9 +1055,11 @@ mod tests {
             .expect("template listing should succeed");
 
         assert!(templates.iter().all(|template| template.id.inner() != 0));
-        assert!(templates
+        let repaired_template = templates
             .iter()
-            .any(|template| template.display_name == "Legacy Zero Agent"));
+            .find(|template| template.display_name == "Legacy Zero Agent")
+            .expect("legacy placeholder agent should still exist after repair");
+        assert_eq!(repaired_template.subagent_names, vec!["Chrome Explore"]);
     }
 
     #[tokio::test]
