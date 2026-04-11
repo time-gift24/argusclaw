@@ -85,7 +85,6 @@ pub struct SchedulerDispatchRequest {
     pub prompt: String,
     pub agent_id: AgentId,
     pub context: Option<serde_json::Value>,
-    pub dispatch_depth: u32,
     pub pipe_tx: broadcast::Sender<ThreadEvent>,
 }
 
@@ -126,11 +125,11 @@ pub struct MarkReadRequest {
     pub message_id: String,
 }
 
-/// Backend integration point implemented by orchestration crates.
 /// Maximum allowed nesting depth for job dispatch chains.
 pub const MAX_DISPATCH_DEPTH: u32 = 3;
 
 #[async_trait]
+/// Backend integration point implemented by orchestration crates.
 pub trait SchedulerBackend: Send + Sync {
     async fn dispatch_job(&self, request: SchedulerDispatchRequest) -> Result<String, ToolError>;
 
@@ -365,7 +364,6 @@ impl NamedTool for SchedulerTool {
                         prompt,
                         agent_id,
                         context,
-                        dispatch_depth: 0,
                         pipe_tx: ctx.pipe_tx.clone(),
                     })
                     .await?;
@@ -465,7 +463,6 @@ mod tests {
         prompt: String,
         agent_id: AgentId,
         context: Option<serde_json::Value>,
-        dispatch_depth: u32,
     }
 
     struct MockSchedulerBackend {
@@ -493,7 +490,6 @@ mod tests {
                     prompt: request.prompt,
                     agent_id: request.agent_id,
                     context: request.context,
-                    dispatch_depth: request.dispatch_depth,
                 });
             Ok(self.dispatch_job_id.clone())
         }
@@ -695,7 +691,6 @@ mod tests {
         assert_eq!(call.prompt, "summarize logs");
         assert_eq!(call.agent_id, AgentId::new(7));
         assert_eq!(call.context, Some(serde_json::json!({"env": "staging"})));
-        assert_eq!(call.dispatch_depth, 0);
     }
 
     #[tokio::test]

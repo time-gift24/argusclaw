@@ -14,11 +14,11 @@ use argus_protocol::{
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
-use argus_tool::scheduler::MAX_DISPATCH_DEPTH;
 use argus_tool::{
     CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
     SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
     SchedulerTool, SendMessageRequest, SendMessageResponse, ToolManager,
+    MAX_DISPATCH_DEPTH,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -2634,7 +2634,6 @@ mod tests {
                 prompt: "nested work".to_string(),
                 agent_id: harness.agent_id,
                 context: None,
-                dispatch_depth: 0,
                 pipe_tx,
             })
             .await

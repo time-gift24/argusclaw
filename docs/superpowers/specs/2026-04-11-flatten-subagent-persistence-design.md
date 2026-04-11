@@ -113,10 +113,9 @@ subagent_names = ["Chrome Explore"]
 - If empty, `dispatch_job()` returns an error immediately
 
 **Recursion guard:**
-- Introduce `dispatch_depth: u32` in the dispatch context
-- Each nested dispatch increments depth by 1
+- Derive dispatch depth from the current thread's parent chain at runtime
 - Reject when depth exceeds `MAX_DISPATCH_DEPTH` (default: 3, defined in `argus-tool/src/scheduler.rs`)
-- Depth is passed through the dispatch chain, not persisted
+- Depth is not persisted or passed through request payloads
 
 ### 6. Wing Facade and Desktop Changes
 

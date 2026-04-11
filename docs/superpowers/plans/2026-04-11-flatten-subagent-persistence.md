@@ -318,18 +318,24 @@ In `crates/argus-tool/src/scheduler.rs`, add near the `SchedulerBackend` trait:
 pub const MAX_DISPATCH_DEPTH: u32 = 3;
 ```
 
-- [ ] **Step 2: Add `dispatch_depth` field to `SchedulerDispatchRequest`**
+- [ ] **Step 2: Keep `SchedulerDispatchRequest` free of derived depth state**
 
-In the `SchedulerDispatchRequest` struct, add:
+Keep the request focused on dispatch inputs:
 ```rust
-pub dispatch_depth: u32,
+pub struct SchedulerDispatchRequest {
+    pub thread_id: ThreadId,
+    pub prompt: String,
+    pub agent_id: AgentId,
+    pub context: Option<serde_json::Value>,
+    pub pipe_tx: broadcast::Sender<ThreadEvent>,
+}
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add crates/argus-tool/src/scheduler.rs
-git commit -m "feat(tool): add MAX_DISPATCH_DEPTH and dispatch_depth to SchedulerDispatchRequest"
+git commit -m "feat(tool): add MAX_DISPATCH_DEPTH for scheduler depth guard"
 ```
 
 ### Task 6: Update SessionSchedulerBackend in argus-session
@@ -373,15 +379,16 @@ if agent.subagent_names.is_empty() {
     });
 }
 
-// Check dispatch depth
-if request.dispatch_depth >= MAX_DISPATCH_DEPTH {
+// Check dispatch depth derived from the thread parent chain
+let dispatch_depth = self.dispatch_depth_for_thread(request.thread_id).await?;
+if dispatch_depth >= MAX_DISPATCH_DEPTH {
     return Err(ToolError::ExecutionFailed {
         message: format!("maximum dispatch depth ({}) exceeded", MAX_DISPATCH_DEPTH),
     });
 }
 ```
 
-When dispatching to subagent jobs, increment `dispatch_depth` in the request passed to `job_manager.dispatch_job()`.
+Dispatch depth is derived from thread ancestry, so it is not persisted or threaded through the request payload.
 
 - [ ] **Step 3: Fix all test code in this crate**
 
