@@ -6,7 +6,7 @@
 
 - `SessionManager` 创建、加载、重命名、删除 session 与 thread
 - 从 `argus-agent` 的 trace / turn log 恢复 thread 状态
-- 为 `scheduler` tool 提供 backend，把 template、job、mailbox 组合成会话层能力
+- 为 `scheduler` tool 提供 backend，把 template、job、mailbox 组合成会话层能力，并从当前 agent 的 `subagent_names` 解析可调度子代理
 - 持有内存态 `Session` 缓存，并把事件广播给上层
 
 ## 关键模块
@@ -27,3 +27,4 @@
 - session 是 orchestration layer，不要把 provider/tool 实现细节塞进这里
 - 恢复逻辑必须与 `argus-agent` 的 trace / turn 语义保持一致
 - `scheduler`、mailbox 或 inbox 语义变更时，要同步检查 `argus-tool` 协议与桌面端消费者
+- 调度递归保护属于 runtime 责任，使用 dispatch depth guard，不要把层级约束重新落回持久化模型
