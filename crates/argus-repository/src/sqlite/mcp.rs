@@ -11,9 +11,8 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
     use argus_protocol::{
-        AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, AgentType,
-        McpDiscoveredToolRecord, McpServerRecord, McpTransportConfig, McpTransportKind,
-        ThinkingConfig,
+        AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, McpDiscoveredToolRecord,
+        McpServerRecord, McpTransportConfig, McpTransportKind, ThinkingConfig,
     };
 
     use crate::sqlite::migrate;
@@ -68,11 +67,10 @@ mod tests {
             model_id: None,
             system_prompt: "You are a test agent.".to_string(),
             tool_names: Vec::new(),
+            subagent_names: Vec::new(),
             max_tokens: None,
             temperature: None,
             thinking_config: Some(ThinkingConfig::enabled()),
-            parent_agent_id: None,
-            agent_type: AgentType::Standard,
         }
     }
 

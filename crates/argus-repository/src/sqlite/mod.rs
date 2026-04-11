@@ -360,4 +360,78 @@ mod tests {
             "legacy workflows table should no longer be created"
         );
     }
+
+    #[tokio::test]
+    async fn flatten_subagent_migration_preserves_parent_child_bindings() {
+        let pool = super::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE llm_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            );
+
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '1.0.0',
+                provider_id INTEGER REFERENCES llm_providers(id) ON DELETE RESTRICT,
+                model_id TEXT,
+                system_prompt TEXT NOT NULL,
+                tool_names TEXT NOT NULL DEFAULT '[]',
+                max_tokens INTEGER,
+                temperature INTEGER,
+                parent_agent_id INTEGER REFERENCES agents(id),
+                agent_type TEXT NOT NULL DEFAULT 'standard' CHECK(agent_type IN ('standard', 'subagent')),
+                thinking_config TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy schema should be created");
+
+        sqlx::query(
+            r#"
+            INSERT INTO agents (id, display_name, description, version, provider_id, model_id, system_prompt, tool_names, max_tokens, temperature, parent_agent_id, agent_type, thinking_config)
+            VALUES
+                (1, 'Parent', 'parent', '1.0.0', NULL, NULL, 'parent prompt', '[]', NULL, NULL, NULL, 'standard', NULL),
+                (2, 'Child A', 'child', '1.0.0', NULL, NULL, 'child prompt', '[]', NULL, NULL, 1, 'subagent', NULL),
+                (3, 'Child B', 'child', '1.0.0', NULL, NULL, 'child prompt', '[]', NULL, NULL, 1, 'subagent', NULL)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy agents should insert");
+
+        let migration_sql = std::fs::read_to_string(format!(
+            "{}/migrations/20260411000000_flatten_subagent_persistence.sql",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("flatten-subagent migration should exist");
+
+        sqlx::raw_sql(&migration_sql)
+            .execute(&pool)
+            .await
+            .expect("flatten-subagent migration should run");
+
+        let parent_subagent_names: String =
+            sqlx::query_scalar("SELECT subagent_names FROM agents WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("parent should still exist");
+        let child_subagent_names: String =
+            sqlx::query_scalar("SELECT subagent_names FROM agents WHERE id = 2")
+                .fetch_one(&pool)
+                .await
+                .expect("child should still exist");
+
+        assert_eq!(parent_subagent_names, r#"["Child A","Child B"]"#);
+        assert_eq!(child_subagent_names, "[]");
+    }
 }
