@@ -14,6 +14,7 @@ use argus_protocol::{
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
+use argus_tool::scheduler::MAX_DISPATCH_DEPTH;
 use argus_tool::{
     CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
     SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
@@ -183,6 +184,37 @@ impl SessionSchedulerBackend {
 
         let guard = thread.read().await;
         guard.agent_record().display_name.clone()
+    }
+
+    async fn current_scheduler_agent(&self) -> std::result::Result<argus_protocol::AgentRecord, ToolError> {
+        let agent_id = current_agent_id()
+            .ok_or_else(|| Self::scheduler_error("no current agent context"))?;
+        self.template_manager
+            .get(agent_id)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?
+            .ok_or_else(|| Self::scheduler_error("agent not found"))
+    }
+
+    async fn dispatch_depth_for_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> std::result::Result<u32, ToolError> {
+        let thread_pool = self.thread_pool();
+        let mut depth = 0;
+        let mut cursor = thread_id;
+
+        while let Some(parent_thread_id) = thread_pool
+            .parent_thread_id(&cursor)
+            .or(thread_pool.recover_parent_thread_id(&cursor).await.map_err(|error| {
+                Self::scheduler_error(error.to_string())
+            })?)
+        {
+            depth += 1;
+            cursor = parent_thread_id;
+        }
+
+        Ok(depth)
     }
 
     async fn active_child_thread_ids(
@@ -394,6 +426,19 @@ impl SchedulerBackend for SessionSchedulerBackend {
         &self,
         request: SchedulerDispatchRequest,
     ) -> std::result::Result<String, ToolError> {
+        let agent = self.current_scheduler_agent().await?;
+        if agent.subagent_names.is_empty() {
+            return Err(Self::scheduler_error("this agent has no subagents configured"));
+        }
+
+        let dispatch_depth = self.dispatch_depth_for_thread(request.thread_id).await?;
+        if dispatch_depth >= MAX_DISPATCH_DEPTH {
+            return Err(Self::scheduler_error(format!(
+                "maximum dispatch depth ({}) exceeded",
+                MAX_DISPATCH_DEPTH
+            )));
+        }
+
         let job_id = Uuid::new_v4().to_string();
 
         let dispatch_event = ThreadEvent::JobDispatched {
@@ -426,18 +471,12 @@ impl SchedulerBackend for SessionSchedulerBackend {
     }
 
     async fn list_subagents(&self) -> std::result::Result<Vec<SchedulerSubagent>, ToolError> {
-        let agent_id = current_agent_id().ok_or_else(|| ToolError::ExecutionFailed {
-            tool_name: "list_subagents".to_string(),
-            reason: "current agent_id not available".to_string(),
-        })?;
+        let agent = self.current_scheduler_agent().await?;
         let records = self
             .template_manager
-            .list_subagents(agent_id)
+            .list_subagents_by_names(&agent.subagent_names)
             .await
-            .map_err(|error| ToolError::ExecutionFailed {
-                tool_name: "scheduler".to_string(),
-                reason: error.to_string(),
-            })?;
+            .map_err(|error| Self::scheduler_error(error.to_string()))?;
 
         Ok(records
             .into_iter()
@@ -1417,9 +1456,10 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
         LlmProviderRepository,
     };
+    use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_protocol::{
-        AgentId, AgentRecord, AgentType, MailboxMessage, MailboxMessageType, McpToolResolver,
-        ProviderId, ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
+        AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
+        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
@@ -1429,7 +1469,7 @@ mod tests {
     };
     use argus_repository::ArgusSqlite;
     use argus_template::TemplateManager;
-    use argus_tool::{SchedulerBackend, SchedulerLookupRequest};
+    use argus_tool::{SchedulerBackend, SchedulerDispatchRequest, SchedulerLookupRequest};
     use async_trait::async_trait;
     use chrono::Utc;
     use dashmap::DashMap;
@@ -1437,6 +1477,7 @@ mod tests {
     use sqlx::SqlitePool;
     use std::path::PathBuf;
     use tempfile::TempDir;
+    use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout, Duration};
     use uuid::Uuid;
 
@@ -1624,11 +1665,10 @@ mod tests {
                 model_id: Some("routing-test".to_string()),
                 system_prompt: "You are a routing test agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::disabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("agent upsert should succeed");
@@ -1859,11 +1899,10 @@ mod tests {
                 model_id: Some("routing-test-v2".to_string()),
                 system_prompt: "You are a mutated routing test agent.".to_string(),
                 tool_names: vec![],
+                subagent_names: vec![],
                 max_tokens: None,
                 temperature: None,
                 thinking_config: Some(ThinkingConfig::disabled()),
-                parent_agent_id: None,
-                agent_type: AgentType::Standard,
             })
             .await
             .expect("template upsert should succeed");
@@ -2450,6 +2489,162 @@ mod tests {
             error
                 .to_string()
                 .contains("not ready to receive mailbox messages"),
+            "unexpected scheduler error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_list_subagents_resolves_names_from_current_agent() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: AgentId::new(12),
+                display_name: "Researcher".to_string(),
+                description: "Researches things".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: None,
+                model_id: None,
+                system_prompt: "Research.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: None,
+            })
+            .await
+            .expect("subagent should upsert");
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: harness.agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-test".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Researcher".to_string(), "Missing".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("parent should upsert");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+
+        set_current_agent_id(harness.agent_id);
+        let subagents = backend
+            .list_subagents()
+            .await
+            .expect("subagent lookup should succeed");
+        clear_current_agent_id();
+
+        assert_eq!(subagents.len(), 1);
+        assert_eq!(subagents[0].display_name, "Researcher");
+    }
+
+    #[tokio::test]
+    async fn scheduler_dispatch_job_rejects_requests_at_maximum_depth() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let level_one = ThreadId::new();
+        let level_two = ThreadId::new();
+        let level_three = ThreadId::new();
+        let trace_root = harness.temp_dir.path().join("trace");
+        let root_base_dir = chat_thread_base_dir(trace_root.as_path(), harness.session_id, harness.thread_id);
+        let level_one_dir = root_base_dir.join(level_one.to_string());
+        let level_two_dir = level_one_dir.join(level_two.to_string());
+        let level_three_dir = level_two_dir.join(level_three.to_string());
+        let agent_snapshot = harness
+            .template_manager
+            .get(harness.agent_id)
+            .await
+            .expect("template lookup should succeed")
+            .expect("agent snapshot should exist");
+
+        for (thread_id, parent_thread_id, base_dir) in [
+            (level_one, Some(harness.thread_id), level_one_dir.as_path()),
+            (level_two, Some(level_one), level_two_dir.as_path()),
+            (level_three, Some(level_two), level_three_dir.as_path()),
+        ] {
+            persist_thread_metadata(
+                base_dir,
+                &ThreadTraceMetadata {
+                    thread_id,
+                    kind: ThreadTraceKind::Job,
+                    root_session_id: Some(harness.session_id),
+                    parent_thread_id,
+                    job_id: Some(format!("job-{thread_id}")),
+                    agent_snapshot: agent_snapshot.clone(),
+                },
+            )
+            .await
+            .expect("child metadata should persist");
+        }
+
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: harness.agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-test".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Researcher".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("parent should upsert");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            trace_root,
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        let (pipe_tx, _) = broadcast::channel(8);
+
+        set_current_agent_id(harness.agent_id);
+        let error = backend
+            .dispatch_job(SchedulerDispatchRequest {
+                thread_id: level_three,
+                prompt: "nested work".to_string(),
+                agent_id: harness.agent_id,
+                context: None,
+                dispatch_depth: 0,
+                pipe_tx,
+            })
+            .await
+            .expect_err("depth limit should reject dispatch");
+        clear_current_agent_id();
+
+        assert!(
+            error
+                .to_string()
+                .contains("maximum dispatch depth (3) exceeded"),
             "unexpected scheduler error: {error}"
         );
     }
