@@ -386,7 +386,8 @@ impl ThreadRuntime {
         match store.runtimes.entry(registration.thread_id) {
             Entry::Occupied(mut entry) => {
                 let current = entry.get_mut();
-                current.summary = summary;
+                current.summary.runtime = summary.runtime;
+                current.summary.recoverable = summary.recoverable;
             }
             Entry::Vacant(entry) => {
                 let (sender, _) = broadcast::channel(128);
@@ -405,7 +406,9 @@ impl ThreadRuntime {
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::{SessionId, ThreadId, ThreadPoolRuntimeKind, ThreadRuntimeStatus};
+    use argus_protocol::{
+        SessionId, ThreadId, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadRuntimeStatus,
+    };
 
     use super::{ThreadRegistration, ThreadRuntime};
 
@@ -470,5 +473,62 @@ mod tests {
         assert_eq!(summary.runtime.job_id.as_deref(), Some("job-123"));
         assert!(!summary.recoverable);
         assert!(runtime.subscribe(&thread_id).is_some());
+    }
+
+    #[test]
+    fn register_thread_preserves_existing_runtime_state() {
+        let runtime = ThreadRuntime::new();
+        let thread_id = ThreadId::new();
+        let first_session_id = SessionId::new();
+        let second_session_id = SessionId::new();
+
+        runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(first_session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        });
+
+        {
+            let mut store = runtime.store.lock().expect("thread-runtime mutex poisoned");
+            let entry = store
+                .runtimes
+                .get_mut(&thread_id)
+                .expect("thread should be registered");
+            entry.summary.status = ThreadRuntimeStatus::Running;
+            entry.summary.estimated_memory_bytes = 512;
+            entry.summary.last_active_at = Some("2026-04-12T12:34:56Z".to_string());
+            entry.summary.last_reason = Some(ThreadPoolEventReason::CoolingExpired);
+        }
+
+        runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: Some(second_session_id),
+            parent_thread_id: None,
+            job_id: Some("job-456".to_string()),
+            recoverable: false,
+        });
+
+        let summary = runtime
+            .runtime_summary(&thread_id)
+            .expect("re-registered thread should still expose a summary");
+
+        assert_eq!(summary.runtime.kind, ThreadPoolRuntimeKind::Job);
+        assert_eq!(summary.runtime.session_id, Some(second_session_id));
+        assert_eq!(summary.runtime.job_id.as_deref(), Some("job-456"));
+        assert_eq!(summary.status, ThreadRuntimeStatus::Running);
+        assert_eq!(summary.estimated_memory_bytes, 512);
+        assert_eq!(
+            summary.last_active_at.as_deref(),
+            Some("2026-04-12T12:34:56Z")
+        );
+        assert_eq!(
+            summary.last_reason,
+            Some(ThreadPoolEventReason::CoolingExpired)
+        );
+        assert!(!summary.recoverable);
     }
 }
