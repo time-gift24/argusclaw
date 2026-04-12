@@ -38,6 +38,10 @@ test("desktop tauri bindings expose chat session and thread snapshot wrappers", 
     tauriSource,
     /getState:\s*\(\)\s*=>\s*invoke<ThreadPoolState>\("get_thread_pool_state"/,
   );
+  assert.match(
+    tauriSource,
+    /threadRuntime\s*=\s*\{\s*getState:\s*\(\)\s*=>\s*invoke<ThreadPoolState>\("get_thread_runtime_state"/,
+  );
 });
 
 test("tauri chat session creation keeps unnamed sessions blank for id fallback rendering", () => {
@@ -45,6 +49,7 @@ test("tauri chat session creation keeps unnamed sessions blank for id fallback r
   assert.doesNotMatch(commandSource, /create_session\(&format!\("Chat-/);
   assert.match(commandSource, /get_thread_pool_snapshot/);
   assert.match(commandSource, /get_thread_pool_state/);
+  assert.match(commandSource, /get_thread_runtime_state/);
   assert.doesNotMatch(commandSource, /compact_agent_id: Option<String>/);
   assert.doesNotMatch(tauriSource, /compactAgentId/);
 });

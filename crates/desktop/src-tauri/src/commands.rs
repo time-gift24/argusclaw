@@ -219,6 +219,13 @@ pub async fn get_thread_pool_state(
     Ok(wing.thread_pool_state())
 }
 
+#[tauri::command]
+pub async fn get_thread_runtime_state(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<ThreadPoolState, String> {
+    Ok(wing.thread_runtime_state())
+}
+
 // ============================================================================
 // MCP Commands
 // ============================================================================

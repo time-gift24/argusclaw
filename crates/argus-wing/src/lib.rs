@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_session_removes_registered_chat_runtimes_from_thread_pool_state() {
+    async fn delete_session_removes_registered_chat_runtimes_from_thread_runtime_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
 
@@ -1351,7 +1351,7 @@ mod tests {
             .await
             .expect("second thread should create");
 
-        let before_delete = wing.thread_pool_state();
+        let before_delete = wing.thread_runtime_state();
         assert!(before_delete
             .runtimes
             .iter()
@@ -1365,7 +1365,7 @@ mod tests {
             .await
             .expect("session delete should succeed");
 
-        let after_delete = wing.thread_pool_state();
+        let after_delete = wing.thread_runtime_state();
         assert!(!after_delete
             .runtimes
             .iter()
@@ -1553,7 +1553,7 @@ mod tests {
             .expect("thread should create");
 
         let runtime_before = wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == thread_id)
@@ -1570,7 +1570,7 @@ mod tests {
         );
 
         let runtime_after = wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == thread_id)
@@ -1625,7 +1625,7 @@ mod tests {
         );
 
         let runtime_after = wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == thread_id)

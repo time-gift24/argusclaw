@@ -288,6 +288,24 @@ impl ThreadRuntime {
         Ok(mailbox.lock().await.mark_mailbox_message_read(message_id))
     }
 
+    pub async fn deliver_mailbox_message(
+        &self,
+        thread_id: ThreadId,
+        message: MailboxMessage,
+    ) -> Result<(), String> {
+        let thread = self
+            .loaded_thread(&thread_id)
+            .ok_or_else(|| format!("thread {} is not loaded", thread_id))?;
+        let (mailbox, control_tx) = {
+            let guard = thread.read().await;
+            (guard.mailbox(), guard.control_tx())
+        };
+
+        mailbox.lock().await.enqueue_mailbox_message(message);
+        let _ = control_tx.send(ThreadControlEvent::MailboxUpdated);
+        Ok(())
+    }
+
     fn runtime_load_mutex(&self, thread_id: &ThreadId) -> Result<Arc<AsyncMutex<()>>, String> {
         self.store
             .lock()

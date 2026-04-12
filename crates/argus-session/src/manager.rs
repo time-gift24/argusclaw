@@ -777,12 +777,10 @@ impl SchedulerBackend for SessionSchedulerBackend {
                     .await
                     .map_err(|error| Self::scheduler_error(error.to_string()))?;
                     session.add_thread(thread);
-                    if !session.enqueue_mailbox_message(target, message).await {
-                        return Err(Self::scheduler_error(format!(
-                            "thread {} is not registered in loaded session {}",
-                            target, session_id
-                        )));
-                    }
+                    self.thread_runtime
+                        .deliver_mailbox_message(*target, message)
+                        .await
+                        .map_err(Self::scheduler_error)?;
                 }
                 _ => {
                     thread_pool
@@ -861,7 +859,6 @@ pub struct SessionManager {
     tool_manager: Arc<ToolManager>,
     trace_dir: PathBuf,
     thread_runtime: Arc<ThreadRuntime>,
-    thread_pool: Arc<ThreadPool>,
 }
 
 impl SessionManager {
@@ -880,7 +877,6 @@ impl SessionManager {
     ) -> Self {
         let sessions = Arc::new(DashMap::new());
         let thread_runtime = job_manager.thread_runtime();
-        let thread_pool = job_manager.thread_pool();
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             template_manager.clone(),
             job_manager.clone(),
@@ -919,11 +915,6 @@ impl SessionManager {
                     let Some(session_id) = summary.runtime.session_id else {
                         return false;
                     };
-                    let Some(session) =
-                        sessions.get(&session_id).map(|entry| entry.value().clone())
-                    else {
-                        return false;
-                    };
                     let Ok(thread) = ensure_chat_thread_runtime_with_mcp(
                         &thread_runtime,
                         &thread_repo,
@@ -938,8 +929,15 @@ impl SessionManager {
                     else {
                         return false;
                     };
-                    session.add_thread(thread);
-                    session.enqueue_mailbox_message(&thread_id, message).await
+                    if let Some(session) =
+                        sessions.get(&session_id).map(|entry| entry.value().clone())
+                    {
+                        session.add_thread(thread);
+                    }
+                    thread_runtime
+                        .deliver_mailbox_message(thread_id, message)
+                        .await
+                        .is_ok()
                 }
             });
         }
@@ -955,7 +953,6 @@ impl SessionManager {
             tool_manager,
             trace_dir,
             thread_runtime,
-            thread_pool,
         }
     }
 
@@ -970,13 +967,10 @@ impl SessionManager {
     fn register_chat_thread(&self, session_id: SessionId, thread_id: ThreadId) {
         self.thread_runtime
             .register_thread(self.chat_thread_registration(session_id, thread_id));
-        let _ = self.thread_pool.register_chat_thread(session_id, thread_id);
     }
 
     fn remove_chat_runtime(&self, thread_id: &ThreadId) -> bool {
-        let removed = self.thread_runtime.remove_runtime(thread_id);
-        let _ = self.thread_pool.remove_runtime(thread_id);
-        removed
+        self.thread_runtime.remove_runtime(thread_id)
     }
 
     async fn ensure_thread_runtime_with_mcp(

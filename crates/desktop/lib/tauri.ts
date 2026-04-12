@@ -402,3 +402,7 @@ export const threadPool = {
   getSnapshot: () => invoke<ThreadPoolSnapshot>("get_thread_pool_snapshot"),
   getState: () => invoke<ThreadPoolState>("get_thread_pool_state"),
 };
+
+export const threadRuntime = {
+  getState: () => invoke<ThreadPoolState>("get_thread_runtime_state"),
+};
