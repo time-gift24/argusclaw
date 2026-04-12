@@ -290,6 +290,11 @@ impl ArgusWing {
         self.job_manager.thread_pool_state()
     }
 
+    /// Return the authoritative thread-runtime state including runtime summaries.
+    pub fn thread_runtime_state(&self) -> ThreadPoolState {
+        self.job_manager.thread_runtime().collect_state()
+    }
+
     /// Resolve the persisted execution thread bound to a job ID, if available.
     pub async fn job_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>> {
         if let Some(thread_id) = self.job_manager.thread_binding(job_id) {
@@ -1254,7 +1259,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_thread_removes_chat_runtime_from_thread_pool_state() {
+    async fn delete_thread_removes_chat_runtime_from_thread_runtime_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
 
@@ -1290,7 +1295,7 @@ mod tests {
             .expect("thread should create");
 
         assert!(wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .iter()
             .any(|runtime| runtime.runtime.thread_id == thread_id));
@@ -1300,7 +1305,7 @@ mod tests {
             .expect("thread delete should succeed");
 
         assert!(!wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .iter()
             .any(|runtime| runtime.runtime.thread_id == thread_id));

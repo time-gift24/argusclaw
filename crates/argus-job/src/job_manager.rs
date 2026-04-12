@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::TurnCancellation;
 #[cfg(test)]
 use argus_agent::TurnRecord;
+use argus_agent::{ThreadRegistration, ThreadRuntime, TurnCancellation};
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
@@ -70,6 +70,7 @@ pub enum JobLookup {
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
+    thread_runtime: Arc<ThreadRuntime>,
     thread_pool: Arc<ThreadPool>,
     tracked_jobs: Arc<StdMutex<TrackedJobsStore>>,
     chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
@@ -118,7 +119,9 @@ impl JobManager {
         let job_repository = persistence
             .as_ref()
             .map(ThreadPoolPersistence::job_repository);
+        let thread_runtime = Arc::new(ThreadRuntime::new());
         let thread_pool = Arc::new(ThreadPool::with_persistence(
+            Arc::clone(&thread_runtime),
             template_manager,
             provider_resolver,
             tool_manager,
@@ -127,6 +130,7 @@ impl JobManager {
         ));
 
         Self {
+            thread_runtime,
             thread_pool,
             tracked_jobs: Arc::new(StdMutex::new(TrackedJobsStore::default())),
             chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
@@ -166,6 +170,10 @@ impl JobManager {
     /// Return the shared unified thread pool.
     pub fn thread_pool(&self) -> Arc<ThreadPool> {
         Arc::clone(&self.thread_pool)
+    }
+
+    pub fn thread_runtime(&self) -> Arc<ThreadRuntime> {
+        Arc::clone(&self.thread_runtime)
     }
 
     pub fn set_chat_mailbox_forwarder<F, Fut>(&self, forwarder: F)
@@ -239,6 +247,14 @@ impl JobManager {
 
     /// Record that a job was dispatched for a thread.
     pub fn record_dispatched_job(&self, thread_id: ThreadId, job_id: String) {
+        self.thread_runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: None,
+            parent_thread_id: None,
+            job_id: Some(job_id.clone()),
+            recoverable: true,
+        });
         Self::record_dispatched_job_in_store(
             &self.tracked_jobs,
             thread_id,
@@ -1097,6 +1113,15 @@ mod tests {
         let bound_thread_id = manager
             .thread_binding(&job_id)
             .expect("job should be bound to a thread");
+        let runtime_summary = manager
+            .thread_runtime()
+            .runtime_summary(&bound_thread_id)
+            .expect("bound runtime should also be tracked in ThreadRuntime");
+        assert_eq!(
+            runtime_summary.runtime.job_id.as_deref(),
+            Some(job_id.as_str())
+        );
+        assert_eq!(runtime_summary.runtime.kind, ThreadPoolRuntimeKind::Job);
         let runtime = manager
             .thread_pool_state()
             .runtimes

@@ -15,7 +15,8 @@ use argus_agent::thread_trace_store::{
 };
 use argus_agent::turn_log_store::recover_thread_log_state;
 use argus_agent::{
-    FilePlanStore, LlmThreadCompactor, ThreadBuilder, TraceConfig, TurnCancellation, TurnConfig,
+    FilePlanStore, LlmThreadCompactor, ThreadBuilder, ThreadRegistration, ThreadRuntime,
+    TraceConfig, TurnCancellation, TurnConfig,
 };
 use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
@@ -171,6 +172,7 @@ pub struct RecoveredChildJob {
 
 /// Coordinates job-thread bindings, runtime state transitions, and metrics.
 pub struct ThreadPool {
+    thread_runtime: Arc<ThreadRuntime>,
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
@@ -193,12 +195,14 @@ impl std::fmt::Debug for ThreadPool {
 impl ThreadPool {
     /// Create a new thread pool with a default runtime cap.
     pub fn new(
+        thread_runtime: Arc<ThreadRuntime>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
     ) -> Self {
         Self::with_persistence(
+            thread_runtime,
             template_manager,
             provider_resolver,
             tool_manager,
@@ -209,6 +213,7 @@ impl ThreadPool {
 
     /// Create a thread pool with optional repository-backed persistence.
     pub fn with_persistence(
+        thread_runtime: Arc<ThreadRuntime>,
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
@@ -216,6 +221,7 @@ impl ThreadPool {
         persistence: Option<ThreadPoolPersistence>,
     ) -> Self {
         Self {
+            thread_runtime,
             template_manager,
             provider_resolver,
             tool_manager,
@@ -234,6 +240,14 @@ impl ThreadPool {
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> broadcast::Receiver<ThreadEvent> {
+        self.thread_runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        });
         let runtime = ThreadPoolRuntimeRef {
             thread_id,
             kind: ThreadPoolRuntimeKind::Chat,
@@ -557,6 +571,14 @@ impl ThreadPool {
             None,
             None,
         );
+        self.thread_runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Job,
+            session_id: None,
+            parent_thread_id: Some(request.originating_thread_id),
+            job_id: Some(request.job_id.clone()),
+            recoverable: true,
+        });
         self.store
             .lock()
             .expect("thread-pool mutex poisoned")
@@ -2402,6 +2424,7 @@ impl ThreadPool {
             .expect("lazy sqlite pool should build for tests");
         let sqlite = Arc::new(ArgusSqlite::new(pool));
         Self::new(
+            Arc::new(ThreadRuntime::new()),
             Arc::new(TemplateManager::new(
                 sqlite.clone() as Arc<dyn AgentRepository>,
                 sqlite,
@@ -2442,7 +2465,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use argus_agent::{Compactor, ThreadBuilder};
+    use argus_agent::{Compactor, ThreadBuilder, ThreadRuntime};
     use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, LlmEventStream};
     use argus_protocol::{AgentRecord, ProviderId, ThinkingConfig};
     use argus_repository::ArgusSqlite;
@@ -2683,6 +2706,7 @@ mod tests {
             provider: Arc::new(FixedProvider),
         });
         let thread_pool = ThreadPool::with_persistence(
+            Arc::new(ThreadRuntime::new()),
             Arc::clone(&template_manager),
             provider_resolver,
             Arc::new(ToolManager::new()),
@@ -2852,6 +2876,7 @@ mod tests {
             provider: Arc::new(FixedProvider),
         });
         let thread_pool = ThreadPool::with_persistence(
+            Arc::new(ThreadRuntime::new()),
             Arc::clone(&template_manager),
             provider_resolver.clone(),
             Arc::new(ToolManager::new()),
@@ -2926,6 +2951,7 @@ mod tests {
             .expect("second child binding should persist");
 
         let fresh_pool = ThreadPool::with_persistence(
+            Arc::new(ThreadRuntime::new()),
             template_manager,
             provider_resolver,
             Arc::new(ToolManager::new()),
@@ -3029,6 +3055,7 @@ mod tests {
         .expect("parent metadata should persist");
 
         let thread_pool = ThreadPool::with_persistence(
+            Arc::new(ThreadRuntime::new()),
             template_manager,
             Arc::new(FixedProviderResolver {
                 provider: Arc::new(FixedProvider),

@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use argus_protocol::{
     MailboxMessage, SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind,
-    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadRuntimeStatus,
+    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
+    ThreadRuntimeStatus,
 };
 use chrono::Utc;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, broadcast, mpsc};
@@ -137,6 +138,66 @@ impl ThreadRuntime {
             .runtimes
             .get(thread_id)
             .map(|entry| entry.summary.clone())
+    }
+
+    #[must_use]
+    pub fn collect_state(&self) -> ThreadPoolState {
+        let store = self.store.lock().expect("thread-runtime mutex poisoned");
+        let runtimes: Vec<_> = store
+            .runtimes
+            .values()
+            .map(|entry| entry.summary.clone())
+            .collect();
+        let queued_threads = runtimes
+            .iter()
+            .filter(|runtime| runtime.status == ThreadRuntimeStatus::Queued)
+            .count() as u32;
+        let running_threads = runtimes
+            .iter()
+            .filter(|runtime| runtime.status == ThreadRuntimeStatus::Running)
+            .count() as u32;
+        let cooling_threads = runtimes
+            .iter()
+            .filter(|runtime| runtime.status == ThreadRuntimeStatus::Cooling)
+            .count() as u32;
+        let resident_thread_count = store
+            .runtimes
+            .values()
+            .filter(|entry| entry.thread.is_some())
+            .count() as u32;
+        let estimated_memory_bytes = store
+            .runtimes
+            .values()
+            .filter(|entry| entry.thread.is_some())
+            .map(|entry| entry.summary.estimated_memory_bytes)
+            .sum::<u64>();
+        let avg_thread_memory_bytes = if resident_thread_count == 0 {
+            0
+        } else {
+            estimated_memory_bytes / u64::from(resident_thread_count)
+        };
+
+        ThreadPoolState {
+            snapshot: ThreadPoolSnapshot {
+                max_threads: 0,
+                active_threads: resident_thread_count,
+                queued_threads,
+                running_threads,
+                cooling_threads,
+                evicted_threads: runtimes
+                    .iter()
+                    .filter(|runtime| runtime.status == ThreadRuntimeStatus::Evicted)
+                    .count() as u64,
+                estimated_memory_bytes,
+                peak_estimated_memory_bytes: estimated_memory_bytes,
+                process_memory_bytes: None,
+                peak_process_memory_bytes: None,
+                resident_thread_count,
+                avg_thread_memory_bytes,
+                captured_at: Utc::now().to_rfc3339(),
+            },
+            runtimes,
+        }
     }
 
     #[must_use]

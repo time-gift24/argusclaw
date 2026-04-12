@@ -879,7 +879,7 @@ impl SessionManager {
         job_manager: Arc<JobManager>,
     ) -> Self {
         let sessions = Arc::new(DashMap::new());
-        let thread_runtime = Arc::new(ThreadRuntime::new());
+        let thread_runtime = job_manager.thread_runtime();
         let thread_pool = job_manager.thread_pool();
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             template_manager.clone(),
