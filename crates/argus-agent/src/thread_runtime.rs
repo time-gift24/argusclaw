@@ -1,17 +1,24 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use argus_protocol::{
-    SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef,
-    ThreadPoolRuntimeSummary, ThreadRuntimeStatus,
+    MailboxMessage, SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind,
+    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadRuntimeStatus,
 };
-use tokio::sync::broadcast;
+use chrono::Utc;
+use tokio::sync::{Mutex as AsyncMutex, RwLock, broadcast, mpsc};
+use tokio::task::AbortHandle;
 
 #[derive(Debug)]
 struct RuntimeEntry {
     summary: ThreadPoolRuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
+    thread: Option<Arc<RwLock<crate::Thread>>>,
+    control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
+    forwarder_abort: Option<AbortHandle>,
+    load_mutex: Arc<AsyncMutex<()>>,
 }
 
 #[derive(Debug, Default)]
@@ -19,6 +26,25 @@ struct ThreadRuntimeStore {
     runtimes: HashMap<ThreadId, RuntimeEntry>,
     parent_thread_by_child: HashMap<ThreadId, ThreadId>,
     child_threads_by_parent: HashMap<ThreadId, Vec<ThreadId>>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeShutdown {
+    thread: Option<Arc<RwLock<crate::Thread>>>,
+    control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
+    forwarder_abort: Option<AbortHandle>,
+}
+
+impl RuntimeShutdown {
+    fn run(self) {
+        if let Some(forwarder_abort) = self.forwarder_abort {
+            forwarder_abort.abort();
+        }
+        if let Some(control_tx) = self.control_tx {
+            let _ = control_tx.send(ThreadControlEvent::ShutdownRuntime);
+        }
+        drop(self.thread);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +74,51 @@ impl ThreadRuntime {
         Self::upsert_runtime_summary(&mut store, registration);
     }
 
+    pub async fn ensure_chat_runtime<F, Fut>(
+        &self,
+        registration: ThreadRegistration,
+        load_thread: F,
+    ) -> Result<Arc<RwLock<crate::Thread>>, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<RwLock<crate::Thread>>, String>>,
+    {
+        self.register_thread(registration.clone());
+
+        if let Some(thread) = self.loaded_chat_thread(&registration.thread_id) {
+            return Ok(thread);
+        }
+
+        let load_mutex = self.runtime_load_mutex(&registration.thread_id)?;
+        let _load_guard = load_mutex.lock().await;
+        if let Some(thread) = self.loaded_chat_thread(&registration.thread_id) {
+            return Ok(thread);
+        }
+
+        self.mark_runtime_loading(&registration.thread_id)?;
+        let thread = match load_thread().await {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.reset_runtime_after_load_failure(&registration.thread_id);
+                return Err(error);
+            }
+        };
+        let runtime_rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+        crate::Thread::spawn_reactor(Arc::clone(&thread)).await;
+        if let Err(error) = self
+            .attach_loaded_thread(registration.thread_id, Arc::clone(&thread), runtime_rx)
+            .await
+        {
+            self.reset_runtime_after_load_failure(&registration.thread_id);
+            return Err(error);
+        }
+
+        Ok(thread)
+    }
+
     #[must_use]
     pub fn subscribe(&self, thread_id: &ThreadId) -> Option<broadcast::Receiver<ThreadEvent>> {
         self.store
@@ -66,6 +137,197 @@ impl ThreadRuntime {
             .runtimes
             .get(thread_id)
             .map(|entry| entry.summary.clone())
+    }
+
+    #[must_use]
+    pub fn loaded_chat_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<crate::Thread>>> {
+        self.store
+            .lock()
+            .expect("thread-runtime mutex poisoned")
+            .runtimes
+            .get(thread_id)
+            .and_then(|entry| {
+                (entry.summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+                    .then(|| entry.thread.clone())
+                    .flatten()
+            })
+    }
+
+    #[must_use]
+    pub fn loaded_thread(&self, thread_id: &ThreadId) -> Option<Arc<RwLock<crate::Thread>>> {
+        self.store
+            .lock()
+            .expect("thread-runtime mutex poisoned")
+            .runtimes
+            .get(thread_id)
+            .and_then(|entry| entry.thread.clone())
+    }
+
+    pub fn remove_runtime(&self, thread_id: &ThreadId) -> bool {
+        let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
+        let removed_entry = store.runtimes.remove(thread_id);
+        let removed = removed_entry.is_some();
+        if removed {
+            if let Some(parent_thread_id) = store.parent_thread_by_child.remove(thread_id)
+                && let Some(children) = store.child_threads_by_parent.get_mut(&parent_thread_id)
+            {
+                children.retain(|child_thread_id| child_thread_id != thread_id);
+                if children.is_empty() {
+                    store.child_threads_by_parent.remove(&parent_thread_id);
+                }
+            }
+            if let Some(child_thread_ids) = store.child_threads_by_parent.remove(thread_id) {
+                for child_thread_id in child_thread_ids {
+                    store.parent_thread_by_child.remove(&child_thread_id);
+                }
+            }
+        }
+        drop(store);
+
+        if let Some(entry) = removed_entry {
+            RuntimeShutdown {
+                thread: entry.thread,
+                control_tx: entry.control_tx,
+                forwarder_abort: entry.forwarder_abort,
+            }
+            .run();
+        }
+
+        removed
+    }
+
+    pub async fn unread_mailbox_messages(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<MailboxMessage>, String> {
+        let thread = self
+            .loaded_thread(&thread_id)
+            .ok_or_else(|| format!("thread {} is not loaded", thread_id))?;
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+
+        Ok(mailbox.lock().await.unread_mailbox_messages())
+    }
+
+    pub async fn mark_mailbox_message_read(
+        &self,
+        thread_id: ThreadId,
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let thread = self
+            .loaded_thread(&thread_id)
+            .ok_or_else(|| format!("thread {} is not loaded", thread_id))?;
+        let mailbox = {
+            let guard = thread.read().await;
+            guard.mailbox()
+        };
+
+        Ok(mailbox.lock().await.mark_mailbox_message_read(message_id))
+    }
+
+    fn runtime_load_mutex(&self, thread_id: &ThreadId) -> Result<Arc<AsyncMutex<()>>, String> {
+        self.store
+            .lock()
+            .expect("thread-runtime mutex poisoned")
+            .runtimes
+            .get(thread_id)
+            .map(|entry| Arc::clone(&entry.load_mutex))
+            .ok_or_else(|| format!("thread {} is not registered", thread_id))
+    }
+
+    fn mark_runtime_loading(&self, thread_id: &ThreadId) -> Result<(), String> {
+        let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
+        let entry = store
+            .runtimes
+            .get_mut(thread_id)
+            .ok_or_else(|| format!("thread {} is not registered", thread_id))?;
+        entry.summary.status = ThreadRuntimeStatus::Loading;
+        entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+        entry.summary.last_reason = None;
+        Ok(())
+    }
+
+    fn reset_runtime_after_load_failure(&self, thread_id: &ThreadId) {
+        let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
+        let mut shutdown = RuntimeShutdown::default();
+        if let Some(entry) = store.runtimes.get_mut(thread_id) {
+            entry.summary.status = ThreadRuntimeStatus::Inactive;
+            entry.summary.estimated_memory_bytes = 0;
+            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+            entry.summary.last_reason = None;
+            shutdown = Self::take_runtime_shutdown(entry);
+        }
+        drop(store);
+        shutdown.run();
+    }
+
+    async fn attach_loaded_thread(
+        &self,
+        thread_id: ThreadId,
+        thread: Arc<RwLock<crate::Thread>>,
+        runtime_rx: broadcast::Receiver<ThreadEvent>,
+    ) -> Result<(), String> {
+        let control_tx = {
+            let guard = thread.read().await;
+            guard.control_tx()
+        };
+        let (sender, replaced_runtime) = {
+            let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
+            let (sender, replaced_runtime) = {
+                let Some(entry) = store.runtimes.get_mut(&thread_id) else {
+                    return Err(format!("thread {} was removed while loading", thread_id));
+                };
+                let replaced_runtime = if entry
+                    .thread
+                    .as_ref()
+                    .is_some_and(|existing| !Arc::ptr_eq(existing, &thread))
+                {
+                    Self::take_runtime_shutdown(entry)
+                } else {
+                    RuntimeShutdown::default()
+                };
+                entry.summary.status = ThreadRuntimeStatus::Inactive;
+                entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+                entry.summary.last_reason = None;
+                entry.thread = Some(Arc::clone(&thread));
+                entry.control_tx = Some(control_tx.clone());
+                entry.forwarder_abort = None;
+                (entry.sender.clone(), replaced_runtime)
+            };
+            (sender, replaced_runtime)
+        };
+        replaced_runtime.run();
+
+        let mut runtime_rx = runtime_rx.resubscribe();
+        let forwarder = tokio::spawn(async move {
+            loop {
+                match runtime_rx.recv().await {
+                    Ok(event) => {
+                        let _ = sender.send(event);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+        let forwarder_abort = forwarder.abort_handle();
+        let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
+        let Some(entry) = store.runtimes.get_mut(&thread_id) else {
+            forwarder_abort.abort();
+            return Err(format!("thread {} was removed while attaching", thread_id));
+        };
+        entry.forwarder_abort = Some(forwarder_abort);
+        Ok(())
+    }
+
+    fn take_runtime_shutdown(entry: &mut RuntimeEntry) -> RuntimeShutdown {
+        RuntimeShutdown {
+            thread: entry.thread.take(),
+            control_tx: entry.control_tx.take(),
+            forwarder_abort: entry.forwarder_abort.take(),
+        }
     }
 
     fn sync_relationship_cache(store: &mut ThreadRuntimeStore, registration: &ThreadRegistration) {
@@ -123,11 +385,19 @@ impl ThreadRuntime {
 
         match store.runtimes.entry(registration.thread_id) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().summary = summary;
+                let current = entry.get_mut();
+                current.summary = summary;
             }
             Entry::Vacant(entry) => {
                 let (sender, _) = broadcast::channel(128);
-                entry.insert(RuntimeEntry { summary, sender });
+                entry.insert(RuntimeEntry {
+                    summary,
+                    sender,
+                    thread: None,
+                    control_tx: None,
+                    forwarder_abort: None,
+                    load_mutex: Arc::new(AsyncMutex::new(())),
+                });
             }
         }
     }

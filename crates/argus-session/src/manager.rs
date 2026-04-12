@@ -1,11 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use argus_agent::config::ThreadConfigBuilder;
 use argus_agent::thread_trace_store::{
-    chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
+    chat_thread_base_dir, persist_thread_metadata, recover_thread_metadata, ThreadTraceKind,
+    ThreadTraceMetadata,
 };
 use argus_agent::tool_context::current_agent_id;
 use argus_agent::turn_log_store::{recover_thread_log_state, RecoveredThreadLogState};
+use argus_agent::{
+    FilePlanStore, LlmThreadCompactor, ThreadBuilder, ThreadRegistration, ThreadRuntime,
+    TraceConfig, TurnConfig,
+};
 use argus_job::{JobLookup, JobManager, ThreadPool};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
@@ -17,8 +23,7 @@ use argus_template::TemplateManager;
 use argus_tool::{
     CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
     SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
-    SchedulerTool, SendMessageRequest, SendMessageResponse, ToolManager,
-    MAX_DISPATCH_DEPTH,
+    SchedulerTool, SendMessageRequest, SendMessageResponse, ToolManager, MAX_DISPATCH_DEPTH,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -80,10 +85,198 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
     }
 }
 
+fn chat_thread_registration(session_id: SessionId, thread_id: ThreadId) -> ThreadRegistration {
+    ThreadRegistration {
+        thread_id,
+        kind: ThreadPoolRuntimeKind::Chat,
+        session_id: Some(session_id),
+        parent_thread_id: None,
+        job_id: None,
+        recoverable: true,
+    }
+}
+
+fn build_chat_thread_config(
+    base_dir: PathBuf,
+    model_name: String,
+) -> Result<argus_agent::ThreadConfig> {
+    let trace_cfg = TraceConfig::new(true, base_dir).with_model(Some(model_name));
+    let mut turn_config = TurnConfig::new();
+    turn_config.trace_config = Some(trace_cfg);
+    ThreadConfigBuilder::default()
+        .turn_config(turn_config)
+        .build()
+        .map_err(|error| ArgusError::LlmError {
+            reason: error.to_string(),
+        })
+}
+
+async fn resolve_provider_with_fallback_from_resolver(
+    provider_resolver: &Arc<dyn ProviderResolver>,
+    provider_id: ProviderId,
+    model: Option<&str>,
+) -> Result<Arc<dyn argus_protocol::LlmProvider>> {
+    match model {
+        Some(model) => match provider_resolver
+            .resolve_with_model(provider_id, model)
+            .await
+        {
+            Ok(provider) => Ok(provider),
+            Err(_) => provider_resolver.resolve(provider_id).await,
+        },
+        None => provider_resolver.resolve(provider_id).await,
+    }
+}
+
+async fn hydrate_thread_from_turn_log(
+    thread: &Arc<tokio::sync::RwLock<argus_agent::Thread>>,
+    base_dir: &Path,
+    updated_at: &str,
+) -> Result<()> {
+    let updated_at = chrono::DateTime::parse_from_rfc3339(updated_at)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let recovered =
+        recover_thread_log_state(base_dir)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+    if recovered.turn_count() > 0 {
+        thread
+            .write()
+            .await
+            .hydrate_from_turn_log_state(recovered, updated_at);
+    }
+    Ok(())
+}
+
+async fn build_chat_thread_from_parts(
+    thread_repo: &Arc<dyn ThreadRepository>,
+    provider_resolver: &Arc<dyn ProviderResolver>,
+    tool_manager: &Arc<ToolManager>,
+    trace_dir: &Path,
+    session_id: SessionId,
+    thread_id: ThreadId,
+) -> Result<Arc<tokio::sync::RwLock<argus_agent::Thread>>> {
+    let thread_record = thread_repo
+        .get_thread_in_session(&thread_id, &session_id)
+        .await
+        .map_err(|error| ArgusError::DatabaseError {
+            reason: error.to_string(),
+        })?
+        .ok_or_else(|| ArgusError::ThreadNotFound(thread_id.inner().to_string()))?;
+    let base_dir = chat_thread_base_dir(trace_dir, session_id, thread_id);
+    let metadata =
+        recover_thread_metadata(&base_dir)
+            .await
+            .map_err(|error| ArgusError::DatabaseError {
+                reason: error.to_string(),
+            })?;
+    if metadata.thread_id != thread_id {
+        return Err(ArgusError::DatabaseError {
+            reason: format!(
+                "chat trace metadata for {thread_id} resolved to {}",
+                metadata.thread_id
+            ),
+        });
+    }
+    if metadata.kind != ThreadTraceKind::ChatRoot {
+        return Err(ArgusError::DatabaseError {
+            reason: format!("thread {thread_id} is not recorded as chat_root"),
+        });
+    }
+
+    let agent_record = metadata.agent_snapshot.clone();
+    let provider_id = ProviderId::new(thread_record.provider_id.into_inner());
+    let requested_model = thread_record
+        .model_override
+        .clone()
+        .unwrap_or_else(|| format!("provider-{}", provider_id.inner()));
+    let provider = match resolve_provider_with_fallback_from_resolver(
+        provider_resolver,
+        provider_id,
+        thread_record.model_override.as_deref(),
+    )
+    .await
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                provider_id = %provider_id,
+                error = %error,
+                "Failed to resolve chat provider, using unavailable placeholder provider"
+            );
+            Arc::new(UnconfiguredProvider::new(format!(
+                "{requested_model}: failed to resolve provider: {error}"
+            ))) as Arc<dyn argus_protocol::LlmProvider>
+        }
+    };
+
+    let config = build_chat_thread_config(base_dir.clone(), provider.model_name().to_string())?;
+    let plan_store = FilePlanStore::new(base_dir.clone());
+    let thread = ThreadBuilder::new()
+        .id(thread_id)
+        .session_id(session_id)
+        .agent_record(Arc::new(agent_record))
+        .title(thread_record.title.clone())
+        .provider(provider.clone())
+        .tool_manager(Arc::clone(tool_manager))
+        .compactor(Arc::new(LlmThreadCompactor::new(provider)))
+        .plan_store(plan_store)
+        .config(config)
+        .build()
+        .map_err(|error| ArgusError::LlmError {
+            reason: error.to_string(),
+        })?;
+    let thread = Arc::new(tokio::sync::RwLock::new(thread));
+    hydrate_thread_from_turn_log(&thread, &base_dir, &thread_record.updated_at).await?;
+    Ok(thread)
+}
+
+async fn ensure_chat_thread_runtime_with_mcp(
+    thread_runtime: &Arc<ThreadRuntime>,
+    thread_repo: &Arc<dyn ThreadRepository>,
+    provider_resolver: &Arc<dyn ProviderResolver>,
+    mcp_tool_resolver: &Arc<dyn McpToolResolver>,
+    tool_manager: &Arc<ToolManager>,
+    trace_dir: &Path,
+    session_id: SessionId,
+    thread_id: ThreadId,
+) -> Result<Arc<tokio::sync::RwLock<argus_agent::Thread>>> {
+    let thread = thread_runtime
+        .ensure_chat_runtime(chat_thread_registration(session_id, thread_id), || async {
+            build_chat_thread_from_parts(
+                thread_repo,
+                provider_resolver,
+                tool_manager,
+                trace_dir,
+                session_id,
+                thread_id,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| ArgusError::LlmError { reason: error })?;
+    thread
+        .write()
+        .await
+        .set_mcp_tool_resolver(Some(Arc::clone(mcp_tool_resolver)));
+    Ok(thread)
+}
+
 #[derive(Clone)]
 struct SessionSchedulerBackend {
     template_manager: Arc<TemplateManager>,
     job_manager: Arc<JobManager>,
+    thread_runtime: Arc<ThreadRuntime>,
+    thread_repo: Arc<dyn ThreadRepository>,
+    provider_resolver: Arc<dyn ProviderResolver>,
+    mcp_tool_resolver: Arc<dyn McpToolResolver>,
+    tool_manager: Arc<ToolManager>,
+    trace_dir: PathBuf,
     sessions: Arc<DashMap<SessionId, Arc<Session>>>,
 }
 
@@ -97,11 +290,23 @@ impl SessionSchedulerBackend {
     fn new(
         template_manager: Arc<TemplateManager>,
         job_manager: Arc<JobManager>,
+        thread_runtime: Arc<ThreadRuntime>,
+        thread_repo: Arc<dyn ThreadRepository>,
+        provider_resolver: Arc<dyn ProviderResolver>,
+        mcp_tool_resolver: Arc<dyn McpToolResolver>,
+        tool_manager: Arc<ToolManager>,
+        trace_dir: PathBuf,
         sessions: Arc<DashMap<SessionId, Arc<Session>>>,
     ) -> Self {
         Self {
             template_manager,
             job_manager,
+            thread_runtime,
+            thread_repo,
+            provider_resolver,
+            mcp_tool_resolver,
+            tool_manager,
+            trace_dir,
             sessions,
         }
     }
@@ -177,8 +382,11 @@ impl SessionSchedulerBackend {
     }
 
     async fn source_label(&self, thread_id: ThreadId) -> String {
-        let thread_pool = self.thread_pool();
-        let Some(thread) = thread_pool.loaded_thread(&thread_id) else {
+        let Some(thread) = self
+            .thread_runtime
+            .loaded_thread(&thread_id)
+            .or_else(|| self.thread_pool().loaded_thread(&thread_id))
+        else {
             return format!("Thread {}", thread_id);
         };
 
@@ -186,9 +394,11 @@ impl SessionSchedulerBackend {
         guard.agent_record().display_name.clone()
     }
 
-    async fn current_scheduler_agent(&self) -> std::result::Result<argus_protocol::AgentRecord, ToolError> {
-        let agent_id = current_agent_id()
-            .ok_or_else(|| Self::scheduler_error("no current agent context"))?;
+    async fn current_scheduler_agent(
+        &self,
+    ) -> std::result::Result<argus_protocol::AgentRecord, ToolError> {
+        let agent_id =
+            current_agent_id().ok_or_else(|| Self::scheduler_error("no current agent context"))?;
         self.template_manager
             .get(agent_id)
             .await
@@ -204,11 +414,10 @@ impl SessionSchedulerBackend {
         let mut depth = 0;
         let mut cursor = thread_id;
 
-        while let Some(parent_thread_id) = thread_pool
-            .parent_thread_id(&cursor)
-            .or(thread_pool.recover_parent_thread_id(&cursor).await.map_err(|error| {
-                Self::scheduler_error(error.to_string())
-            })?)
+        while let Some(parent_thread_id) = thread_pool.parent_thread_id(&cursor).or(thread_pool
+            .recover_parent_thread_id(&cursor)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?)
         {
             depth += 1;
             cursor = parent_thread_id;
@@ -428,7 +637,9 @@ impl SchedulerBackend for SessionSchedulerBackend {
     ) -> std::result::Result<String, ToolError> {
         let agent = self.current_scheduler_agent().await?;
         if agent.subagent_names.is_empty() {
-            return Err(Self::scheduler_error("this agent has no subagents configured"));
+            return Err(Self::scheduler_error(
+                "this agent has no subagents configured",
+            ));
         }
 
         let dispatch_depth = self.dispatch_depth_for_thread(request.thread_id).await?;
@@ -535,7 +746,7 @@ impl SchedulerBackend for SessionSchedulerBackend {
                 summary: request.summary.clone(),
             };
 
-            match thread_pool.runtime_summary(target) {
+            match self.thread_runtime.runtime_summary(target) {
                 Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
                     let session_id = summary.runtime.session_id.ok_or_else(|| {
                         Self::scheduler_error(format!(
@@ -553,11 +764,18 @@ impl SchedulerBackend for SessionSchedulerBackend {
                                 session_id, target
                             ))
                         })?;
-                    thread_pool.register_chat_thread(session_id, *target);
-                    let thread = thread_pool
-                        .ensure_chat_runtime(session_id, *target)
-                        .await
-                        .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                    let thread = ensure_chat_thread_runtime_with_mcp(
+                        &self.thread_runtime,
+                        &self.thread_repo,
+                        &self.provider_resolver,
+                        &self.mcp_tool_resolver,
+                        &self.tool_manager,
+                        &self.trace_dir,
+                        session_id,
+                        *target,
+                    )
+                    .await
+                    .map_err(|error| Self::scheduler_error(error.to_string()))?;
                     session.add_thread(thread);
                     if !session.enqueue_mailbox_message(target, message).await {
                         return Err(Self::scheduler_error(format!(
@@ -585,6 +803,18 @@ impl SchedulerBackend for SessionSchedulerBackend {
         &self,
         request: CheckInboxRequest,
     ) -> std::result::Result<Vec<MailboxMessage>, ToolError> {
+        if self
+            .thread_runtime
+            .runtime_summary(&request.thread_id)
+            .is_some_and(|summary| summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+        {
+            return self
+                .thread_runtime
+                .unread_mailbox_messages(request.thread_id)
+                .await
+                .map_err(Self::scheduler_error);
+        }
+
         self.thread_pool()
             .unread_mailbox_messages(request.thread_id)
             .await
@@ -592,11 +822,21 @@ impl SchedulerBackend for SessionSchedulerBackend {
     }
 
     async fn mark_read(&self, request: MarkReadRequest) -> std::result::Result<(), ToolError> {
-        let marked = self
-            .thread_pool()
-            .mark_mailbox_message_read(request.thread_id, &request.message_id)
-            .await
-            .map_err(|error| Self::scheduler_error(error.to_string()))?;
+        let marked = if self
+            .thread_runtime
+            .runtime_summary(&request.thread_id)
+            .is_some_and(|summary| summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+        {
+            self.thread_runtime
+                .mark_mailbox_message_read(request.thread_id, &request.message_id)
+                .await
+                .map_err(Self::scheduler_error)?
+        } else {
+            self.thread_pool()
+                .mark_mailbox_message_read(request.thread_id, &request.message_id)
+                .await
+                .map_err(|error| Self::scheduler_error(error.to_string()))?
+        };
         if !marked {
             return Err(Self::scheduler_error(format!(
                 "message {} was not found in the current inbox",
@@ -618,7 +858,9 @@ pub struct SessionManager {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     mcp_tool_resolver: Arc<dyn McpToolResolver>,
+    tool_manager: Arc<ToolManager>,
     trace_dir: PathBuf,
+    thread_runtime: Arc<ThreadRuntime>,
     thread_pool: Arc<ThreadPool>,
 }
 
@@ -634,24 +876,41 @@ impl SessionManager {
         mcp_tool_resolver: Arc<dyn McpToolResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
-        thread_pool: Arc<ThreadPool>,
         job_manager: Arc<JobManager>,
     ) -> Self {
         let sessions = Arc::new(DashMap::new());
+        let thread_runtime = Arc::new(ThreadRuntime::new());
+        let thread_pool = job_manager.thread_pool();
         let scheduler_backend = Arc::new(SessionSchedulerBackend::new(
             template_manager.clone(),
             job_manager.clone(),
+            Arc::clone(&thread_runtime),
+            Arc::clone(&thread_repo),
+            Arc::clone(&provider_resolver),
+            Arc::clone(&mcp_tool_resolver),
+            Arc::clone(&tool_manager),
+            trace_dir.clone(),
             Arc::clone(&sessions),
         ));
         tool_manager.register(Arc::new(SchedulerTool::new(scheduler_backend.clone())));
         {
             let sessions = Arc::clone(&sessions);
-            let thread_pool = Arc::clone(&thread_pool);
+            let thread_runtime = Arc::clone(&thread_runtime);
+            let thread_repo = Arc::clone(&thread_repo);
+            let provider_resolver = Arc::clone(&provider_resolver);
+            let mcp_tool_resolver = Arc::clone(&mcp_tool_resolver);
+            let tool_manager = Arc::clone(&tool_manager);
+            let trace_dir = trace_dir.clone();
             job_manager.set_chat_mailbox_forwarder(move |thread_id, message| {
                 let sessions = Arc::clone(&sessions);
-                let thread_pool = Arc::clone(&thread_pool);
+                let thread_runtime = Arc::clone(&thread_runtime);
+                let thread_repo = Arc::clone(&thread_repo);
+                let provider_resolver = Arc::clone(&provider_resolver);
+                let mcp_tool_resolver = Arc::clone(&mcp_tool_resolver);
+                let tool_manager = Arc::clone(&tool_manager);
+                let trace_dir = trace_dir.clone();
                 async move {
-                    let Some(summary) = thread_pool.runtime_summary(&thread_id) else {
+                    let Some(summary) = thread_runtime.runtime_summary(&thread_id) else {
                         return false;
                     };
                     if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
@@ -665,8 +924,17 @@ impl SessionManager {
                     else {
                         return false;
                     };
-                    thread_pool.register_chat_thread(session_id, thread_id);
-                    let Ok(thread) = thread_pool.ensure_chat_runtime(session_id, thread_id).await
+                    let Ok(thread) = ensure_chat_thread_runtime_with_mcp(
+                        &thread_runtime,
+                        &thread_repo,
+                        &provider_resolver,
+                        &mcp_tool_resolver,
+                        &tool_manager,
+                        &trace_dir,
+                        session_id,
+                        thread_id,
+                    )
+                    .await
                     else {
                         return false;
                     };
@@ -684,9 +952,31 @@ impl SessionManager {
             template_manager,
             provider_resolver,
             mcp_tool_resolver,
+            tool_manager,
             trace_dir,
+            thread_runtime,
             thread_pool,
         }
+    }
+
+    fn chat_thread_registration(
+        &self,
+        session_id: SessionId,
+        thread_id: ThreadId,
+    ) -> ThreadRegistration {
+        chat_thread_registration(session_id, thread_id)
+    }
+
+    fn register_chat_thread(&self, session_id: SessionId, thread_id: ThreadId) {
+        self.thread_runtime
+            .register_thread(self.chat_thread_registration(session_id, thread_id));
+        let _ = self.thread_pool.register_chat_thread(session_id, thread_id);
+    }
+
+    fn remove_chat_runtime(&self, thread_id: &ThreadId) -> bool {
+        let removed = self.thread_runtime.remove_runtime(thread_id);
+        let _ = self.thread_pool.remove_runtime(thread_id);
+        removed
     }
 
     async fn ensure_thread_runtime_with_mcp(
@@ -694,18 +984,18 @@ impl SessionManager {
         session_id: SessionId,
         thread_id: ThreadId,
     ) -> Result<Arc<tokio::sync::RwLock<argus_agent::Thread>>> {
-        let thread = self
-            .thread_pool
-            .ensure_chat_runtime(session_id, thread_id)
-            .await
-            .map_err(|error| ArgusError::LlmError {
-                reason: error.to_string(),
-            })?;
-        thread
-            .write()
-            .await
-            .set_mcp_tool_resolver(Some(Arc::clone(&self.mcp_tool_resolver)));
-        Ok(thread)
+        self.register_chat_thread(session_id, thread_id);
+        ensure_chat_thread_runtime_with_mcp(
+            &self.thread_runtime,
+            &self.thread_repo,
+            &self.provider_resolver,
+            &self.mcp_tool_resolver,
+            &self.tool_manager,
+            &self.trace_dir,
+            session_id,
+            thread_id,
+        )
+        .await
     }
 
     /// Broadcast a ThreadEvent to all active sessions.
@@ -772,8 +1062,7 @@ impl SessionManager {
 
         self.sessions.insert(session_id, session.clone());
         for thread_record in thread_records {
-            self.thread_pool
-                .register_chat_thread(session_id, thread_record.id);
+            self.register_chat_thread(session_id, thread_record.id);
             match self
                 .ensure_thread_runtime_with_mcp(session_id, thread_record.id)
                 .await
@@ -797,7 +1086,7 @@ impl SessionManager {
     pub async fn unload(&self, session_id: SessionId) -> Result<()> {
         if let Some((_, session)) = self.sessions.remove(&session_id) {
             for thread_id in session.thread_ids() {
-                self.thread_pool.remove_runtime(&thread_id);
+                self.remove_chat_runtime(&thread_id);
             }
         }
         Ok(())
@@ -848,7 +1137,7 @@ impl SessionManager {
         // Remove from memory if loaded
         self.sessions.remove(&session_id);
         for thread_id in thread_ids {
-            self.thread_pool.remove_runtime(&thread_id);
+            self.remove_chat_runtime(&thread_id);
         }
 
         // Clean up session trace directory
@@ -992,14 +1281,13 @@ impl SessionManager {
                     reason: e.to_string(),
                 }
             })?;
-        self.thread_pool.register_chat_thread(session_id, thread_id);
         let thread = match self
             .ensure_thread_runtime_with_mcp(session_id, thread_id)
             .await
         {
             Ok(thread) => thread,
             Err(error) => {
-                self.thread_pool.remove_runtime(&thread_id);
+                self.remove_chat_runtime(&thread_id);
                 let _ = self.thread_repo.delete_thread(&thread_id).await;
                 let _ = tokio::fs::remove_dir_all(&thread_trace_dir).await;
                 return Err(ArgusError::LlmError {
@@ -1021,7 +1309,7 @@ impl SessionManager {
             .map_err(|e| ArgusError::DatabaseError {
                 reason: e.to_string(),
             })?;
-        self.thread_pool.remove_runtime(thread_id);
+        self.remove_chat_runtime(thread_id);
 
         // Remove from in-memory session if loaded
         if let Some(session) = self.sessions.get(&session_id) {
@@ -1078,7 +1366,7 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
-        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+        if let Some(thread) = self.thread_runtime.loaded_chat_thread(thread_id) {
             let mut thread = thread.write().await;
             thread.set_title(in_memory_title);
         }
@@ -1117,7 +1405,7 @@ impl SessionManager {
             return Err(ArgusError::ThreadNotFound(thread_id.inner().to_string()));
         }
 
-        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+        if let Some(thread) = self.thread_runtime.loaded_chat_thread(thread_id) {
             let mut thread = thread.write().await;
             thread.set_provider(provider);
         }
@@ -1164,17 +1452,9 @@ impl SessionManager {
     ) -> Result<()> {
         let session = self.load(session_id).await?;
         self.ensure_thread_in_session(session_id, thread_id).await?;
-        self.ensure_thread_runtime_with_mcp(session_id, *thread_id)
-            .await?;
-        self.thread_pool
-            .register_chat_thread(session_id, *thread_id);
         let thread = self
-            .thread_pool
-            .ensure_chat_runtime(session_id, *thread_id)
-            .await
-            .map_err(|error| ArgusError::LlmError {
-                reason: error.to_string(),
-            })?;
+            .ensure_thread_runtime_with_mcp(session_id, *thread_id)
+            .await?;
         session.add_thread(thread);
         if session.enqueue_user_message(thread_id, message, None).await {
             Ok(())
@@ -1203,7 +1483,7 @@ impl SessionManager {
         thread_id: &ThreadId,
     ) -> Result<Vec<ChatMessage>> {
         self.load(session_id).await?;
-        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+        if let Some(thread) = self.thread_runtime.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
             if thread.has_non_system_history() || thread.turn_count() > 0 {
                 return Ok(thread.history_iter().cloned().collect());
@@ -1233,7 +1513,7 @@ impl SessionManager {
         thread_id: &ThreadId,
     ) -> Result<(Vec<ChatMessage>, u32, u32, u32)> {
         self.load(session_id).await?;
-        if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
+        if let Some(thread) = self.thread_runtime.loaded_chat_thread(thread_id) {
             let thread = thread.read().await;
             let (messages, turn_count, token_count) =
                 if thread.has_non_system_history() || thread.turn_count() > 0 {
@@ -1317,13 +1597,13 @@ impl SessionManager {
         });
         let provider_id = Some(ProviderId::new(thread_record.provider_id.into_inner()));
         self.load(session_id).await?;
-        self.thread_pool
-            .register_chat_thread(session_id, *thread_id);
-        let effective_model = if let Some(thread) = self.thread_pool.loaded_chat_thread(thread_id) {
-            Some(thread.read().await.provider().model_name().to_string())
-        } else {
-            thread_record.model_override.clone()
-        };
+        self.register_chat_thread(session_id, *thread_id);
+        let effective_model =
+            if let Some(thread) = self.thread_runtime.loaded_chat_thread(thread_id) {
+                Some(thread.read().await.provider().model_name().to_string())
+            } else {
+                thread_record.model_override.clone()
+            };
         Ok((template_id, provider_id, effective_model))
     }
 
@@ -1339,11 +1619,9 @@ impl SessionManager {
             .await
             .ok()
             .flatten()?;
-        self.thread_pool.subscribe(thread_id).or_else(|| {
-            Some(
-                self.thread_pool
-                    .register_chat_thread(session_id, *thread_id),
-            )
+        self.thread_runtime.subscribe(thread_id).or_else(|| {
+            self.register_chat_thread(session_id, *thread_id);
+            self.thread_runtime.subscribe(thread_id)
         })
     }
 
@@ -1449,14 +1727,15 @@ mod tests {
     use argus_agent::thread_trace_store::{
         chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
     };
+    use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_agent::turn_log_store::append_turn_record;
     use argus_agent::turn_log_store::RecoveredThreadLogState;
+    use argus_agent::ThreadRuntime;
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
         LlmProviderRepository,
     };
-    use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
         ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
@@ -1693,7 +1972,6 @@ mod tests {
             Arc::new(NoopMcpResolver),
             tool_manager,
             temp_dir.path().join("trace"),
-            job_manager.thread_pool(),
             job_manager,
         );
 
@@ -1750,17 +2028,28 @@ mod tests {
         trace_dir: PathBuf,
         provider: Arc<dyn LlmProvider>,
     ) -> SessionSchedulerBackend {
-        let provider_resolver = Arc::new(FixedProviderResolver::new(provider));
+        let provider_resolver = Arc::new(FixedProviderResolver::new(Arc::clone(&provider)));
+        let tool_manager = Arc::new(argus_tool::ToolManager::new());
         let job_manager = Arc::new(argus_job::JobManager::new_with_repositories(
             template_manager.clone(),
-            provider_resolver,
-            Arc::new(argus_tool::ToolManager::new()),
-            trace_dir,
+            Arc::clone(&provider_resolver) as Arc<dyn argus_protocol::ProviderResolver>,
+            Arc::clone(&tool_manager),
+            trace_dir.clone(),
             sqlite.clone() as Arc<dyn JobRepository>,
             sqlite.clone() as Arc<dyn ThreadRepository>,
-            sqlite as Arc<dyn LlmProviderRepository>,
+            sqlite.clone() as Arc<dyn LlmProviderRepository>,
         ));
-        SessionSchedulerBackend::new(template_manager, job_manager, Arc::new(DashMap::new()))
+        SessionSchedulerBackend::new(
+            template_manager,
+            job_manager,
+            Arc::new(ThreadRuntime::new()),
+            sqlite.clone() as Arc<dyn ThreadRepository>,
+            provider_resolver,
+            Arc::new(NoopMcpResolver),
+            tool_manager,
+            trace_dir,
+            Arc::new(DashMap::new()),
+        )
     }
 
     #[tokio::test]
@@ -1838,7 +2127,7 @@ mod tests {
 
         let session = manager.load(session_id).await.expect("session should load");
         assert!(
-            manager.thread_pool.remove_runtime(&thread_id),
+            manager.remove_chat_runtime(&thread_id),
             "chat runtime should be removable for rehydrate coverage"
         );
 
@@ -1908,13 +2197,12 @@ mod tests {
             .expect("template upsert should succeed");
 
         assert!(
-            manager.thread_pool.remove_runtime(&thread_id),
+            manager.remove_chat_runtime(&thread_id),
             "existing runtime should be evicted before rehydration"
         );
 
         let thread = manager
-            .thread_pool
-            .ensure_chat_runtime(session_id, thread_id)
+            .ensure_thread_runtime_with_mcp(session_id, thread_id)
             .await
             .expect("chat runtime should rebuild from trace snapshot");
         let guard = thread.read().await;
@@ -1930,7 +2218,10 @@ mod tests {
         let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
 
         assert!(
-            manager.thread_pool.loaded_chat_thread(&thread_id).is_some(),
+            manager
+                .thread_runtime
+                .loaded_chat_thread(&thread_id)
+                .is_some(),
             "test setup should leave the chat runtime loaded"
         );
 
@@ -1940,8 +2231,37 @@ mod tests {
             .expect("session unload should succeed");
 
         assert!(
-            manager.thread_pool.loaded_chat_thread(&thread_id).is_none(),
+            manager
+                .thread_runtime
+                .loaded_chat_thread(&thread_id)
+                .is_none(),
             "unload should evict loaded chat runtimes alongside the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn loaded_chat_runtime_lives_in_thread_runtime_registry() {
+        let (manager, _temp_dir, session_id, thread_id) = test_session_manager().await;
+
+        assert!(
+            manager
+                .thread_runtime
+                .loaded_chat_thread(&thread_id)
+                .is_some(),
+            "chat runtime should be registered in ThreadRuntime"
+        );
+
+        manager
+            .unload(session_id)
+            .await
+            .expect("session unload should succeed");
+
+        assert!(
+            manager
+                .thread_runtime
+                .loaded_chat_thread(&thread_id)
+                .is_none(),
+            "unload should evict the chat runtime from ThreadRuntime"
         );
     }
 
@@ -2089,7 +2409,7 @@ mod tests {
 
         assert!(
             manager
-                .thread_pool
+                .thread_runtime
                 .mark_mailbox_message_read(thread_id, &message.id)
                 .await
                 .expect("mark_mailbox_message_read should succeed"),
@@ -2567,7 +2887,8 @@ mod tests {
         let level_two = ThreadId::new();
         let level_three = ThreadId::new();
         let trace_root = harness.temp_dir.path().join("trace");
-        let root_base_dir = chat_thread_base_dir(trace_root.as_path(), harness.session_id, harness.thread_id);
+        let root_base_dir =
+            chat_thread_base_dir(trace_root.as_path(), harness.session_id, harness.thread_id);
         let level_one_dir = root_base_dir.join(level_one.to_string());
         let level_two_dir = level_one_dir.join(level_two.to_string());
         let level_three_dir = level_two_dir.join(level_three.to_string());

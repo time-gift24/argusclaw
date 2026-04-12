@@ -159,7 +159,6 @@ impl ArgusWing {
             mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
-            job_manager.thread_pool(),
             job_manager.clone(),
         ));
 
@@ -230,7 +229,6 @@ impl ArgusWing {
             mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
-            job_manager.thread_pool(),
             job_manager.clone(),
         ));
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
