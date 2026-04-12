@@ -1,6 +1,6 @@
 # ThreadRuntime Refactor Design
 
-**Date:** 2026-04-12  
+**Date:** 2026-04-12
 **Status:** Approved for planning
 
 ## Goal
