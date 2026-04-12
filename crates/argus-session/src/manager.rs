@@ -906,13 +906,19 @@ impl SessionManager {
                 let tool_manager = Arc::clone(&tool_manager);
                 let trace_dir = trace_dir.clone();
                 async move {
-                    let Some(summary) = thread_runtime.runtime_summary(&thread_id) else {
-                        return false;
+                    let session_id = match thread_runtime.runtime_summary(&thread_id) {
+                        Some(summary) => {
+                            if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
+                                return false;
+                            }
+                            summary.runtime.session_id
+                        }
+                        None => match thread_repo.get_thread(&thread_id).await {
+                            Ok(Some(record)) => record.session_id,
+                            Ok(None) | Err(_) => None,
+                        },
                     };
-                    if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
-                        return false;
-                    }
-                    let Some(session_id) = summary.runtime.session_id else {
+                    let Some(session_id) = session_id else {
                         return false;
                     };
                     let Ok(thread) = ensure_chat_thread_runtime_with_mcp(

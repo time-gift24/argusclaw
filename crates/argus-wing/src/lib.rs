@@ -1271,7 +1271,8 @@ mod tests {
             .upsert_template(AgentRecord {
                 id: AgentId::new(0),
                 display_name: "Pool Cleanup Agent".to_string(),
-                description: "Verifies chat runtimes are removed on delete".to_string(),
+                description: "Verifies chat runtime registrations are removed on delete"
+                    .to_string(),
                 version: "1.0.0".to_string(),
                 provider_id: None,
                 model_id: None,
@@ -1324,7 +1325,7 @@ mod tests {
             .upsert_template(AgentRecord {
                 id: AgentId::new(0),
                 display_name: "Session Cleanup Agent".to_string(),
-                description: "Verifies session delete clears pooled chat runtimes".to_string(),
+                description: "Verifies session delete clears registered chat runtimes".to_string(),
                 version: "1.0.0".to_string(),
                 provider_id: None,
                 model_id: None,

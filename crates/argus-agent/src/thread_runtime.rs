@@ -293,16 +293,29 @@ impl ThreadRuntime {
         thread_id: ThreadId,
         message: MailboxMessage,
     ) -> Result<(), String> {
-        let thread = self
-            .loaded_thread(&thread_id)
-            .ok_or_else(|| format!("thread {} is not loaded", thread_id))?;
+        let (thread, sender) = {
+            let store = self.store.lock().expect("thread-runtime mutex poisoned");
+            let entry = store
+                .runtimes
+                .get(&thread_id)
+                .ok_or_else(|| format!("thread {} is not registered", thread_id))?;
+            let thread = entry
+                .thread
+                .clone()
+                .ok_or_else(|| format!("thread {} is not loaded", thread_id))?;
+            (thread, entry.sender.clone())
+        };
         let (mailbox, control_tx) = {
             let guard = thread.read().await;
             (guard.mailbox(), guard.control_tx())
         };
 
-        mailbox.lock().await.enqueue_mailbox_message(message);
+        mailbox
+            .lock()
+            .await
+            .enqueue_mailbox_message(message.clone());
         let _ = control_tx.send(ThreadControlEvent::MailboxUpdated);
+        let _ = sender.send(ThreadEvent::MailboxMessageQueued { thread_id, message });
         Ok(())
     }
 

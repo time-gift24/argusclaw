@@ -317,7 +317,7 @@ pub enum ThreadRuntimeStatus {
     Evicted,
 }
 
-/// Runtime source classification inside the unified thread pool.
+/// Runtime source classification for thread runtime and job-pool observers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadPoolRuntimeKind {
@@ -327,7 +327,7 @@ pub enum ThreadPoolRuntimeKind {
     Job,
 }
 
-/// Stable identifier for a runtime tracked by the unified thread pool.
+/// Stable identifier for a tracked runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ThreadPoolRuntimeRef {
     /// Thread ID.

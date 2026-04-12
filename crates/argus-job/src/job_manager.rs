@@ -167,7 +167,7 @@ impl JobManager {
         self.thread_pool.get_thread_binding(job_id)
     }
 
-    /// Return the shared unified thread pool.
+    /// Return the shared job thread pool.
     pub fn thread_pool(&self) -> Arc<ThreadPool> {
         Arc::clone(&self.thread_pool)
     }
