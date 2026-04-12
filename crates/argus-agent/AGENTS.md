@@ -77,7 +77,7 @@
 - chat thread 一定是树根，`parent_thread_id = None`。
 - job thread 一定是其派发源 thread 的直接子节点，并持久化到父节点目录下。
 - job thread 必须持久化自己的 `parent_thread_id` 和 `job_id`；父节点不再维护持久化 child 列表。
-- `ThreadPool` 中的 `parent_thread_by_child` / `child_threads_by_parent` 只是运行时缓存，不是真相源；恢复时必须从目录树和子节点元数据回填。
+- runtime registry / job runtime supervisor 中的 `parent_thread_by_child` / `child_threads_by_parent` 只是运行时缓存，不是真相源；恢复时必须从目录树和子节点元数据回填。
 - job thread 一旦创建，父节点固定；发现持久化父节点与当前派发源不一致时应直接报错，不做隐式迁移。
 
 ### Simplicity Guardrails

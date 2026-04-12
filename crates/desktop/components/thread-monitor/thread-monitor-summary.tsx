@@ -6,7 +6,7 @@ import { Activity, Cpu, HardDrive, Radar, TimerReset, Workflow } from "lucide-re
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { ThreadPoolSnapshot } from "@/lib/types/chat";
+import type { JobRuntimePoolSnapshot } from "@/lib/types/chat";
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -63,7 +63,7 @@ function MetricCard({ icon, label, value, detail, tone = "default" }: MetricCard
 }
 
 interface ThreadMonitorSummaryProps {
-  snapshot: ThreadPoolSnapshot | null;
+  snapshot: JobRuntimePoolSnapshot | null;
   observedCount: number;
   loading: boolean;
 }

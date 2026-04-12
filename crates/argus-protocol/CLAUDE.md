@@ -6,7 +6,7 @@
 
 - 定义 `LlmProvider`、`NamedTool`、`HookHandler`、`ProviderResolver` 等跨层抽象
 - 提供 `ThreadId` / `SessionId` / `AgentId` / `ProviderId` 等强类型 ID
-- 统一承载 `ThreadEvent`、`ThreadPoolSnapshot`、plan 参数、安全输出与 MCP 记录
+- 统一承载 `ThreadEvent`、`JobRuntimePoolSnapshot`、plan 参数、安全输出与 MCP 记录
 
 ## 关键模块
 

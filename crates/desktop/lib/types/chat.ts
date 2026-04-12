@@ -34,7 +34,7 @@ export interface ThreadSnapshotPayload {
   plan_item_count: number;
 }
 
-export type ThreadRuntimeStatus =
+export type RuntimeStatus =
   | "inactive"
   | "loading"
   | "queued"
@@ -42,25 +42,34 @@ export type ThreadRuntimeStatus =
   | "cooling"
   | "evicted";
 
-export type ThreadPoolRuntimeKind = "chat" | "job";
+export type RuntimeKind = "chat" | "job";
 
-export interface ThreadPoolRuntimeRef {
+export interface RuntimeRef {
   thread_id: string;
-  kind: ThreadPoolRuntimeKind;
+  kind: RuntimeKind;
   session_id: string | null;
   job_id: string | null;
 }
 
-export interface ThreadPoolRuntimeSummary {
-  runtime: ThreadPoolRuntimeRef;
-  status: ThreadRuntimeStatus;
+export interface JobRuntimeSummary {
+  runtime: RuntimeRef;
+  status: RuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;
   recoverable: boolean;
-  last_reason: ThreadPoolEventReason | null;
+  last_reason: RuntimeEventReason | null;
 }
 
-export interface ThreadPoolSnapshot {
+export interface ThreadRuntimeSummary {
+  runtime: RuntimeRef;
+  status: RuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+  last_reason: RuntimeEventReason | null;
+}
+
+export interface ThreadRuntimeSnapshot {
   max_threads: number;
   active_threads: number;
   queued_threads: number;
@@ -76,12 +85,33 @@ export interface ThreadPoolSnapshot {
   captured_at: string;
 }
 
-export interface ThreadPoolState {
-  snapshot: ThreadPoolSnapshot;
-  runtimes: ThreadPoolRuntimeSummary[];
+export interface ThreadRuntimeState {
+  snapshot: ThreadRuntimeSnapshot;
+  runtimes: ThreadRuntimeSummary[];
 }
 
-export type ThreadPoolEventReason =
+export interface JobRuntimePoolSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_threads: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
+export interface JobRuntimePoolState {
+  snapshot: JobRuntimePoolSnapshot;
+  runtimes: JobRuntimeSummary[];
+}
+
+export type RuntimeEventReason =
   | "cooling_expired"
   | "memory_pressure"
   | "cancelled"
@@ -119,7 +149,7 @@ export interface JobDetailTimelineItem {
   at: string;
   label: string;
   status: JobDetailStatus;
-  reason?: ThreadPoolEventReason | null;
+  reason?: RuntimeEventReason | null;
 }
 
 export interface JobDetailPayload {
@@ -230,17 +260,17 @@ export type ThreadEventPayload =
   | { type: "compaction_finished" }
   | { type: "compaction_failed"; error: string }
   | { type: "thread_bound_to_job"; job_id: string }
-  | { type: "thread_pool_queued"; runtime: ThreadPoolRuntimeRef }
-  | { type: "thread_pool_started"; runtime: ThreadPoolRuntimeRef }
-  | { type: "thread_pool_cooling"; runtime: ThreadPoolRuntimeRef }
+  | { type: "job_runtime_queued"; runtime: RuntimeRef }
+  | { type: "job_runtime_started"; runtime: RuntimeRef }
+  | { type: "job_runtime_cooling"; runtime: RuntimeRef }
   | {
-      type: "thread_pool_evicted";
-      runtime: ThreadPoolRuntimeRef;
-      reason: ThreadPoolEventReason;
+      type: "job_runtime_evicted";
+      runtime: RuntimeRef;
+      reason: RuntimeEventReason;
     }
   | {
-      type: "thread_pool_metrics_updated";
-      snapshot: ThreadPoolSnapshot;
+      type: "job_runtime_metrics_updated";
+      snapshot: JobRuntimePoolSnapshot;
     }
   | {
       type: "job_dispatched";

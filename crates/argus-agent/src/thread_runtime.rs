@@ -4,9 +4,9 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use argus_protocol::{
-    MailboxMessage, SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadPoolRuntimeKind,
-    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeStatus,
+    MailboxMessage, RuntimeEventReason, RuntimeKind, RuntimeRef, RuntimeStatus, SessionId,
+    ThreadControlEvent, ThreadEvent, ThreadId, ThreadRuntimeSnapshot, ThreadRuntimeState,
+    ThreadRuntimeSummary,
 };
 use chrono::Utc;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, broadcast, mpsc};
@@ -14,7 +14,7 @@ use tokio::task::AbortHandle;
 
 #[derive(Debug)]
 struct RuntimeEntry {
-    summary: ThreadPoolRuntimeSummary,
+    summary: ThreadRuntimeSummary,
     sender: broadcast::Sender<ThreadEvent>,
     thread: Option<Arc<RwLock<crate::Thread>>>,
     control_tx: Option<mpsc::UnboundedSender<ThreadControlEvent>>,
@@ -51,7 +51,7 @@ impl RuntimeShutdown {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadRegistration {
     pub thread_id: ThreadId,
-    pub kind: ThreadPoolRuntimeKind,
+    pub kind: RuntimeKind,
     pub session_id: Option<SessionId>,
     pub parent_thread_id: Option<ThreadId>,
     pub job_id: Option<String>,
@@ -131,7 +131,7 @@ impl ThreadRuntime {
     }
 
     #[must_use]
-    pub fn runtime_summary(&self, thread_id: &ThreadId) -> Option<ThreadPoolRuntimeSummary> {
+    pub fn runtime_summary(&self, thread_id: &ThreadId) -> Option<ThreadRuntimeSummary> {
         self.store
             .lock()
             .expect("thread-runtime mutex poisoned")
@@ -141,24 +141,25 @@ impl ThreadRuntime {
     }
 
     #[must_use]
-    pub fn collect_state(&self) -> ThreadPoolState {
+    pub fn collect_state(&self) -> ThreadRuntimeState {
         let store = self.store.lock().expect("thread-runtime mutex poisoned");
         let runtimes: Vec<_> = store
             .runtimes
             .values()
+            .filter(|entry| entry.summary.runtime.kind == RuntimeKind::Chat)
             .map(|entry| entry.summary.clone())
             .collect();
         let queued_threads = runtimes
             .iter()
-            .filter(|runtime| runtime.status == ThreadRuntimeStatus::Queued)
+            .filter(|runtime| runtime.status == RuntimeStatus::Queued)
             .count() as u32;
         let running_threads = runtimes
             .iter()
-            .filter(|runtime| runtime.status == ThreadRuntimeStatus::Running)
+            .filter(|runtime| runtime.status == RuntimeStatus::Running)
             .count() as u32;
         let cooling_threads = runtimes
             .iter()
-            .filter(|runtime| runtime.status == ThreadRuntimeStatus::Cooling)
+            .filter(|runtime| runtime.status == RuntimeStatus::Cooling)
             .count() as u32;
         let resident_thread_count = store
             .runtimes
@@ -177,9 +178,9 @@ impl ThreadRuntime {
             estimated_memory_bytes / u64::from(resident_thread_count)
         };
 
-        ThreadPoolState {
-            snapshot: ThreadPoolSnapshot {
-                // ThreadRuntime is a registry view and does not own ThreadPool admission limits.
+        ThreadRuntimeState {
+            snapshot: ThreadRuntimeSnapshot {
+                // ThreadRuntime is a registry view and does not own job admission limits.
                 max_threads: 0,
                 active_threads: resident_thread_count,
                 queued_threads,
@@ -187,13 +188,13 @@ impl ThreadRuntime {
                 cooling_threads,
                 evicted_threads: runtimes
                     .iter()
-                    .filter(|runtime| runtime.status == ThreadRuntimeStatus::Evicted)
+                    .filter(|runtime| runtime.status == RuntimeStatus::Evicted)
                     .count() as u64,
                 estimated_memory_bytes,
                 peak_estimated_memory_bytes: estimated_memory_bytes,
                 process_memory_bytes: None,
                 peak_process_memory_bytes: None,
-                // Registry residency counts loaded runtimes, not ThreadPool slot ownership.
+                // Registry residency counts loaded runtimes, not job-runtime slot ownership.
                 resident_thread_count,
                 avg_thread_memory_bytes,
                 captured_at: Utc::now().to_rfc3339(),
@@ -210,7 +211,7 @@ impl ThreadRuntime {
             .runtimes
             .get(thread_id)
             .and_then(|entry| {
-                (entry.summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+                (entry.summary.runtime.kind == RuntimeKind::Chat)
                     .then(|| entry.thread.clone())
                     .flatten()
             })
@@ -337,7 +338,7 @@ impl ThreadRuntime {
             .runtimes
             .get_mut(thread_id)
             .ok_or_else(|| format!("thread {} is not registered", thread_id))?;
-        entry.summary.status = ThreadRuntimeStatus::Loading;
+        entry.summary.status = RuntimeStatus::Loading;
         entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
         entry.summary.last_reason = None;
         Ok(())
@@ -347,7 +348,7 @@ impl ThreadRuntime {
         let mut store = self.store.lock().expect("thread-runtime mutex poisoned");
         let mut shutdown = RuntimeShutdown::default();
         if let Some(entry) = store.runtimes.get_mut(thread_id) {
-            entry.summary.status = ThreadRuntimeStatus::Inactive;
+            entry.summary.status = RuntimeStatus::Inactive;
             entry.summary.estimated_memory_bytes = 0;
             entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
             entry.summary.last_reason = None;
@@ -382,7 +383,7 @@ impl ThreadRuntime {
                 } else {
                     RuntimeShutdown::default()
                 };
-                entry.summary.status = ThreadRuntimeStatus::Inactive;
+                entry.summary.status = RuntimeStatus::Inactive;
                 entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
                 entry.summary.last_reason = None;
                 entry.thread = Some(Arc::clone(&thread));
@@ -432,15 +433,15 @@ impl ThreadRuntime {
             ThreadEvent::Processing { .. }
             | ThreadEvent::ToolStarted { .. }
             | ThreadEvent::ToolCompleted { .. }
-            | ThreadEvent::CompactionStarted { .. } => (Some(ThreadRuntimeStatus::Running), None),
+            | ThreadEvent::CompactionStarted { .. } => (Some(RuntimeStatus::Running), None),
             ThreadEvent::Idle { .. }
             | ThreadEvent::TurnCompleted { .. }
             | ThreadEvent::TurnSettled { .. }
             | ThreadEvent::CompactionFinished { .. }
-            | ThreadEvent::Compacted { .. } => (Some(ThreadRuntimeStatus::Inactive), None),
+            | ThreadEvent::Compacted { .. } => (Some(RuntimeStatus::Inactive), None),
             ThreadEvent::TurnFailed { .. } | ThreadEvent::CompactionFailed { .. } => (
-                Some(ThreadRuntimeStatus::Inactive),
-                Some(argus_protocol::ThreadPoolEventReason::ExecutionFailed),
+                Some(RuntimeStatus::Inactive),
+                Some(RuntimeEventReason::ExecutionFailed),
             ),
             _ => (None, None),
         };
@@ -499,14 +500,14 @@ impl ThreadRuntime {
     }
 
     fn upsert_runtime_summary(store: &mut ThreadRuntimeStore, registration: ThreadRegistration) {
-        let summary = ThreadPoolRuntimeSummary {
-            runtime: ThreadPoolRuntimeRef {
+        let summary = ThreadRuntimeSummary {
+            runtime: RuntimeRef {
                 thread_id: registration.thread_id,
                 kind: registration.kind,
                 session_id: registration.session_id,
                 job_id: registration.job_id,
             },
-            status: ThreadRuntimeStatus::Inactive,
+            status: RuntimeStatus::Inactive,
             estimated_memory_bytes: 0,
             last_active_at: None,
             recoverable: registration.recoverable,
@@ -543,8 +544,8 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
     };
     use argus_protocol::{
-        AgentId, AgentRecord, SessionId, ThinkingConfig, ThreadEvent, ThreadId,
-        ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadRuntimeStatus,
+        AgentId, AgentRecord, RuntimeEventReason, RuntimeKind, RuntimeStatus, SessionId,
+        ThinkingConfig, ThreadEvent, ThreadId,
     };
     use tokio::sync::RwLock;
     use tokio::time::{Duration, timeout};
@@ -598,7 +599,7 @@ mod tests {
     ) -> Arc<RwLock<Thread>> {
         runtime.register_thread(ThreadRegistration {
             thread_id,
-            kind: ThreadPoolRuntimeKind::Chat,
+            kind: RuntimeKind::Chat,
             session_id: Some(session_id),
             parent_thread_id: None,
             job_id: None,
@@ -643,7 +644,7 @@ mod tests {
     async fn wait_for_status(
         runtime: &ThreadRuntime,
         thread_id: ThreadId,
-        expected: ThreadRuntimeStatus,
+        expected: RuntimeStatus,
     ) {
         timeout(Duration::from_secs(2), async {
             loop {
@@ -668,7 +669,7 @@ mod tests {
 
         runtime.register_thread(ThreadRegistration {
             thread_id,
-            kind: ThreadPoolRuntimeKind::Chat,
+            kind: RuntimeKind::Chat,
             session_id: Some(session_id),
             parent_thread_id: None,
             job_id: None,
@@ -680,10 +681,10 @@ mod tests {
             .expect("registered thread should expose a summary");
 
         assert_eq!(summary.runtime.thread_id, thread_id);
-        assert_eq!(summary.runtime.kind, ThreadPoolRuntimeKind::Chat);
+        assert_eq!(summary.runtime.kind, RuntimeKind::Chat);
         assert_eq!(summary.runtime.session_id, Some(session_id));
         assert_eq!(summary.runtime.job_id, None);
-        assert_eq!(summary.status, ThreadRuntimeStatus::Inactive);
+        assert_eq!(summary.status, RuntimeStatus::Inactive);
         assert!(runtime.subscribe(&thread_id).is_some());
     }
 
@@ -696,7 +697,7 @@ mod tests {
 
         runtime.register_thread(ThreadRegistration {
             thread_id,
-            kind: ThreadPoolRuntimeKind::Chat,
+            kind: RuntimeKind::Chat,
             session_id: Some(first_session_id),
             parent_thread_id: None,
             job_id: None,
@@ -705,7 +706,7 @@ mod tests {
 
         runtime.register_thread(ThreadRegistration {
             thread_id,
-            kind: ThreadPoolRuntimeKind::Job,
+            kind: RuntimeKind::Job,
             session_id: Some(second_session_id),
             parent_thread_id: None,
             job_id: Some("job-123".to_string()),
@@ -716,7 +717,7 @@ mod tests {
             .runtime_summary(&thread_id)
             .expect("re-registered thread should update its summary");
 
-        assert_eq!(summary.runtime.kind, ThreadPoolRuntimeKind::Job);
+        assert_eq!(summary.runtime.kind, RuntimeKind::Job);
         assert_eq!(summary.runtime.session_id, Some(second_session_id));
         assert_eq!(summary.runtime.job_id.as_deref(), Some("job-123"));
         assert!(!summary.recoverable);
@@ -732,7 +733,7 @@ mod tests {
 
         runtime.register_thread(ThreadRegistration {
             thread_id,
-            kind: ThreadPoolRuntimeKind::Chat,
+            kind: RuntimeKind::Chat,
             session_id: Some(first_session_id),
             parent_thread_id: None,
             job_id: None,
@@ -745,15 +746,15 @@ mod tests {
                 .runtimes
                 .get_mut(&thread_id)
                 .expect("thread should be registered");
-            entry.summary.status = ThreadRuntimeStatus::Running;
+            entry.summary.status = RuntimeStatus::Running;
             entry.summary.estimated_memory_bytes = 512;
             entry.summary.last_active_at = Some("2026-04-12T12:34:56Z".to_string());
-            entry.summary.last_reason = Some(ThreadPoolEventReason::CoolingExpired);
+            entry.summary.last_reason = Some(RuntimeEventReason::CoolingExpired);
         }
 
         runtime.register_thread(ThreadRegistration {
             thread_id,
-            kind: ThreadPoolRuntimeKind::Job,
+            kind: RuntimeKind::Job,
             session_id: Some(second_session_id),
             parent_thread_id: None,
             job_id: Some("job-456".to_string()),
@@ -764,10 +765,10 @@ mod tests {
             .runtime_summary(&thread_id)
             .expect("re-registered thread should still expose a summary");
 
-        assert_eq!(summary.runtime.kind, ThreadPoolRuntimeKind::Job);
+        assert_eq!(summary.runtime.kind, RuntimeKind::Job);
         assert_eq!(summary.runtime.session_id, Some(second_session_id));
         assert_eq!(summary.runtime.job_id.as_deref(), Some("job-456"));
-        assert_eq!(summary.status, ThreadRuntimeStatus::Running);
+        assert_eq!(summary.status, RuntimeStatus::Running);
         assert_eq!(summary.estimated_memory_bytes, 512);
         assert_eq!(
             summary.last_active_at.as_deref(),
@@ -775,7 +776,7 @@ mod tests {
         );
         assert_eq!(
             summary.last_reason,
-            Some(ThreadPoolEventReason::CoolingExpired)
+            Some(RuntimeEventReason::CoolingExpired)
         );
         assert!(!summary.recoverable);
     }
@@ -797,12 +798,12 @@ mod tests {
                     delta: "hello".to_string(),
                 },
             });
-        wait_for_status(&runtime, thread_id, ThreadRuntimeStatus::Running).await;
+        wait_for_status(&runtime, thread_id, RuntimeStatus::Running).await;
 
         thread.read().await.broadcast_to_self(ThreadEvent::Idle {
             thread_id: thread_id.to_string(),
         });
-        wait_for_status(&runtime, thread_id, ThreadRuntimeStatus::Inactive).await;
+        wait_for_status(&runtime, thread_id, RuntimeStatus::Inactive).await;
     }
 
     #[tokio::test]
@@ -824,8 +825,8 @@ mod tests {
         timeout(Duration::from_secs(2), async {
             loop {
                 if let Some(summary) = runtime.runtime_summary(&thread_id)
-                    && summary.status == ThreadRuntimeStatus::Inactive
-                    && summary.last_reason == Some(ThreadPoolEventReason::ExecutionFailed)
+                    && summary.status == RuntimeStatus::Inactive
+                    && summary.last_reason == Some(RuntimeEventReason::ExecutionFailed)
                 {
                     break;
                 }

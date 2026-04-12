@@ -46,7 +46,7 @@ type TurnExecutionParts = (
 
 /// Internal runtime state for a loaded thread actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ThreadRuntimeState {
+pub(crate) enum ThreadLoopState {
     /// Runtime is idle and ready for work.
     Idle,
     /// Runtime is executing a turn.
@@ -134,7 +134,7 @@ pub struct Thread {
 
     /// Current runtime state.
     #[builder(default)]
-    runtime_state: ThreadRuntimeState,
+    runtime_state: ThreadLoopState,
 
     /// Cancellation handle for the active turn, if any.
     #[builder(default)]
@@ -219,7 +219,7 @@ impl ThreadBuilder {
             compactor: self.compactor.ok_or(ThreadError::CompactorNotConfigured)?,
             hooks,
             config: self.config.unwrap_or_default(),
-            runtime_state: ThreadRuntimeState::Idle,
+            runtime_state: ThreadLoopState::Idle,
             active_turn_cancellation: None,
             pipe_tx,
             control_tx,
@@ -314,21 +314,21 @@ impl Thread {
 
     /// Returns true if a Turn is currently executing.
     pub fn is_turn_running(&self) -> bool {
-        !matches!(self.runtime_state, ThreadRuntimeState::Idle)
+        !matches!(self.runtime_state, ThreadLoopState::Idle)
     }
 
     /// Get current state.
     pub fn state(&self) -> ThreadState {
         match self.runtime_state {
-            ThreadRuntimeState::Idle => ThreadState::Idle,
-            ThreadRuntimeState::Running { .. } | ThreadRuntimeState::Stopping { .. } => {
+            ThreadLoopState::Idle => ThreadState::Idle,
+            ThreadLoopState::Running { .. } | ThreadLoopState::Stopping { .. } => {
                 ThreadState::Processing
             }
         }
     }
 
     fn reset_runtime_loop_state(&mut self) {
-        self.runtime_state = ThreadRuntimeState::Idle;
+        self.runtime_state = ThreadLoopState::Idle;
         self.active_turn_cancellation = None;
     }
 
@@ -361,20 +361,20 @@ impl Thread {
         // A stop request only applies to the turn that just settled; it must
         // not spill into the next queued turn.
         mailbox.clear_stop_signal();
-        self.runtime_state = ThreadRuntimeState::Idle;
+        self.runtime_state = ThreadLoopState::Idle;
         self.try_start_next_turn(mailbox)
     }
 
     fn inspect_runtime_mailbox(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
         if mailbox.take_stop_signal() {
-            if matches!(self.runtime_state, ThreadRuntimeState::Running { .. }) {
+            if matches!(self.runtime_state, ThreadLoopState::Running { .. }) {
                 return self.cancel_active_turn();
             }
 
             return ThreadLoopAction::Noop;
         }
 
-        if matches!(self.runtime_state, ThreadRuntimeState::Idle) {
+        if matches!(self.runtime_state, ThreadLoopState::Idle) {
             return self.try_start_next_turn(mailbox);
         }
 
@@ -382,7 +382,7 @@ impl Thread {
     }
 
     fn try_start_next_turn(&mut self, mailbox: &mut ThreadMailbox) -> ThreadLoopAction {
-        if !matches!(self.runtime_state, ThreadRuntimeState::Idle) {
+        if !matches!(self.runtime_state, ThreadLoopState::Idle) {
             return ThreadLoopAction::Noop;
         }
 
@@ -394,7 +394,7 @@ impl Thread {
 
     fn start_runtime_turn(&mut self, message: QueuedUserMessage) -> ThreadLoopAction {
         let turn_number = derive_next_user_turn_number(&self.turns);
-        self.runtime_state = ThreadRuntimeState::Running { turn_number };
+        self.runtime_state = ThreadLoopState::Running { turn_number };
 
         ThreadLoopAction::StartTurn {
             turn_number,
@@ -405,13 +405,11 @@ impl Thread {
 
     fn cancel_active_turn(&mut self) -> ThreadLoopAction {
         match self.runtime_state {
-            ThreadRuntimeState::Running { turn_number } => {
-                self.runtime_state = ThreadRuntimeState::Stopping { turn_number };
+            ThreadLoopState::Running { turn_number } => {
+                self.runtime_state = ThreadLoopState::Stopping { turn_number };
                 ThreadLoopAction::StopTurn { turn_number }
             }
-            ThreadRuntimeState::Idle | ThreadRuntimeState::Stopping { .. } => {
-                ThreadLoopAction::Noop
-            }
+            ThreadLoopState::Idle | ThreadLoopState::Stopping { .. } => ThreadLoopAction::Noop,
         }
     }
 
@@ -514,7 +512,7 @@ impl Thread {
     ) {
         self.turns = recovered.turns;
         self.active_turn_cancellation = None;
-        self.runtime_state = ThreadRuntimeState::Idle;
+        self.runtime_state = ThreadLoopState::Idle;
         self.updated_at = updated_at;
     }
 
@@ -661,7 +659,7 @@ impl Thread {
                             shutdown_requested = true;
                             let state = { thread.read().await.runtime_state };
                             match state {
-                                ThreadRuntimeState::Idle => break,
+                                ThreadLoopState::Idle => break,
                                 _ => {
                                     let mut mailbox = mailbox.lock().await;
                                     let mut guard = thread.write().await;
@@ -862,9 +860,9 @@ impl Thread {
     ) {
         let committed = result.is_ok();
         let settled_turn_number = match thread.read().await.runtime_state {
-            ThreadRuntimeState::Running { turn_number }
-            | ThreadRuntimeState::Stopping { turn_number } => Some(turn_number),
-            ThreadRuntimeState::Idle => None,
+            ThreadLoopState::Running { turn_number }
+            | ThreadLoopState::Stopping { turn_number } => Some(turn_number),
+            ThreadLoopState::Idle => None,
         };
         let thread_id = {
             let guard = thread.read().await;
@@ -1167,7 +1165,7 @@ impl Thread {
     #[cfg(test)]
     fn hydrate_turn_history_for_test(&mut self, turns: Vec<TurnRecord>) {
         self.turns = turns;
-        self.runtime_state = ThreadRuntimeState::Idle;
+        self.runtime_state = ThreadLoopState::Idle;
         self.active_turn_cancellation = None;
     }
 }
@@ -1725,7 +1723,7 @@ mod tests {
         );
         assert_eq!(
             thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 3 }
+            ThreadLoopState::Running { turn_number: 3 }
         );
 
         thread.dispatch_runtime_command(
@@ -1746,7 +1744,7 @@ mod tests {
         thread.complete_runtime_turn(false, &mut mailbox);
         assert_eq!(
             thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 3 }
+            ThreadLoopState::Running { turn_number: 3 }
         );
         assert_eq!(mailbox.pending_len(), 0);
 
@@ -1761,7 +1759,7 @@ mod tests {
             )))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
-        assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
+        assert_eq!(thread.runtime_state, ThreadLoopState::Idle);
     }
 
     #[tokio::test]
@@ -1778,7 +1776,7 @@ mod tests {
         );
         assert_eq!(
             thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 1 }
+            ThreadLoopState::Running { turn_number: 1 }
         );
 
         let _agent = thread
@@ -1792,7 +1790,7 @@ mod tests {
             )))
             .expect("turn should settle");
         thread.complete_runtime_turn(true, &mut mailbox);
-        assert_eq!(thread.runtime_state, ThreadRuntimeState::Idle);
+        assert_eq!(thread.runtime_state, ThreadLoopState::Idle);
 
         thread.dispatch_runtime_command(
             ThreadCommand::EnqueueUserMessage {
@@ -1803,7 +1801,7 @@ mod tests {
         );
         assert_eq!(
             thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 2 }
+            ThreadLoopState::Running { turn_number: 2 }
         );
     }
 
@@ -1842,14 +1840,14 @@ mod tests {
         thread.complete_runtime_turn(true, &mut mailbox);
         assert_eq!(
             thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 2 }
+            ThreadLoopState::Running { turn_number: 2 }
         );
 
         let action = thread.inspect_runtime_mailbox(&mut mailbox);
         assert!(matches!(action, ThreadLoopAction::Noop));
         assert_eq!(
             thread.runtime_state,
-            ThreadRuntimeState::Running { turn_number: 2 }
+            ThreadLoopState::Running { turn_number: 2 }
         );
     }
 

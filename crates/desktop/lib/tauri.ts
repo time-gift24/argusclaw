@@ -296,7 +296,7 @@ export interface ThreadSnapshotPayload {
   plan_item_count: number;
 }
 
-export type ThreadRuntimeStatus =
+export type RuntimeStatus =
   | "inactive"
   | "loading"
   | "queued"
@@ -304,25 +304,34 @@ export type ThreadRuntimeStatus =
   | "cooling"
   | "evicted";
 
-export type ThreadPoolRuntimeKind = "chat" | "job";
+export type RuntimeKind = "chat" | "job";
 
-export interface ThreadPoolRuntimeRef {
+export interface RuntimeRef {
   thread_id: string;
-  kind: ThreadPoolRuntimeKind;
+  kind: RuntimeKind;
   session_id: string | null;
   job_id: string | null;
 }
 
-export interface ThreadPoolRuntimeSummary {
-  runtime: ThreadPoolRuntimeRef;
-  status: ThreadRuntimeStatus;
+export interface JobRuntimeSummary {
+  runtime: RuntimeRef;
+  status: RuntimeStatus;
   estimated_memory_bytes: number;
   last_active_at: string | null;
   recoverable: boolean;
-  last_reason: ThreadPoolEventReason | null;
+  last_reason: RuntimeEventReason | null;
 }
 
-export interface ThreadPoolSnapshot {
+export interface ThreadRuntimeSummary {
+  runtime: RuntimeRef;
+  status: RuntimeStatus;
+  estimated_memory_bytes: number;
+  last_active_at: string | null;
+  recoverable: boolean;
+  last_reason: RuntimeEventReason | null;
+}
+
+export interface ThreadRuntimeSnapshot {
   max_threads: number;
   active_threads: number;
   queued_threads: number;
@@ -338,12 +347,33 @@ export interface ThreadPoolSnapshot {
   captured_at: string;
 }
 
-export interface ThreadPoolState {
-  snapshot: ThreadPoolSnapshot;
-  runtimes: ThreadPoolRuntimeSummary[];
+export interface ThreadRuntimeState {
+  snapshot: ThreadRuntimeSnapshot;
+  runtimes: ThreadRuntimeSummary[];
 }
 
-export type ThreadPoolEventReason =
+export interface JobRuntimePoolSnapshot {
+  max_threads: number;
+  active_threads: number;
+  queued_threads: number;
+  running_threads: number;
+  cooling_threads: number;
+  evicted_threads: number;
+  estimated_memory_bytes: number;
+  peak_estimated_memory_bytes: number;
+  process_memory_bytes: number | null;
+  peak_process_memory_bytes: number | null;
+  resident_thread_count: number;
+  avg_thread_memory_bytes: number;
+  captured_at: string;
+}
+
+export interface JobRuntimePoolState {
+  snapshot: JobRuntimePoolSnapshot;
+  runtimes: JobRuntimeSummary[];
+}
+
+export type RuntimeEventReason =
   | "cooling_expired"
   | "memory_pressure"
   | "cancelled"
@@ -398,11 +428,11 @@ export const chat = {
     invoke<ThreadSummary[]>("list_threads", { sessionId }),
 };
 
-export const threadPool = {
-  getSnapshot: () => invoke<ThreadPoolSnapshot>("get_thread_pool_snapshot"),
-  getState: () => invoke<ThreadPoolState>("get_thread_pool_state"),
+export const jobRuntime = {
+  getSnapshot: () => invoke<JobRuntimePoolSnapshot>("get_job_runtime_snapshot"),
+  getState: () => invoke<JobRuntimePoolState>("get_job_runtime_state"),
 };
 
 export const threadRuntime = {
-  getState: () => invoke<ThreadPoolState>("get_thread_runtime_state"),
+  getState: () => invoke<ThreadRuntimeState>("get_thread_runtime_state"),
 };

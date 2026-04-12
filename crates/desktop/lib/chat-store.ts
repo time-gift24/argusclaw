@@ -1,20 +1,23 @@
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { agents, chat, providers, sessions, threadPool } from "@/lib/tauri";
+import { agents, chat, jobRuntime, providers, sessions, threadRuntime } from "@/lib/tauri";
 import type {
   JobDetailPayload,
   JobDetailTimelineItem,
+  JobRuntimePoolState,
   JobStatusPayload,
+  JobRuntimeSummary,
   MailboxMessageJobResultPayload,
   MailboxMessagePayload,
+  RuntimeEventReason,
+  RuntimeKind,
+  JobRuntimePoolSnapshot,
+  RuntimeStatus,
   ThreadEventEnvelope,
-  ThreadPoolEventReason,
-  ThreadPoolRuntimeKind,
-  ThreadPoolRuntimeSummary,
-  ThreadPoolSnapshot,
+  ThreadRuntimeState,
+  ThreadRuntimeSummary,
   ThreadSnapshotPayload,
-  ThreadRuntimeStatus,
 } from "@/lib/types/chat";
 import type { PlanItem } from "@/lib/types/plan";
 import type { SessionSummary, ThreadSummary } from "@/lib/tauri";
@@ -118,7 +121,7 @@ function buildJobDetailTimelineEntry(
   at: string,
   label: string,
   status: JobDetailTimelineItem["status"],
-  reason?: ThreadPoolEventReason | null,
+  reason?: RuntimeEventReason | null,
 ): JobDetailTimelineItem {
   return {
     kind,
@@ -246,16 +249,16 @@ const ensurePendingAssistantSession = (
   pendingAssistant: session.pendingAssistant ?? createPendingAssistant(),
 });
 
-export interface ThreadPoolThreadState {
+export interface RuntimeThreadState {
   threadId: string;
-  kind: ThreadPoolRuntimeKind;
+  kind: RuntimeKind;
   sessionId: string | null;
   jobId: string | null;
-  status: ThreadRuntimeStatus;
+  status: RuntimeStatus;
   estimatedMemoryBytes: number;
   lastActiveAt: string | null;
   recoverable: boolean;
-  lastReason: ThreadPoolEventReason | null;
+  lastReason: RuntimeEventReason | null;
   eventCount: number;
 }
 
@@ -301,10 +304,10 @@ export interface ChatStore {
   sessionListLoading: boolean;
   threadListBySessionId: Record<string, ThreadSummary[]>;
   threadListLoadingBySessionId: Record<string, boolean>;
-  threadPoolSnapshot: ThreadPoolSnapshot | null;
-  threadPoolSnapshotLoading: boolean;
-  threadPoolError: string | null;
-  threadPoolThreads: ThreadPoolThreadState[];
+  jobRuntimeSnapshot: JobRuntimePoolSnapshot | null;
+  jobRuntimeSnapshotLoading: boolean;
+  jobRuntimeError: string | null;
+  runtimeThreads: RuntimeThreadState[];
   stoppingJobIds: Record<string, true>;
   _unlisten: UnlistenFn | null;
 
@@ -325,7 +328,7 @@ export interface ChatStore {
   sendMessage: (content: string) => Promise<void>;
   cancelTurn: () => Promise<void>;
   stopJob: (jobId: string) => Promise<void>;
-  refreshThreadPoolSnapshot: () => Promise<void>;
+  refreshRuntimeMonitor: () => Promise<void>;
   refreshSnapshot: (
     sessionKey: string,
     options?: { preserveError?: boolean },
@@ -335,7 +338,7 @@ export interface ChatStore {
 }
 
 let threadEventListenerInitPromise: Promise<UnlistenFn> | null = null;
-let threadPoolSnapshotRequestVersion = 0;
+let runtimeMonitorRequestVersion = 0;
 
 function clearStoppingJobId(
   stoppingJobIds: Record<string, true>,
@@ -360,9 +363,9 @@ function getTemplateDraftSelection(
 }
 
 function mapRuntimeSummaryToThreadState(
-  runtime: ThreadPoolRuntimeSummary,
-  existing?: ThreadPoolThreadState,
-): ThreadPoolThreadState {
+  runtime: JobRuntimeSummary | ThreadRuntimeSummary,
+  existing?: RuntimeThreadState,
+): RuntimeThreadState {
   return {
     threadId: runtime.runtime.thread_id,
     kind: runtime.runtime.kind,
@@ -377,9 +380,9 @@ function mapRuntimeSummaryToThreadState(
   };
 }
 
-function sortThreadPoolThreads(
-  threads: ThreadPoolThreadState[],
-): ThreadPoolThreadState[] {
+function sortRuntimeThreads(
+  threads: RuntimeThreadState[],
+): RuntimeThreadState[] {
   return threads.slice().sort((left, right) => {
     const leftTime = left.lastActiveAt ?? "";
     const rightTime = right.lastActiveAt ?? "";
@@ -390,10 +393,10 @@ function sortThreadPoolThreads(
   });
 }
 
-function touchThreadPoolThread(
-  threads: ThreadPoolThreadState[],
+function touchRuntimeThread(
+  threads: RuntimeThreadState[],
   update: Omit<
-    ThreadPoolThreadState,
+    RuntimeThreadState,
     | "estimatedMemoryBytes"
     | "lastActiveAt"
     | "recoverable"
@@ -403,13 +406,13 @@ function touchThreadPoolThread(
     estimatedMemoryBytes?: number;
     lastActiveAt?: string;
     recoverable?: boolean;
-    reason?: ThreadPoolEventReason | null;
+    reason?: RuntimeEventReason | null;
   },
-  fallbackSnapshot: ThreadPoolSnapshot | null,
-): ThreadPoolThreadState[] {
+  fallbackSnapshot: JobRuntimePoolSnapshot | null,
+): RuntimeThreadState[] {
   const now = update.lastActiveAt ?? new Date().toISOString();
   const existing = threads.find((entry) => entry.threadId === update.threadId);
-  const nextEntry: ThreadPoolThreadState = {
+  const nextEntry: RuntimeThreadState = {
     threadId: update.threadId,
     kind: update.kind,
     sessionId: update.sessionId,
@@ -429,7 +432,29 @@ function touchThreadPoolThread(
   const withoutCurrent = threads.filter(
     (entry) => entry.threadId !== update.threadId,
   );
-  return sortThreadPoolThreads([nextEntry, ...withoutCurrent]);
+  return sortRuntimeThreads([nextEntry, ...withoutCurrent]);
+}
+
+function mergeRuntimeThreads(
+  jobRuntimeState: JobRuntimePoolState,
+  threadRuntimeState: ThreadRuntimeState,
+  existingThreads: RuntimeThreadState[],
+): RuntimeThreadState[] {
+  const runtimes = [
+    ...threadRuntimeState.runtimes,
+    ...jobRuntimeState.runtimes,
+  ];
+
+  return sortRuntimeThreads(
+    runtimes.map((runtime) =>
+      mapRuntimeSummaryToThreadState(
+        runtime,
+        existingThreads.find(
+          (thread) => thread.threadId === runtime.runtime.thread_id,
+        ),
+      ),
+    ),
+  );
 }
 
 function findSessionKeyForEnvelope(
@@ -447,10 +472,10 @@ function findSessionKeyForEnvelope(
   const jobId =
     envelope.payload.type === "thread_bound_to_job"
       ? envelope.payload.job_id
-      : envelope.payload.type === "thread_pool_queued" ||
-          envelope.payload.type === "thread_pool_started" ||
-          envelope.payload.type === "thread_pool_cooling" ||
-          envelope.payload.type === "thread_pool_evicted"
+      : envelope.payload.type === "job_runtime_queued" ||
+          envelope.payload.type === "job_runtime_started" ||
+          envelope.payload.type === "job_runtime_cooling" ||
+          envelope.payload.type === "job_runtime_evicted"
         ? envelope.payload.runtime.job_id
         : null;
 
@@ -503,10 +528,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sessionListLoading: false,
   threadListBySessionId: {},
   threadListLoadingBySessionId: {},
-  threadPoolSnapshot: null,
-  threadPoolSnapshotLoading: false,
-  threadPoolError: null,
-  threadPoolThreads: [],
+  jobRuntimeSnapshot: null,
+  jobRuntimeSnapshotLoading: false,
+  jobRuntimeError: null,
+  runtimeThreads: [],
   stoppingJobIds: {},
   _unlisten: null,
 
@@ -545,7 +570,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (templateList.length === 0) {
         set({ errorMessage: "当前没有可用的 Agent 模板。" });
       }
-      void get().refreshThreadPoolSnapshot();
+      void get().refreshRuntimeMonitor();
       // NOTE: Do NOT auto-create a session here.
       // Session/thread materialization happens only on first send.
     } catch (error) {
@@ -951,41 +976,39 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  async refreshThreadPoolSnapshot() {
-    const requestVersion = ++threadPoolSnapshotRequestVersion;
+  async refreshRuntimeMonitor() {
+    const requestVersion = ++runtimeMonitorRequestVersion;
     set((state) => ({
-      threadPoolSnapshotLoading: true,
-      threadPoolError: null,
-      threadPoolSnapshot: state.threadPoolSnapshot,
+      jobRuntimeSnapshotLoading: true,
+      jobRuntimeError: null,
+      jobRuntimeSnapshot: state.jobRuntimeSnapshot,
     }));
 
     try {
-      const poolState = await threadRuntime.getState();
+      const [jobRuntimeState, threadRuntimeState] = await Promise.all([
+        jobRuntime.getState(),
+        threadRuntime.getState(),
+      ]);
       set((state) => ({
-        ...(requestVersion === threadPoolSnapshotRequestVersion
+        ...(requestVersion === runtimeMonitorRequestVersion
           ? {
-              threadPoolSnapshot: poolState.snapshot,
-              threadPoolSnapshotLoading: false,
-              threadPoolError: null,
-              threadPoolThreads: sortThreadPoolThreads(
-                poolState.runtimes.map((runtime) =>
-                  mapRuntimeSummaryToThreadState(
-                    runtime,
-                    state.threadPoolThreads.find(
-                      (thread) => thread.threadId === runtime.runtime.thread_id,
-                    ),
-                  ),
-                ),
+              jobRuntimeSnapshot: jobRuntimeState.snapshot,
+              jobRuntimeSnapshotLoading: false,
+              jobRuntimeError: null,
+              runtimeThreads: mergeRuntimeThreads(
+                jobRuntimeState,
+                threadRuntimeState,
+                state.runtimeThreads,
               ),
             }
           : {}),
       }));
     } catch (error) {
       set(() =>
-        requestVersion === threadPoolSnapshotRequestVersion
+        requestVersion === runtimeMonitorRequestVersion
           ? {
-              threadPoolSnapshotLoading: false,
-              threadPoolError: toErrorMessage(error),
+              jobRuntimeSnapshotLoading: false,
+              jobRuntimeError: toErrorMessage(error),
             }
           : {},
       );
@@ -1098,11 +1121,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       switch (payload.type) {
         case "thread_bound_to_job":
-        case "thread_pool_queued":
-        case "thread_pool_started":
-        case "thread_pool_cooling":
-        case "thread_pool_evicted":
-        case "thread_pool_metrics_updated":
+        case "job_runtime_queued":
+        case "job_runtime_started":
+        case "job_runtime_cooling":
+        case "job_runtime_evicted":
+        case "job_runtime_metrics_updated":
           return true;
         default:
           return false;
@@ -1128,8 +1151,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               ),
             );
             return {
-              threadPoolThreads: touchThreadPoolThread(
-                state.threadPoolThreads,
+              runtimeThreads: touchRuntimeThread(
+                state.runtimeThreads,
                 {
                   threadId: envelope.thread_id,
                   kind: "job",
@@ -1139,14 +1162,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   reason: null,
                   lastActiveAt: now,
                 },
-                state.threadPoolSnapshot,
+                state.jobRuntimeSnapshot,
               ),
               ...(nextSessionsByKey
                 ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
           }
-          case "thread_pool_queued": {
+          case "job_runtime_queued": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1154,8 +1177,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               buildJobDetailTimelineEntry("queued", now, "排队中", "running"),
             );
             return {
-              threadPoolThreads: touchThreadPoolThread(
-                state.threadPoolThreads,
+              runtimeThreads: touchRuntimeThread(
+                state.runtimeThreads,
                 {
                   threadId: envelope.thread_id,
                   kind: payload.runtime.kind,
@@ -1165,14 +1188,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   reason: null,
                   lastActiveAt: now,
                 },
-                state.threadPoolSnapshot,
+                state.jobRuntimeSnapshot,
               ),
               ...(nextSessionsByKey
                 ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
           }
-          case "thread_pool_started": {
+          case "job_runtime_started": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1180,8 +1203,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               buildJobDetailTimelineEntry("started", now, "运行中", "running"),
             );
             return {
-              threadPoolThreads: touchThreadPoolThread(
-                state.threadPoolThreads,
+              runtimeThreads: touchRuntimeThread(
+                state.runtimeThreads,
                 {
                   threadId: envelope.thread_id,
                   kind: payload.runtime.kind,
@@ -1191,14 +1214,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   reason: null,
                   lastActiveAt: now,
                 },
-                state.threadPoolSnapshot,
+                state.jobRuntimeSnapshot,
               ),
               ...(nextSessionsByKey
                 ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
           }
-          case "thread_pool_cooling": {
+          case "job_runtime_cooling": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1206,8 +1229,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               buildJobDetailTimelineEntry("cooling", now, "冷却中", "running"),
             );
             return {
-              threadPoolThreads: touchThreadPoolThread(
-                state.threadPoolThreads,
+              runtimeThreads: touchRuntimeThread(
+                state.runtimeThreads,
                 {
                   threadId: envelope.thread_id,
                   kind: payload.runtime.kind,
@@ -1217,14 +1240,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   reason: null,
                   lastActiveAt: now,
                 },
-                state.threadPoolSnapshot,
+                state.jobRuntimeSnapshot,
               ),
               ...(nextSessionsByKey
                 ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
           }
-          case "thread_pool_evicted": {
+          case "job_runtime_evicted": {
             const nextSessionsByKey = updateSessionJobDetailTimeline(
               state.sessionsByKey,
               sessionKey,
@@ -1238,8 +1261,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               ),
             );
             return {
-              threadPoolThreads: touchThreadPoolThread(
-                state.threadPoolThreads,
+              runtimeThreads: touchRuntimeThread(
+                state.runtimeThreads,
                 {
                   threadId: envelope.thread_id,
                   kind: payload.runtime.kind,
@@ -1249,18 +1272,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   reason: payload.reason,
                   lastActiveAt: now,
                 },
-                state.threadPoolSnapshot,
+                state.jobRuntimeSnapshot,
               ),
               ...(nextSessionsByKey
                 ? { sessionsByKey: nextSessionsByKey }
                 : {}),
             };
           }
-          case "thread_pool_metrics_updated":
+          case "job_runtime_metrics_updated":
             return {
-              threadPoolSnapshotLoading: false,
-              threadPoolError: null,
-              threadPoolThreads: state.threadPoolThreads.map((thread) => ({
+              jobRuntimeSnapshotLoading: false,
+              jobRuntimeError: null,
+              jobRuntimeSnapshot: payload.snapshot,
+              runtimeThreads: state.runtimeThreads.map((thread) => ({
                 ...thread,
                 estimatedMemoryBytes:
                   thread.estimatedMemoryBytes > 0

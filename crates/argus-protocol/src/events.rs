@@ -302,7 +302,7 @@ impl ThreadMailbox {
 /// Snapshot of a single thread tracked by the thread pool.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ThreadRuntimeStatus {
+pub enum RuntimeStatus {
     /// Runtime has not been loaded into memory.
     Inactive,
     /// Runtime is being loaded.
@@ -320,7 +320,7 @@ pub enum ThreadRuntimeStatus {
 /// Runtime source classification for thread runtime and job-pool observers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ThreadPoolRuntimeKind {
+pub enum RuntimeKind {
     /// User-facing conversational runtime.
     Chat,
     /// Background job runtime.
@@ -329,24 +329,24 @@ pub enum ThreadPoolRuntimeKind {
 
 /// Stable identifier for a tracked runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolRuntimeRef {
+pub struct RuntimeRef {
     /// Thread ID.
     pub thread_id: ThreadId,
     /// Runtime category.
-    pub kind: ThreadPoolRuntimeKind,
+    pub kind: RuntimeKind,
     /// Bound session ID when the runtime belongs to a user chat thread.
     pub session_id: Option<SessionId>,
     /// Bound job ID if this runtime is associated with a dispatched job.
     pub job_id: Option<String>,
 }
 
-/// Snapshot of a single thread tracked by the thread pool.
+/// Snapshot of a single loaded thread runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolRuntimeSummary {
+pub struct ThreadRuntimeSummary {
     /// Stable runtime identity.
-    pub runtime: ThreadPoolRuntimeRef,
+    pub runtime: RuntimeRef,
     /// Runtime status.
-    pub status: ThreadRuntimeStatus,
+    pub status: RuntimeStatus,
     /// Estimated memory usage for this runtime.
     pub estimated_memory_bytes: u64,
     /// Last activity timestamp (RFC3339).
@@ -354,15 +354,69 @@ pub struct ThreadPoolRuntimeSummary {
     /// Whether the runtime can be reloaded after in-memory eviction.
     pub recoverable: bool,
     /// Last eviction/cooling reason when available.
-    pub last_reason: Option<ThreadPoolEventReason>,
+    pub last_reason: Option<RuntimeEventReason>,
 }
 
-/// Backward-compatible alias for older thread-pool consumers.
-pub type ThreadRuntimeSnapshot = ThreadPoolRuntimeSummary;
+/// Aggregated thread-runtime telemetry snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadRuntimeSnapshot {
+    /// `ThreadRuntime` is an authority/registry, not an admission controller.
+    pub max_threads: u32,
+    /// Total active (loaded) runtimes.
+    pub active_threads: u32,
+    /// Runtimes waiting in the queue.
+    pub queued_threads: u32,
+    /// Runtimes currently executing.
+    pub running_threads: u32,
+    /// Runtimes in cooling state.
+    pub cooling_threads: u32,
+    /// Number of evictions observed since process start.
+    pub evicted_threads: u64,
+    /// Estimated registry memory usage.
+    pub estimated_memory_bytes: u64,
+    /// Peak estimated registry memory usage.
+    pub peak_estimated_memory_bytes: u64,
+    /// Process-level memory usage when available.
+    pub process_memory_bytes: Option<u64>,
+    /// Peak process-level memory usage when available.
+    pub peak_process_memory_bytes: Option<u64>,
+    /// Number of currently loaded runtimes.
+    pub resident_thread_count: u32,
+    /// Average estimated memory usage per resident runtime.
+    pub avg_thread_memory_bytes: u64,
+    /// Snapshot timestamp (RFC3339).
+    pub captured_at: String,
+}
+
+/// Authoritative thread-runtime query payload used by external observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadRuntimeState {
+    /// Aggregated runtime metrics.
+    pub snapshot: ThreadRuntimeSnapshot,
+    /// Current runtime summaries.
+    pub runtimes: Vec<ThreadRuntimeSummary>,
+}
+
+/// Snapshot of a single job runtime tracked by the job runtime pool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobRuntimeSummary {
+    /// Stable runtime identity.
+    pub runtime: RuntimeRef,
+    /// Runtime status.
+    pub status: RuntimeStatus,
+    /// Estimated memory usage for this runtime.
+    pub estimated_memory_bytes: u64,
+    /// Last activity timestamp (RFC3339).
+    pub last_active_at: Option<String>,
+    /// Whether the runtime can be reloaded after in-memory eviction.
+    pub recoverable: bool,
+    /// Last eviction/cooling reason when available.
+    pub last_reason: Option<RuntimeEventReason>,
+}
 
 /// Aggregated thread-pool telemetry snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolSnapshot {
+pub struct JobRuntimePoolSnapshot {
     /// Configured max number of concurrently loaded runtimes.
     pub max_threads: u32,
     /// Total active (loaded) runtimes.
@@ -393,17 +447,17 @@ pub struct ThreadPoolSnapshot {
 
 /// Authoritative thread-pool query payload used by external observers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ThreadPoolState {
+pub struct JobRuntimePoolState {
     /// Aggregated pool metrics.
-    pub snapshot: ThreadPoolSnapshot,
+    pub snapshot: JobRuntimePoolSnapshot,
     /// Current runtime summaries.
-    pub runtimes: Vec<ThreadPoolRuntimeSummary>,
+    pub runtimes: Vec<JobRuntimeSummary>,
 }
 
 /// Reason associated with thread-pool lifecycle transitions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ThreadPoolEventReason {
+pub enum RuntimeEventReason {
     /// Runtime naturally cooled down and aged out.
     CoolingExpired,
     /// Runtime was evicted due to memory pressure.
@@ -563,31 +617,31 @@ pub enum ThreadEvent {
         thread_id: ThreadId,
     },
     /// Job/thread has entered queued state inside the thread pool.
-    ThreadPoolQueued {
+    JobRuntimeQueued {
         /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        runtime: RuntimeRef,
     },
     /// Job/thread has started running inside the thread pool.
-    ThreadPoolStarted {
+    JobRuntimeStarted {
         /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        runtime: RuntimeRef,
     },
     /// Job/thread has entered cooling state inside the thread pool.
-    ThreadPoolCooling {
+    JobRuntimeCooling {
         /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        runtime: RuntimeRef,
     },
     /// Job/thread runtime has been evicted from memory.
-    ThreadPoolEvicted {
+    JobRuntimeEvicted {
         /// Runtime reference.
-        runtime: ThreadPoolRuntimeRef,
+        runtime: RuntimeRef,
         /// Eviction reason.
-        reason: ThreadPoolEventReason,
+        reason: RuntimeEventReason,
     },
     /// Aggregated thread-pool metrics update.
-    ThreadPoolMetricsUpdated {
+    JobRuntimeMetricsUpdated {
         /// Current thread-pool telemetry snapshot.
-        snapshot: ThreadPoolSnapshot,
+        snapshot: JobRuntimePoolSnapshot,
     },
     /// User wants to interrupt the current turn.
     ///
@@ -607,8 +661,8 @@ pub enum ThreadEvent {
 }
 
 #[cfg(test)]
-pub(crate) fn assert_thread_pool_snapshot_round_trip() {
-    let snapshot = ThreadPoolSnapshot {
+pub(crate) fn assert_job_runtime_snapshot_round_trip() {
+    let snapshot = JobRuntimePoolSnapshot {
         max_threads: 8,
         active_threads: 2,
         queued_threads: 1,
@@ -625,7 +679,7 @@ pub(crate) fn assert_thread_pool_snapshot_round_trip() {
     };
 
     let value = serde_json::to_value(&snapshot).unwrap();
-    let restored: ThreadPoolSnapshot = serde_json::from_value(value).unwrap();
+    let restored: JobRuntimePoolSnapshot = serde_json::from_value(value).unwrap();
     assert_eq!(restored.max_threads, 8);
     assert_eq!(restored.queued_threads, 1);
 }
@@ -734,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_pool_snapshot_round_trips_through_json() {
-        assert_thread_pool_snapshot_round_trip();
+    fn job_runtime_snapshot_round_trips_through_json() {
+        assert_job_runtime_snapshot_round_trip();
     }
 }

@@ -12,11 +12,11 @@ use argus_agent::{
     FilePlanStore, LlmThreadCompactor, ThreadBuilder, ThreadRegistration, ThreadRuntime,
     TraceConfig, TurnConfig,
 };
-use argus_job::{JobLookup, JobManager, ThreadPool};
+use argus_job::{JobLookup, JobManager};
 use argus_protocol::{
     llm::{ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream},
     AgentId, ArgusError, LlmProviderId, MailboxMessage, MailboxMessageType, McpToolResolver,
-    ProviderId, Result, SessionId, ThreadEvent, ThreadId, ThreadPoolRuntimeKind, ToolError,
+    ProviderId, Result, RuntimeKind, SessionId, ThreadEvent, ThreadId, ToolError,
 };
 use argus_repository::traits::{LlmProviderRepository, SessionRepository, ThreadRepository};
 use argus_template::TemplateManager;
@@ -88,7 +88,7 @@ impl argus_protocol::LlmProvider for UnconfiguredProvider {
 fn chat_thread_registration(session_id: SessionId, thread_id: ThreadId) -> ThreadRegistration {
     ThreadRegistration {
         thread_id,
-        kind: ThreadPoolRuntimeKind::Chat,
+        kind: RuntimeKind::Chat,
         session_id: Some(session_id),
         parent_thread_id: None,
         job_id: None,
@@ -318,10 +318,6 @@ impl SessionSchedulerBackend {
         }
     }
 
-    fn thread_pool(&self) -> Arc<ThreadPool> {
-        self.job_manager.thread_pool()
-    }
-
     fn map_job_lookup(lookup: JobLookup) -> SchedulerJobLookup {
         match lookup {
             JobLookup::NotFound => SchedulerJobLookup::NotFound,
@@ -350,8 +346,7 @@ impl SessionSchedulerBackend {
         thread_id: ThreadId,
         job_id: &str,
     ) -> std::result::Result<(), ToolError> {
-        let thread_pool = self.thread_pool();
-        let Some(thread) = thread_pool.loaded_thread(&thread_id) else {
+        let Some(thread) = self.job_manager.loaded_job_thread(&thread_id) else {
             tracing::warn!(job_id, thread_id = %thread_id, "failed to claim queued job result: thread not loaded");
             return Ok(());
         };
@@ -385,7 +380,7 @@ impl SessionSchedulerBackend {
         let Some(thread) = self
             .thread_runtime
             .loaded_thread(&thread_id)
-            .or_else(|| self.thread_pool().loaded_thread(&thread_id))
+            .or_else(|| self.job_manager.loaded_job_thread(&thread_id))
         else {
             return format!("Thread {}", thread_id);
         };
@@ -410,11 +405,11 @@ impl SessionSchedulerBackend {
         &self,
         thread_id: ThreadId,
     ) -> std::result::Result<u32, ToolError> {
-        let thread_pool = self.thread_pool();
         let mut depth = 0;
         let mut cursor = thread_id;
 
-        while let Some(parent_thread_id) = thread_pool.parent_thread_id(&cursor).or(thread_pool
+        while let Some(parent_thread_id) = self.job_manager.parent_thread_id(&cursor).or(self
+            .job_manager
             .recover_parent_thread_id(&cursor)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?)
@@ -430,8 +425,8 @@ impl SessionSchedulerBackend {
         &self,
         thread_id: ThreadId,
     ) -> std::result::Result<Vec<ThreadId>, ToolError> {
-        let thread_pool = self.thread_pool();
-        let children = thread_pool
+        let children = self
+            .job_manager
             .recover_child_jobs(thread_id)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
@@ -453,12 +448,15 @@ impl SessionSchedulerBackend {
         &self,
         thread_id: ThreadId,
     ) -> std::result::Result<Vec<ThreadId>, ToolError> {
-        let thread_pool = self.thread_pool();
         Ok(self
             .active_child_thread_ids(thread_id)
             .await?
             .into_iter()
-            .filter(|child_thread_id| thread_pool.loaded_thread(child_thread_id).is_some())
+            .filter(|child_thread_id| {
+                self.job_manager
+                    .loaded_job_thread(child_thread_id)
+                    .is_some()
+            })
             .collect())
     }
 
@@ -471,10 +469,10 @@ impl SessionSchedulerBackend {
             return Ok(true);
         }
 
-        let thread_pool = self.thread_pool();
-        let parent = match thread_pool.parent_thread_id(&source_thread_id) {
+        let parent = match self.job_manager.parent_thread_id(&source_thread_id) {
             Some(parent) => Some(parent),
-            None => thread_pool
+            None => self
+                .job_manager
                 .recover_parent_thread_id(&source_thread_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?,
@@ -483,7 +481,8 @@ impl SessionSchedulerBackend {
             return Ok(true);
         }
 
-        Ok(thread_pool
+        Ok(self
+            .job_manager
             .recover_child_jobs(source_thread_id)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?
@@ -498,14 +497,14 @@ impl SessionSchedulerBackend {
         if self
             .thread_runtime
             .runtime_summary(&target_thread_id)
-            .is_some_and(|summary| summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+            .is_some_and(|summary| summary.runtime.kind == RuntimeKind::Chat)
         {
             return Ok(());
         }
 
-        let thread_pool = self.thread_pool();
-        let Some(summary) = thread_pool.runtime_summary(&target_thread_id) else {
-            if thread_pool
+        let Some(summary) = self.job_manager.job_runtime_summary(&target_thread_id) else {
+            if self
+                .job_manager
                 .recover_parent_thread_id(&target_thread_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?
@@ -520,8 +519,11 @@ impl SessionSchedulerBackend {
             )));
         };
 
-        if summary.runtime.kind == ThreadPoolRuntimeKind::Job
-            && thread_pool.loaded_thread(&target_thread_id).is_none()
+        if summary.runtime.kind == RuntimeKind::Job
+            && self
+                .job_manager
+                .loaded_job_thread(&target_thread_id)
+                .is_none()
         {
             return Err(Self::scheduler_error(format!(
                 "thread {target_thread_id} is not ready to receive mailbox messages"
@@ -536,11 +538,10 @@ impl SessionSchedulerBackend {
         thread_id: ThreadId,
         agent_name: &str,
     ) -> std::result::Result<ThreadId, ToolError> {
-        let thread_pool = self.thread_pool();
         let mut matches = Vec::new();
 
         for child_thread_id in self.mailbox_ready_child_thread_ids(thread_id).await? {
-            let Some(thread) = thread_pool.loaded_thread(&child_thread_id) else {
+            let Some(thread) = self.job_manager.loaded_job_thread(&child_thread_id) else {
                 continue;
             };
             let display_name = {
@@ -568,8 +569,6 @@ impl SessionSchedulerBackend {
         thread_id: ThreadId,
         to: &str,
     ) -> std::result::Result<Vec<ThreadId>, ToolError> {
-        let thread_pool = self.thread_pool();
-
         if let Some(job_id) = to.strip_prefix("job:") {
             if !matches!(
                 self.job_manager
@@ -580,7 +579,8 @@ impl SessionSchedulerBackend {
             ) {
                 return Err(Self::scheduler_error(format!("job {job_id} is not active")));
             }
-            let target = thread_pool
+            let target = self
+                .job_manager
                 .recover_thread_binding(job_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?
@@ -611,9 +611,10 @@ impl SessionSchedulerBackend {
         }
 
         if to == "parent" {
-            let parent = match thread_pool.parent_thread_id(&thread_id) {
+            let parent = match self.job_manager.parent_thread_id(&thread_id) {
                 Some(parent) => Some(parent),
-                None => thread_pool
+                None => self
+                    .job_manager
                     .recover_parent_thread_id(&thread_id)
                     .await
                     .map_err(|error| Self::scheduler_error(error.to_string()))?,
@@ -739,7 +740,6 @@ impl SchedulerBackend for SessionSchedulerBackend {
             .resolve_message_targets(request.thread_id, &request.to)
             .await?;
         let source_label = self.source_label(request.thread_id).await;
-        let thread_pool = self.thread_pool();
 
         for target in &targets {
             let message = MailboxMessage {
@@ -755,7 +755,7 @@ impl SchedulerBackend for SessionSchedulerBackend {
             };
 
             match self.thread_runtime.runtime_summary(target) {
-                Some(summary) if summary.runtime.kind == ThreadPoolRuntimeKind::Chat => {
+                Some(summary) if summary.runtime.kind == RuntimeKind::Chat => {
                     let session_id = summary.runtime.session_id.ok_or_else(|| {
                         Self::scheduler_error(format!(
                             "chat thread {} is missing a session binding",
@@ -791,8 +791,8 @@ impl SchedulerBackend for SessionSchedulerBackend {
                         .map_err(Self::scheduler_error)?;
                 }
                 _ => {
-                    thread_pool
-                        .deliver_mailbox_message(*target, message)
+                    self.job_manager
+                        .deliver_job_mailbox_message(*target, message)
                         .await
                         .map_err(|error| Self::scheduler_error(error.to_string()))?;
                 }
@@ -812,7 +812,7 @@ impl SchedulerBackend for SessionSchedulerBackend {
         if self
             .thread_runtime
             .runtime_summary(&request.thread_id)
-            .is_some_and(|summary| summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+            .is_some_and(|summary| summary.runtime.kind == RuntimeKind::Chat)
         {
             return self
                 .thread_runtime
@@ -821,8 +821,8 @@ impl SchedulerBackend for SessionSchedulerBackend {
                 .map_err(Self::scheduler_error);
         }
 
-        self.thread_pool()
-            .unread_mailbox_messages(request.thread_id)
+        self.job_manager
+            .unread_job_mailbox_messages(request.thread_id)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))
     }
@@ -831,15 +831,15 @@ impl SchedulerBackend for SessionSchedulerBackend {
         let marked = if self
             .thread_runtime
             .runtime_summary(&request.thread_id)
-            .is_some_and(|summary| summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+            .is_some_and(|summary| summary.runtime.kind == RuntimeKind::Chat)
         {
             self.thread_runtime
                 .mark_mailbox_message_read(request.thread_id, &request.message_id)
                 .await
                 .map_err(Self::scheduler_error)?
         } else {
-            self.thread_pool()
-                .mark_mailbox_message_read(request.thread_id, &request.message_id)
+            self.job_manager
+                .mark_job_mailbox_message_read(request.thread_id, &request.message_id)
                 .await
                 .map_err(|error| Self::scheduler_error(error.to_string()))?
         };
@@ -916,7 +916,7 @@ impl SessionManager {
                 async move {
                     let session_id = match thread_runtime.runtime_summary(&thread_id) {
                         Some(summary) => {
-                            if summary.runtime.kind != ThreadPoolRuntimeKind::Chat {
+                            if summary.runtime.kind != RuntimeKind::Chat {
                                 return false;
                             }
                             summary.runtime.session_id
@@ -1746,7 +1746,7 @@ mod tests {
     };
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
-        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, ThreadPoolRuntimeKind, TokenUsage,
+        ResolvedMcpTools, RuntimeKind, SessionId, ThinkingConfig, ThreadId, TokenUsage,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
@@ -2863,7 +2863,7 @@ mod tests {
         );
         backend.thread_runtime.register_thread(ThreadRegistration {
             thread_id: harness.thread_id,
-            kind: ThreadPoolRuntimeKind::Chat,
+            kind: RuntimeKind::Chat,
             session_id: Some(harness.session_id),
             parent_thread_id: None,
             job_id: None,
