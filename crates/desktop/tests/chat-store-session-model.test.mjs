@@ -20,8 +20,8 @@ test("chat store keeps sessions keyed by template and provider preference", () =
   assert.match(storeSource, /refreshThreadPoolSnapshot:\s*\(\)\s*=>\s*Promise<void>/);
   assert.match(storeSource, /ThreadPoolRuntimeSummary/);
   assert.match(storeSource, /ThreadPoolRuntimeKind/);
-  assert.match(storeSource, /threadPool\.getState\(/);
-  assert.match(storeSource, /threadPool\.getState\(\)[\s\S]*threadPoolThreads:/);
+  assert.match(storeSource, /threadRuntime\.getState\(/);
+  assert.match(storeSource, /threadRuntime\.getState\(\)[\s\S]*threadPoolThreads:/);
   assert.match(storeSource, /mapRuntimeSummaryToThreadState/);
   assert.match(storeSource, /kind:\s*runtime\.runtime\.kind/);
   assert.match(storeSource, /sessionId:\s*runtime\.runtime\.session_id/);

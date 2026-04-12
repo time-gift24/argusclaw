@@ -394,11 +394,13 @@ impl ThreadRuntime {
         };
         replaced_runtime.run();
 
+        let store = Arc::clone(&self.store);
         let mut runtime_rx = runtime_rx.resubscribe();
         let forwarder = tokio::spawn(async move {
             loop {
                 match runtime_rx.recv().await {
                     Ok(event) => {
+                        ThreadRuntime::apply_runtime_event(&store, &thread_id, &event);
                         let _ = sender.send(event);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -414,6 +416,40 @@ impl ThreadRuntime {
         };
         entry.forwarder_abort = Some(forwarder_abort);
         Ok(())
+    }
+
+    fn apply_runtime_event(
+        store: &Arc<Mutex<ThreadRuntimeStore>>,
+        thread_id: &ThreadId,
+        event: &ThreadEvent,
+    ) {
+        let mut store = store.lock().expect("thread-runtime mutex poisoned");
+        let Some(entry) = store.runtimes.get_mut(thread_id) else {
+            return;
+        };
+
+        let (status, last_reason) = match event {
+            ThreadEvent::Processing { .. }
+            | ThreadEvent::ToolStarted { .. }
+            | ThreadEvent::ToolCompleted { .. }
+            | ThreadEvent::CompactionStarted { .. } => (Some(ThreadRuntimeStatus::Running), None),
+            ThreadEvent::Idle { .. }
+            | ThreadEvent::TurnCompleted { .. }
+            | ThreadEvent::TurnSettled { .. }
+            | ThreadEvent::CompactionFinished { .. }
+            | ThreadEvent::Compacted { .. } => (Some(ThreadRuntimeStatus::Inactive), None),
+            ThreadEvent::TurnFailed { .. } | ThreadEvent::CompactionFailed { .. } => (
+                Some(ThreadRuntimeStatus::Inactive),
+                Some(argus_protocol::ThreadPoolEventReason::ExecutionFailed),
+            ),
+            _ => (None, None),
+        };
+
+        if let Some(status) = status {
+            entry.summary.status = status;
+            entry.summary.last_active_at = Some(Utc::now().to_rfc3339());
+            entry.summary.last_reason = last_reason;
+        }
     }
 
     fn take_runtime_shutdown(entry: &mut RuntimeEntry) -> RuntimeShutdown {
@@ -500,11 +536,129 @@ impl ThreadRuntime {
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::{
-        SessionId, ThreadId, ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadRuntimeStatus,
+    use std::sync::Arc;
+
+    use crate::{LlmThreadCompactor, Thread, ThreadBuilder};
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
     };
+    use argus_protocol::{
+        AgentId, AgentRecord, SessionId, ThinkingConfig, ThreadEvent, ThreadId,
+        ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadRuntimeStatus,
+    };
+    use tokio::sync::RwLock;
+    use tokio::time::{Duration, timeout};
 
     use super::{ThreadRegistration, ThreadRuntime};
+
+    #[derive(Debug)]
+    struct NoopProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NoopProvider {
+        fn model_name(&self) -> &str {
+            "noop"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: Some("ok".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: self.model_name().to_string(),
+                capability: "stream_complete".to_string(),
+            })
+        }
+    }
+
+    async fn attach_test_chat_thread(
+        runtime: &ThreadRuntime,
+        thread_id: ThreadId,
+        session_id: SessionId,
+    ) -> Arc<RwLock<Thread>> {
+        runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        });
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
+        let thread = Arc::new(RwLock::new(
+            ThreadBuilder::new()
+                .id(thread_id)
+                .session_id(session_id)
+                .agent_record(Arc::new(AgentRecord {
+                    id: AgentId::new(1),
+                    display_name: "Runtime Test Agent".to_string(),
+                    description: "Used to test runtime summaries".to_string(),
+                    version: "1.0.0".to_string(),
+                    provider_id: None,
+                    model_id: Some("noop".to_string()),
+                    system_prompt: "Observe runtime state.".to_string(),
+                    tool_names: vec![],
+                    subagent_names: vec![],
+                    max_tokens: None,
+                    temperature: None,
+                    thinking_config: Some(ThinkingConfig::disabled()),
+                }))
+                .provider(Arc::clone(&provider))
+                .compactor(Arc::new(LlmThreadCompactor::new(provider)))
+                .build()
+                .expect("thread should build"),
+        ));
+        let runtime_rx = {
+            let guard = thread.read().await;
+            guard.subscribe()
+        };
+        runtime
+            .attach_loaded_thread(thread_id, Arc::clone(&thread), runtime_rx)
+            .await
+            .expect("thread should attach");
+        thread
+    }
+
+    async fn wait_for_status(
+        runtime: &ThreadRuntime,
+        thread_id: ThreadId,
+        expected: ThreadRuntimeStatus,
+    ) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if runtime
+                    .runtime_summary(&thread_id)
+                    .is_some_and(|summary| summary.status == expected)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runtime summary should update");
+    }
 
     #[test]
     fn register_thread_exposes_subscription_and_summary() {
@@ -624,5 +778,61 @@ mod tests {
             Some(ThreadPoolEventReason::CoolingExpired)
         );
         assert!(!summary.recoverable);
+    }
+
+    #[tokio::test]
+    async fn attached_chat_runtime_summary_tracks_processing_and_idle_events() {
+        let runtime = ThreadRuntime::new();
+        let thread_id = ThreadId::new();
+        let session_id = SessionId::new();
+        let thread = attach_test_chat_thread(&runtime, thread_id, session_id).await;
+
+        thread
+            .read()
+            .await
+            .broadcast_to_self(ThreadEvent::Processing {
+                thread_id: thread_id.to_string(),
+                turn_number: 1,
+                event: argus_protocol::llm::LlmStreamEvent::ContentDelta {
+                    delta: "hello".to_string(),
+                },
+            });
+        wait_for_status(&runtime, thread_id, ThreadRuntimeStatus::Running).await;
+
+        thread.read().await.broadcast_to_self(ThreadEvent::Idle {
+            thread_id: thread_id.to_string(),
+        });
+        wait_for_status(&runtime, thread_id, ThreadRuntimeStatus::Inactive).await;
+    }
+
+    #[tokio::test]
+    async fn attached_chat_runtime_summary_marks_failures_in_last_reason() {
+        let runtime = ThreadRuntime::new();
+        let thread_id = ThreadId::new();
+        let session_id = SessionId::new();
+        let thread = attach_test_chat_thread(&runtime, thread_id, session_id).await;
+
+        thread
+            .read()
+            .await
+            .broadcast_to_self(ThreadEvent::TurnFailed {
+                thread_id: thread_id.to_string(),
+                turn_number: 1,
+                error: "boom".to_string(),
+            });
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(summary) = runtime.runtime_summary(&thread_id)
+                    && summary.status == ThreadRuntimeStatus::Inactive
+                    && summary.last_reason == Some(ThreadPoolEventReason::ExecutionFailed)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("runtime failure summary should update");
     }
 }

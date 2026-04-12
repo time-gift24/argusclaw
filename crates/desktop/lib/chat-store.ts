@@ -960,7 +960,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
 
     try {
-      const poolState = await threadPool.getState();
+      const poolState = await threadRuntime.getState();
       set((state) => ({
         ...(requestVersion === threadPoolSnapshotRequestVersion
           ? {
@@ -1258,7 +1258,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
           case "thread_pool_metrics_updated":
             return {
-              threadPoolSnapshot: payload.snapshot,
               threadPoolSnapshotLoading: false,
               threadPoolError: null,
               threadPoolThreads: state.threadPoolThreads.map((thread) => ({

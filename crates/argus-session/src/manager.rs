@@ -495,6 +495,14 @@ impl SessionSchedulerBackend {
         &self,
         target_thread_id: ThreadId,
     ) -> std::result::Result<(), ToolError> {
+        if self
+            .thread_runtime
+            .runtime_summary(&target_thread_id)
+            .is_some_and(|summary| summary.runtime.kind == ThreadPoolRuntimeKind::Chat)
+        {
+            return Ok(());
+        }
+
         let thread_pool = self.thread_pool();
         let Some(summary) = thread_pool.runtime_summary(&target_thread_id) else {
             if thread_pool
@@ -1730,7 +1738,7 @@ mod tests {
     use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_agent::turn_log_store::append_turn_record;
     use argus_agent::turn_log_store::RecoveredThreadLogState;
-    use argus_agent::ThreadRuntime;
+    use argus_agent::{ThreadRegistration, ThreadRuntime};
     use argus_protocol::llm::ChatMessage;
     use argus_protocol::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
@@ -1738,7 +1746,7 @@ mod tests {
     };
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
-        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
+        ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, ThreadPoolRuntimeKind, TokenUsage,
     };
     use argus_repository::migrate;
     use argus_repository::traits::JobRepository;
@@ -2811,6 +2819,68 @@ mod tests {
                 .contains("not ready to receive mailbox messages"),
             "unexpected scheduler error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_chat_parent_targets_resolve_via_thread_runtime_authority() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(FixedProvider {
+            model_name: "routing-test".to_string(),
+        }))
+        .await;
+        let child_thread_id = ThreadId::new();
+        let child_base_dir = chat_thread_base_dir(
+            harness.temp_dir.path().join("trace").as_path(),
+            harness.session_id,
+            harness.thread_id,
+        )
+        .join(child_thread_id.to_string());
+        persist_thread_metadata(
+            &child_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: child_thread_id,
+                kind: ThreadTraceKind::Job,
+                root_session_id: Some(harness.session_id),
+                parent_thread_id: Some(harness.thread_id),
+                job_id: Some("job-parent-target".to_string()),
+                agent_snapshot: harness
+                    .template_manager
+                    .get(harness.agent_id)
+                    .await
+                    .expect("template lookup should succeed")
+                    .expect("agent snapshot should exist"),
+            },
+        )
+        .await
+        .expect("child metadata should persist");
+
+        let backend = restarted_scheduler_backend(
+            Arc::clone(&harness.sqlite),
+            Arc::clone(&harness.template_manager),
+            harness.temp_dir.path().join("trace"),
+            Arc::new(FixedProvider {
+                model_name: "routing-test".to_string(),
+            }),
+        );
+        backend.thread_runtime.register_thread(ThreadRegistration {
+            thread_id: harness.thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(harness.session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        });
+
+        let parent_target = backend
+            .resolve_message_targets(child_thread_id, "parent")
+            .await
+            .expect("parent chat target should resolve through ThreadRuntime");
+        assert_eq!(parent_target, vec![harness.thread_id]);
+
+        let explicit_target = backend
+            .resolve_message_targets(child_thread_id, &format!("thread:{}", harness.thread_id))
+            .await
+            .expect("explicit chat thread target should resolve through ThreadRuntime");
+        assert_eq!(explicit_target, vec![harness.thread_id]);
     }
 
     #[tokio::test]
