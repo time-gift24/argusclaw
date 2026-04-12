@@ -548,11 +548,11 @@ pub enum ThreadEvent {
         /// Subagent description.
         agent_description: String,
     },
-    /// A mailbox message was queued for a thread.
+    /// A mailbox message was enqueued into the thread mailbox and runtime observers were notified.
     MailboxMessageQueued {
         /// Thread ID that received the message.
         thread_id: ThreadId,
-        /// Queued mailbox message.
+        /// Mailbox message that was enqueued.
         message: MailboxMessage,
     },
     /// Job has been bound to a concrete thread runtime.

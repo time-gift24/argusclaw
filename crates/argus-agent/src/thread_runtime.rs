@@ -179,6 +179,7 @@ impl ThreadRuntime {
 
         ThreadPoolState {
             snapshot: ThreadPoolSnapshot {
+                // ThreadRuntime is a registry view and does not own ThreadPool admission limits.
                 max_threads: 0,
                 active_threads: resident_thread_count,
                 queued_threads,
@@ -192,6 +193,7 @@ impl ThreadRuntime {
                 peak_estimated_memory_bytes: estimated_memory_bytes,
                 process_memory_bytes: None,
                 peak_process_memory_bytes: None,
+                // Registry residency counts loaded runtimes, not ThreadPool slot ownership.
                 resident_thread_count,
                 avg_thread_memory_bytes,
                 captured_at: Utc::now().to_rfc3339(),

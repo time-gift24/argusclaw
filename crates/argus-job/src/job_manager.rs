@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(test)]
-use argus_agent::TurnRecord;
+use argus_agent::{LlmThreadCompactor, ThreadBuilder, TurnRecord};
 use argus_agent::{ThreadRegistration, ThreadRuntime, TurnCancellation};
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
@@ -414,6 +414,7 @@ impl JobManager {
         });
 
         let thread_pool = Arc::clone(&self.thread_pool);
+        let thread_runtime = Arc::clone(&self.thread_runtime);
         let tracked_jobs = Arc::clone(&self.tracked_jobs);
         let chat_mailbox_forwarder = Arc::clone(&self.chat_mailbox_forwarder);
         let pipe_tx_clone = pipe_tx.clone();
@@ -429,7 +430,7 @@ impl JobManager {
                 .await;
 
             Self::forward_job_result_to_runtime(
-                &thread_pool,
+                &thread_runtime,
                 &chat_mailbox_forwarder,
                 originating_thread_id,
                 execution_thread_id,
@@ -584,7 +585,7 @@ impl JobManager {
     }
 
     async fn forward_job_result_to_runtime(
-        thread_pool: &ThreadPool,
+        thread_runtime: &ThreadRuntime,
         chat_mailbox_forwarder: &Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
         originating_thread_id: ThreadId,
         execution_thread_id: ThreadId,
@@ -617,9 +618,17 @@ impl JobManager {
             None => false,
         };
         if !forwarded {
-            let _ = thread_pool
+            if let Err(error) = thread_runtime
                 .deliver_mailbox_message(originating_thread_id, mailbox_message)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %originating_thread_id,
+                    execution_thread_id = %execution_thread_id,
+                    error = %error,
+                    "Failed to deliver job result mailbox message to chat thread runtime"
+                );
+            }
         }
     }
 
@@ -944,6 +953,54 @@ mod tests {
         )
     }
 
+    async fn load_chat_runtime(
+        manager: &JobManager,
+        thread_id: ThreadId,
+        session_id: SessionId,
+        agent_id: AgentId,
+        provider: Arc<dyn LlmProvider>,
+    ) {
+        let registration = ThreadRegistration {
+            thread_id,
+            kind: ThreadPoolRuntimeKind::Chat,
+            session_id: Some(session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        };
+        manager
+            .thread_runtime()
+            .ensure_chat_runtime(registration, move || {
+                let provider = Arc::clone(&provider);
+                async move {
+                    let thread = ThreadBuilder::new()
+                        .id(thread_id)
+                        .session_id(session_id)
+                        .agent_record(Arc::new(AgentRecord {
+                            id: agent_id,
+                            display_name: "Parent Chat Agent".to_string(),
+                            description: "Used to test mailbox fallback delivery".to_string(),
+                            version: "1.0.0".to_string(),
+                            provider_id: Some(ProviderId::new(1)),
+                            model_id: Some("capturing".to_string()),
+                            system_prompt: "You receive job results.".to_string(),
+                            tool_names: vec![],
+                            subagent_names: vec![],
+                            max_tokens: None,
+                            temperature: None,
+                            thinking_config: Some(ThinkingConfig::enabled()),
+                        }))
+                        .provider(Arc::clone(&provider))
+                        .compactor(Arc::new(LlmThreadCompactor::new(provider)))
+                        .build()
+                        .map_err(|err| err.to_string())?;
+                    Ok(Arc::new(tokio::sync::RwLock::new(thread)))
+                }
+            })
+            .await
+            .expect("chat runtime should load into ThreadRuntime");
+    }
+
     fn assistant_output(content: &str) -> TurnRecord {
         TurnRecord::user_turn(
             1,
@@ -1211,6 +1268,44 @@ mod tests {
         assert_eq!(manager.thread_binding(&job_id), Some(execution_thread_id));
         assert!(saw_queued, "queued event should be observed");
         assert!(saw_metrics, "metrics update should be observed");
+    }
+
+    #[tokio::test]
+    async fn job_result_fallback_delivers_to_thread_runtime_chat_mailbox() {
+        let provider = Arc::new(CapturingProvider::new("done", Duration::from_millis(5), 24));
+        let (manager, agent_id, originating_thread_id) =
+            test_job_manager_with_provider(provider.clone()).await;
+        let session_id = SessionId::new();
+        load_chat_runtime(
+            &manager,
+            originating_thread_id,
+            session_id,
+            agent_id,
+            provider,
+        )
+        .await;
+
+        manager.set_chat_mailbox_forwarder(|_, _| async { false });
+
+        JobManager::forward_job_result_to_runtime(
+            &manager.thread_runtime(),
+            &manager.chat_mailbox_forwarder,
+            originating_thread_id,
+            ThreadId::new(),
+            sample_job_result("job-mailbox-fallback"),
+        )
+        .await;
+
+        let unread = manager
+            .thread_runtime()
+            .unread_mailbox_messages(originating_thread_id)
+            .await
+            .expect("thread runtime mailbox should be readable");
+        assert_eq!(unread.len(), 1, "job result should reach the chat mailbox");
+        assert!(matches!(
+            unread[0].message_type,
+            MailboxMessageType::JobResult { .. }
+        ));
     }
 
     #[tokio::test]
