@@ -141,10 +141,8 @@ fn build_request(cmd: &Command) -> serde_json::Value {
         } => ("HEAD", url, headers, &None, timeout, &None),
     };
 
-    let headers_map: serde_json::Map<String, serde_json::Value> = headers
-        .iter()
-        .map(|(k, v)| (k.clone(), json!(v)))
-        .collect();
+    let headers_map: serde_json::Map<String, serde_json::Value> =
+        headers.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
 
     let mut req = json!({
         "url": url,

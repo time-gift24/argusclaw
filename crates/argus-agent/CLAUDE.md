@@ -11,6 +11,7 @@
 ## 关键模块
 
 - `src/thread.rs`：`Thread` actor、顺序执行 turn、广播 `ThreadEvent`
+- `src/thread_runtime.rs`：thread runtime 注册、订阅与运行时关系缓存
 - `src/turn.rs`：LLM / tool 执行循环、stream 归并、hook 调度
 - `src/history.rs`：`TurnRecord`、`TurnRecordKind`、turn 编号推导
 - `src/compact/*`：thread-level / turn-level compact
@@ -20,6 +21,7 @@
 ## 公开入口
 
 - `Thread`、`ThreadBuilder`
+- `ThreadRuntime`
 - `ThreadConfig`、`TurnConfig`
 - `LlmThreadCompactor`、`LlmTurnCompactor`
 - `FilePlanStore`
@@ -29,4 +31,5 @@
 - 不要引入能从 `TurnRecord` 或 trace 文件直接推导出来的镜像状态
 - `Checkpoint(0)` 只表示线程级 compact；真实 turn 编号由 `UserTurn` / `TurnCheckpoint` 消耗
 - trace 节点文件固定为 `thread.json`、`turns.jsonl`、`plan.json`
+- parent/child thread 关系的持久化真相源仍是目录树 + `thread.json`；运行时 map 只允许作为缓存
 - 更细的不变量见同目录 `AGENTS.md`

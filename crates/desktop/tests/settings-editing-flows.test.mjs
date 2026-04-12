@@ -94,7 +94,7 @@ test("agent editor treats provider as optional when deciding whether the form ca
   assert.match(agentEditorSource, /const isEditing = agentId !== undefined/);
   assert.match(
     agentEditorSource,
-    /providersData\.find\(\(p\)\s*=>\s*p\.is_default && p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*providersData\.find\(\(p\)\s*=>\s*p\.secret_status !== "requires_reentry"\)\?\.id[\s\S]*null/,
+    /providersData\.find\([\s\S]*p\.is_default && p\.secret_status !== "requires_reentry"[\s\S]*\?\.id[\s\S]*providersData\.find\([\s\S]*p\.secret_status !== "requires_reentry"[\s\S]*\?\.id[\s\S]*null/,
   );
   assert.match(
     agentEditorSource,
@@ -106,7 +106,7 @@ test("agent editor treats provider as optional when deciding whether the form ca
   );
   assert.match(
     agentEditorSource,
-    /const cleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\}, schedulerExplicitlySelected\)/,
+    /const cleanedFormData = ensureSchedulerToolState\(\s*\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\},[\s\S]*schedulerExplicitlySelected[\s\S]*\)/,
   );
   assert.match(agentEditorSource, /setFormData\(cleanedFormData\)/);
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(cleanedFormData\)/);
@@ -123,11 +123,11 @@ test("agent editor auto-enables scheduler when subagents are configured", () => 
   );
   assert.match(
     agentEditorSource,
-    /const isLockedScheduler = isSchedulerTool && schedulerRequired/,
+    /const isLockedScheduler =[\s\S]*isSchedulerTool && schedulerRequired/,
   );
   assert.match(
     agentEditorSource,
-    /const cleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*\}, schedulerExplicitlySelected\)/,
+    /const cleanedFormData = ensureSchedulerToolState\(\s*\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*\},[\s\S]*schedulerExplicitlySelected[\s\S]*\)/,
   );
   assert.match(agentEditorSource, /disabled=\{isLockedScheduler\}/);
   assert.match(agentEditorSource, /因子代理配置自动启用/);
@@ -216,7 +216,7 @@ test("provider cards and agent editor surface providers that require api key ree
   assert.match(providersPageSource, /requires_reentry/);
   assert.match(providerDialogSource, /secret_status === "requires_reentry"/);
   assert.match(agentEditorSource, /secret_status === "requires_reentry"/);
-  assert.match(agentEditorSource, /disabled=\{.*secret_status === "requires_reentry"/);
+  assert.match(agentEditorSource, /disabled=\{[\s\S]*secret_status === "requires_reentry"/);
 });
 
 test("provider editor allows connection tests when account token auth is enabled", () => {

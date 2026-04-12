@@ -2,9 +2,9 @@
 
 use argus_protocol::{AgentId, ThreadId};
 
-/// In-memory request model used by ThreadPool orchestration.
+/// In-memory request model used by job-runtime orchestration.
 #[derive(Debug, Clone)]
-pub struct ThreadPoolJobRequest {
+pub struct JobRuntimeRequest {
     /// Source thread where dispatch_job was invoked.
     pub originating_thread_id: ThreadId,
     /// Stable job ID for lookup and result correlation.

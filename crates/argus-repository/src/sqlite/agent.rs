@@ -121,12 +121,8 @@ impl AgentRepository for ArgusSqlite {
             if let Some(old_display_name) =
                 previous_display_name.filter(|name| name != &record.display_name)
             {
-                self.rewrite_subagent_references(
-                    &mut tx,
-                    &old_display_name,
-                    &record.display_name,
-                )
-                .await?;
+                self.rewrite_subagent_references(&mut tx, &old_display_name, &record.display_name)
+                    .await?;
             }
             tx.commit().await.map_err(|e| DbError::QueryFailed {
                 reason: e.to_string(),
@@ -241,12 +237,14 @@ impl ArgusSqlite {
 
         for row in candidate_rows {
             let id = row.get::<i64, _>("id");
-            let subagent_names: Vec<String> = serde_json::from_str(
-                &row.get::<String, _>("subagent_names"),
-            )
-            .map_err(|e| DbError::QueryFailed {
-                reason: format!("failed to parse subagent_names during rename rewrite: {e}"),
-            })?;
+            let subagent_names: Vec<String> =
+                serde_json::from_str(&row.get::<String, _>("subagent_names")).map_err(|e| {
+                    DbError::QueryFailed {
+                        reason: format!(
+                            "failed to parse subagent_names during rename rewrite: {e}"
+                        ),
+                    }
+                })?;
             let mut changed = false;
             let rewritten_names: Vec<String> = subagent_names
                 .into_iter()

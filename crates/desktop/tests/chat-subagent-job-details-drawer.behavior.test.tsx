@@ -93,7 +93,7 @@ test("drawer panel renders selected detail output and metadata", () => {
   );
 
   assert.match(html, /完整输出/);
-  assert.match(html, /任务信息/);
+  assert.match(html, /原始 Prompt/);
   assert.match(html, /执行过程/);
   assert.match(html, /Worker/);
 });
@@ -111,5 +111,22 @@ test("drawer panel falls back to the summary when no full result exists", () => 
 
   assert.match(html, /结果摘要/);
   assert.match(html, /任务摘要/);
-  assert.match(html, /Job job-2/);
+  assert.doesNotMatch(html, /Job job-2/);
+});
+
+test("drawer panel hides the output section when no summary or final result exists", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SubagentJobDetailsPanel, {
+      detail: makeDetail({
+        job_id: "job-3",
+        result_text: null,
+        summary_text: null,
+      }),
+    }),
+  );
+
+  assert.doesNotMatch(html, /暂无详细结果/);
+  assert.doesNotMatch(html, /任务已结束，但详细结果暂不可用/);
+  assert.doesNotMatch(html, /任务信息/);
+  assert.match(html, /原始 Prompt/);
 });

@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use argus_protocol::{
-    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage, LlmProviderId,
-    LlmProviderRecord, LlmProviderRecordJson, McpDiscoveredToolRecord, McpServerRecord,
-    McpServerStatus, ProviderId, ProviderSecretStatus, ProviderTestResult, Role, SecretString,
-    SessionId, ThreadId, ThreadPoolSnapshot, ThreadPoolState,
+    AgentId, AgentMcpBinding, AgentMcpServerBinding, AgentRecord, ChatMessage,
+    JobRuntimePoolSnapshot, JobRuntimePoolState, LlmProviderId, LlmProviderRecord,
+    LlmProviderRecordJson, McpDiscoveredToolRecord, McpServerRecord, McpServerStatus, ProviderId,
+    ProviderSecretStatus, ProviderTestResult, Role, SecretString, SessionId, ThreadId,
+    ThreadRuntimeState,
 };
 use argus_wing::ArgusWing;
 use serde::{Deserialize, Serialize};
@@ -206,17 +207,24 @@ pub async fn list_tools(wing: State<'_, Arc<ArgusWing>>) -> Result<Vec<ToolInfoP
 }
 
 #[tauri::command]
-pub async fn get_thread_pool_snapshot(
+pub async fn get_job_runtime_snapshot(
     wing: State<'_, Arc<ArgusWing>>,
-) -> Result<ThreadPoolSnapshot, String> {
-    Ok(wing.thread_pool_snapshot())
+) -> Result<JobRuntimePoolSnapshot, String> {
+    Ok(wing.job_runtime_snapshot())
 }
 
 #[tauri::command]
-pub async fn get_thread_pool_state(
+pub async fn get_job_runtime_state(
     wing: State<'_, Arc<ArgusWing>>,
-) -> Result<ThreadPoolState, String> {
-    Ok(wing.thread_pool_state())
+) -> Result<JobRuntimePoolState, String> {
+    Ok(wing.job_runtime_state())
+}
+
+#[tauri::command]
+pub async fn get_thread_runtime_state(
+    wing: State<'_, Arc<ArgusWing>>,
+) -> Result<ThreadRuntimeState, String> {
+    Ok(wing.thread_runtime_state())
 }
 
 // ============================================================================

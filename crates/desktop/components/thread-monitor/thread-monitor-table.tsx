@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import type { ThreadPoolThreadState } from "@/lib/chat-store";
+import type { RuntimeThreadState } from "@/lib/chat-store";
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -34,7 +34,7 @@ function formatTime(value: string | null): string {
   });
 }
 
-function statusLabel(status: ThreadPoolThreadState["status"]): string {
+function statusLabel(status: RuntimeThreadState["status"]): string {
   switch (status) {
     case "queued":
       return "排队中";
@@ -51,7 +51,7 @@ function statusLabel(status: ThreadPoolThreadState["status"]): string {
   }
 }
 
-function statusBadgeClass(status: ThreadPoolThreadState["status"]): string {
+function statusBadgeClass(status: RuntimeThreadState["status"]): string {
   switch (status) {
     case "running":
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
@@ -68,7 +68,7 @@ function statusBadgeClass(status: ThreadPoolThreadState["status"]): string {
   }
 }
 
-function reasonLabel(reason: ThreadPoolThreadState["lastReason"]): string {
+function reasonLabel(reason: RuntimeThreadState["lastReason"]): string {
   if (!reason) return "—";
   switch (reason) {
     case "cooling_expired":
@@ -82,12 +82,12 @@ function reasonLabel(reason: ThreadPoolThreadState["lastReason"]): string {
   }
 }
 
-function kindLabel(kind: ThreadPoolThreadState["kind"]): string {
+function kindLabel(kind: RuntimeThreadState["kind"]): string {
   return kind === "chat" ? "Chat" : "Job";
 }
 
 interface ThreadMonitorTableProps {
-  threads: ThreadPoolThreadState[];
+  threads: RuntimeThreadState[];
   stoppingJobIds: Record<string, true>;
   onStopJob: (jobId: string) => void | Promise<void>;
 }

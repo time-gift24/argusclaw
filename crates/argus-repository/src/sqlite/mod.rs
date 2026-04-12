@@ -543,12 +543,10 @@ mod tests {
         .await
         .expect("legacy agents should insert");
 
-        sqlx::query(
-            "INSERT INTO threads (id, provider_id, template_id) VALUES ('thread-1', 1, 1)",
-        )
-        .execute(&pool)
-        .await
-        .expect("thread should insert");
+        sqlx::query("INSERT INTO threads (id, provider_id, template_id) VALUES ('thread-1', 1, 1)")
+            .execute(&pool)
+            .await
+            .expect("thread should insert");
         sqlx::query(
             "INSERT INTO jobs (id, name, agent_id, prompt) VALUES ('job-1', 'Job', 2, 'work')",
         )
@@ -594,7 +592,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flatten_subagent_migration_via_sqlx_migrator_succeeds_with_existing_agent_foreign_keys() {
+    async fn flatten_subagent_migration_via_sqlx_migrator_succeeds_with_existing_agent_foreign_keys()
+     {
         let db_path = std::env::temp_dir().join(format!(
             "argus-repository-migrate-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -690,15 +689,17 @@ mod tests {
         .await
         .expect("legacy schema with migrations table should be created");
 
-        let migrator =
-            sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/migrations"
-            )))
-            .await
-            .expect("migrator should load repository migrations");
+        let migrator = sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations"
+        )))
+        .await
+        .expect("migrator should load repository migrations");
 
-        for migration in migrator.iter().filter(|migration| migration.version < 20260411000000) {
+        for migration in migrator
+            .iter()
+            .filter(|migration| migration.version < 20260411000000)
+        {
             sqlx::query(
                 "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
                  VALUES (?1, ?2, 1, ?3, 0)",
@@ -732,12 +733,10 @@ mod tests {
         .await
         .expect("legacy agents should insert");
 
-        sqlx::query(
-            "INSERT INTO threads (id, provider_id, template_id) VALUES ('thread-1', 1, 1)",
-        )
-        .execute(&pool)
-        .await
-        .expect("thread should insert");
+        sqlx::query("INSERT INTO threads (id, provider_id, template_id) VALUES ('thread-1', 1, 1)")
+            .execute(&pool)
+            .await
+            .expect("thread should insert");
         sqlx::query(
             "INSERT INTO jobs (id, name, agent_id, prompt) VALUES ('job-1', 'Job', 2, 'work')",
         )

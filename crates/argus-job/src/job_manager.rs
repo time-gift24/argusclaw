@@ -1,6 +1,6 @@
 //! JobManager for dispatching and managing background jobs.
 //!
-//! Each dispatched job is tracked through a ThreadPool-managed execution thread.
+//! Each dispatched job is tracked through a JobRuntimeSupervisor-managed execution thread.
 //! Results are sent back through the unified pipe as ThreadEvent::JobResult.
 
 use std::collections::{HashMap, VecDeque};
@@ -10,15 +10,15 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use argus_agent::TurnCancellation;
 #[cfg(test)]
-use argus_agent::TurnRecord;
+use argus_agent::{LlmThreadCompactor, ThreadBuilder, TurnRecord};
+use argus_agent::{ThreadRegistration, ThreadRuntime, TurnCancellation};
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
-    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadEvent, ThreadId,
-    ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
-    ThreadPoolState, ThreadRuntimeStatus,
+    AgentId, JobRuntimePoolSnapshot, JobRuntimePoolState, JobRuntimeSummary, MailboxMessage,
+    MailboxMessageType, ProviderResolver, RuntimeKind, RuntimeRef, RuntimeStatus, ThreadEvent,
+    ThreadId, ThreadJobResult,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{JobId, JobStatus};
@@ -27,9 +27,10 @@ use argus_tool::ToolManager;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::RecoveredChildJob;
 use crate::error::JobError;
-use crate::thread_pool::{ThreadPool, ThreadPoolPersistence};
-use crate::types::ThreadPoolJobRequest;
+use crate::job_runtime_supervisor::{JobRuntimePersistence, JobRuntimeSupervisor};
+use crate::types::JobRuntimeRequest;
 
 #[derive(Debug, Clone)]
 enum TrackedJobState {
@@ -70,7 +71,8 @@ pub enum JobLookup {
 
 /// Manages job dispatch and lifecycle.
 pub struct JobManager {
-    thread_pool: Arc<ThreadPool>,
+    thread_runtime: Arc<ThreadRuntime>,
+    job_runtime: Arc<JobRuntimeSupervisor>,
     tracked_jobs: Arc<StdMutex<TrackedJobsStore>>,
     chat_mailbox_forwarder: Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
     job_repository: Option<Arc<dyn JobRepository>>,
@@ -107,18 +109,20 @@ impl JobManager {
         )
     }
 
-    /// Create a new JobManager with optional persistent thread-pool backing.
+    /// Create a new JobManager with optional persistent job-runtime backing.
     pub fn new_with_persistence(
         template_manager: Arc<TemplateManager>,
         provider_resolver: Arc<dyn ProviderResolver>,
         tool_manager: Arc<ToolManager>,
         trace_dir: PathBuf,
-        persistence: Option<ThreadPoolPersistence>,
+        persistence: Option<JobRuntimePersistence>,
     ) -> Self {
         let job_repository = persistence
             .as_ref()
-            .map(ThreadPoolPersistence::job_repository);
-        let thread_pool = Arc::new(ThreadPool::with_persistence(
+            .map(JobRuntimePersistence::job_repository);
+        let thread_runtime = Arc::new(ThreadRuntime::new());
+        let job_runtime = Arc::new(JobRuntimeSupervisor::with_persistence(
+            Arc::clone(&thread_runtime),
             template_manager,
             provider_resolver,
             tool_manager,
@@ -127,7 +131,8 @@ impl JobManager {
         ));
 
         Self {
-            thread_pool,
+            thread_runtime,
+            job_runtime,
             tracked_jobs: Arc::new(StdMutex::new(TrackedJobsStore::default())),
             chat_mailbox_forwarder: Arc::new(StdMutex::new(None)),
             job_repository,
@@ -150,7 +155,7 @@ impl JobManager {
             provider_resolver,
             tool_manager,
             trace_dir,
-            Some(ThreadPoolPersistence::new(
+            Some(JobRuntimePersistence::new(
                 job_repository,
                 thread_repository,
                 provider_repository,
@@ -160,12 +165,73 @@ impl JobManager {
 
     /// Get the currently bound execution thread for a job, if any.
     pub fn thread_binding(&self, job_id: &str) -> Option<ThreadId> {
-        self.thread_pool.get_thread_binding(job_id)
+        self.job_runtime.get_thread_binding(job_id)
     }
 
-    /// Return the shared unified thread pool.
-    pub fn thread_pool(&self) -> Arc<ThreadPool> {
-        Arc::clone(&self.thread_pool)
+    pub fn thread_runtime(&self) -> Arc<ThreadRuntime> {
+        Arc::clone(&self.thread_runtime)
+    }
+
+    pub fn parent_thread_id(&self, child_thread_id: &ThreadId) -> Option<ThreadId> {
+        self.job_runtime.parent_thread_id(child_thread_id)
+    }
+
+    pub async fn recover_parent_thread_id(
+        &self,
+        child_thread_id: &ThreadId,
+    ) -> Result<Option<ThreadId>, JobError> {
+        self.job_runtime
+            .recover_parent_thread_id(child_thread_id)
+            .await
+    }
+
+    pub async fn recover_thread_binding(&self, job_id: &str) -> Result<Option<ThreadId>, JobError> {
+        self.job_runtime.recover_thread_binding(job_id).await
+    }
+
+    pub async fn recover_child_jobs(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> Result<Vec<RecoveredChildJob>, JobError> {
+        self.job_runtime.recover_child_jobs(parent_thread_id).await
+    }
+
+    pub fn loaded_job_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<Arc<tokio::sync::RwLock<argus_agent::Thread>>> {
+        self.job_runtime.loaded_thread(thread_id)
+    }
+
+    pub fn job_runtime_summary(&self, thread_id: &ThreadId) -> Option<JobRuntimeSummary> {
+        self.job_runtime.runtime_summary(thread_id)
+    }
+
+    pub async fn unread_job_mailbox_messages(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<MailboxMessage>, JobError> {
+        self.job_runtime.unread_mailbox_messages(thread_id).await
+    }
+
+    pub async fn mark_job_mailbox_message_read(
+        &self,
+        thread_id: ThreadId,
+        message_id: &str,
+    ) -> Result<bool, JobError> {
+        self.job_runtime
+            .mark_mailbox_message_read(thread_id, message_id)
+            .await
+    }
+
+    pub async fn deliver_job_mailbox_message(
+        &self,
+        thread_id: ThreadId,
+        message: MailboxMessage,
+    ) -> Result<(), JobError> {
+        self.job_runtime
+            .deliver_mailbox_message(thread_id, message)
+            .await
     }
 
     pub fn set_chat_mailbox_forwarder<F, Fut>(&self, forwarder: F)
@@ -185,14 +251,14 @@ impl JobManager {
         *slot = Some(forwarder);
     }
 
-    /// Collect a point-in-time thread-pool snapshot.
-    pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
-        self.thread_pool.collect_metrics()
+    /// Collect a point-in-time job runtime snapshot.
+    pub fn job_runtime_snapshot(&self) -> JobRuntimePoolSnapshot {
+        self.job_runtime.collect_metrics()
     }
 
-    /// Collect the authoritative thread-pool state.
-    pub fn thread_pool_state(&self) -> ThreadPoolState {
-        self.thread_pool.collect_state()
+    /// Collect the authoritative job runtime state.
+    pub fn job_runtime_state(&self) -> JobRuntimePoolState {
+        self.job_runtime.collect_state()
     }
 
     /// Stop a running background job by signalling cancellation.
@@ -239,6 +305,14 @@ impl JobManager {
 
     /// Record that a job was dispatched for a thread.
     pub fn record_dispatched_job(&self, thread_id: ThreadId, job_id: String) {
+        self.thread_runtime.register_thread(ThreadRegistration {
+            thread_id,
+            kind: RuntimeKind::Job,
+            session_id: None,
+            parent_thread_id: None,
+            job_id: Some(job_id.clone()),
+            recoverable: true,
+        });
         Self::record_dispatched_job_in_store(
             &self.tracked_jobs,
             thread_id,
@@ -300,7 +374,7 @@ impl JobManager {
             return Ok(JobLookup::NotFound);
         };
         let Some(metadata) = self
-            .thread_pool
+            .job_runtime
             .recover_job_thread_metadata(execution_thread_id)
             .await?
         else {
@@ -346,7 +420,7 @@ impl JobManager {
         }
     }
 
-    /// Dispatch a background job through the thread pool.
+    /// Dispatch a background job through the job runtime supervisor.
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_job(
         &self,
@@ -363,7 +437,7 @@ impl JobManager {
             ));
         }
 
-        let request = ThreadPoolJobRequest {
+        let request = JobRuntimeRequest {
             originating_thread_id,
             job_id: job_id.clone(),
             agent_id,
@@ -371,7 +445,7 @@ impl JobManager {
             context,
         };
 
-        let execution_thread_id = self.thread_pool.enqueue_job(request.clone()).await?;
+        let execution_thread_id = self.job_runtime.enqueue_job(request.clone()).await?;
 
         let cancellation = TurnCancellation::new();
         let spawn_cancellation = cancellation.clone();
@@ -385,25 +459,26 @@ impl JobManager {
             job_id: job_id.clone(),
             thread_id: execution_thread_id,
         });
-        let _ = pipe_tx.send(ThreadEvent::ThreadPoolQueued {
-            runtime: ThreadPoolRuntimeRef {
+        let _ = pipe_tx.send(ThreadEvent::JobRuntimeQueued {
+            runtime: RuntimeRef {
                 thread_id: execution_thread_id,
-                kind: ThreadPoolRuntimeKind::Job,
+                kind: RuntimeKind::Job,
                 session_id: None,
                 job_id: Some(job_id.clone()),
             },
         });
-        let _ = pipe_tx.send(ThreadEvent::ThreadPoolMetricsUpdated {
-            snapshot: self.thread_pool.collect_metrics(),
+        let _ = pipe_tx.send(ThreadEvent::JobRuntimeMetricsUpdated {
+            snapshot: self.job_runtime.collect_metrics(),
         });
 
-        let thread_pool = Arc::clone(&self.thread_pool);
+        let job_runtime = Arc::clone(&self.job_runtime);
+        let thread_runtime = Arc::clone(&self.thread_runtime);
         let tracked_jobs = Arc::clone(&self.tracked_jobs);
         let chat_mailbox_forwarder = Arc::clone(&self.chat_mailbox_forwarder);
         let pipe_tx_clone = pipe_tx.clone();
 
         tokio::spawn(async move {
-            let result = thread_pool
+            let result = job_runtime
                 .execute_job(
                     request,
                     execution_thread_id,
@@ -413,7 +488,7 @@ impl JobManager {
                 .await;
 
             Self::forward_job_result_to_runtime(
-                &thread_pool,
+                &thread_runtime,
                 &chat_mailbox_forwarder,
                 originating_thread_id,
                 execution_thread_id,
@@ -550,11 +625,11 @@ impl JobManager {
     }
 
     fn is_job_runtime_active(&self, job_id: &str) -> bool {
-        let Some(thread_id) = self.thread_pool.get_thread_binding(job_id) else {
+        let Some(thread_id) = self.job_runtime.get_thread_binding(job_id) else {
             return true;
         };
 
-        self.thread_pool
+        self.job_runtime
             .collect_state()
             .runtimes
             .into_iter()
@@ -562,13 +637,13 @@ impl JobManager {
             .is_some_and(|runtime| {
                 matches!(
                     runtime.status,
-                    ThreadRuntimeStatus::Queued | ThreadRuntimeStatus::Running
+                    RuntimeStatus::Queued | RuntimeStatus::Running
                 )
             })
     }
 
     async fn forward_job_result_to_runtime(
-        thread_pool: &ThreadPool,
+        thread_runtime: &ThreadRuntime,
         chat_mailbox_forwarder: &Arc<StdMutex<Option<Arc<ChatMailboxForwarder>>>>,
         originating_thread_id: ThreadId,
         execution_thread_id: ThreadId,
@@ -601,9 +676,17 @@ impl JobManager {
             None => false,
         };
         if !forwarded {
-            let _ = thread_pool
+            if let Err(error) = thread_runtime
                 .deliver_mailbox_message(originating_thread_id, mailbox_message)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %originating_thread_id,
+                    execution_thread_id = %execution_thread_id,
+                    error = %error,
+                    "Failed to deliver job result mailbox message to chat thread runtime"
+                );
+            }
         }
     }
 
@@ -681,8 +764,7 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProviderRepository,
     };
     use argus_protocol::{
-        AgentRecord, LlmProvider, ProviderId, SessionId, ThinkingConfig, ThreadId,
-        ThreadRuntimeStatus,
+        AgentRecord, LlmProvider, ProviderId, RuntimeStatus, SessionId, ThinkingConfig, ThreadId,
     };
     use argus_repository::ArgusSqlite;
     use argus_repository::migrate;
@@ -928,6 +1010,54 @@ mod tests {
         )
     }
 
+    async fn load_chat_runtime(
+        manager: &JobManager,
+        thread_id: ThreadId,
+        session_id: SessionId,
+        agent_id: AgentId,
+        provider: Arc<dyn LlmProvider>,
+    ) {
+        let registration = ThreadRegistration {
+            thread_id,
+            kind: RuntimeKind::Chat,
+            session_id: Some(session_id),
+            parent_thread_id: None,
+            job_id: None,
+            recoverable: true,
+        };
+        manager
+            .thread_runtime()
+            .ensure_chat_runtime(registration, move || {
+                let provider = Arc::clone(&provider);
+                async move {
+                    let thread = ThreadBuilder::new()
+                        .id(thread_id)
+                        .session_id(session_id)
+                        .agent_record(Arc::new(AgentRecord {
+                            id: agent_id,
+                            display_name: "Parent Chat Agent".to_string(),
+                            description: "Used to test mailbox fallback delivery".to_string(),
+                            version: "1.0.0".to_string(),
+                            provider_id: Some(ProviderId::new(1)),
+                            model_id: Some("capturing".to_string()),
+                            system_prompt: "You receive job results.".to_string(),
+                            tool_names: vec![],
+                            subagent_names: vec![],
+                            max_tokens: None,
+                            temperature: None,
+                            thinking_config: Some(ThinkingConfig::enabled()),
+                        }))
+                        .provider(Arc::clone(&provider))
+                        .compactor(Arc::new(LlmThreadCompactor::new(provider)))
+                        .build()
+                        .map_err(|err| err.to_string())?;
+                    Ok(Arc::new(tokio::sync::RwLock::new(thread)))
+                }
+            })
+            .await
+            .expect("chat runtime should load into ThreadRuntime");
+    }
+
     fn assistant_output(content: &str) -> TurnRecord {
         TurnRecord::user_turn(
             1,
@@ -1076,7 +1206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_job_creates_thread_pool_binding() {
+    async fn dispatch_job_creates_job_runtime_binding() {
         let manager = test_job_manager();
         let originating_thread_id = ThreadId::new();
         let (pipe_tx, _pipe_rx) = broadcast::channel(16);
@@ -1097,18 +1227,27 @@ mod tests {
         let bound_thread_id = manager
             .thread_binding(&job_id)
             .expect("job should be bound to a thread");
+        let runtime_summary = manager
+            .thread_runtime()
+            .runtime_summary(&bound_thread_id)
+            .expect("bound runtime should also be tracked in ThreadRuntime");
+        assert_eq!(
+            runtime_summary.runtime.job_id.as_deref(),
+            Some(job_id.as_str())
+        );
+        assert_eq!(runtime_summary.runtime.kind, RuntimeKind::Job);
         let runtime = manager
-            .thread_pool_state()
+            .job_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
-            .expect("bound runtime should be tracked in thread pool state");
+            .expect("bound runtime should be tracked in job runtime state");
         assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
         assert!(matches!(
             runtime.status,
-            argus_protocol::ThreadRuntimeStatus::Queued
-                | argus_protocol::ThreadRuntimeStatus::Running
-                | argus_protocol::ThreadRuntimeStatus::Cooling
+            argus_protocol::RuntimeStatus::Queued
+                | argus_protocol::RuntimeStatus::Running
+                | argus_protocol::RuntimeStatus::Cooling
         ));
     }
 
@@ -1146,16 +1285,16 @@ mod tests {
                         assert_ne!(execution_thread_id, originating_thread_id);
                         bound_thread_id = Some(execution_thread_id);
                     }
-                    Ok(ThreadEvent::ThreadPoolQueued { runtime })
+                    Ok(ThreadEvent::JobRuntimeQueued { runtime })
                         if runtime.job_id.as_deref() == Some(job_id.as_str()) =>
                     {
-                        assert_eq!(runtime.kind, ThreadPoolRuntimeKind::Job);
+                        assert_eq!(runtime.kind, RuntimeKind::Job);
                         if let Some(execution_thread_id) = bound_thread_id {
                             assert_eq!(runtime.thread_id, execution_thread_id);
                         }
                         saw_queued = true;
                     }
-                    Ok(ThreadEvent::ThreadPoolMetricsUpdated { .. }) => {
+                    Ok(ThreadEvent::JobRuntimeMetricsUpdated { .. }) => {
                         saw_metrics = true;
                     }
                     Ok(ThreadEvent::JobResult {
@@ -1186,6 +1325,44 @@ mod tests {
         assert_eq!(manager.thread_binding(&job_id), Some(execution_thread_id));
         assert!(saw_queued, "queued event should be observed");
         assert!(saw_metrics, "metrics update should be observed");
+    }
+
+    #[tokio::test]
+    async fn job_result_fallback_delivers_to_thread_runtime_chat_mailbox() {
+        let provider = Arc::new(CapturingProvider::new("done", Duration::from_millis(5), 24));
+        let (manager, agent_id, originating_thread_id) =
+            test_job_manager_with_provider(provider.clone()).await;
+        let session_id = SessionId::new();
+        load_chat_runtime(
+            &manager,
+            originating_thread_id,
+            session_id,
+            agent_id,
+            provider,
+        )
+        .await;
+
+        manager.set_chat_mailbox_forwarder(|_, _| async { false });
+
+        JobManager::forward_job_result_to_runtime(
+            &manager.thread_runtime(),
+            &manager.chat_mailbox_forwarder,
+            originating_thread_id,
+            ThreadId::new(),
+            sample_job_result("job-mailbox-fallback"),
+        )
+        .await;
+
+        let unread = manager
+            .thread_runtime()
+            .unread_mailbox_messages(originating_thread_id)
+            .await
+            .expect("thread runtime mailbox should be readable");
+        assert_eq!(unread.len(), 1, "job result should reach the chat mailbox");
+        assert!(matches!(
+            unread[0].message_type,
+            MailboxMessageType::JobResult { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1284,15 +1461,12 @@ mod tests {
         timeout(Duration::from_secs(5), async {
             loop {
                 let status = manager
-                    .thread_pool_state()
+                    .job_runtime_state()
                     .runtimes
                     .into_iter()
                     .find(|runtime| runtime.runtime.job_id.as_deref() == Some(job_id.as_str()))
                     .map(|runtime| runtime.status);
-                if matches!(
-                    status,
-                    Some(ThreadRuntimeStatus::Queued | ThreadRuntimeStatus::Running)
-                ) {
+                if matches!(status, Some(RuntimeStatus::Queued | RuntimeStatus::Running)) {
                     break;
                 }
                 sleep(Duration::from_millis(10)).await;

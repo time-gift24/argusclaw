@@ -88,8 +88,9 @@ pub fn run() {
             commands::list_threads,
             commands::rename_thread,
             commands::list_tools,
-            commands::get_thread_pool_snapshot,
-            commands::get_thread_pool_state,
+            commands::get_job_runtime_snapshot,
+            commands::get_job_runtime_state,
+            commands::get_thread_runtime_state,
             // Account commands
             commands::get_current_user,
             commands::has_any_user,

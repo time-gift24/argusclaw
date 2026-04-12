@@ -12,11 +12,11 @@ import { useChatStore } from "@/lib/chat-store";
 const THREAD_POOL_POLL_INTERVAL_MS = 5_000;
 
 export function ThreadMonitorScreen() {
-  const snapshot = useChatStore((state) => state.threadPoolSnapshot);
-  const threads = useChatStore((state) => state.threadPoolThreads);
-  const loading = useChatStore((state) => state.threadPoolSnapshotLoading);
-  const error = useChatStore((state) => state.threadPoolError);
-  const refresh = useChatStore((state) => state.refreshThreadPoolSnapshot);
+  const snapshot = useChatStore((state) => state.jobRuntimeSnapshot);
+  const threads = useChatStore((state) => state.runtimeThreads);
+  const loading = useChatStore((state) => state.jobRuntimeSnapshotLoading);
+  const error = useChatStore((state) => state.jobRuntimeError);
+  const refresh = useChatStore((state) => state.refreshRuntimeMonitor);
   const stopJob = useChatStore((state) => state.stopJob);
   const stoppingJobIds = useChatStore((state) => state.stoppingJobIds);
   const { addToast } = useToast();
@@ -72,7 +72,7 @@ export function ThreadMonitorScreen() {
                 </Badge>
               </div>
               <p className="max-w-2xl text-sm text-muted-foreground">
-                监控线程池总览和统一 runtime 状态，并为运行中的 job 提供轻量停止入口。线程列表与池级指标仍以后端权威状态为准。
+                监控 job runtime 池级指标和统一 runtime 状态，并为运行中的 job 提供轻量停止入口。线程列表与指标都以后端权威状态为准。
               </p>
               <div className="flex flex-wrap gap-2 pt-1 text-xs">
                 <Badge variant="outline" className="rounded-full border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300">
@@ -91,7 +91,7 @@ export function ThreadMonitorScreen() {
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {loading ? <Loader2 className="size-4 animate-spin text-primary" /> : <RefreshCw className="size-4 text-muted-foreground/70" />}
-              <span>{loading ? "正在刷新监控快照" : "已连接线程池监控"}</span>
+              <span>{loading ? "正在刷新监控快照" : "已连接 runtime 监控"}</span>
             </div>
           </div>
           {error ? (

@@ -5,16 +5,16 @@
 
 pub mod error;
 pub mod job_manager;
-pub mod thread_pool;
+pub mod job_runtime_supervisor;
 pub mod types;
 
 pub use error::JobError;
 pub use job_manager::{JobLookup, JobManager};
-pub use thread_pool::ThreadPool;
-pub use types::ThreadPoolJobRequest;
+pub use job_runtime_supervisor::{JobRuntimePersistence, JobRuntimeSupervisor, RecoveredChildJob};
+pub use types::JobRuntimeRequest;
 
 #[cfg(test)]
 #[tokio::test]
 async fn enqueue_job_creates_binding_and_updates_metrics() {
-    thread_pool::assert_enqueue_job_creates_binding_and_updates_metrics().await;
+    job_runtime_supervisor::assert_enqueue_job_creates_binding_and_updates_metrics().await;
 }

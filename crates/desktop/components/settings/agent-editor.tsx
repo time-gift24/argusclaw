@@ -62,22 +62,29 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
   }
 }
 
+const SCHEDULER_TOOL_NAME = "scheduler"
+
 function ensureSchedulerToolState(
   record: AgentRecord,
   schedulerExplicitlySelected: boolean,
 ): AgentRecord {
-  const hasScheduler = record.tool_names.includes("scheduler")
+  const hasScheduler = record.tool_names.includes(SCHEDULER_TOOL_NAME)
 
   if (record.subagent_names.length > 0) {
-    return hasScheduler
-      ? record
-      : { ...record, tool_names: [...record.tool_names, "scheduler"] }
+    if (hasScheduler) {
+      return record
+    }
+
+    return {
+      ...record,
+      tool_names: [...record.tool_names, SCHEDULER_TOOL_NAME],
+    }
   }
 
   if (!schedulerExplicitlySelected && hasScheduler) {
     return {
       ...record,
-      tool_names: record.tool_names.filter((name) => name !== "scheduler"),
+      tool_names: record.tool_names.filter((name) => name !== SCHEDULER_TOOL_NAME),
     }
   }
 
@@ -91,6 +98,65 @@ interface ToolParameterDetail {
   required: boolean
   typeLabel: string
   description: string
+}
+
+function normalizeAgentRecord(
+  record: AgentRecord,
+  schedulerExplicitlySelected: boolean,
+): AgentRecord {
+  return ensureSchedulerToolState(
+    {
+      ...record,
+      subagent_names: record.subagent_names ?? [],
+    },
+    schedulerExplicitlySelected,
+  )
+}
+
+function getUpdatedSubagentNames(
+  subagentNames: string[],
+  agentName: string,
+  checked: boolean | "indeterminate",
+): string[] {
+  if (checked) {
+    return [...subagentNames, agentName]
+  }
+
+  return subagentNames.filter((name) => name !== agentName)
+}
+
+function toggleToolNames(toolNames: string[], toolName: string): string[] {
+  if (toolNames.includes(toolName)) {
+    return toolNames.filter((name) => name !== toolName)
+  }
+
+  return [...toolNames, toolName]
+}
+
+function getToolPopoverClasses(index: number): {
+  hoverPositionClass: string
+  arrowPositionClass: string
+} {
+  const columnIndex = index % 4
+
+  if (index < 4) {
+    return {
+      hoverPositionClass: "bottom-full mb-2 left-1/2 -translate-x-1/2",
+      arrowPositionClass: "left-1/2 -translate-x-1/2 top-full -mt-1",
+    }
+  }
+
+  if (columnIndex < 2) {
+    return {
+      hoverPositionClass: "left-full ml-2 top-1/2 -translate-y-1/2",
+      arrowPositionClass: "right-full -mr-1 top-1/2 -translate-y-1/2",
+    }
+  }
+
+  return {
+    hoverPositionClass: "right-full mr-2 top-1/2 -translate-y-1/2",
+    arrowPositionClass: "left-full -ml-1 top-1/2 -translate-y-1/2",
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -330,11 +396,9 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           ])
           if (agent) {
             const schedulerWasExplicit =
-              agent.tool_names.includes("scheduler") && (agent.subagent_names?.length ?? 0) === 0
-            const normalizedAgent = ensureSchedulerToolState({
-              ...agent,
-              subagent_names: agent.subagent_names ?? [],
-            }, schedulerWasExplicit)
+              agent.tool_names.includes(SCHEDULER_TOOL_NAME) &&
+              (agent.subagent_names?.length ?? 0) === 0
+            const normalizedAgent = normalizeAgentRecord(agent, schedulerWasExplicit)
             setSchedulerExplicitlySelected(schedulerWasExplicit)
             setFormData(normalizedAgent)
           }
@@ -501,12 +565,17 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                                 checked={selected}
                                 onCheckedChange={(checked) => {
                                   setFormData((prev) =>
-                                    ensureSchedulerToolState({
-                                      ...prev,
-                                      subagent_names: checked
-                                        ? [...prev.subagent_names, agent.display_name]
-                                        : prev.subagent_names.filter((name) => name !== agent.display_name),
-                                    }, schedulerExplicitlySelected),
+                                    ensureSchedulerToolState(
+                                      {
+                                        ...prev,
+                                        subagent_names: getUpdatedSubagentNames(
+                                          prev.subagent_names,
+                                          agent.display_name,
+                                          checked,
+                                        ),
+                                      },
+                                      schedulerExplicitlySelected,
+                                    ),
                                   )
                                 }}
                               />
@@ -708,23 +777,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                   {pagedToolList.map((tool, index) => {
                     const parameterDetails = extractToolParameterDetails(tool.parameters)
                     const detailedDescription = tool.description || readToolSchemaDescription(tool.parameters) || "无描述"
-                    const isSchedulerTool = tool.name === "scheduler"
+                    const isSchedulerTool = tool.name === SCHEDULER_TOOL_NAME
                     const isLockedScheduler = isSchedulerTool && schedulerRequired
                     const isSelected = isLockedScheduler || formData.tool_names.includes(tool.name)
-                    const columnIndex = index % 4
-                    const isTopRow = index < 4
-                    const hoverPositionClass =
-                      isTopRow
-                        ? "bottom-full mb-2 left-1/2 -translate-x-1/2"
-                        : columnIndex < 2
-                          ? "left-full ml-2 top-1/2 -translate-y-1/2"
-                          : "right-full mr-2 top-1/2 -translate-y-1/2"
-                    const arrowPositionClass =
-                      isTopRow
-                        ? "left-1/2 -translate-x-1/2 top-full -mt-1"
-                        : columnIndex < 2
-                          ? "right-full -mr-1 top-1/2 -translate-y-1/2"
-                          : "left-full -ml-1 top-1/2 -translate-y-1/2"
+                    const { hoverPositionClass, arrowPositionClass } =
+                      getToolPopoverClasses(index)
 
                     return (
                     <div
@@ -733,9 +790,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                         if (isLockedScheduler) return
                         setFormData((prev) => ({
                           ...prev,
-                          tool_names: isSelected
-                            ? prev.tool_names.filter((n) => n !== tool.name)
-                            : [...prev.tool_names, tool.name],
+                          tool_names: toggleToolNames(prev.tool_names, tool.name),
                         }))
                         if (isSchedulerTool) {
                           setSchedulerExplicitlySelected(!isSelected)

@@ -34,9 +34,9 @@ use argus_job::JobManager;
 use argus_llm::ProviderManager;
 use argus_mcp::{McpRuntime, McpRuntimeConfig, RmcpConnector};
 use argus_protocol::{
-    AgentId, AgentRecord, ArgusError, LlmProvider, LlmProviderId, LlmProviderRecord, ProviderId,
-    ProviderTestResult, Result, RiskLevel, SessionId, ThreadEvent, ThreadId, ThreadPoolSnapshot,
-    ThreadPoolState,
+    AgentId, AgentRecord, ArgusError, JobRuntimePoolSnapshot, JobRuntimePoolState, LlmProvider,
+    LlmProviderId, LlmProviderRecord, ProviderId, ProviderTestResult, Result, RiskLevel, SessionId,
+    ThreadEvent, ThreadId, ThreadRuntimeState,
 };
 use argus_repository::traits::{
     AccountRepository, AgentRepository, JobRepository, LlmProviderRepository, McpRepository,
@@ -159,7 +159,6 @@ impl ArgusWing {
             mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
-            job_manager.thread_pool(),
             job_manager.clone(),
         ));
 
@@ -230,7 +229,6 @@ impl ArgusWing {
             mcp_tool_resolver,
             tool_manager.clone(),
             trace_dir,
-            job_manager.thread_pool(),
             job_manager.clone(),
         ));
         let mcp_repo: Arc<dyn McpRepository> = arc_sqlite.clone();
@@ -281,15 +279,20 @@ impl ArgusWing {
         Ok(())
     }
 
-    /// Get a point-in-time snapshot of aggregate thread-pool metrics.
+    /// Get a point-in-time snapshot of aggregate job-runtime metrics.
     #[must_use]
-    pub fn thread_pool_snapshot(&self) -> ThreadPoolSnapshot {
-        self.job_manager.thread_pool_snapshot()
+    pub fn job_runtime_snapshot(&self) -> JobRuntimePoolSnapshot {
+        self.job_manager.job_runtime_snapshot()
     }
 
-    /// Return the authoritative thread-pool state including runtime summaries.
-    pub fn thread_pool_state(&self) -> ThreadPoolState {
-        self.job_manager.thread_pool_state()
+    /// Return the authoritative job-runtime state including runtime summaries.
+    pub fn job_runtime_state(&self) -> JobRuntimePoolState {
+        self.job_manager.job_runtime_state()
+    }
+
+    /// Return the authoritative thread-runtime state including runtime summaries.
+    pub fn thread_runtime_state(&self) -> ThreadRuntimeState {
+        self.job_manager.thread_runtime().collect_state()
     }
 
     /// Resolve the persisted execution thread bound to a job ID, if available.
@@ -1256,7 +1259,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_thread_removes_chat_runtime_from_thread_pool_state() {
+    async fn delete_thread_removes_chat_runtime_from_thread_runtime_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
 
@@ -1268,7 +1271,8 @@ mod tests {
             .upsert_template(AgentRecord {
                 id: AgentId::new(0),
                 display_name: "Pool Cleanup Agent".to_string(),
-                description: "Verifies chat runtimes are removed on delete".to_string(),
+                description: "Verifies chat runtime registrations are removed on delete"
+                    .to_string(),
                 version: "1.0.0".to_string(),
                 provider_id: None,
                 model_id: None,
@@ -1292,7 +1296,7 @@ mod tests {
             .expect("thread should create");
 
         assert!(wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .iter()
             .any(|runtime| runtime.runtime.thread_id == thread_id));
@@ -1302,14 +1306,14 @@ mod tests {
             .expect("thread delete should succeed");
 
         assert!(!wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .iter()
             .any(|runtime| runtime.runtime.thread_id == thread_id));
     }
 
     #[tokio::test]
-    async fn delete_session_removes_registered_chat_runtimes_from_thread_pool_state() {
+    async fn delete_session_removes_registered_chat_runtimes_from_thread_runtime_state() {
         let temp_dir = tempfile::tempdir().expect("temp dir should exist");
         let database_path = temp_dir.path().join("test.sqlite");
 
@@ -1321,7 +1325,7 @@ mod tests {
             .upsert_template(AgentRecord {
                 id: AgentId::new(0),
                 display_name: "Session Cleanup Agent".to_string(),
-                description: "Verifies session delete clears pooled chat runtimes".to_string(),
+                description: "Verifies session delete clears registered chat runtimes".to_string(),
                 version: "1.0.0".to_string(),
                 provider_id: None,
                 model_id: None,
@@ -1348,7 +1352,7 @@ mod tests {
             .await
             .expect("second thread should create");
 
-        let before_delete = wing.thread_pool_state();
+        let before_delete = wing.thread_runtime_state();
         assert!(before_delete
             .runtimes
             .iter()
@@ -1362,7 +1366,7 @@ mod tests {
             .await
             .expect("session delete should succeed");
 
-        let after_delete = wing.thread_pool_state();
+        let after_delete = wing.thread_runtime_state();
         assert!(!after_delete
             .runtimes
             .iter()
@@ -1550,7 +1554,7 @@ mod tests {
             .expect("thread should create");
 
         let runtime_before = wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == thread_id)
@@ -1567,7 +1571,7 @@ mod tests {
         );
 
         let runtime_after = wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == thread_id)
@@ -1622,7 +1626,7 @@ mod tests {
         );
 
         let runtime_after = wing
-            .thread_pool_state()
+            .thread_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == thread_id)
@@ -1693,7 +1697,7 @@ mod tests {
         assert_ne!(bound_thread_id, originating_thread_id);
 
         let runtime = wing
-            .thread_pool_state()
+            .job_runtime_state()
             .runtimes
             .into_iter()
             .find(|runtime| runtime.runtime.thread_id == bound_thread_id)
@@ -1701,9 +1705,9 @@ mod tests {
         assert_eq!(runtime.runtime.job_id.as_deref(), Some(job_id.as_str()));
         assert!(matches!(
             runtime.status,
-            argus_protocol::ThreadRuntimeStatus::Queued
-                | argus_protocol::ThreadRuntimeStatus::Running
-                | argus_protocol::ThreadRuntimeStatus::Cooling
+            argus_protocol::RuntimeStatus::Queued
+                | argus_protocol::RuntimeStatus::Running
+                | argus_protocol::RuntimeStatus::Cooling
         ));
 
         let sqlite = ArgusSqlite::new(wing.pool.clone());

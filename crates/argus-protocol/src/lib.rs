@@ -20,10 +20,10 @@ pub use account::{AccountCredentials, AccountRepository};
 pub use agent::AgentRecord;
 pub use error::{ArgusError, Result};
 pub use events::{
-    MailboxMessage, MailboxMessageType, QueuedUserMessage, ThreadCommand, ThreadControlEvent,
-    ThreadEvent, ThreadJobResult, ThreadMailbox, ThreadPoolEventReason, ThreadPoolRuntimeKind,
-    ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot, ThreadPoolState,
-    ThreadRuntimeSnapshot, ThreadRuntimeStatus,
+    JobRuntimePoolSnapshot, JobRuntimePoolState, JobRuntimeSummary, MailboxMessage,
+    MailboxMessageType, QueuedUserMessage, RuntimeEventReason, RuntimeKind, RuntimeRef,
+    RuntimeStatus, ThreadCommand, ThreadControlEvent, ThreadEvent, ThreadJobResult, ThreadMailbox,
+    ThreadRuntimeSnapshot, ThreadRuntimeState, ThreadRuntimeSummary,
 };
 pub use hooks::{HookAction, HookEvent, HookHandler, HookRegistry, ToolHookContext};
 pub use ids::{AgentId, ProviderId, SessionId, ThreadId};
@@ -84,6 +84,6 @@ pub use safety::{OutputWarning, SafetyConfig, sanitize_tool_output};
 
 #[cfg(test)]
 #[test]
-fn thread_pool_snapshot_round_trips_through_json() {
-    events::assert_thread_pool_snapshot_round_trip();
+fn job_runtime_snapshot_round_trips_through_json() {
+    events::assert_job_runtime_snapshot_round_trip();
 }

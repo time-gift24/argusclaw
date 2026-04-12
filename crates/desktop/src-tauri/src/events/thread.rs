@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 
 use argus_protocol::{
-    LlmStreamEvent, MailboxMessage, ThreadEvent, ThreadNoticeLevel, ThreadPoolEventReason,
-    ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    JobRuntimePoolSnapshot, LlmStreamEvent, MailboxMessage, RuntimeEventReason, RuntimeRef,
+    ThreadEvent, ThreadNoticeLevel,
 };
 
 /// Envelope for thread events sent to the frontend.
@@ -206,35 +206,35 @@ impl ThreadEventEnvelope {
                 turn_number: None,
                 payload: ThreadEventPayload::ThreadBoundToJob { job_id },
             }),
-            ThreadEvent::ThreadPoolQueued { runtime } => Some(Self {
+            ThreadEvent::JobRuntimeQueued { runtime } => Some(Self {
                 session_id,
                 thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolQueued { runtime },
+                payload: ThreadEventPayload::JobRuntimeQueued { runtime },
             }),
-            ThreadEvent::ThreadPoolStarted { runtime } => Some(Self {
+            ThreadEvent::JobRuntimeStarted { runtime } => Some(Self {
                 session_id,
                 thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolStarted { runtime },
+                payload: ThreadEventPayload::JobRuntimeStarted { runtime },
             }),
-            ThreadEvent::ThreadPoolCooling { runtime } => Some(Self {
+            ThreadEvent::JobRuntimeCooling { runtime } => Some(Self {
                 session_id,
                 thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolCooling { runtime },
+                payload: ThreadEventPayload::JobRuntimeCooling { runtime },
             }),
-            ThreadEvent::ThreadPoolEvicted { runtime, reason } => Some(Self {
+            ThreadEvent::JobRuntimeEvicted { runtime, reason } => Some(Self {
                 session_id,
                 thread_id: runtime.thread_id.inner().to_string(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolEvicted { runtime, reason },
+                payload: ThreadEventPayload::JobRuntimeEvicted { runtime, reason },
             }),
-            ThreadEvent::ThreadPoolMetricsUpdated { snapshot } => Some(Self {
+            ThreadEvent::JobRuntimeMetricsUpdated { snapshot } => Some(Self {
                 session_id,
                 thread_id: String::new(),
                 turn_number: None,
-                payload: ThreadEventPayload::ThreadPoolMetricsUpdated { snapshot },
+                payload: ThreadEventPayload::JobRuntimeMetricsUpdated { snapshot },
             }),
             ThreadEvent::UserInterrupt { .. } => None,
             ThreadEvent::UserMessage { .. } => None,
@@ -304,21 +304,21 @@ pub enum ThreadEventPayload {
     ThreadBoundToJob {
         job_id: String,
     },
-    ThreadPoolQueued {
-        runtime: ThreadPoolRuntimeRef,
+    JobRuntimeQueued {
+        runtime: RuntimeRef,
     },
-    ThreadPoolStarted {
-        runtime: ThreadPoolRuntimeRef,
+    JobRuntimeStarted {
+        runtime: RuntimeRef,
     },
-    ThreadPoolCooling {
-        runtime: ThreadPoolRuntimeRef,
+    JobRuntimeCooling {
+        runtime: RuntimeRef,
     },
-    ThreadPoolEvicted {
-        runtime: ThreadPoolRuntimeRef,
-        reason: ThreadPoolEventReason,
+    JobRuntimeEvicted {
+        runtime: RuntimeRef,
+        reason: RuntimeEventReason,
     },
-    ThreadPoolMetricsUpdated {
-        snapshot: ThreadPoolSnapshot,
+    JobRuntimeMetricsUpdated {
+        snapshot: JobRuntimePoolSnapshot,
     },
     JobDispatched {
         job_id: String,
@@ -377,7 +377,7 @@ impl ThreadEventPayload {
 
 #[cfg(test)]
 mod tests {
-    use argus_protocol::{LlmStreamEvent, ThreadEvent, ThreadId, ThreadPoolSnapshot};
+    use argus_protocol::{JobRuntimePoolSnapshot, LlmStreamEvent, ThreadEvent, ThreadId};
 
     use super::{ThreadEventEnvelope, ThreadEventPayload};
 
@@ -434,8 +434,8 @@ mod tests {
     }
 
     #[test]
-    fn thread_pool_metrics_updated_event_conversion_preserves_snapshot() {
-        let snapshot = ThreadPoolSnapshot {
+    fn job_runtime_metrics_updated_event_conversion_preserves_snapshot() {
+        let snapshot = JobRuntimePoolSnapshot {
             max_threads: 8,
             active_threads: 2,
             queued_threads: 1,
@@ -453,7 +453,7 @@ mod tests {
 
         let envelope = ThreadEventEnvelope::from_thread_event(
             "session-1".to_string(),
-            ThreadEvent::ThreadPoolMetricsUpdated {
+            ThreadEvent::JobRuntimeMetricsUpdated {
                 snapshot: snapshot.clone(),
             },
         )
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(envelope.turn_number, None);
         assert!(matches!(
             envelope.payload,
-            ThreadEventPayload::ThreadPoolMetricsUpdated { snapshot: ref forwarded }
+            ThreadEventPayload::JobRuntimeMetricsUpdated { snapshot: ref forwarded }
                 if forwarded == &snapshot
         ));
     }
