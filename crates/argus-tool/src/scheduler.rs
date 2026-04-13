@@ -35,6 +35,8 @@ enum SchedulerInput {
         job_id: String,
         #[serde(default)]
         consume: Option<bool>,
+        #[serde(default)]
+        wait_ms: Option<u64>,
     },
     #[serde(rename = "send_message")]
     SendMessage {
@@ -94,6 +96,7 @@ pub struct SchedulerLookupRequest {
     pub thread_id: ThreadId,
     pub job_id: String,
     pub consume: bool,
+    pub wait_ms: Option<u64>,
 }
 
 /// Request payload for sending a mailbox message.
@@ -230,6 +233,10 @@ fn scheduler_get_result_variant() -> serde_json::Value {
             "consume": {
                 "type": "boolean",
                 "description": "When true, consume result and prevent queued replay"
+            },
+            "wait_ms": {
+                "type": "integer",
+                "description": "Optional short wait window in milliseconds before returning pending"
             }
         },
         "required": ["action", "job_id"],
@@ -377,13 +384,18 @@ impl NamedTool for SchedulerTool {
                 let subagents = self.backend.list_subagents().await?;
                 serialize_value(subagents, self.name(), "subagents")
             }
-            SchedulerInput::GetJobResult { job_id, consume } => {
+            SchedulerInput::GetJobResult {
+                job_id,
+                consume,
+                wait_ms,
+            } => {
                 let lookup = self
                     .backend
                     .get_job_result(SchedulerLookupRequest {
                         thread_id: ctx.thread_id,
                         job_id: job_id.clone(),
                         consume: consume.unwrap_or(false),
+                        wait_ms,
                     })
                     .await?;
 
@@ -470,6 +482,7 @@ mod tests {
         dispatch_calls: Mutex<Vec<RecordedDispatch>>,
         list_response: Vec<SchedulerSubagent>,
         lookup_response: SchedulerJobLookup,
+        lookup_calls: Mutex<Vec<SchedulerLookupRequest>>,
         send_calls: Mutex<Vec<SendMessageRequest>>,
         send_response: SendMessageResponse,
         inbox_response: Vec<MailboxMessage>,
@@ -500,8 +513,12 @@ mod tests {
 
         async fn get_job_result(
             &self,
-            _request: SchedulerLookupRequest,
+            request: SchedulerLookupRequest,
         ) -> Result<SchedulerJobLookup, ToolError> {
+            self.lookup_calls
+                .lock()
+                .expect("lookup_calls mutex poisoned")
+                .push(request);
             Ok(self.lookup_response.clone())
         }
 
@@ -573,6 +590,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -581,7 +599,7 @@ mod tests {
             inbox_response: Vec::new(),
             mark_read_calls: Mutex::new(Vec::new()),
         });
-        let tool = SchedulerTool::new(backend);
+        let tool = SchedulerTool::new(backend.clone());
         assert_eq!(tool.name(), "scheduler");
         assert_eq!(tool.risk_level(), RiskLevel::Medium);
     }
@@ -593,6 +611,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -601,7 +620,7 @@ mod tests {
             inbox_response: Vec::new(),
             mark_read_calls: Mutex::new(Vec::new()),
         });
-        let tool = SchedulerTool::new(backend);
+        let tool = SchedulerTool::new(backend.clone());
         let definition = tool.definition();
         let variants = definition.parameters["oneOf"]
             .as_array()
@@ -633,6 +652,10 @@ mod tests {
             get_result_variant["required"],
             serde_json::json!(["action", "job_id"])
         );
+        assert_eq!(
+            get_result_variant["properties"]["wait_ms"]["type"],
+            serde_json::json!("integer")
+        );
 
         let send_message_variant = variants
             .iter()
@@ -653,6 +676,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -700,6 +724,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -742,6 +767,7 @@ mod tests {
                 description: "Plans work".to_string(),
             }],
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -750,7 +776,7 @@ mod tests {
             inbox_response: Vec::new(),
             mark_read_calls: Mutex::new(Vec::new()),
         });
-        let tool = SchedulerTool::new(backend);
+        let tool = SchedulerTool::new(backend.clone());
 
         let response = tool
             .execute(serde_json::json!({"action": "list_subagents"}), make_ctx())
@@ -768,6 +794,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Completed(sample_result()),
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -776,14 +803,15 @@ mod tests {
             inbox_response: Vec::new(),
             mark_read_calls: Mutex::new(Vec::new()),
         });
-        let tool = SchedulerTool::new(backend);
+        let tool = SchedulerTool::new(backend.clone());
 
         let response = tool
             .execute(
                 serde_json::json!({
                     "action": "get_job_result",
                     "job_id": "job-42",
-                    "consume": true
+                    "consume": true,
+                    "wait_ms": 1000
                 }),
                 make_ctx(),
             )
@@ -793,6 +821,14 @@ mod tests {
         assert_eq!(response["job_id"], serde_json::json!("job-42"));
         assert_eq!(response["status"], serde_json::json!("completed"));
         assert_eq!(response["result"]["message"], serde_json::json!("finished"));
+        let lookup_calls = backend
+            .lookup_calls
+            .lock()
+            .expect("lookup_calls mutex poisoned");
+        assert_eq!(lookup_calls.len(), 1);
+        assert_eq!(lookup_calls[0].job_id, "job-42");
+        assert!(lookup_calls[0].consume);
+        assert_eq!(lookup_calls[0].wait_ms, Some(1000));
     }
 
     #[tokio::test]
@@ -803,6 +839,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 1,
@@ -850,6 +887,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,
@@ -876,6 +914,7 @@ mod tests {
             dispatch_calls: Mutex::new(Vec::new()),
             list_response: Vec::new(),
             lookup_response: SchedulerJobLookup::Pending,
+            lookup_calls: Mutex::new(Vec::new()),
             send_calls: Mutex::new(Vec::new()),
             send_response: SendMessageResponse {
                 delivered: 0,

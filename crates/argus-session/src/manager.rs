@@ -17,14 +17,14 @@ use argus_template::TemplateManager;
 use argus_tool::{
     CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
     SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
-    SchedulerTool, SendMessageRequest, SendMessageResponse, ToolManager,
-    MAX_DISPATCH_DEPTH,
+    SchedulerTool, SendMessageRequest, SendMessageResponse, ToolManager, MAX_DISPATCH_DEPTH,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use tokio::sync::broadcast;
+use tokio::time::{sleep, Duration, Instant};
 use uuid::Uuid;
 
 use crate::session::{Session, SessionSummary, ThreadSummary};
@@ -94,6 +94,9 @@ impl std::fmt::Debug for SessionSchedulerBackend {
 }
 
 impl SessionSchedulerBackend {
+    const GET_JOB_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+    const GET_JOB_RESULT_MAX_WAIT: Duration = Duration::from_millis(5_000);
+
     fn new(
         template_manager: Arc<TemplateManager>,
         job_manager: Arc<JobManager>,
@@ -186,9 +189,11 @@ impl SessionSchedulerBackend {
         guard.agent_record().display_name.clone()
     }
 
-    async fn current_scheduler_agent(&self) -> std::result::Result<argus_protocol::AgentRecord, ToolError> {
-        let agent_id = current_agent_id()
-            .ok_or_else(|| Self::scheduler_error("no current agent context"))?;
+    async fn current_scheduler_agent(
+        &self,
+    ) -> std::result::Result<argus_protocol::AgentRecord, ToolError> {
+        let agent_id =
+            current_agent_id().ok_or_else(|| Self::scheduler_error("no current agent context"))?;
         self.template_manager
             .get(agent_id)
             .await
@@ -204,11 +209,10 @@ impl SessionSchedulerBackend {
         let mut depth = 0;
         let mut cursor = thread_id;
 
-        while let Some(parent_thread_id) = thread_pool
-            .parent_thread_id(&cursor)
-            .or(thread_pool.recover_parent_thread_id(&cursor).await.map_err(|error| {
-                Self::scheduler_error(error.to_string())
-            })?)
+        while let Some(parent_thread_id) = thread_pool.parent_thread_id(&cursor).or(thread_pool
+            .recover_parent_thread_id(&cursor)
+            .await
+            .map_err(|error| Self::scheduler_error(error.to_string()))?)
         {
             depth += 1;
             cursor = parent_thread_id;
@@ -428,7 +432,9 @@ impl SchedulerBackend for SessionSchedulerBackend {
     ) -> std::result::Result<String, ToolError> {
         let agent = self.current_scheduler_agent().await?;
         if agent.subagent_names.is_empty() {
-            return Err(Self::scheduler_error("this agent has no subagents configured"));
+            return Err(Self::scheduler_error(
+                "this agent has no subagents configured",
+            ));
         }
 
         let dispatch_depth = self.dispatch_depth_for_thread(request.thread_id).await?;
@@ -492,11 +498,36 @@ impl SchedulerBackend for SessionSchedulerBackend {
         &self,
         request: SchedulerLookupRequest,
     ) -> std::result::Result<SchedulerJobLookup, ToolError> {
-        let lookup = self
+        let mut lookup = self
             .job_manager
             .get_job_result_status_persisted(request.thread_id, &request.job_id, false)
             .await
             .map_err(|error| Self::scheduler_error(error.to_string()))?;
+
+        if matches!(lookup, JobLookup::Pending) {
+            let wait_budget = request
+                .wait_ms
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::ZERO)
+                .min(Self::GET_JOB_RESULT_MAX_WAIT);
+            if wait_budget > Duration::ZERO {
+                let deadline = Instant::now() + wait_budget;
+                while matches!(lookup, JobLookup::Pending) {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    sleep(remaining.min(Self::GET_JOB_RESULT_POLL_INTERVAL)).await;
+                    lookup = self
+                        .job_manager
+                        .get_job_result_status_persisted(request.thread_id, &request.job_id, false)
+                        .await
+                        .map_err(|error| Self::scheduler_error(error.to_string()))?;
+                }
+            }
+        }
 
         if request.consume && matches!(lookup, JobLookup::Completed(_)) {
             self.claim_queued_runtime_result(request.thread_id, &request.job_id)
@@ -1449,6 +1480,7 @@ mod tests {
     use argus_agent::thread_trace_store::{
         chat_thread_base_dir, persist_thread_metadata, ThreadTraceKind, ThreadTraceMetadata,
     };
+    use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_agent::turn_log_store::append_turn_record;
     use argus_agent::turn_log_store::RecoveredThreadLogState;
     use argus_protocol::llm::ChatMessage;
@@ -1456,7 +1488,6 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
         LlmProviderRepository,
     };
-    use argus_agent::tool_context::{clear_current_agent_id, set_current_agent_id};
     use argus_protocol::{
         AgentId, AgentRecord, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
         ResolvedMcpTools, SessionId, ThinkingConfig, ThreadId, TokenUsage,
@@ -1555,10 +1586,19 @@ mod tests {
             &self,
             _request: CompletionRequest,
         ) -> std::result::Result<argus_protocol::llm::LlmEventStream, LlmError> {
-            Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "not used in routing tests".to_string(),
-            })
+            sleep(self.delay).await;
+            Ok(Box::pin(stream::iter(vec![
+                Ok(argus_protocol::llm::LlmStreamEvent::ContentDelta {
+                    delta: self.response.clone(),
+                }),
+                Ok(argus_protocol::llm::LlmStreamEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                }),
+                Ok(argus_protocol::llm::LlmStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ])))
         }
     }
 
@@ -1613,6 +1653,7 @@ mod tests {
 
     struct SessionManagerHarness {
         manager: SessionManager,
+        job_manager: Arc<argus_job::JobManager>,
         temp_dir: TempDir,
         sqlite: Arc<ArgusSqlite>,
         template_manager: Arc<TemplateManager>,
@@ -1694,7 +1735,7 @@ mod tests {
             tool_manager,
             temp_dir.path().join("trace"),
             job_manager.thread_pool(),
-            job_manager,
+            Arc::clone(&job_manager),
         );
 
         let session_id: SessionId = session_manager
@@ -1708,6 +1749,7 @@ mod tests {
 
         SessionManagerHarness {
             manager: session_manager,
+            job_manager,
             temp_dir,
             sqlite,
             template_manager,
@@ -2428,6 +2470,7 @@ mod tests {
                 thread_id: harness.thread_id,
                 job_id: job_id.clone(),
                 consume: false,
+                wait_ms: None,
             })
             .await
             .expect("persisted job result should load");
@@ -2567,7 +2610,8 @@ mod tests {
         let level_two = ThreadId::new();
         let level_three = ThreadId::new();
         let trace_root = harness.temp_dir.path().join("trace");
-        let root_base_dir = chat_thread_base_dir(trace_root.as_path(), harness.session_id, harness.thread_id);
+        let root_base_dir =
+            chat_thread_base_dir(trace_root.as_path(), harness.session_id, harness.thread_id);
         let level_one_dir = root_base_dir.join(level_one.to_string());
         let level_two_dir = level_one_dir.join(level_two.to_string());
         let level_three_dir = level_two_dir.join(level_three.to_string());
@@ -2646,5 +2690,351 @@ mod tests {
                 .contains("maximum dispatch depth (3) exceeded"),
             "unexpected scheduler error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn scheduler_get_job_result_without_wait_ms_returns_pending_immediately() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(DelayedProvider {
+            model_name: "routing-delay".to_string(),
+            response: "background answer".to_string(),
+            delay: Duration::from_secs(2),
+        }))
+        .await;
+        let worker_id = AgentId::new(12);
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: worker_id,
+                display_name: "Researcher".to_string(),
+                description: "Researches things".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "Research.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("worker should upsert");
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: harness.agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Researcher".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("parent should upsert");
+        let _ = harness
+            .manager
+            .load(harness.session_id)
+            .await
+            .expect("session should load");
+        let backend = SessionSchedulerBackend::new(
+            Arc::clone(&harness.template_manager),
+            Arc::clone(&harness.job_manager),
+            Arc::clone(&harness.manager.sessions),
+        );
+        let (pipe_tx, _) = broadcast::channel(8);
+
+        set_current_agent_id(harness.agent_id);
+        let job_id = backend
+            .dispatch_job(SchedulerDispatchRequest {
+                thread_id: harness.thread_id,
+                prompt: "summarize".to_string(),
+                agent_id: worker_id,
+                context: None,
+                pipe_tx,
+            })
+            .await
+            .expect("dispatch should succeed");
+        let started_at = tokio::time::Instant::now();
+        let lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id,
+                consume: false,
+                wait_ms: None,
+            })
+            .await
+            .expect("lookup should succeed");
+        clear_current_agent_id();
+
+        assert!(started_at.elapsed() < Duration::from_secs(1));
+        assert!(matches!(lookup, argus_tool::SchedulerJobLookup::Pending));
+    }
+
+    #[tokio::test]
+    async fn scheduler_get_job_result_waits_until_completed_within_window() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(DelayedProvider {
+            model_name: "routing-delay".to_string(),
+            response: "background answer".to_string(),
+            delay: Duration::from_millis(200),
+        }))
+        .await;
+        let worker_id = AgentId::new(12);
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: worker_id,
+                display_name: "Researcher".to_string(),
+                description: "Researches things".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "Research.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("worker should upsert");
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: harness.agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Researcher".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("parent should upsert");
+        let _ = harness
+            .manager
+            .load(harness.session_id)
+            .await
+            .expect("session should load");
+        let backend = SessionSchedulerBackend::new(
+            Arc::clone(&harness.template_manager),
+            Arc::clone(&harness.job_manager),
+            Arc::clone(&harness.manager.sessions),
+        );
+        let (pipe_tx, _) = broadcast::channel(8);
+
+        set_current_agent_id(harness.agent_id);
+        let job_id = backend
+            .dispatch_job(SchedulerDispatchRequest {
+                thread_id: harness.thread_id,
+                prompt: "summarize".to_string(),
+                agent_id: worker_id,
+                context: None,
+                pipe_tx,
+            })
+            .await
+            .expect("dispatch should succeed");
+        let lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id,
+                consume: false,
+                wait_ms: Some(1000),
+            })
+            .await
+            .expect("lookup should succeed");
+        clear_current_agent_id();
+
+        match lookup {
+            argus_tool::SchedulerJobLookup::Completed(result) => {
+                assert_eq!(result.message, "background answer");
+                assert!(result.success);
+            }
+            other => panic!("expected completed lookup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_get_job_result_consumes_completed_result_after_wait() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(DelayedProvider {
+            model_name: "routing-delay".to_string(),
+            response: "background answer".to_string(),
+            delay: Duration::from_millis(200),
+        }))
+        .await;
+        let worker_id = AgentId::new(12);
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: worker_id,
+                display_name: "Researcher".to_string(),
+                description: "Researches things".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "Research.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("worker should upsert");
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: harness.agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Researcher".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("parent should upsert");
+        let _ = harness
+            .manager
+            .load(harness.session_id)
+            .await
+            .expect("session should load");
+        let backend = SessionSchedulerBackend::new(
+            Arc::clone(&harness.template_manager),
+            Arc::clone(&harness.job_manager),
+            Arc::clone(&harness.manager.sessions),
+        );
+        let (pipe_tx, _) = broadcast::channel(8);
+
+        set_current_agent_id(harness.agent_id);
+        let job_id = backend
+            .dispatch_job(SchedulerDispatchRequest {
+                thread_id: harness.thread_id,
+                prompt: "summarize".to_string(),
+                agent_id: worker_id,
+                context: None,
+                pipe_tx,
+            })
+            .await
+            .expect("dispatch should succeed");
+        let consume_lookup = backend
+            .get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id,
+                consume: true,
+                wait_ms: Some(1000),
+            })
+            .await
+            .expect("lookup should succeed");
+        clear_current_agent_id();
+
+        match consume_lookup {
+            argus_tool::SchedulerJobLookup::Consumed(_)
+            | argus_tool::SchedulerJobLookup::Completed(_) => {}
+            other => panic!("expected terminal consume lookup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_get_job_result_clamps_wait_ms() {
+        let harness = test_session_manager_harness_with_provider(Arc::new(DelayedProvider {
+            model_name: "routing-delay".to_string(),
+            response: "background answer".to_string(),
+            delay: Duration::from_secs(10),
+        }))
+        .await;
+        let worker_id = AgentId::new(12);
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: worker_id,
+                display_name: "Researcher".to_string(),
+                description: "Researches things".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "Research.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec![],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("worker should upsert");
+        harness
+            .template_manager
+            .upsert(AgentRecord {
+                id: harness.agent_id,
+                display_name: "Routing Test Agent".to_string(),
+                description: "Used to verify session mailbox routing".to_string(),
+                version: "1.0.0".to_string(),
+                provider_id: Some(ProviderId::new(1)),
+                model_id: Some("routing-delay".to_string()),
+                system_prompt: "You are a routing test agent.".to_string(),
+                tool_names: vec![],
+                subagent_names: vec!["Researcher".to_string()],
+                max_tokens: None,
+                temperature: None,
+                thinking_config: Some(ThinkingConfig::disabled()),
+            })
+            .await
+            .expect("parent should upsert");
+        let _ = harness
+            .manager
+            .load(harness.session_id)
+            .await
+            .expect("session should load");
+        let backend = SessionSchedulerBackend::new(
+            Arc::clone(&harness.template_manager),
+            Arc::clone(&harness.job_manager),
+            Arc::clone(&harness.manager.sessions),
+        );
+        let (pipe_tx, _) = broadcast::channel(8);
+
+        set_current_agent_id(harness.agent_id);
+        let job_id = backend
+            .dispatch_job(SchedulerDispatchRequest {
+                thread_id: harness.thread_id,
+                prompt: "summarize".to_string(),
+                agent_id: worker_id,
+                context: None,
+                pipe_tx,
+            })
+            .await
+            .expect("dispatch should succeed");
+        let clamped_lookup = timeout(
+            Duration::from_secs(6),
+            backend.get_job_result(SchedulerLookupRequest {
+                thread_id: harness.thread_id,
+                job_id,
+                consume: false,
+                wait_ms: Some(9_000),
+            }),
+        )
+        .await
+        .expect("wait_ms should clamp below six seconds")
+        .expect("lookup should succeed");
+        clear_current_agent_id();
+
+        assert!(matches!(
+            clamped_lookup,
+            argus_tool::SchedulerJobLookup::Pending
+        ));
     }
 }
