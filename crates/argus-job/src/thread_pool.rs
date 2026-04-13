@@ -21,10 +21,10 @@ use argus_protocol::llm::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmError, LlmEventStream, Role,
 };
 use argus_protocol::{
-    AgentId, LlmProvider, MailboxMessage, MailboxMessageType, ProviderId, ProviderResolver,
-    SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult, ThreadPoolEventReason,
-    ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary, ThreadPoolSnapshot,
-    ThreadPoolState, ThreadRuntimeStatus,
+    AgentId, LlmProvider, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderId,
+    ProviderResolver, SessionId, ThreadControlEvent, ThreadEvent, ThreadId, ThreadJobResult,
+    ThreadPoolEventReason, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolRuntimeSummary,
+    ThreadPoolSnapshot, ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
 use argus_repository::types::{
@@ -174,6 +174,7 @@ pub struct ThreadPool {
     template_manager: Arc<TemplateManager>,
     provider_resolver: Arc<dyn ProviderResolver>,
     tool_manager: Arc<ToolManager>,
+    mcp_tool_resolver: Arc<StdMutex<Option<Arc<dyn McpToolResolver>>>>,
     chat_runtime_config: ChatRuntimeConfig,
     persistence: Option<ThreadPoolPersistence>,
     max_threads: u32,
@@ -219,6 +220,7 @@ impl ThreadPool {
             template_manager,
             provider_resolver,
             tool_manager,
+            mcp_tool_resolver: Arc::new(StdMutex::new(None)),
             chat_runtime_config: ChatRuntimeConfig { trace_dir },
             persistence,
             max_threads: DEFAULT_MAX_THREADS,
@@ -226,6 +228,13 @@ impl ThreadPool {
             admission_waiters: Arc::new(AtomicUsize::new(0)),
             store: Arc::new(StdMutex::new(ThreadPoolStore::default())),
         }
+    }
+
+    pub fn set_mcp_tool_resolver(&self, resolver: Option<Arc<dyn McpToolResolver>>) {
+        *self
+            .mcp_tool_resolver
+            .lock()
+            .expect("mcp resolver mutex poisoned") = resolver;
     }
 
     /// Register a chat thread in the unified pool without loading its runtime.
@@ -1946,7 +1955,7 @@ impl ThreadPool {
             .as_ref()
             .and_then(|record| record.title.clone())
             .or_else(|| Some(format!("job:{}", request.job_id)));
-        let thread = ThreadBuilder::new()
+        let mut builder = ThreadBuilder::new()
             .id(thread_id)
             .session_id(Self::job_runtime_session_id(thread_id))
             .agent_record(Arc::new(agent_record))
@@ -1955,7 +1964,16 @@ impl ThreadPool {
             .tool_manager(self.tool_manager.clone())
             .compactor(Arc::new(LlmThreadCompactor::new(provider)))
             .plan_store(plan_store)
-            .config(config)
+            .config(config);
+        if let Some(resolver) = self
+            .mcp_tool_resolver
+            .lock()
+            .expect("mcp resolver mutex poisoned")
+            .clone()
+        {
+            builder = builder.mcp_tool_resolver(resolver);
+        }
+        let thread = builder
             .build()
             .map_err(|err| JobError::ExecutionFailed(err.to_string()))?;
         let thread = Arc::new(RwLock::new(thread));
@@ -2443,8 +2461,14 @@ mod tests {
 
     use super::*;
     use argus_agent::{Compactor, ThreadBuilder};
-    use argus_protocol::llm::{CompletionRequest, CompletionResponse, LlmError, LlmEventStream};
-    use argus_protocol::{AgentRecord, ProviderId, ThinkingConfig};
+    use argus_protocol::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmEventStream, ToolCall,
+        ToolDefinition,
+    };
+    use argus_protocol::{
+        AgentRecord, NamedTool, ProviderId, ResolvedMcpTools, ThinkingConfig, ToolError,
+        ToolExecutionContext,
+    };
     use argus_repository::ArgusSqlite;
     use argus_repository::error::DbError;
     use argus_repository::migrate;
@@ -2539,6 +2563,106 @@ mod tests {
             _model: &str,
         ) -> argus_protocol::Result<Arc<dyn argus_protocol::LlmProvider>> {
             Ok(Arc::clone(&self.provider))
+        }
+    }
+
+    struct MockToolCallProvider {
+        responses: StdMutex<Vec<CompletionResponse>>,
+    }
+
+    impl MockToolCallProvider {
+        fn new(responses: Vec<CompletionResponse>) -> Self {
+            Self {
+                responses: StdMutex::new(responses.into_iter().rev().collect()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl argus_protocol::LlmProvider for MockToolCallProvider {
+        fn model_name(&self) -> &str {
+            "job-mcp-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<CompletionResponse, LlmError> {
+            self.responses
+                .lock()
+                .expect("mock provider mutex poisoned")
+                .pop()
+                .ok_or_else(|| LlmError::RequestFailed {
+                    provider: "job-mcp-test".to_string(),
+                    reason: "no more mock responses".to_string(),
+                })
+        }
+
+        async fn stream_complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::result::Result<LlmEventStream, LlmError> {
+            Err(LlmError::UnsupportedCapability {
+                provider: "job-mcp-test".to_string(),
+                capability: "stream_complete".to_string(),
+            })
+        }
+    }
+
+    struct McpEchoTool;
+
+    #[async_trait]
+    impl NamedTool for McpEchoTool {
+        fn name(&self) -> &str {
+            "mcp_echo"
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "mcp_echo".to_string(),
+                description: "Echo a string through the MCP resolver".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["message"]
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            _ctx: Arc<ToolExecutionContext>,
+        ) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({
+                "echoed": args
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+            }))
+        }
+    }
+
+    struct FixedMcpResolver;
+
+    #[async_trait]
+    impl McpToolResolver for FixedMcpResolver {
+        async fn resolve_for_agent(
+            &self,
+            _agent_id: AgentId,
+        ) -> argus_protocol::Result<ResolvedMcpTools> {
+            Ok(ResolvedMcpTools::new(
+                vec![Arc::new(McpEchoTool)],
+                Vec::new(),
+            ))
         }
     }
 
@@ -2810,6 +2934,171 @@ mod tests {
                 thread_id,
                 job_id: "job-snapshot".to_string(),
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn job_thread_uses_configured_mcp_tool_resolver_for_turn_execution() {
+        let trace_dir =
+            std::env::temp_dir().join(format!("argus-thread-pool-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&trace_dir).expect("trace dir should exist");
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool should connect");
+        migrate(&pool).await.expect("migration should succeed");
+        let sqlite = Arc::new(ArgusSqlite::new(pool));
+
+        let template_manager = Arc::new(TemplateManager::new(
+            sqlite.clone() as Arc<dyn AgentRepository>,
+            sqlite.clone(),
+        ));
+        let agent_id = AgentId::new(7);
+        let agent_record = AgentRecord {
+            id: agent_id,
+            display_name: "Job MCP Agent".to_string(),
+            description: "Uses MCP in job thread".to_string(),
+            version: "1.0.0".to_string(),
+            provider_id: Some(ProviderId::new(1)),
+            model_id: Some("job-mcp-test".to_string()),
+            system_prompt: "Use MCP when helpful.".to_string(),
+            tool_names: vec![],
+            subagent_names: vec![],
+            max_tokens: None,
+            temperature: None,
+            thinking_config: Some(ThinkingConfig::disabled()),
+        };
+        template_manager
+            .upsert(agent_record.clone())
+            .await
+            .expect("template upsert should succeed");
+
+        let provider_resolver = Arc::new(FixedProviderResolver {
+            provider: Arc::new(MockToolCallProvider::new(vec![
+                CompletionResponse {
+                    content: Some("Call MCP".to_string()),
+                    reasoning_content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call-1".to_string(),
+                        name: "mcp_echo".to_string(),
+                        arguments: serde_json::json!({"message": "from job"}),
+                    }],
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                CompletionResponse {
+                    content: Some("Final answer after MCP".to_string()),
+                    reasoning_content: None,
+                    tool_calls: vec![],
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+            ])),
+        });
+        let thread_pool = ThreadPool::with_persistence(
+            Arc::clone(&template_manager),
+            provider_resolver,
+            Arc::new(ToolManager::new()),
+            trace_dir.clone(),
+            Some(ThreadPoolPersistence::new(
+                sqlite.clone() as Arc<dyn JobRepository>,
+                sqlite.clone() as Arc<dyn ThreadRepository>,
+                sqlite.clone() as Arc<dyn LlmProviderRepository>,
+            )),
+        );
+        thread_pool.set_mcp_tool_resolver(Some(Arc::new(FixedMcpResolver)));
+
+        let parent_session_id = SessionId::new();
+        let parent_thread_id = ThreadId::new();
+        SessionRepository::create(sqlite.as_ref(), &parent_session_id, "parent")
+            .await
+            .expect("parent session should persist");
+        sqlite
+            .upsert_thread(&ThreadRecord {
+                id: parent_thread_id,
+                provider_id: argus_protocol::LlmProviderId::new(1),
+                title: Some("parent".to_string()),
+                token_count: 0,
+                turn_count: 0,
+                session_id: Some(parent_session_id),
+                template_id: Some(RepoAgentId::new(agent_id.inner())),
+                model_override: Some("job-mcp-test".to_string()),
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: Utc::now().to_rfc3339(),
+            })
+            .await
+            .expect("parent thread record should persist");
+        let parent_base_dir = chat_thread_base_dir(&trace_dir, parent_session_id, parent_thread_id);
+        persist_thread_metadata(
+            &parent_base_dir,
+            &ThreadTraceMetadata {
+                thread_id: parent_thread_id,
+                kind: ThreadTraceKind::ChatRoot,
+                root_session_id: Some(parent_session_id),
+                parent_thread_id: None,
+                job_id: None,
+                agent_snapshot: agent_record.clone(),
+            },
+        )
+        .await
+        .expect("parent metadata should persist");
+
+        let request = ThreadPoolJobRequest {
+            originating_thread_id: parent_thread_id,
+            job_id: "job-mcp".to_string(),
+            agent_id,
+            prompt: "run test".to_string(),
+            context: None,
+        };
+        let thread_id = thread_pool
+            .persist_binding(&request, &Utc::now().to_string())
+            .await
+            .expect("job binding should persist");
+
+        let thread = thread_pool
+            .build_job_thread(&request, thread_id)
+            .await
+            .expect("job thread should build");
+        let record = thread
+            .write()
+            .await
+            .execute_turn("use mcp".to_string(), None, TurnCancellation::new())
+            .await
+            .expect("turn should succeed when MCP tool is resolved");
+
+        let assistant_messages: Vec<_> = record
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Assistant)
+            .collect();
+        assert!(
+            assistant_messages.iter().any(|message| {
+                message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|tool_calls| !tool_calls.is_empty())
+            }),
+            "job thread should expose MCP tools to the LLM; messages={:?}",
+            record
+                .messages
+                .iter()
+                .map(|message| (
+                    format!("{:?}", message.role),
+                    message.content.clone(),
+                    message.tool_calls.clone(),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            assistant_messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("Final answer after MCP")
         );
     }
 

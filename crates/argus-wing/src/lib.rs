@@ -148,6 +148,7 @@ impl ArgusWing {
         McpRuntime::start(&mcp_runtime);
         let mcp_tool_resolver: Arc<dyn argus_protocol::McpToolResolver> =
             Arc::new(McpRuntime::handle(&mcp_runtime));
+        job_manager.set_mcp_tool_resolver(Some(Arc::clone(&mcp_tool_resolver)));
 
         // Create session manager
         let session_manager = Arc::new(SessionManager::new(
@@ -221,6 +222,7 @@ impl ArgusWing {
         McpRuntime::start(&mcp_runtime);
         let mcp_tool_resolver: Arc<dyn argus_protocol::McpToolResolver> =
             Arc::new(McpRuntime::handle(&mcp_runtime));
+        job_manager.set_mcp_tool_resolver(Some(Arc::clone(&mcp_tool_resolver)));
         let session_manager = Arc::new(SessionManager::new(
             arc_sqlite.clone() as Arc<dyn SessionRepository>,
             arc_sqlite.clone() as Arc<dyn ThreadRepository>,

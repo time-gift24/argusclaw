@@ -16,8 +16,8 @@ use argus_agent::TurnRecord;
 #[cfg(test)]
 use argus_protocol::llm::{ChatMessage, Role};
 use argus_protocol::{
-    AgentId, MailboxMessage, MailboxMessageType, ProviderResolver, ThreadEvent, ThreadId,
-    ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
+    AgentId, MailboxMessage, MailboxMessageType, McpToolResolver, ProviderResolver, ThreadEvent,
+    ThreadId, ThreadJobResult, ThreadPoolRuntimeKind, ThreadPoolRuntimeRef, ThreadPoolSnapshot,
     ThreadPoolState, ThreadRuntimeStatus,
 };
 use argus_repository::traits::{JobRepository, LlmProviderRepository, ThreadRepository};
@@ -166,6 +166,10 @@ impl JobManager {
     /// Return the shared unified thread pool.
     pub fn thread_pool(&self) -> Arc<ThreadPool> {
         Arc::clone(&self.thread_pool)
+    }
+
+    pub fn set_mcp_tool_resolver(&self, resolver: Option<Arc<dyn McpToolResolver>>) {
+        self.thread_pool.set_mcp_tool_resolver(resolver);
     }
 
     pub fn set_chat_mailbox_forwarder<F, Fut>(&self, forwarder: F)
