@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
 use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
 use thirtyfour::common::cookie::Cookie;
-use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
+use thirtyfour::extensions::query::ElementQuery;
+use thirtyfour::prelude::{
+    By, ChromiumLikeCapabilities, DesiredCapabilities, WebDriver, WebElement,
+};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
@@ -299,6 +302,24 @@ impl ChromeManager {
         self.active_session_interaction()
             .await?
             .extract_text(selector)
+            .await
+    }
+
+    pub async fn query(&self, by: By) -> Result<ElementQuery, ChromeToolError> {
+        self.active_session_interaction().await?.query(by).await
+    }
+
+    pub async fn find_element(&self, by: By) -> Result<WebElement, ChromeToolError> {
+        self.active_session_interaction()
+            .await?
+            .find_element(by)
+            .await
+    }
+
+    pub async fn find_elements(&self, by: By) -> Result<Vec<WebElement>, ChromeToolError> {
+        self.active_session_interaction()
+            .await?
+            .find_elements(by)
             .await
     }
 
@@ -1954,6 +1975,24 @@ mod tests {
         assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
 
         let err = manager.list_tabs().await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
+
+        let err = manager
+            .query(thirtyfour::prelude::By::Css("#hero"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
+
+        let err = manager
+            .find_element(thirtyfour::prelude::By::Css("#hero"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
+
+        let err = manager
+            .find_elements(thirtyfour::prelude::By::Css(".item"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
     }
 

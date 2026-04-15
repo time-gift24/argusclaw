@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use thirtyfour::common::cookie::Cookie;
-use thirtyfour::prelude::{By, WebDriver};
+use thirtyfour::extensions::query::{ElementQuery, ElementQueryable};
+use thirtyfour::prelude::{By, WebDriver, WebElement};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
@@ -17,6 +18,23 @@ use super::models::PageMetadata;
 pub trait BrowserSession: Send + Sync {
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
+    async fn query(&self, _by: By) -> Result<ElementQuery, ChromeToolError> {
+        Err(ChromeToolError::InteractionFailed {
+            reason: "query is not supported by this browser session".to_string(),
+        })
+    }
+
+    async fn find_element(&self, _by: By) -> Result<WebElement, ChromeToolError> {
+        Err(ChromeToolError::InteractionFailed {
+            reason: "find_element is not supported by this browser session".to_string(),
+        })
+    }
+
+    async fn find_elements(&self, _by: By) -> Result<Vec<WebElement>, ChromeToolError> {
+        Err(ChromeToolError::InteractionFailed {
+            reason: "find_elements is not supported by this browser session".to_string(),
+        })
+    }
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
     async fn current_url(&self) -> Result<String, ChromeToolError>;
@@ -411,6 +429,28 @@ impl BrowserSession for ManagedWebDriverSession {
             .map_err(|e| ChromeToolError::PageReadFailed {
                 reason: e.to_string(),
             })
+    }
+
+    async fn query(&self, by: By) -> Result<ElementQuery, ChromeToolError> {
+        Ok(self.live_driver().await?.query(by))
+    }
+
+    async fn find_element(&self, by: By) -> Result<WebElement, ChromeToolError> {
+        self.live_driver()
+            .await?
+            .find(by)
+            .await
+            .map_err(|e| ChromeToolError::InteractionFailed {
+                reason: format!("element not found: {e}"),
+            })
+    }
+
+    async fn find_elements(&self, by: By) -> Result<Vec<WebElement>, ChromeToolError> {
+        self.live_driver().await?.find_all(by).await.map_err(|e| {
+            ChromeToolError::InteractionFailed {
+                reason: format!("elements not found: {e}"),
+            }
+        })
     }
 
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
