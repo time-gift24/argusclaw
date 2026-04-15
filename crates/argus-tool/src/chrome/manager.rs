@@ -1,7 +1,5 @@
-use std::future::Future;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -289,6 +287,10 @@ impl ChromeManager {
         Self::clear_stale_session_result(&mut slot, result).await
     }
 
+    pub async fn element_text(&self, selector: &str) -> Result<String, ChromeToolError> {
+        self.extract_text(Some(selector)).await
+    }
+
     pub async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
         let mut slot = self.session.lock().await;
         let session = Self::active_session(&slot)?;
@@ -307,40 +309,6 @@ impl ChromeManager {
         let mut slot = self.session.lock().await;
         let session = Self::active_session(&slot)?;
         let result = session.interaction().current_url().await;
-        Self::clear_stale_session_result(&mut slot, result).await
-    }
-
-    pub async fn with_webdriver<T, F>(&self, operation: F) -> Result<T, ChromeToolError>
-    where
-        F: for<'driver> FnOnce(
-                &'driver WebDriver,
-            ) -> Pin<
-                Box<dyn Future<Output = Result<T, ChromeToolError>> + Send + 'driver>,
-            > + Send,
-    {
-        // The callback runs while the shared session and WebDriver locks are held.
-        // Callers should perform only direct WebDriver operations here.
-        let mut slot = self.session.lock().await;
-        let session = Self::active_session(&slot)?;
-        let interaction = session.interaction();
-        let webdriver =
-            interaction
-                .webdriver_mutex()
-                .ok_or_else(|| ChromeToolError::InteractionFailed {
-                    reason: "direct webdriver access is not supported by this browser session"
-                        .to_string(),
-                })?;
-
-        let result = {
-            let guard = webdriver.lock().await;
-            let driver = guard
-                .as_ref()
-                .ok_or_else(|| ChromeToolError::SessionShutdownFailed {
-                    reason: "session already closed".to_string(),
-                })?;
-            operation(driver).await
-        };
-
         Self::clear_stale_session_result(&mut slot, result).await
     }
 
@@ -1644,7 +1612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_with_webdriver_runs_operation_inside_locked_session() {
+    async fn manager_element_text_runs_query_inside_locked_session() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1652,7 +1620,8 @@ mod tests {
                 "POST /session HTTP/1.1",
                 "POST /session/test-session/timeouts HTTP/1.1",
                 "GET /session/test-session/window HTTP/1.1",
-                "GET /session/test-session/url HTTP/1.1",
+                "POST /session/test-session/element HTTP/1.1",
+                "GET /session/test-session/element/element-1/text HTTP/1.1",
                 "DELETE /session/test-session HTTP/1.1",
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -1670,8 +1639,14 @@ mod tests {
                     })
                 } else if expected_request.ends_with("/window HTTP/1.1") {
                     json!({ "value": "window-1" })
-                } else if expected_request.ends_with("/url HTTP/1.1") {
-                    json!({ "value": "https://example.com/locked" })
+                } else if expected_request.ends_with("/element HTTP/1.1") {
+                    json!({
+                        "value": {
+                            "element-6066-11e4-a52e-4f735466cecf": "element-1"
+                        }
+                    })
+                } else if expected_request.ends_with("/text HTTP/1.1") {
+                    json!({ "value": "Locked text" })
                 } else {
                     json!({ "value": null })
                 };
@@ -1697,22 +1672,9 @@ mod tests {
         );
 
         manager.navigate("https://example.com").await.unwrap();
-        let current_url = manager
-            .with_webdriver(|driver| {
-                Box::pin(async move {
-                    driver
-                        .current_url()
-                        .await
-                        .map(|url| url.to_string())
-                        .map_err(|error| ChromeToolError::PageReadFailed {
-                            reason: error.to_string(),
-                        })
-                })
-            })
-            .await
-            .unwrap();
+        let text = manager.element_text("main").await.unwrap();
 
-        assert_eq!(current_url, "https://example.com/locked");
+        assert_eq!(text, "Locked text");
         manager.close().await.unwrap();
         server.await.unwrap();
     }
@@ -1737,7 +1699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_clears_stale_session_after_read_failure() {
+    async fn manager_clears_stale_session_after_element_text_failure() {
         let backend = Arc::new(StaleReadBackend::default());
         let manager = ChromeManager::new_with_components(
             backend.clone(),
@@ -1750,7 +1712,7 @@ mod tests {
             .await
             .expect("initial navigate should open stale test session");
 
-        let err = manager.extract_text(None).await.unwrap_err();
+        let err = manager.element_text("main").await.unwrap_err();
         assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
         assert_eq!(
             backend.shutdowns.lock().unwrap().as_slice(),
@@ -1957,7 +1919,7 @@ mod tests {
         let manager = ChromeManager::new_for_test(sample_backend());
         manager.navigate("https://example.com").await.unwrap();
 
-        let text = manager.extract_text(Some("#hero")).await.unwrap();
+        let text = manager.element_text("#hero").await.unwrap();
         assert_eq!(text, "Example text [#hero]");
     }
 
@@ -2021,6 +1983,9 @@ mod tests {
         let manager = ChromeManager::new_for_test(sample_backend());
 
         let err = manager.extract_text(None).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
+
+        let err = manager.element_text("main").await.unwrap_err();
         assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
 
         let err = manager.current_url().await.unwrap_err();

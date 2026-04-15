@@ -15,10 +15,6 @@ use super::models::PageMetadata;
 
 #[async_trait]
 pub trait BrowserSession: Send + Sync {
-    fn webdriver_mutex(&self) -> Option<&Mutex<Option<WebDriver>>> {
-        None
-    }
-
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError>;
@@ -365,10 +361,6 @@ impl ChromeDriverProcess {
 
 #[async_trait]
 impl BrowserSession for Mutex<Option<WebDriver>> {
-    fn webdriver_mutex(&self) -> Option<&Mutex<Option<WebDriver>>> {
-        Some(self)
-    }
-
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
         let guard = self.lock().await;
         let driver = live_driver(&guard)?;
