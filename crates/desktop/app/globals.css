@@ -128,7 +128,7 @@
     @apply scroll-smooth;
   }
   html {
-    @apply font-sans text-sm sm:text-base;
+    @apply font-sans text-sm;
   }
   body {
     @apply bg-background text-foreground antialiased;

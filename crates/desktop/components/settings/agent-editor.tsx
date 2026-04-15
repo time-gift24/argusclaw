@@ -773,14 +773,15 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                         )}
                       </div>
                       <div
+                        onClick={(event) => event.stopPropagation()}
                         className={cn(
-                          "pointer-events-none absolute z-20 w-80 rounded-2xl border border-primary/25 bg-gradient-to-br from-background via-background to-primary/10 p-3 shadow-2xl shadow-primary/15 opacity-0 backdrop-blur-sm transition-all duration-200 group-hover:opacity-100",
+                          "pointer-events-auto absolute z-20 max-h-[min(24rem,55vh)] w-80 overflow-y-auto custom-scrollbar overscroll-contain rounded-2xl border border-primary/25 bg-gradient-to-br from-background via-background to-primary/10 p-3 pr-2 shadow-2xl shadow-primary/15 opacity-0 backdrop-blur-sm transition-all duration-200 group-hover:opacity-100",
                           hoverPositionClass,
                         )}
                       >
                         <div className="text-[11px] font-bold text-foreground">{tool.name}</div>
                         <div className="mt-1 text-[10px] font-semibold text-foreground/90">描述</div>
-                        <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground line-clamp-4">
+                        <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
                           {detailedDescription}
                         </p>
 
@@ -788,7 +789,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                         {parameterDetails.length === 0 ? (
                           <p className="mt-0.5 text-[10px] text-muted-foreground">无参数</p>
                         ) : (
-                          <div className="mt-1 max-h-28 space-y-1 overflow-y-auto custom-scrollbar pr-1">
+                          <div className="mt-1 space-y-1 pr-1">
                             {parameterDetails.map((parameter) => (
                               <div key={`${tool.name}-${parameter.name}`} className="rounded-lg border border-muted/50 bg-background/70 px-2 py-1.5">
                                 <div className="flex items-center gap-1.5 text-[10px]">
@@ -799,7 +800,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                                     {parameter.typeLabel}
                                   </span>
                                 </div>
-                                <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground line-clamp-2">
+                                <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
                                   {parameter.description}
                                 </p>
                               </div>

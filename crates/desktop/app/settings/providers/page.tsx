@@ -150,41 +150,41 @@ export default function ProvidersPage() {
   }
 
   return (
-    <div className="w-full space-y-6 animate-in fade-in duration-500">
+    <div className="w-full space-y-4 animate-in fade-in duration-500">
       {/* 顶部标题栏 */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between border-b pb-6">
+      <div className="flex flex-col gap-3 border-b pb-4 md:flex-row md:items-center md:justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <Cloud className="h-5 w-5 text-primary" />
-            <h1 className="text-xl font-bold tracking-tight">模型提供者 (LLM Providers)</h1>
+            <Cloud className="h-4 w-4 text-primary" />
+            <h1 className="text-lg font-bold tracking-tight">模型提供者 (LLM Providers)</h1>
           </div>
           <p className="text-muted-foreground text-sm">
             管理您的 AI 模型提供者连接、API 密钥及模型列表。
           </p>
         </div>
 
-        <Button size="sm" onClick={() => navigate("/settings/providers/new")} className="h-9 shadow-sm">
+        <Button size="sm" onClick={() => navigate("/settings/providers/new")} className="shadow-sm">
           <Plus className="h-4 w-4 mr-1.5" />
           添加提供者
         </Button>
       </div>
 
       {providerList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-80 border-2 border-dashed rounded-2xl bg-muted/20 gap-4">
-          <div className="bg-muted p-4 rounded-full">
-            <Cloud className="h-8 w-8 text-muted-foreground/50" />
+        <div className="flex h-64 flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed bg-muted/20">
+          <div className="rounded-full bg-muted p-3">
+            <Cloud className="h-7 w-7 text-muted-foreground/50" />
           </div>
           <div className="text-center space-y-1">
             <p className="font-medium text-muted-foreground">暂无模型提供者</p>
             <p className="text-xs text-muted-foreground/60">开始配置您的第一个 AI 推理服务吧</p>
           </div>
-          <Button size="sm" onClick={() => navigate("/settings/providers/new")} className="px-6">
+          <Button size="sm" onClick={() => navigate("/settings/providers/new")} className="px-4">
             <Plus className="h-4 w-4 mr-1.5" />
             立即添加
           </Button>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {providerList.map((provider) => (
             <ProviderCard
               key={provider.id}

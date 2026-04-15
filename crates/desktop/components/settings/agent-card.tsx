@@ -25,15 +25,14 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
     providers.find((provider) => provider.id === agent.provider_id)?.display_name ||
     agent.provider_id ||
     "未指定"
-  const toolNames = [...new Set(agent.tool_names.filter(Boolean))]
   const dispatchCapable = agent.subagent_names.length > 0
 
   return (
     <Card className="group overflow-hidden border-muted/60 transition-all hover:border-primary/30 hover:shadow-md bg-background">
-      <div className="flex items-center p-4 gap-4">
+      <div className="flex items-center gap-3 p-3">
         {/* Left: Icon & Title Group */}
         <div className="flex flex-1 items-center gap-3 min-w-0">
-          <div className="rounded-lg bg-primary/5 p-2 text-primary shrink-0 transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
+          <div className="shrink-0 rounded-lg bg-primary/5 p-1.5 text-primary transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
             <Bot className="h-4 w-4" />
           </div>
           <div className="flex flex-col min-w-0">
@@ -57,7 +56,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
         </div>
 
         {/* Middle: Key Metrics (Hidden on small screens) */}
-        <div className="hidden md:flex items-center gap-6 px-6 border-x border-muted/30 h-8">
+        <div className="hidden h-8 items-center gap-4 border-x border-muted/30 px-4 md:flex">
           <div className="flex flex-col gap-1">
             <span className="text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest leading-none">提供者</span>
             <span className="text-[11px] font-medium truncate max-w-[80px] leading-none">{providerName}</span>
@@ -77,7 +76,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 rounded-lg hover:bg-primary/5 hover:text-primary transition-colors text-muted-foreground"
+            className="h-7 w-7 rounded-lg text-muted-foreground transition-colors hover:bg-primary/5 hover:text-primary"
             onClick={() => onEdit(agent.id)}
           >
             <Pencil className="h-3.5 w-3.5" />
@@ -86,7 +85,7 @@ export function AgentCard({ agent, providers, onEdit, onDelete }: AgentCardProps
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 rounded-lg hover:bg-destructive/5 hover:text-destructive transition-colors text-muted-foreground hover:text-destructive"
+            className="h-7 w-7 rounded-lg text-muted-foreground transition-colors hover:bg-destructive/5 hover:text-destructive"
             onClick={() => onDelete(agent.id)}
           >
             <Trash2 className="h-3.5 w-3.5" />

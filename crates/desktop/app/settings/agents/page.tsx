@@ -63,13 +63,13 @@ export default function AgentsPage() {
   }
 
   return (
-    <div className="w-full space-y-6 animate-in fade-in duration-500">
+    <div className="w-full space-y-4 animate-in fade-in duration-500">
       {/* 顶部标题栏 */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between border-b pb-6">
+      <div className="flex flex-col gap-3 border-b pb-4 md:flex-row md:items-center md:justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <Bot className="h-5 w-5 text-primary" />
-            <h1 className="text-xl font-bold tracking-tight">智能体管理</h1>
+            <Bot className="h-4 w-4 text-primary" />
+            <h1 className="text-lg font-bold tracking-tight">智能体管理</h1>
           </div>
           <p className="text-muted-foreground text-sm">
             在这里创建、配置和管理您的 AI 智能体及其子智能体。
@@ -78,7 +78,7 @@ export default function AgentsPage() {
 
         <div className="flex items-center gap-2">
           <Link to="/settings/agents/new">
-            <Button size="sm" className="h-9 shadow-sm">
+            <Button size="sm" className="shadow-sm">
               <Plus className="h-4 w-4 mr-1.5" />
               新建智能体
             </Button>
@@ -88,23 +88,23 @@ export default function AgentsPage() {
 
       {/* 智能体列表 */}
       {agentList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-80 border-2 border-dashed rounded-2xl bg-muted/20 gap-4">
-          <div className="bg-muted p-4 rounded-full">
-            <Bot className="h-8 w-8 text-muted-foreground/50" />
+        <div className="flex h-64 flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed bg-muted/20">
+          <div className="rounded-full bg-muted p-3">
+            <Bot className="h-7 w-7 text-muted-foreground/50" />
           </div>
           <div className="text-center space-y-1">
             <p className="font-medium text-muted-foreground">暂无智能体配置</p>
             <p className="text-xs text-muted-foreground/60">开始创建您的第一个 AI 助手吧</p>
           </div>
           <Link to="/settings/agents/new">
-            <Button size="sm" className="px-6">
+            <Button size="sm" className="px-4">
               <Plus className="h-4 w-4 mr-1.5" />
               立即创建
             </Button>
           </Link>
         </div>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid gap-3">
           {agentList.map((agent) => (
             <AgentCard
               key={agent.id}

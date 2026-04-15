@@ -100,7 +100,7 @@ function ToolFallbackTrigger({
     <CollapsibleTrigger
       data-slot="tool-fallback-trigger"
       className={cn(
-        "aui-tool-fallback-trigger group/trigger flex w-full items-center gap-2.5 px-2 py-1.5 text-xs text-muted-foreground transition-all hover:bg-muted/50 rounded-lg border border-transparent hover:border-muted/40",
+        "aui-tool-fallback-trigger group/trigger flex w-full items-center gap-2 rounded-lg border border-transparent px-2 py-1 text-xs text-muted-foreground transition-all hover:border-muted/40 hover:bg-muted/50",
         className,
       )}
       {...props}
@@ -133,8 +133,8 @@ function ToolFallbackTrigger({
         className={cn(
           "aui-tool-fallback-trigger-chevron size-3 shrink-0 opacity-30",
           "transition-transform duration-(--animation-duration) ease-out",
-          "group-data-[state=closed]/trigger:-rotate-90",
-          "group-data-[state=open]/trigger:rotate-0",
+          "group-not-data-[panel-open]/trigger:-rotate-90",
+          "group-data-[panel-open]/trigger:rotate-0",
         )}
       />
     </CollapsibleTrigger>
@@ -152,17 +152,17 @@ function ToolFallbackContent({
       className={cn(
         "aui-tool-fallback-content relative overflow-hidden text-xs outline-none",
         "group/collapsible-content ease-out",
-        "data-[state=closed]:animate-collapsible-up",
-        "data-[state=open]:animate-collapsible-down",
-        "data-[state=closed]:fill-mode-forwards",
-        "data-[state=closed]:pointer-events-none",
-        "data-[state=open]:duration-(--animation-duration)",
-        "data-[state=closed]:duration-(--animation-duration)",
+        "data-[closed]:animate-collapsible-up",
+        "data-[open]:animate-collapsible-down",
+        "data-[closed]:fill-mode-forwards",
+        "data-[closed]:pointer-events-none",
+        "data-[open]:duration-(--animation-duration)",
+        "data-[closed]:duration-(--animation-duration)",
         className,
       )}
       {...props}
     >
-      <div className="mt-1 flex flex-col gap-2 pl-4 border-l-2 border-muted/40 ml-4.5 py-2">{children}</div>
+      <div className="mt-1 ml-4.5 flex flex-col gap-1.5 border-l-2 border-muted/40 py-1.5 pl-3">{children}</div>
     </CollapsibleContent>
   );
 }
@@ -183,7 +183,7 @@ function ToolFallbackArgs({
       {...props}
     >
       <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">参数 (Arguments)</p>
-      <pre className="aui-tool-fallback-args-value max-h-[18rem] overflow-auto custom-scrollbar whitespace-pre-wrap text-[11px] text-muted-foreground bg-muted/20 p-3 rounded-xl border border-muted/40 font-mono">
+      <pre className="aui-tool-fallback-args-value max-h-[16rem] overflow-auto custom-scrollbar whitespace-pre-wrap rounded-lg border border-muted/40 bg-muted/20 p-2.5 font-mono text-[11px] text-muted-foreground">
         {argsText}
       </pre>
     </div>
@@ -209,7 +209,7 @@ function ToolFallbackResult({
       {...props}
     >
       <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">输出 (Output)</p>
-      <pre className="aui-tool-fallback-result-content max-h-[18rem] overflow-auto custom-scrollbar whitespace-pre-wrap text-[11px] text-muted-foreground bg-emerald-500/5 p-3 rounded-xl border border-emerald-500/10 font-mono">
+      <pre className="aui-tool-fallback-result-content max-h-[16rem] overflow-auto custom-scrollbar whitespace-pre-wrap rounded-lg border border-emerald-500/10 bg-emerald-500/5 p-2.5 font-mono text-[11px] text-muted-foreground">
         {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
       </pre>
     </div>

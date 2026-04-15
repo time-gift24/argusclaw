@@ -47,7 +47,7 @@ export default function ToolsPage() {
   }
 
   return (
-    <div className="w-full space-y-4">
+    <div className="w-full space-y-3">
       <div>
         <h1 className="text-sm font-semibold">工具</h1>
         <p className="text-muted-foreground text-xs">
@@ -60,7 +60,7 @@ export default function ToolsPage() {
           <p className="text-muted-foreground">暂无可用工具</p>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
           {toolList.map((tool) => (
             <ToolCard key={tool.name} tool={tool} />
           ))}

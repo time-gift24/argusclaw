@@ -143,7 +143,7 @@ test("settings layout keeps edit pages inside a shrinkable scroll container", ()
   );
   assert.match(
     settingsLayoutSource,
-    /className="mx-auto w-full max-w-7xl px-6 py-4"/,
+    /className="mx-auto w-full max-w-7xl px-4 py-3"/,
   );
   assert.match(
     agentEditorSource,

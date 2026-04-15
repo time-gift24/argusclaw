@@ -47,11 +47,11 @@ export function ProviderCard({
 
   return (
     <Card className="group overflow-hidden border-muted/60 transition-all hover:border-primary/30 hover:shadow-md bg-background">
-      <div className="flex flex-col p-4 gap-4">
+      <div className="flex flex-col gap-3 p-3">
         {/* Top: Header Group */}
         <div className="flex items-center justify-between gap-3 min-w-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="rounded-lg bg-primary/5 p-2 text-primary shrink-0 transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
+            <div className="shrink-0 rounded-lg bg-primary/5 p-1.5 text-primary transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
               <Cloud className="h-4 w-4" />
             </div>
             <div className="flex flex-col min-w-0">
@@ -99,7 +99,7 @@ export function ProviderCard({
         </div>
 
         {/* Middle: Info Grid */}
-        <div className="grid grid-cols-2 gap-4 pt-3 border-t border-muted/30">
+        <div className="grid grid-cols-2 gap-3 border-t border-muted/30 pt-2.5">
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-1.5 text-[9px] font-bold text-muted-foreground/50 uppercase tracking-wider leading-none">
               <Globe className="h-2.5 w-2.5" />
@@ -117,7 +117,7 @@ export function ProviderCard({
         </div>
 
         {requiresReentry && (
-          <div className="rounded-xl bg-amber-50 p-3 border border-amber-100">
+          <div className="rounded-lg border border-amber-100 bg-amber-50 p-2.5">
             <p className="text-[10px] text-amber-700 leading-normal flex items-start gap-2 font-medium">
               <span className="shrink-0 bg-amber-200 text-amber-800 rounded-full w-3.5 h-3.5 flex items-center justify-center text-[8px] font-bold">!</span>
               密钥已失效，请重新编辑并填写 API Key 才能继续使用。
@@ -131,7 +131,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 text-[11px] px-3 rounded-lg hover:bg-primary/5 hover:text-primary transition-colors font-medium"
+              className="h-7 rounded-lg px-2.5 text-[11px] font-medium transition-colors hover:bg-primary/5 hover:text-primary"
               onClick={() => onTestConnection(provider.id)}
               disabled={isTesting || requiresReentry}
             >
@@ -141,7 +141,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 text-[11px] px-3 rounded-lg hover:bg-muted/80 transition-colors font-medium text-muted-foreground"
+              className="h-7 rounded-lg px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/80"
               onClick={() => onSetDefault(provider.id)}
               disabled={provider.is_default}
             >
@@ -154,7 +154,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg hover:bg-muted/80 transition-colors"
+              className="h-7 w-7 rounded-lg transition-colors hover:bg-muted/80"
               onClick={() => navigate(`/settings/providers/edit?id=${provider.id}`)}
             >
               <Pencil className="h-3.5 w-3.5" />
@@ -163,7 +163,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg hover:bg-destructive/5 hover:text-destructive transition-colors text-muted-foreground hover:text-destructive"
+              className="h-7 w-7 rounded-lg text-muted-foreground transition-colors hover:bg-destructive/5 hover:text-destructive"
               onClick={() => onDelete(provider.id)}
               disabled={provider.is_default}
             >

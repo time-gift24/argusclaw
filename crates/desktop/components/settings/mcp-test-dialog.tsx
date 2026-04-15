@@ -62,7 +62,7 @@ export function McpTestDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-3xl">
+      <DialogContent className="gap-3 p-3 sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Network className="h-4 w-4 text-primary" />
@@ -73,8 +73,8 @@ export function McpTestDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-5">
-          <div className="flex items-center justify-between gap-3 rounded-2xl border border-muted/60 bg-muted/20 px-4 py-3">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-muted/60 bg-muted/20 px-3 py-2.5">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <Badge variant="outline" className={cn("text-[10px] uppercase", statusTone)}>
@@ -106,21 +106,21 @@ export function McpTestDialog({
             </div>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm font-bold text-foreground">
               <Wrench className="h-4 w-4 text-primary" />
               Discovered Tools
             </div>
             {discoveredTools.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-muted/60 px-4 py-6 text-sm text-muted-foreground">
+              <div className="rounded-xl border border-dashed border-muted/60 px-3 py-4 text-xs text-muted-foreground">
                 当前没有 discovery 快照。请检查 transport 配置或再次测试连接。
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[320px] overflow-y-auto pr-1 custom-scrollbar">
+              <div className="grid max-h-[280px] grid-cols-1 gap-2 overflow-y-auto pr-1 custom-scrollbar md:grid-cols-2">
                 {discoveredTools.map((tool) => (
                   <div
                     key={`${tool.server_id}-${tool.tool_name_original}`}
-                    className="rounded-2xl border border-muted/60 bg-background px-4 py-3 space-y-1"
+                    className="space-y-1 rounded-xl border border-muted/60 bg-background px-3 py-2"
                   >
                     <p className="text-sm font-semibold truncate">{tool.tool_name_original}</p>
                     <p className="text-[11px] text-muted-foreground line-clamp-3">
@@ -133,7 +133,7 @@ export function McpTestDialog({
           </div>
         </div>
 
-        <DialogFooter showCloseButton>
+        <DialogFooter>
           <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
             关闭
           </Button>

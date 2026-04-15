@@ -1,9 +1,15 @@
 "use client"
 
 import * as React from "react"
+import { ChevronDown } from "lucide-react"
 import { type ToolInfo } from "@/lib/tauri"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 
 const riskColors: Record<ToolInfo["risk_level"], string> = {
   low: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300",
@@ -20,36 +26,35 @@ export function ToolCard({ tool }: ToolCardProps) {
   const [showParams, setShowParams] = React.useState(false)
 
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <div className="flex items-start justify-between">
-          <div>
+    <Card className="overflow-hidden">
+      <CardHeader className="p-3 pb-2">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
             <h3 className="text-sm font-semibold">{tool.name}</h3>
-            <p className="text-xs text-muted-foreground mt-1">{tool.description}</p>
+            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              {tool.description}
+            </p>
           </div>
           <Badge className={riskColors[tool.risk_level]} variant="secondary">
             {tool.risk_level}
           </Badge>
         </div>
       </CardHeader>
-      <CardContent className="pt-0">
-        <button
-          type="button"
-          aria-expanded={showParams}
-          aria-controls={`tool-params-${tool.name}`}
-          onClick={() => setShowParams(!showParams)}
-          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          {showParams ? "隐藏" : "显示"}参数 schema
-        </button>
-        {showParams && (
+      <CardContent className="p-3 pt-0">
+        <Collapsible open={showParams} onOpenChange={setShowParams}>
+          <CollapsibleTrigger className="group/trigger flex w-full items-center justify-between rounded-md border border-muted/50 bg-muted/20 px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground">
+            <span>{showParams ? "隐藏" : "显示"}参数 schema</span>
+            <ChevronDown className="h-3.5 w-3.5 transition-transform group-data-[panel-open]/trigger:rotate-180" />
+          </CollapsibleTrigger>
+          <CollapsibleContent className="overflow-hidden data-[closed]:animate-collapsible-up data-[open]:animate-collapsible-down">
           <pre
             id={`tool-params-${tool.name}`}
-            className="mt-2 text-xs bg-muted p-2 rounded-md overflow-x-auto"
+              className="mt-2 max-h-56 overflow-auto rounded-md bg-muted p-2 font-mono text-[11px] custom-scrollbar"
           >
             {JSON.stringify(tool.parameters, null, 2)}
           </pre>
-        )}
+          </CollapsibleContent>
+        </Collapsible>
       </CardContent>
     </Card>
   )

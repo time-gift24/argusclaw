@@ -38,7 +38,7 @@ export function McpCard({
   onViewResult,
 }: McpCardProps) {
   return (
-    <div className="rounded-3xl border border-muted/60 bg-background p-5 space-y-4 shadow-sm">
+    <div className="space-y-3 rounded-xl border border-muted/60 bg-background p-3 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -62,7 +62,7 @@ export function McpCard({
       </div>
 
       {server.last_error && (
-        <div className="rounded-2xl bg-rose-500/5 border border-rose-500/20 px-3 py-2 text-[11px] text-rose-700">
+        <div className="rounded-lg border border-rose-500/20 bg-rose-500/5 px-2.5 py-1.5 text-[11px] text-rose-700">
           {server.last_error}
         </div>
       )}
@@ -70,7 +70,7 @@ export function McpCard({
       {latestResult && (
         <button
           type="button"
-          className="w-full rounded-2xl border border-muted/60 bg-muted/20 px-3 py-3 space-y-1 text-left transition-colors hover:bg-muted/30"
+          className="w-full space-y-1 rounded-lg border border-muted/60 bg-muted/20 px-2.5 py-2 text-left transition-colors hover:bg-muted/30"
           onClick={onViewResult}
         >
           <div className="flex items-center justify-between gap-3">

@@ -27,7 +27,7 @@ test("agent list cards receive provider metadata and render compact metrics", ()
   );
   assert.match(
     agentCardSource,
-    /hidden md:flex items-center gap-6 px-6 border-x border-muted\/30 h-8/,
+    /hidden h-8 items-center gap-4 border-x border-muted\/30 px-4 md:flex/,
   );
   assert.match(agentCardSource, />提供者<\/span>/);
   assert.match(agentCardSource, />子代理<\/span>/);
