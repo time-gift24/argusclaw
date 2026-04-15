@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -68,9 +69,8 @@ impl ChromeTool {
 
     #[must_use]
     pub fn new() -> Self {
-        let paths = ChromePaths::from_home(&default_home_dir());
         Self {
-            manager: Arc::new(ChromeManager::new_production(paths)),
+            manager: shared_production_manager(),
             policy: ExplorePolicy::readonly(),
             interactive: false,
         }
@@ -78,9 +78,8 @@ impl ChromeTool {
 
     #[must_use]
     pub fn new_interactive() -> Self {
-        let paths = ChromePaths::from_home(&default_home_dir());
         Self {
-            manager: Arc::new(ChromeManager::new_interactive_production(paths)),
+            manager: shared_production_manager(),
             policy: ExplorePolicy::interactive(),
             interactive: true,
         }
@@ -160,6 +159,11 @@ impl ChromeTool {
             policy: ExplorePolicy::interactive(),
             interactive: true,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_manager_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.manager, &other.manager)
     }
 
     fn definition_parameters(interactive: bool) -> serde_json::Value {
@@ -477,4 +481,12 @@ pub(super) fn default_home_dir() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
         .unwrap_or_else(std::env::temp_dir)
+}
+
+fn shared_production_manager() -> Arc<ChromeManager> {
+    static SHARED_MANAGER: OnceLock<Arc<ChromeManager>> = OnceLock::new();
+    Arc::clone(SHARED_MANAGER.get_or_init(|| {
+        let paths = ChromePaths::from_home(&default_home_dir());
+        Arc::new(ChromeManager::new_interactive_production(paths))
+    }))
 }

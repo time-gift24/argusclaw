@@ -6,8 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use thirtyfour::common::cookie::Cookie;
-use thirtyfour::extensions::query::{ElementQuery, ElementQueryable};
-use thirtyfour::prelude::{By, WebDriver, WebElement};
+use thirtyfour::prelude::{By, WebDriver};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
@@ -16,25 +15,12 @@ use super::models::PageMetadata;
 
 #[async_trait]
 pub trait BrowserSession: Send + Sync {
+    fn webdriver_mutex(&self) -> Option<&Mutex<Option<WebDriver>>> {
+        None
+    }
+
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
-    async fn query(&self, _by: By) -> Result<ElementQuery, ChromeToolError> {
-        Err(ChromeToolError::InteractionFailed {
-            reason: "query is not supported by this browser session".to_string(),
-        })
-    }
-
-    async fn find_element(&self, _by: By) -> Result<WebElement, ChromeToolError> {
-        Err(ChromeToolError::InteractionFailed {
-            reason: "find_element is not supported by this browser session".to_string(),
-        })
-    }
-
-    async fn find_elements(&self, _by: By) -> Result<Vec<WebElement>, ChromeToolError> {
-        Err(ChromeToolError::InteractionFailed {
-            reason: "find_elements is not supported by this browser session".to_string(),
-        })
-    }
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
     async fn current_url(&self) -> Result<String, ChromeToolError>;
@@ -62,7 +48,6 @@ struct TabState {
 
 #[derive(Clone)]
 pub struct ChromeSession {
-    pub session_id: String,
     pub current_url: String,
     pub page_title: String,
     interaction: Arc<dyn BrowserSession>,
@@ -73,7 +58,6 @@ pub struct ChromeSession {
 impl fmt::Debug for ChromeSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChromeSession")
-            .field("session_id", &self.session_id)
             .field("current_url", &self.current_url)
             .field("page_title", &self.page_title)
             .finish()
@@ -83,13 +67,11 @@ impl fmt::Debug for ChromeSession {
 impl ChromeSession {
     #[must_use]
     pub fn new(
-        session_id: String,
         current_url: String,
         page_title: String,
         interaction: Arc<dyn BrowserSession>,
     ) -> Self {
         Self {
-            session_id,
             current_url,
             page_title,
             interaction,
@@ -171,9 +153,7 @@ impl ChromeSession {
         let (window_handle, was_active, previous_active_handle) = {
             let state = self.tab_state.lock().await;
             if state.tabs.len() <= 1 {
-                return Err(ChromeToolError::CannotCloseLastTab {
-                    session_id: self.session_id.clone(),
-                });
+                return Err(ChromeToolError::CannotCloseLastTab);
             }
             let entry = state
                 .tabs
@@ -383,38 +363,15 @@ impl ChromeDriverProcess {
     }
 }
 
-pub struct ManagedWebDriverSession {
-    driver: Mutex<Option<WebDriver>>,
-}
-
-impl fmt::Debug for ManagedWebDriverSession {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ManagedWebDriverSession")
-            .finish_non_exhaustive()
-    }
-}
-
-impl ManagedWebDriverSession {
-    #[must_use]
-    pub fn new(driver: WebDriver) -> Self {
-        Self {
-            driver: Mutex::new(Some(driver)),
-        }
-    }
-
-    async fn live_driver(&self) -> Result<WebDriver, ChromeToolError> {
-        self.driver.lock().await.as_ref().cloned().ok_or_else(|| {
-            ChromeToolError::SessionShutdownFailed {
-                reason: "session already closed".to_string(),
-            }
-        })
-    }
-}
-
 #[async_trait]
-impl BrowserSession for ManagedWebDriverSession {
+impl BrowserSession for Mutex<Option<WebDriver>> {
+    fn webdriver_mutex(&self) -> Option<&Mutex<Option<WebDriver>>> {
+        Some(self)
+    }
+
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         let element = match selector {
             Some(selector) => driver.find(By::Css(selector)).await,
             None => driver.find(By::Css("body")).await,
@@ -431,30 +388,9 @@ impl BrowserSession for ManagedWebDriverSession {
             })
     }
 
-    async fn query(&self, by: By) -> Result<ElementQuery, ChromeToolError> {
-        Ok(self.live_driver().await?.query(by))
-    }
-
-    async fn find_element(&self, by: By) -> Result<WebElement, ChromeToolError> {
-        self.live_driver()
-            .await?
-            .find(by)
-            .await
-            .map_err(|e| ChromeToolError::InteractionFailed {
-                reason: format!("element not found: {e}"),
-            })
-    }
-
-    async fn find_elements(&self, by: By) -> Result<Vec<WebElement>, ChromeToolError> {
-        self.live_driver().await?.find_all(by).await.map_err(|e| {
-            ChromeToolError::InteractionFailed {
-                reason: format!("elements not found: {e}"),
-            }
-        })
-    }
-
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         let element = driver.find(By::Css(selector)).await.map_err(|e| {
             ChromeToolError::InteractionFailed {
                 reason: format!("element not found for selector '{selector}': {e}"),
@@ -469,7 +405,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         let element = driver.find(By::Css(selector)).await.map_err(|e| {
             ChromeToolError::InteractionFailed {
                 reason: format!("element not found for selector '{selector}': {e}"),
@@ -484,7 +421,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn current_url(&self) -> Result<String, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         driver
             .current_url()
             .await
@@ -495,7 +433,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         driver
             .get_all_cookies()
             .await
@@ -505,7 +444,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         driver
             .goto(url)
             .await
@@ -533,7 +473,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn create_new_tab(&self, url: &str) -> Result<(String, PageMetadata), ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         let original_handle = driver.window().await.ok();
         let handle = driver
             .new_tab()
@@ -582,7 +523,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn switch_to_window(&self, window_handle: &str) -> Result<PageMetadata, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         let handle = thirtyfour::WindowHandle::from(window_handle.to_string());
         driver
             .switch_to_window(handle)
@@ -610,7 +552,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn close_current_window(&self) -> Result<(), ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         driver
             .close_window()
             .await
@@ -620,7 +563,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         let current_handle =
             driver
                 .window()
@@ -657,7 +601,8 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
-        let driver = self.live_driver().await?;
+        let guard = self.lock().await;
+        let driver = live_driver(&guard)?;
         driver.window().await.map(|h| h.to_string()).map_err(|e| {
             ChromeToolError::TabOperationFailed {
                 reason: format!("failed to get current window handle: {e}"),
@@ -666,7 +611,7 @@ impl BrowserSession for ManagedWebDriverSession {
     }
 
     async fn shutdown(&self) -> Result<(), ChromeToolError> {
-        if let Some(driver) = self.driver.lock().await.take() {
+        if let Some(driver) = self.lock().await.take() {
             driver
                 .quit()
                 .await
@@ -676,6 +621,14 @@ impl BrowserSession for ManagedWebDriverSession {
         }
         Ok(())
     }
+}
+
+fn live_driver(driver: &Option<WebDriver>) -> Result<&WebDriver, ChromeToolError> {
+    driver
+        .as_ref()
+        .ok_or_else(|| ChromeToolError::SessionShutdownFailed {
+            reason: "session already closed".to_string(),
+        })
 }
 
 pub(crate) async fn shutdown_child_process(child: &mut Child) -> Result<(), ChromeToolError> {
@@ -707,8 +660,9 @@ mod tests {
     use thirtyfour::prelude::{DesiredCapabilities, WebDriver};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
 
-    use super::{BrowserSession, ChromeToolError, ManagedWebDriverSession};
+    use super::{BrowserSession, ChromeToolError};
 
     async fn read_http_request(
         stream: &mut tokio::net::TcpStream,
@@ -773,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_webdriver_session_shutdown_propagates_quit_failures() {
+    async fn webdriver_session_lock_shutdown_propagates_quit_failures() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -825,7 +779,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let session = ManagedWebDriverSession::new(driver);
+        let session = Mutex::new(Some(driver));
 
         let error = session.shutdown().await.unwrap_err();
         assert!(matches!(

@@ -1,21 +1,18 @@
-use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
 use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
 use thirtyfour::common::cookie::Cookie;
-use thirtyfour::extensions::query::ElementQuery;
-use thirtyfour::prelude::{
-    By, ChromiumLikeCapabilities, DesiredCapabilities, WebDriver, WebElement,
-};
+use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -24,11 +21,8 @@ use super::error::ChromeToolError;
 use super::installer::{
     ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
 };
-use super::models::{NewTabResult, OpenArgs, OpenedPage, OpenedSession, PageMetadata, TabInfo};
-use super::session::{
-    BrowserSession, ChromeDriverProcess, ChromeSession, ManagedWebDriverSession,
-    shutdown_child_process,
-};
+use super::models::{NewTabResult, OpenedPage, PageMetadata, TabInfo};
+use super::session::{BrowserSession, ChromeDriverProcess, ChromeSession, shutdown_child_process};
 
 pub struct BackendOpenResult {
     pub metadata: PageMetadata,
@@ -124,30 +118,21 @@ pub struct ChromeManager {
     backend: Arc<dyn BrowserBackend>,
     managed_support: Option<ManagedChromeSupport>,
     paths: ChromePaths,
-    sessions: RwLock<HashMap<String, ChromeSession>>,
-    session_order: RwLock<VecDeque<String>>,
-    session_limit: usize,
-    next_session_id: AtomicU64,
+    session: Mutex<Option<ChromeSession>>,
 }
 
 impl ChromeManager {
-    const PRODUCTION_SESSION_LIMIT: usize = 1;
-
     #[must_use]
-    fn new_with_session_limit(
+    fn new_with_components(
         backend: Arc<dyn BrowserBackend>,
         managed_support: Option<ManagedChromeSupport>,
         paths: ChromePaths,
-        session_limit: usize,
     ) -> Self {
         Self {
             backend,
             managed_support,
             paths,
-            sessions: RwLock::new(HashMap::new()),
-            session_order: RwLock::new(VecDeque::new()),
-            session_limit,
-            next_session_id: AtomicU64::new(0),
+            session: Mutex::new(None),
         }
     }
 
@@ -167,12 +152,7 @@ impl ChromeManager {
             installer,
             SessionMode::Readonly,
         ));
-        Self::new_with_session_limit(
-            backend,
-            managed_support,
-            paths,
-            Self::PRODUCTION_SESSION_LIMIT,
-        )
+        Self::new_with_components(backend, managed_support, paths)
     }
 
     #[must_use]
@@ -191,12 +171,7 @@ impl ChromeManager {
             installer,
             SessionMode::Interactive,
         ));
-        Self::new_with_session_limit(
-            backend,
-            managed_support,
-            paths,
-            Self::PRODUCTION_SESSION_LIMIT,
-        )
+        Self::new_with_components(backend, managed_support, paths)
     }
 
     #[cfg(test)]
@@ -217,12 +192,7 @@ impl ChromeManager {
             installer,
             SessionMode::Readonly,
         ));
-        Self::new_with_session_limit(
-            backend,
-            managed_support,
-            paths,
-            Self::PRODUCTION_SESSION_LIMIT,
-        )
+        Self::new_with_components(backend, managed_support, paths)
     }
 
     #[cfg(test)]
@@ -243,21 +213,18 @@ impl ChromeManager {
             installer,
             SessionMode::Interactive,
         ));
-        Self::new_with_session_limit(
-            backend,
-            managed_support,
-            paths,
-            Self::PRODUCTION_SESSION_LIMIT,
-        )
+        Self::new_with_components(backend, managed_support, paths)
     }
 
     #[cfg(test)]
     #[must_use]
     pub fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
-        static NEXT_TEST_MANAGER_ID: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT_TEST_MANAGER_ID.fetch_add(1, Ordering::Relaxed) + 1;
-        let home = std::env::temp_dir().join(format!("arguswing-chrome-tests-{id}"));
-        Self::new_with_session_limit(backend, None, ChromePaths::from_home(&home), 4)
+        let home = tempfile::Builder::new()
+            .prefix("arguswing-chrome-tests-")
+            .tempdir()
+            .map(|dir| dir.keep())
+            .unwrap_or_else(|_| std::env::temp_dir().join("arguswing-chrome-tests"));
+        Self::new_with_components(backend, None, ChromePaths::from_home(&home))
     }
 
     pub async fn install_driver(
@@ -276,15 +243,31 @@ impl ChromeManager {
     }
 
     pub async fn navigate(&self, url: &str) -> Result<OpenedPage, ChromeToolError> {
-        if let Some(session_id) = self.current_active_session_id().await {
-            return self.navigate_session(&session_id, url).await;
+        self.paths.ensure_directories()?;
+
+        let mut slot = self.session.lock().await;
+        if let Some(session) = slot.as_mut() {
+            let metadata = match session.interaction().navigate(url).await {
+                Ok(metadata) => metadata,
+                Err(error) if Self::is_stale_session_error(&error) => {
+                    Self::shutdown_slot(&mut slot).await;
+                    let session = self.open_new_session(url).await?;
+                    let opened = opened_page_from_session(&session);
+                    *slot = Some(session);
+                    return Ok(opened);
+                }
+                Err(error) => return Err(error),
+            };
+            session.update_metadata(metadata.clone());
+            return Ok(OpenedPage {
+                final_url: metadata.final_url,
+                page_title: metadata.page_title,
+            });
         }
 
-        let opened = self
-            .open(OpenArgs {
-                url: url.to_string(),
-            })
-            .await?;
+        let session = self.open_new_session(url).await?;
+        let opened = opened_page_from_session(&session);
+        *slot = Some(session);
         Ok(OpenedPage {
             final_url: opened.final_url,
             page_title: opened.page_title,
@@ -292,61 +275,81 @@ impl ChromeManager {
     }
 
     pub async fn close(&self) -> Result<(), ChromeToolError> {
-        if let Some(session_id) = self.current_active_session_id().await {
-            self.close_session(&session_id).await?;
+        let mut slot = self.session.lock().await;
+        if let Some(session) = slot.take() {
+            session.interaction().shutdown().await?;
         }
         Ok(())
     }
 
     pub async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
-        self.active_session_interaction()
-            .await?
-            .extract_text(selector)
-            .await
-    }
-
-    pub async fn query(&self, by: By) -> Result<ElementQuery, ChromeToolError> {
-        self.active_session_interaction().await?.query(by).await
-    }
-
-    pub async fn find_element(&self, by: By) -> Result<WebElement, ChromeToolError> {
-        self.active_session_interaction()
-            .await?
-            .find_element(by)
-            .await
-    }
-
-    pub async fn find_elements(&self, by: By) -> Result<Vec<WebElement>, ChromeToolError> {
-        self.active_session_interaction()
-            .await?
-            .find_elements(by)
-            .await
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let result = session.interaction().extract_text(selector).await;
+        Self::clear_stale_session_result(&mut slot, result).await
     }
 
     pub async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
-        self.active_session_interaction()
-            .await?
-            .click(selector)
-            .await
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let result = session.interaction().click(selector).await;
+        Self::clear_stale_session_result(&mut slot, result).await
     }
 
     pub async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError> {
-        self.active_session_interaction()
-            .await?
-            .type_text(selector, text)
-            .await
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let result = session.interaction().type_text(selector, text).await;
+        Self::clear_stale_session_result(&mut slot, result).await
     }
 
     pub async fn current_url(&self) -> Result<String, ChromeToolError> {
-        self.active_session_interaction().await?.current_url().await
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let result = session.interaction().current_url().await;
+        Self::clear_stale_session_result(&mut slot, result).await
+    }
+
+    pub async fn with_webdriver<T, F>(&self, operation: F) -> Result<T, ChromeToolError>
+    where
+        F: for<'driver> FnOnce(
+                &'driver WebDriver,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<T, ChromeToolError>> + Send + 'driver>,
+            > + Send,
+    {
+        // The callback runs while the shared session and WebDriver locks are held.
+        // Callers should perform only direct WebDriver operations here.
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let interaction = session.interaction();
+        let webdriver =
+            interaction
+                .webdriver_mutex()
+                .ok_or_else(|| ChromeToolError::InteractionFailed {
+                    reason: "direct webdriver access is not supported by this browser session"
+                        .to_string(),
+                })?;
+
+        let result = {
+            let guard = webdriver.lock().await;
+            let driver = guard
+                .as_ref()
+                .ok_or_else(|| ChromeToolError::SessionShutdownFailed {
+                    reason: "session already closed".to_string(),
+                })?;
+            operation(driver).await
+        };
+
+        Self::clear_stale_session_result(&mut slot, result).await
     }
 
     pub async fn get_cookies(&self, domain: Option<&str>) -> Result<Vec<Cookie>, ChromeToolError> {
-        let cookies = self
-            .active_session_interaction()
-            .await?
-            .get_cookies()
-            .await?;
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let cookies =
+            Self::clear_stale_session_result(&mut slot, session.interaction().get_cookies().await)
+                .await?;
 
         let Some(domain) = domain.and_then(normalize_cookie_domain) else {
             return Ok(cookies);
@@ -359,11 +362,11 @@ impl ChromeManager {
     }
 
     pub async fn new_tab(&self, url: &str) -> Result<NewTabResult, ChromeToolError> {
-        let session_id = self.active_session_id().await?;
-        let session = self.session(&session_id).await?;
-        let result = session.create_new_tab(url).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&session_id) {
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let result =
+            Self::clear_stale_session_result(&mut slot, session.create_new_tab(url).await).await?;
+        if let Some(session) = slot.as_mut() {
             session.update_metadata(PageMetadata {
                 final_url: result.url.clone(),
                 page_title: result.page_title.clone(),
@@ -373,231 +376,81 @@ impl ChromeManager {
     }
 
     pub async fn switch_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
-        let session_id = self.active_session_id().await?;
-        let session = self.session(&session_id).await?;
-        let metadata = session.switch_tab(tab_id).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.update_metadata(metadata.clone());
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let metadata =
+            Self::clear_stale_session_result(&mut slot, session.switch_tab(tab_id).await).await?;
+        if let Some(session) = slot.as_mut() {
+            session.update_metadata(metadata.clone());
         }
         Ok(metadata)
     }
 
     pub async fn close_tab(&self, tab_id: &str) -> Result<(), ChromeToolError> {
-        let session_id = self.active_session_id().await?;
-        let session = self.session(&session_id).await?;
-        let metadata = session.close_tab(tab_id).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&session_id) {
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        let metadata =
+            Self::clear_stale_session_result(&mut slot, session.close_tab(tab_id).await).await?;
+        if let Some(session) = slot.as_mut() {
             session.update_metadata(metadata);
         }
         Ok(())
     }
 
     pub async fn list_tabs(&self) -> Result<Vec<TabInfo>, ChromeToolError> {
-        let session_id = self.active_session_id().await?;
-        let session = self.session(&session_id).await?;
-        session.list_tabs().await
+        let mut slot = self.session.lock().await;
+        let session = Self::active_session(&slot)?;
+        Self::clear_stale_session_result(&mut slot, session.list_tabs().await).await
     }
 
-    async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {
-        self.paths.ensure_directories()?;
-
-        // Reuse existing session in single-session mode (production)
-        if self.session_limit == 1 {
-            let existing_id = {
-                let order = self.session_order.read().await;
-                order.back().cloned()
-            };
-            if let Some(existing_id) = existing_id
-                && self.sessions.read().await.contains_key(&existing_id)
-            {
-                let page = self.navigate_session(&existing_id, &args.url).await?;
-                return Ok(OpenedSession {
-                    session_id: existing_id,
-                    final_url: page.final_url,
-                    page_title: page.page_title,
-                });
-            }
-        }
-
-        let opened = self.backend.open(&args.url).await?;
-        self.store_backend_opened_session(opened).await
-    }
-
-    async fn close_session(&self, session_id: &str) -> Result<(), ChromeToolError> {
-        self.remove_session_order_entry(session_id).await;
-        let session = self
-            .sessions
-            .write()
-            .await
-            .remove(session_id)
-            .ok_or_else(|| Self::session_not_found(session_id))?;
-        session.interaction().shutdown().await
-    }
-
-    async fn session(&self, session_id: &str) -> Result<ChromeSession, ChromeToolError> {
-        self.sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| Self::session_not_found(session_id))
-    }
-
-    async fn navigate_session(
-        &self,
-        session_id: &str,
-        url: &str,
-    ) -> Result<OpenedPage, ChromeToolError> {
-        let metadata = match self
-            .session_interaction(session_id)
-            .await?
-            .navigate(url)
-            .await
-        {
-            Ok(metadata) => metadata,
-            Err(error) if self.should_retry_after_navigation_failure(&error) => {
-                return self
-                    .reopen_session_after_navigation_failure(session_id, url)
-                    .await;
-            }
-            Err(error) => return Err(error),
-        };
-
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.update_metadata(metadata.clone());
-        }
-
-        Ok(OpenedPage {
-            final_url: metadata.final_url,
-            page_title: metadata.page_title,
-        })
-    }
-
-    fn next_session_id(&self) -> String {
-        let next = self.next_session_id.fetch_add(1, Ordering::Relaxed) + 1;
-        format!("session-{next}")
-    }
-
-    async fn session_interaction(
-        &self,
-        session_id: &str,
-    ) -> Result<Arc<dyn BrowserSession>, ChromeToolError> {
-        self.sessions
-            .read()
-            .await
-            .get(session_id)
-            .map(ChromeSession::interaction)
-            .ok_or_else(|| Self::session_not_found(session_id))
-    }
-
-    async fn active_session_id(&self) -> Result<String, ChromeToolError> {
-        self.current_active_session_id()
-            .await
-            .ok_or(ChromeToolError::SharedSessionUnavailable)
-    }
-
-    async fn active_session_interaction(&self) -> Result<Arc<dyn BrowserSession>, ChromeToolError> {
-        let session_id = self.active_session_id().await?;
-        self.session_interaction(&session_id).await
-    }
-
-    async fn current_active_session_id(&self) -> Option<String> {
-        let session_id = {
-            let order = self.session_order.read().await;
-            order.back().cloned()
-        }?;
-
-        self.sessions
-            .read()
-            .await
-            .contains_key(&session_id)
-            .then_some(session_id)
-    }
-
-    async fn store_backend_opened_session(
-        &self,
-        opened: BackendOpenResult,
-    ) -> Result<OpenedSession, ChromeToolError> {
-        let BackendOpenResult { metadata, session } = opened;
-        let session_id = self.next_session_id();
-
+    async fn open_new_session(&self, url: &str) -> Result<ChromeSession, ChromeToolError> {
+        let BackendOpenResult { metadata, session } = self.backend.open(url).await?;
         let session = ChromeSession::new(
-            session_id.clone(),
             metadata.final_url.clone(),
             metadata.page_title.clone(),
             session,
         );
-
         // Register the active window so tab APIs work on freshly opened or re-attached sessions.
         if let Ok(handle) = session.interaction().current_window_handle().await {
             session.register_initial_tab(handle).await;
         }
-
-        self.sessions
-            .write()
-            .await
-            .insert(session_id.clone(), session);
-        self.session_order
-            .write()
-            .await
-            .push_back(session_id.clone());
-        self.evict_excess_sessions().await?;
-
-        Ok(OpenedSession {
-            session_id,
-            final_url: metadata.final_url,
-            page_title: metadata.page_title,
-        })
+        Ok(session)
     }
 
-    async fn evict_excess_sessions(&self) -> Result<(), ChromeToolError> {
-        loop {
-            let evicted_session_id = {
-                let mut order = self.session_order.write().await;
-                if order.len() <= self.session_limit {
-                    return Ok(());
-                }
-                order.pop_front()
-            };
+    fn active_session(slot: &Option<ChromeSession>) -> Result<ChromeSession, ChromeToolError> {
+        slot.clone()
+            .ok_or(ChromeToolError::SharedSessionUnavailable)
+    }
 
-            let Some(session_id) = evicted_session_id else {
-                return Ok(());
-            };
-
-            self.close_session(&session_id).await?;
+    async fn clear_stale_session_result<T>(
+        slot: &mut Option<ChromeSession>,
+        result: Result<T, ChromeToolError>,
+    ) -> Result<T, ChromeToolError> {
+        match result {
+            Err(error) if Self::is_stale_session_error(&error) => {
+                Self::shutdown_slot(slot).await;
+                Err(ChromeToolError::SharedSessionUnavailable)
+            }
+            other => other,
         }
     }
 
-    async fn remove_session_order_entry(&self, session_id: &str) {
-        let mut order = self.session_order.write().await;
-        if let Some(index) = order.iter().position(|value| value == session_id) {
-            order.remove(index);
+    async fn shutdown_slot(slot: &mut Option<ChromeSession>) {
+        if let Some(session) = slot.take() {
+            let _ = session.interaction().shutdown().await;
         }
     }
 
-    fn session_not_found(session_id: &str) -> ChromeToolError {
-        ChromeToolError::SessionNotFound {
-            session_id: session_id.to_string(),
-        }
-    }
-
-    fn should_retry_after_navigation_failure(&self, error: &ChromeToolError) -> bool {
-        if self.session_limit != Self::PRODUCTION_SESSION_LIMIT {
-            return false;
-        }
-
+    fn is_stale_session_error(error: &ChromeToolError) -> bool {
         let reason = match error {
             ChromeToolError::NavigationFailed { reason, .. }
             | ChromeToolError::PageReadFailed { reason }
             | ChromeToolError::SessionShutdownFailed { reason }
+            | ChromeToolError::InteractionFailed { reason }
             | ChromeToolError::TabOperationFailed { reason } => reason,
             ChromeToolError::InvalidArguments { .. }
             | ChromeToolError::MissingRequiredField { .. }
             | ChromeToolError::ActionNotAllowed { .. }
-            | ChromeToolError::SessionNotFound { .. }
             | ChromeToolError::SharedSessionUnavailable
             | ChromeToolError::DirectoryCreateFailed { .. }
             | ChromeToolError::DriverDownloadFailed { .. }
@@ -611,9 +464,8 @@ impl ChromeManager {
             | ChromeToolError::DriverStartFailed { .. }
             | ChromeToolError::FileReadFailed { .. }
             | ChromeToolError::FileWriteFailed { .. }
-            | ChromeToolError::InteractionFailed { .. }
             | ChromeToolError::TabNotFound { .. }
-            | ChromeToolError::CannotCloseLastTab { .. }
+            | ChromeToolError::CannotCloseLastTab
             | ChromeToolError::OutputSerialization(_) => return false,
         };
 
@@ -631,23 +483,12 @@ impl ChromeManager {
         .iter()
         .any(|needle| reason.contains(needle))
     }
+}
 
-    async fn reopen_session_after_navigation_failure(
-        &self,
-        session_id: &str,
-        url: &str,
-    ) -> Result<OpenedPage, ChromeToolError> {
-        self.remove_session_order_entry(session_id).await;
-        let session = self.sessions.write().await.remove(session_id);
-        if let Some(session) = session {
-            let _ = session.interaction().shutdown().await;
-        }
-        let opened = self.backend.open(url).await?;
-        let opened = self.store_backend_opened_session(opened).await?;
-        Ok(OpenedPage {
-            final_url: opened.final_url,
-            page_title: opened.page_title,
-        })
+fn opened_page_from_session(session: &ChromeSession) -> OpenedPage {
+    OpenedPage {
+        final_url: session.current_url.clone(),
+        page_title: session.page_title.clone(),
     }
 }
 
@@ -670,27 +511,23 @@ fn normalize_cookie_domain(domain: &str) -> Option<String> {
 
 impl Drop for ChromeManager {
     fn drop(&mut self) {
-        let sessions = std::mem::take(self.sessions.get_mut());
-        self.session_order.get_mut().clear();
+        let session = self.session.get_mut().take();
         let shared_host = self
             .managed_support
             .as_ref()
             .and_then(|support| support.shared_host.clone());
-        if sessions.is_empty() && shared_host.is_none() {
+        if session.is_none() && shared_host.is_none() {
             return;
         }
 
-        let interactions: Vec<_> = sessions
-            .into_values()
-            .map(|session| session.interaction())
-            .collect();
+        let interaction = session.map(|session| session.interaction());
         let _ = std::thread::spawn(move || {
             if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
                 runtime.block_on(async move {
-                    for interaction in interactions {
+                    if let Some(interaction) = interaction {
                         let _ = interaction.shutdown().await;
                     }
                     if let Some(shared_host) = shared_host {
@@ -705,13 +542,13 @@ impl Drop for ChromeManager {
 
 #[derive(Debug)]
 pub struct SystemChromeHost {
-    driver_process: RwLock<Option<Arc<ChromeDriverProcess>>>,
+    driver_process: Mutex<Option<Arc<ChromeDriverProcess>>>,
 }
 
 impl Default for SystemChromeHost {
     fn default() -> Self {
         Self {
-            driver_process: RwLock::new(None),
+            driver_process: Mutex::new(None),
         }
     }
 }
@@ -752,7 +589,7 @@ impl ChromeHost for SystemChromeHost {
         };
 
         if let Err(err) = driver.goto(url).await {
-            let _ = driver.clone().quit().await;
+            let _ = driver.quit().await;
             return Err(ChromeToolError::NavigationFailed {
                 url: url.to_string(),
                 reason: err.to_string(),
@@ -772,7 +609,7 @@ impl ChromeHost for SystemChromeHost {
                 reason: e.to_string(),
             })?;
 
-        let session: Arc<dyn BrowserSession> = Arc::new(ManagedWebDriverSession::new(driver));
+        let session: Arc<dyn BrowserSession> = Arc::new(Mutex::new(Some(driver)));
         Ok(BackendOpenResult {
             metadata: PageMetadata {
                 final_url,
@@ -785,19 +622,20 @@ impl ChromeHost for SystemChromeHost {
 
 impl SystemChromeHost {
     async fn shutdown(&self) -> Result<(), ChromeToolError> {
-        let process = { self.driver_process.write().await.take() };
+        let process = { self.driver_process.lock().await.take() };
         if let Some(process) = process {
             process.shutdown().await?;
         }
         Ok(())
     }
 
+    #[cfg(test)]
     async fn take_reusable_driver_process(
         &self,
         driver_binary: &Path,
     ) -> Result<Option<Arc<ChromeDriverProcess>>, ChromeToolError> {
-        let cached_process = { self.driver_process.read().await.clone() };
-        let Some(process) = cached_process else {
+        let mut guard = self.driver_process.lock().await;
+        let Some(process) = guard.as_ref().cloned() else {
             return Ok(None);
         };
 
@@ -805,14 +643,7 @@ impl SystemChromeHost {
             return Ok(Some(process));
         }
 
-        {
-            let mut guard = self.driver_process.write().await;
-            if let Some(current) = guard.as_ref()
-                && Arc::ptr_eq(current, &process)
-            {
-                guard.take();
-            }
-        }
+        guard.take();
         process.shutdown().await?;
         Ok(None)
     }
@@ -821,8 +652,13 @@ impl SystemChromeHost {
         &self,
         driver_binary: &Path,
     ) -> Result<Arc<ChromeDriverProcess>, ChromeToolError> {
-        if let Some(process) = self.take_reusable_driver_process(driver_binary).await? {
-            return Ok(process);
+        let mut guard = self.driver_process.lock().await;
+        if let Some(process) = guard.as_ref().cloned() {
+            if process.matches_driver_binary(driver_binary) && process.is_alive().await {
+                return Ok(process);
+            }
+            guard.take();
+            process.shutdown().await?;
         }
 
         let mut command = background_command(driver_binary);
@@ -845,7 +681,7 @@ impl SystemChromeHost {
             SHARED_DRIVER_PORT,
             driver_binary.to_path_buf(),
         ));
-        *self.driver_process.write().await = Some(Arc::clone(&process));
+        *guard = Some(Arc::clone(&process));
         Ok(process)
     }
 }
@@ -1135,17 +971,22 @@ mod tests {
     use std::process::Stdio;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::Duration;
 
     use serde_json::json;
     use tempfile::tempdir;
     use thirtyfour::common::cookie::Cookie;
+    use thirtyfour::prelude::{DesiredCapabilities, WebDriver};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     #[cfg(unix)]
     use tokio::process::Command;
+    use tokio::sync::Mutex as TokioMutex;
 
     use crate::chrome::error::ChromeToolError;
     use crate::chrome::installer::{ChromeInstaller, ChromePaths, DriverDownloader};
-    use crate::chrome::models::{OpenArgs, PageMetadata};
+    use crate::chrome::models::PageMetadata;
     use crate::chrome::session::{BrowserSession, ChromeDriverProcess};
 
     use super::{
@@ -1436,6 +1277,10 @@ mod tests {
         fn open_urls(&self) -> Vec<String> {
             self.open_urls.lock().unwrap().clone()
         }
+
+        fn shutdowns(&self) -> Vec<String> {
+            self.shutdowns.lock().unwrap().clone()
+        }
     }
 
     #[derive(Debug)]
@@ -1556,6 +1401,228 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct SlowOpenBackend {
+        open_count: AtomicUsize,
+    }
+
+    impl SlowOpenBackend {
+        fn open_count(&self) -> usize {
+            self.open_count.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for SlowOpenBackend {
+        async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            self.open_count.fetch_add(1, AtomicOrdering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let session: Arc<dyn BrowserSession> = Arc::new(FlakyNavigateSession {
+                current_url: StdMutex::new(url.to_string()),
+                current_title: StdMutex::new(format!("Opened {url}")),
+                fail_navigation: false,
+                shutdown_label: url.to_string(),
+                shutdowns: Arc::new(StdMutex::new(Vec::new())),
+            });
+
+            Ok(BackendOpenResult {
+                metadata: PageMetadata {
+                    final_url: url.to_string(),
+                    page_title: format!("Opened {url}"),
+                },
+                session,
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct StaleReadBackend {
+        shutdowns: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[derive(Debug)]
+    struct StaleReadSession {
+        shutdowns: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserSession for StaleReadSession {
+        async fn extract_text(&self, _selector: Option<&str>) -> Result<String, ChromeToolError> {
+            Err(ChromeToolError::PageReadFailed {
+                reason: "invalid session id".to_string(),
+            })
+        }
+
+        async fn shutdown(&self) -> Result<(), ChromeToolError> {
+            self.shutdowns
+                .lock()
+                .unwrap()
+                .push("stale-read".to_string());
+            Ok(())
+        }
+
+        async fn click(&self, _selector: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn type_text(&self, _selector: &str, _text: &str) -> Result<(), ChromeToolError> {
+            Ok(())
+        }
+
+        async fn current_url(&self) -> Result<String, ChromeToolError> {
+            Ok("https://example.com".to_string())
+        }
+
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
+            Ok(Vec::new())
+        }
+
+        async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
+            Ok(PageMetadata {
+                final_url: url.to_string(),
+                page_title: format!("Navigated to {url}"),
+            })
+        }
+
+        async fn create_new_tab(
+            &self,
+            _url: &str,
+        ) -> Result<(String, PageMetadata), ChromeToolError> {
+            Err(ChromeToolError::TabOperationFailed {
+                reason: "not implemented in stale read test session".to_string(),
+            })
+        }
+
+        async fn switch_to_window(
+            &self,
+            _window_handle: &str,
+        ) -> Result<PageMetadata, ChromeToolError> {
+            Err(ChromeToolError::TabOperationFailed {
+                reason: "not implemented in stale read test session".to_string(),
+            })
+        }
+
+        async fn close_current_window(&self) -> Result<(), ChromeToolError> {
+            Err(ChromeToolError::TabOperationFailed {
+                reason: "not implemented in stale read test session".to_string(),
+            })
+        }
+
+        async fn list_windows(&self) -> Result<Vec<(String, String, String)>, ChromeToolError> {
+            Ok(vec![(
+                "handle-1".to_string(),
+                "https://example.com".to_string(),
+                "Example".to_string(),
+            )])
+        }
+
+        async fn current_window_handle(&self) -> Result<String, ChromeToolError> {
+            Ok("handle-1".to_string())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for StaleReadBackend {
+        async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            let session: Arc<dyn BrowserSession> = Arc::new(StaleReadSession {
+                shutdowns: Arc::clone(&self.shutdowns),
+            });
+
+            Ok(BackendOpenResult {
+                metadata: PageMetadata {
+                    final_url: url.to_string(),
+                    page_title: "Example".to_string(),
+                },
+                session,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct WebDriverBackend {
+        driver: StdMutex<Option<WebDriver>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserBackend for WebDriverBackend {
+        async fn open(&self, url: &str) -> Result<BackendOpenResult, ChromeToolError> {
+            let driver = self
+                .driver
+                .lock()
+                .unwrap()
+                .take()
+                .expect("test webdriver should be opened once");
+            let session: Arc<dyn BrowserSession> = Arc::new(TokioMutex::new(Some(driver)));
+
+            Ok(BackendOpenResult {
+                metadata: PageMetadata {
+                    final_url: url.to_string(),
+                    page_title: "Initial".to_string(),
+                },
+                session,
+            })
+        }
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<String> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none()
+                && let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                header_end = Some(index + 4);
+                let headers = String::from_utf8_lossy(&buffer[..index + 4]);
+                for line in headers.lines() {
+                    if let Some(value) = line.strip_prefix("Content-Length:") {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+
+            if let Some(end) = header_end
+                && buffer.len() >= end + content_length
+            {
+                return Ok(String::from_utf8_lossy(&buffer[..end])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string());
+            }
+        }
+
+        Ok(String::from_utf8_lossy(&buffer)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    async fn write_json_response(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        body: serde_json::Value,
+    ) -> std::io::Result<()> {
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.shutdown().await
+    }
+
     fn sample_backend() -> Arc<FakeBrowserBackend> {
         Arc::new(
             FakeBrowserBackend::default()
@@ -1576,6 +1643,121 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn manager_with_webdriver_runs_operation_inside_locked_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected_request in [
+                "POST /session HTTP/1.1",
+                "POST /session/test-session/timeouts HTTP/1.1",
+                "GET /session/test-session/window HTTP/1.1",
+                "GET /session/test-session/url HTTP/1.1",
+                "DELETE /session/test-session HTTP/1.1",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request_line = read_http_request(&mut stream).await.unwrap();
+                assert_eq!(request_line, expected_request);
+
+                let response = if expected_request.starts_with("POST /session ") {
+                    json!({
+                        "value": {
+                            "sessionId": "test-session",
+                            "capabilities": {
+                                "browserName": "chrome"
+                            }
+                        }
+                    })
+                } else if expected_request.ends_with("/window HTTP/1.1") {
+                    json!({ "value": "window-1" })
+                } else if expected_request.ends_with("/url HTTP/1.1") {
+                    json!({ "value": "https://example.com/locked" })
+                } else {
+                    json!({ "value": null })
+                };
+
+                write_json_response(&mut stream, "200 OK", response)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let driver = WebDriver::new(
+            format!("http://{server_addr}"),
+            DesiredCapabilities::chrome(),
+        )
+        .await
+        .unwrap();
+        let manager = ChromeManager::new_with_components(
+            Arc::new(WebDriverBackend {
+                driver: StdMutex::new(Some(driver)),
+            }),
+            None,
+            ChromePaths::from_home(tempdir().unwrap().path()),
+        );
+
+        manager.navigate("https://example.com").await.unwrap();
+        let current_url = manager
+            .with_webdriver(|driver| {
+                Box::pin(async move {
+                    driver
+                        .current_url()
+                        .await
+                        .map(|url| url.to_string())
+                        .map_err(|error| ChromeToolError::PageReadFailed {
+                            reason: error.to_string(),
+                        })
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(current_url, "https://example.com/locked");
+        manager.close().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_serializes_concurrent_initial_navigate_to_one_backend_open() {
+        let backend = Arc::new(SlowOpenBackend::default());
+        let manager = ChromeManager::new_with_components(
+            backend.clone(),
+            None,
+            ChromePaths::from_home(tempdir().unwrap().path()),
+        );
+
+        let (first, second) = tokio::join!(
+            manager.navigate("https://example.com/one"),
+            manager.navigate("https://example.com/two")
+        );
+
+        first.expect("first navigate should succeed");
+        second.expect("second navigate should succeed");
+        assert_eq!(backend.open_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn manager_clears_stale_session_after_read_failure() {
+        let backend = Arc::new(StaleReadBackend::default());
+        let manager = ChromeManager::new_with_components(
+            backend.clone(),
+            None,
+            ChromePaths::from_home(tempdir().unwrap().path()),
+        );
+
+        manager
+            .navigate("https://example.com")
+            .await
+            .expect("initial navigate should open stale test session");
+
+        let err = manager.extract_text(None).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
+        assert_eq!(
+            backend.shutdowns.lock().unwrap().as_slice(),
+            &["stale-read".to_string()]
+        );
+    }
+
     #[derive(Debug, Default)]
     struct PanicDownloader;
 
@@ -1584,69 +1766,6 @@ mod tests {
         async fn fetch(&self, url: &str) -> Result<Vec<u8>, ChromeToolError> {
             panic!("unexpected download request in test: {url}");
         }
-    }
-
-    #[tokio::test]
-    async fn manager_evicts_oldest_session_and_shuts_it_down_when_capacity_is_exceeded() {
-        let shutdowns = Arc::new(StdMutex::new(Vec::new()));
-        let manager = ChromeManager::new_for_test(Arc::new(
-            FakeBrowserBackend::default()
-                .with_shutdowns(Arc::clone(&shutdowns))
-                .with_page(
-                    "https://example.com/1",
-                    "https://example.com/1",
-                    "One",
-                    Vec::new(),
-                    "One",
-                )
-                .with_page(
-                    "https://example.com/2",
-                    "https://example.com/2",
-                    "Two",
-                    Vec::new(),
-                    "Two",
-                )
-                .with_page(
-                    "https://example.com/3",
-                    "https://example.com/3",
-                    "Three",
-                    Vec::new(),
-                    "Three",
-                )
-                .with_page(
-                    "https://example.com/4",
-                    "https://example.com/4",
-                    "Four",
-                    Vec::new(),
-                    "Four",
-                )
-                .with_page(
-                    "https://example.com/5",
-                    "https://example.com/5",
-                    "Five",
-                    Vec::new(),
-                    "Five",
-                ),
-        ));
-
-        let mut opened = Vec::new();
-        for index in 1..=5 {
-            opened.push(
-                manager
-                    .open(OpenArgs {
-                        url: format!("https://example.com/{index}"),
-                    })
-                    .await
-                    .unwrap(),
-            );
-        }
-
-        let err = manager.session(&opened[0].session_id).await.unwrap_err();
-        assert!(matches!(err, ChromeToolError::SessionNotFound { .. }));
-        assert_eq!(
-            shutdowns.lock().unwrap().as_slice(),
-            &["https://example.com/1".to_string()]
-        );
     }
 
     #[test]
@@ -1669,12 +1788,7 @@ mod tests {
             .unwrap();
 
         runtime.block_on(async {
-            manager
-                .open(OpenArgs {
-                    url: "https://example.com/drop".to_string(),
-                })
-                .await
-                .unwrap();
+            manager.navigate("https://example.com/drop").await.unwrap();
         });
         drop(runtime);
         drop(manager);
@@ -1705,7 +1819,7 @@ mod tests {
                 9515,
                 Path::new("/tmp/chromedriver-v1").to_path_buf(),
             ));
-            *host.driver_process.write().await = Some(Arc::clone(&process));
+            *host.driver_process.lock().await = Some(Arc::clone(&process));
             process
         });
 
@@ -1716,7 +1830,7 @@ mod tests {
             Arc::new(PanicDownloader),
         ));
         let host_trait: Arc<dyn ChromeHost> = host.clone();
-        let manager = ChromeManager::new_with_session_limit(
+        let manager = ChromeManager::new_with_components(
             sample_backend(),
             Some(ManagedChromeSupport {
                 host: host_trait,
@@ -1724,7 +1838,6 @@ mod tests {
                 shared_host: Some(host.clone()),
             }),
             paths,
-            ChromeManager::PRODUCTION_SESSION_LIMIT,
         );
 
         drop(manager);
@@ -1747,7 +1860,7 @@ mod tests {
             9515,
             Path::new("/tmp/chromedriver-v1").to_path_buf(),
         ));
-        *host.driver_process.write().await = Some(Arc::clone(&cached_process));
+        *host.driver_process.lock().await = Some(Arc::clone(&cached_process));
 
         let reused = host
             .take_reusable_driver_process(Path::new("/tmp/chromedriver-v2"))
@@ -1756,40 +1869,31 @@ mod tests {
 
         assert!(reused.is_none());
         assert!(!cached_process.is_alive().await);
-        assert!(host.driver_process.read().await.is_none());
+        assert!(host.driver_process.lock().await.is_none());
     }
 
     #[tokio::test]
-    async fn manager_creates_session_and_returns_metadata() {
+    async fn manager_navigate_creates_session_and_returns_metadata() {
         let manager = ChromeManager::new_for_test(sample_backend());
 
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
+        let opened = manager.navigate("https://example.com").await.unwrap();
 
         assert_eq!(opened.final_url, "https://example.com");
         assert_eq!(opened.page_title, "Example");
-        assert!(!opened.session_id.is_empty());
     }
 
     #[tokio::test]
     async fn manager_reopens_single_session_when_navigation_fails_after_browser_closes() {
         let backend = Arc::new(FlakyNavigateBackend::default());
         let temp_dir = tempdir().unwrap();
-        let manager = ChromeManager::new_with_session_limit(
+        let manager = ChromeManager::new_with_components(
             backend.clone(),
             None,
             ChromePaths::from_home(temp_dir.path()),
-            ChromeManager::PRODUCTION_SESSION_LIMIT,
         );
 
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
+        manager
+            .navigate("https://example.com")
             .await
             .expect("initial open should succeed");
 
@@ -1798,8 +1902,6 @@ mod tests {
             .await
             .expect("navigate should recover by reopening a fresh session");
 
-        let active_session_id = manager.current_active_session_id().await.unwrap();
-        assert_ne!(active_session_id, opened.session_id);
         assert_eq!(reopened.final_url, "https://example.org");
         assert_eq!(reopened.page_title, "Opened https://example.org");
         assert_eq!(
@@ -1809,31 +1911,23 @@ mod tests {
                 "https://example.org".to_string()
             ]
         );
-
-        let err = manager.session(&opened.session_id).await.unwrap_err();
-        assert!(matches!(err, ChromeToolError::SessionNotFound { .. }));
+        assert_eq!(backend.shutdowns(), vec!["open-1".to_string()]);
     }
 
     #[tokio::test]
-    async fn manager_stores_opened_session_and_returns_it() {
+    async fn manager_reuses_single_session_for_subsequent_navigate() {
         let manager = ChromeManager::new_for_test(sample_backend());
 
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
+        manager.navigate("https://example.com").await.unwrap();
+        let opened = manager.navigate("https://example.org").await.unwrap();
 
-        let session = manager.session(&opened.session_id).await.unwrap();
-
-        assert_eq!(session.session_id, opened.session_id);
-        assert_eq!(session.current_url, "https://example.com");
-        assert_eq!(session.page_title, "Example");
+        assert_eq!(opened.final_url, "https://example.org");
+        assert_eq!(opened.page_title, "Navigated to https://example.org");
+        assert_eq!(manager.current_url().await.unwrap(), "https://example.org");
     }
 
     #[tokio::test]
-    async fn manager_close_session_removes_session_and_shuts_it_down() {
+    async fn manager_close_removes_session_and_shuts_it_down() {
         let shutdowns = Arc::new(StdMutex::new(Vec::new()));
         let manager = ChromeManager::new_for_test(Arc::new(
             FakeBrowserBackend::default()
@@ -1847,17 +1941,11 @@ mod tests {
                 ),
         ));
 
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
+        manager.navigate("https://example.com").await.unwrap();
+        manager.close().await.unwrap();
 
-        manager.close_session(&opened.session_id).await.unwrap();
-
-        let err = manager.session(&opened.session_id).await.unwrap_err();
-        assert!(matches!(err, ChromeToolError::SessionNotFound { .. }));
+        let err = manager.extract_text(None).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
         assert_eq!(
             shutdowns.lock().unwrap().as_slice(),
             &["https://example.com".to_string()]
@@ -1865,44 +1953,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_rejects_unknown_session_with_variant() {
-        let manager = ChromeManager::new_for_test(sample_backend());
-        let err = manager.session("missing").await.unwrap_err();
-        assert!(matches!(
-            err,
-            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
-        ));
-    }
-
-    #[tokio::test]
     async fn manager_uses_active_session_for_read_operations() {
         let manager = ChromeManager::new_for_test(sample_backend());
-        manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
-        manager
-            .open(OpenArgs {
-                url: "https://example.org".into(),
-            })
-            .await
-            .unwrap();
+        manager.navigate("https://example.com").await.unwrap();
 
         let text = manager.extract_text(Some("#hero")).await.unwrap();
-        assert_eq!(text, "Org text [#hero]");
+        assert_eq!(text, "Example text [#hero]");
     }
 
     #[tokio::test]
     async fn manager_close_active_tab_updates_session_metadata() {
         let manager = ChromeManager::new_for_test(sample_backend());
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
+        manager.navigate("https://example.com").await.unwrap();
 
         let new_tab = manager.new_tab("https://example.org").await.unwrap();
         manager.switch_tab(&new_tab.tab_id).await.unwrap();
@@ -1915,9 +1977,7 @@ mod tests {
         .expect("close_tab should not deadlock")
         .unwrap();
 
-        let session = manager.session(&opened.session_id).await.unwrap();
-        assert_eq!(session.current_url, "https://example.com");
-        assert_eq!(session.page_title, "Example");
+        assert_eq!(manager.current_url().await.unwrap(), "https://example.com");
 
         let tabs = manager.list_tabs().await.unwrap();
         assert_eq!(tabs.len(), 1);
@@ -1942,12 +2002,7 @@ mod tests {
             ),
         ));
 
-        manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
+        manager.navigate("https://example.com").await.unwrap();
 
         let tabs = manager.list_tabs().await.unwrap();
         assert_eq!(tabs.len(), 2);
@@ -1975,24 +2030,6 @@ mod tests {
         assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
 
         let err = manager.list_tabs().await.unwrap_err();
-        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
-
-        let err = manager
-            .query(thirtyfour::prelude::By::Css("#hero"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
-
-        let err = manager
-            .find_element(thirtyfour::prelude::By::Css("#hero"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
-
-        let err = manager
-            .find_elements(thirtyfour::prelude::By::Css(".item"))
-            .await
-            .unwrap_err();
         assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
     }
 

@@ -92,29 +92,24 @@ async fn smoke_test_skips_without_env_flag() {
         .await
         .expect("chrome install should succeed");
 
-    let open = manager
+    let navigate = manager
         .execute(
             "chrome",
             serde_json::json!({
-                "action": "open",
+                "action": "navigate",
                 "url": "https://example.com"
             }),
             make_ctx(),
         )
         .await
-        .expect("chrome open should succeed");
-
-    let session_id = open["session_id"]
-        .as_str()
-        .expect("open should return a session id")
-        .to_owned();
+        .expect("chrome navigate should succeed");
+    assert!(navigate.get("session_id").is_none());
 
     let extract = manager
         .execute(
             "chrome",
             serde_json::json!({
                 "action": "extract_text",
-                "session_id": session_id,
                 "selector": "body"
             }),
             make_ctx(),

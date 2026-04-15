@@ -13,9 +13,6 @@ pub enum ChromeToolError {
     #[error("action '{action}' is not allowed")]
     ActionNotAllowed { action: String },
 
-    #[error("session not found: {session_id}")]
-    SessionNotFound { session_id: String },
-
     #[error("shared browser session is unavailable; run navigate(url) first")]
     SharedSessionUnavailable,
 
@@ -75,8 +72,8 @@ pub enum ChromeToolError {
     #[error("tab not found: {tab_id}")]
     TabNotFound { tab_id: String },
 
-    #[error("cannot close the last tab in session '{session_id}'")]
-    CannotCloseLastTab { session_id: String },
+    #[error("cannot close the last tab in the shared browser session")]
+    CannotCloseLastTab,
 
     #[error("tab operation failed: {reason}")]
     TabOperationFailed { reason: String },

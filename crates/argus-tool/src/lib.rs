@@ -28,7 +28,8 @@ pub mod shell;
 pub mod write;
 
 pub use chrome::{
-    ChromeManager, ChromePaths, ChromeTool, NewTabResult, OpenedPage, PageMetadata, TabInfo,
+    ChromeManager, ChromePaths, ChromeTool, ChromeToolError, NewTabResult, OpenedPage,
+    PageMetadata, TabInfo,
 };
 pub use clap_tool::{ClapExecutor, ClapTool};
 pub use glob::GlobTool;

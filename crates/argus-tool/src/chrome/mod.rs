@@ -7,6 +7,7 @@ mod policy;
 mod session;
 mod tool;
 
+pub use error::ChromeToolError;
 pub use installer::ChromePaths;
 pub use manager::ChromeManager;
 pub use models::{NewTabResult, OpenedPage, PageMetadata, TabInfo};
@@ -343,6 +344,14 @@ mod tests {
         assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("text").is_some());
         assert!(def.parameters["properties"].get("max_requests").is_none());
+    }
+
+    #[test]
+    fn production_chrome_tools_share_process_scoped_manager() {
+        let readonly = ChromeTool::new();
+        let interactive = ChromeTool::new_interactive();
+
+        assert!(readonly.shares_manager_with(&interactive));
     }
 
     #[tokio::test]
