@@ -266,7 +266,7 @@ impl ArgusWing {
     pub async fn register_default_tools(&self) -> Result<()> {
         use argus_tool::{
             ApplyPatchTool, ChromeTool, GlobTool, GrepTool, HttpTool, ListDirTool, ReadTool,
-            ShellTool, WriteFileTool,
+            ShellTool, SleepTool, WriteFileTool,
         };
 
         self.tool_manager.register(Arc::new(ShellTool::new()));
@@ -277,6 +277,7 @@ impl ArgusWing {
         self.tool_manager.register(Arc::new(WriteFileTool::new()));
         self.tool_manager.register(Arc::new(ListDirTool::new()));
         self.tool_manager.register(Arc::new(ApplyPatchTool::new()));
+        self.tool_manager.register(Arc::new(SleepTool::new()));
         self.tool_manager
             .register(Arc::new(ChromeTool::new_interactive()));
 
@@ -1502,6 +1503,7 @@ mod tests {
             "list_dir",
             "read",
             "shell",
+            "sleep",
             "write_file",
         ] {
             assert!(
@@ -1509,6 +1511,23 @@ mod tests {
                 "missing expected tool: {expected_tool}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn list_tools_exposes_sleep_as_low_risk() {
+        let wing = make_test_wing().await;
+        wing.register_default_tools()
+            .await
+            .expect("default tool registration should succeed");
+
+        let tools = wing.list_tools().await;
+        let sleep = tools
+            .iter()
+            .find(|tool| tool.name == "sleep")
+            .expect("sleep tool should be listed");
+
+        assert_eq!(sleep.risk_level, RiskLevel::Low);
+        assert!(sleep.description.contains("Wait"));
     }
 
     #[tokio::test]

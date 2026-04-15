@@ -63,6 +63,13 @@ function createDefaultFormData(preferredProviderId: number | null): AgentRecord 
   }
 }
 
+const ALWAYS_ENABLED_TOOL_NAMES = new Set(["sleep"])
+
+function removeAlwaysEnabledToolNames(record: AgentRecord): AgentRecord {
+  const toolNames = record.tool_names.filter((name) => !ALWAYS_ENABLED_TOOL_NAMES.has(name))
+  return toolNames.length === record.tool_names.length ? record : { ...record, tool_names: toolNames }
+}
+
 function ensureSchedulerToolState(
   record: AgentRecord,
   schedulerExplicitlySelected: boolean,
@@ -230,6 +237,15 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       }, 0),
     [mcpBindings, mcpToolsByServerId],
   )
+  const selectedBuiltinToolCount = React.useMemo(() => {
+    const selectedToolNames = new Set(formData.tool_names)
+    for (const tool of uniqueToolList) {
+      if (ALWAYS_ENABLED_TOOL_NAMES.has(tool.name)) {
+        selectedToolNames.add(tool.name)
+      }
+    }
+    return selectedToolNames.size
+  }, [formData.tool_names, uniqueToolList])
 
   React.useEffect(() => {
     setToolPage((prev) => Math.min(prev, toolTotalPages))
@@ -361,12 +377,13 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     if (!canSave) return
     setSaving(true)
     try {
-      const cleanedFormData = ensureSchedulerToolState({
+      const schedulerCleanedFormData = ensureSchedulerToolState({
         ...formData,
         subagent_names: formData.subagent_names.filter(
           (name) => !missingSubagentNames.includes(name),
         ),
       }, schedulerExplicitlySelected)
+      const cleanedFormData = removeAlwaysEnabledToolNames(schedulerCleanedFormData)
       setFormData(cleanedFormData)
       const savedId = await agents.upsert(cleanedFormData)
       if (isEditing || savedId) {
@@ -670,7 +687,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest bg-muted/40 px-2 py-0.5 rounded-full">
-                  已选 {formData.tool_names.length} / {toolList.length}
+                  已选 {selectedBuiltinToolCount} / {toolList.length}
                 </span>
                 <div className="flex items-center gap-1">
                   <Button
@@ -711,7 +728,9 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                     const detailedDescription = tool.description || readToolSchemaDescription(tool.parameters) || "无描述"
                     const isSchedulerTool = tool.name === "scheduler"
                     const isLockedScheduler = isSchedulerTool && schedulerRequired
-                    const isSelected = isLockedScheduler || formData.tool_names.includes(tool.name)
+                    const isAlwaysEnabledTool = ALWAYS_ENABLED_TOOL_NAMES.has(tool.name)
+                    const isLockedTool = isLockedScheduler || isAlwaysEnabledTool
+                    const isSelected = isLockedTool || formData.tool_names.includes(tool.name)
                     const columnIndex = index % 4
                     const isTopRow = index < 4
                     const tooltipSide = isTopRow ? "top" : columnIndex < 2 ? "right" : "left"
@@ -722,7 +741,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                           render={
                             <div
                               onClick={() => {
-                                if (isLockedScheduler) return
+                                if (isLockedTool) return
                                 setFormData((prev) => ({
                                   ...prev,
                                   tool_names: isSelected
@@ -735,7 +754,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                               }}
                               className={cn(
                                 "relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 transition-all",
-                                isLockedScheduler ? "cursor-not-allowed border-primary/40 bg-primary/10 shadow-inner" : "cursor-pointer",
+                                isLockedTool ? "cursor-not-allowed border-primary/40 bg-primary/10 shadow-inner" : "cursor-pointer",
                                 isSelected
                                   ? "border-primary bg-primary/5 shadow-inner"
                                   : "border-muted/60 bg-background hover:border-primary/30",
@@ -744,7 +763,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                               <Checkbox
                                 id={`tool-${tool.name}`}
                                 checked={isSelected}
-                                disabled={isLockedScheduler}
+                                disabled={isLockedTool}
                                 className="mt-0.5 shrink-0"
                                 onClick={(e) => e.stopPropagation()}
                               />
@@ -761,6 +780,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                                 {isLockedScheduler && (
                                   <p className="mt-1 text-[10px] font-medium text-primary">
                                     因子代理配置自动启用
+                                  </p>
+                                )}
+                                {isAlwaysEnabledTool && (
+                                  <p className="mt-1 text-[10px] font-medium text-primary">
+                                    运行时默认注入
                                   </p>
                                 )}
                               </div>

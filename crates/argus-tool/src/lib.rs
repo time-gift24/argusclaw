@@ -25,6 +25,7 @@ pub mod path_utils;
 pub mod read;
 pub mod scheduler;
 pub mod shell;
+pub mod sleep;
 pub mod write;
 
 pub use chrome::{
@@ -43,6 +44,7 @@ pub use scheduler::{
     SchedulerSubagent, SchedulerTool, SendMessageRequest, SendMessageResponse,
 };
 pub use shell::ShellTool;
+pub use sleep::SleepTool;
 pub use write::WriteFileTool;
 
 pub(crate) use output::{ToolOutputError, serialize_tool_output};

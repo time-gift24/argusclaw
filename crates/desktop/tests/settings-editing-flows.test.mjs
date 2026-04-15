@@ -106,8 +106,9 @@ test("agent editor treats provider as optional when deciding whether the form ca
   );
   assert.match(
     agentEditorSource,
-    /const cleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\}, schedulerExplicitlySelected\)/,
+    /const schedulerCleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*!missingSubagentNames\.includes\(name\)[\s\S]*\}, schedulerExplicitlySelected\)/,
   );
+  assert.match(agentEditorSource, /const cleanedFormData = removeAlwaysEnabledToolNames\(schedulerCleanedFormData\)/);
   assert.match(agentEditorSource, /setFormData\(cleanedFormData\)/);
   assert.match(agentEditorSource, /const savedId = await agents\.upsert\(cleanedFormData\)/);
   assert.match(agentEditorSource, /navigate\(`\/settings\/agents\/edit\?id=\$\{savedId\}`\)/);
@@ -127,9 +128,9 @@ test("agent editor auto-enables scheduler when subagents are configured", () => 
   );
   assert.match(
     agentEditorSource,
-    /const cleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*\}, schedulerExplicitlySelected\)/,
+    /const schedulerCleanedFormData = ensureSchedulerToolState\(\{[\s\S]*subagent_names: formData\.subagent_names\.filter\([\s\S]*\}, schedulerExplicitlySelected\)/,
   );
-  assert.match(agentEditorSource, /disabled=\{isLockedScheduler\}/);
+  assert.match(agentEditorSource, /disabled=\{isLockedTool\}/);
   assert.match(agentEditorSource, /因子代理配置自动启用/);
 });
 
@@ -156,6 +157,20 @@ test("agent editor stacks tooltip description above parameters with separate sec
     agentEditorSource,
     /<TooltipContent[\s\S]*?<div className="space-y-3">[\s\S]*?<section className="space-y-1">[\s\S]*?描述[\s\S]*?<section className="space-y-1\.5 border-t border-primary\/10 pt-3">[\s\S]*?参数/s,
   );
+});
+
+test("agent editor shows runtime-default sleep as checked and locked without persisting it", () => {
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(agentEditorSource, /const ALWAYS_ENABLED_TOOL_NAMES = new Set\(\["sleep"\]\)/);
+  assert.match(agentEditorSource, /function removeAlwaysEnabledToolNames/);
+  assert.match(agentEditorSource, /const isAlwaysEnabledTool = ALWAYS_ENABLED_TOOL_NAMES\.has\(tool\.name\)/);
+  assert.match(agentEditorSource, /const isLockedTool = isLockedScheduler \|\| isAlwaysEnabledTool/);
+  assert.match(agentEditorSource, /const isSelected = isLockedTool \|\| formData\.tool_names\.includes\(tool\.name\)/);
+  assert.match(agentEditorSource, /if \(isLockedTool\) return/);
+  assert.match(agentEditorSource, /disabled=\{isLockedTool\}/);
+  assert.match(agentEditorSource, /removeAlwaysEnabledToolNames\(schedulerCleanedFormData\)/);
+  assert.match(agentEditorSource, /运行时默认注入/);
 });
 
 test("settings layout keeps edit pages inside a shrinkable scroll container", () => {

@@ -181,19 +181,19 @@ fn scheduler_dispatch_variant() -> serde_json::Value {
             "action": {
                 "type": "string",
                 "enum": ["dispatch_job", "dispath_job"],
-                "description": "Scheduler operation to perform"
+                "description": "选择 scheduler 操作；使用 dispatch_job 派发子代理后台任务。保留 dispath_job 兼容旧调用。"
             },
             "prompt": {
                 "type": "string",
-                "description": "Task prompt for dispatch_job"
+                "description": "派发给子代理的任务说明。请写清目标、关键上下文、约束、期望产出格式和完成标准。"
             },
             "agent_id": {
                 "type": "integer",
-                "description": "Subagent ID for dispatch_job"
+                "description": "要派发的子代理 agent_id；可先调用 list_subagents 查看可用子代理及其 agent_id。"
             },
             "context": {
                 "type": "object",
-                "description": "Optional context payload for dispatch_job"
+                "description": "可选结构化上下文，用于补充 dispatch_job 的任务背景、输入数据或引用信息。"
             }
         },
         "required": ["action", "prompt", "agent_id"],
@@ -207,7 +207,7 @@ fn scheduler_list_variant() -> serde_json::Value {
         "properties": {
             "action": {
                 "const": "list_subagents",
-                "description": "Scheduler operation to perform"
+                "description": "查看当前智能体可派发的子代理列表、说明和 agent_id；派发前优先调用。"
             }
         },
         "required": ["action"],
@@ -221,15 +221,15 @@ fn scheduler_get_result_variant() -> serde_json::Value {
         "properties": {
             "action": {
                 "const": "get_job_result",
-                "description": "Scheduler operation to perform"
+                "description": "查询子代理后台任务结果；dispatch_job 返回 job_id 后用此操作检查完成状态。如果任务仍在运行，应主动调用 sleep 后再查询，避免连续空转查询。"
             },
             "job_id": {
                 "type": "string",
-                "description": "Job ID for get_job_result"
+                "description": "dispatch_job 返回的 job_id，用于定位要查询的子代理任务。"
             },
             "consume": {
                 "type": "boolean",
-                "description": "When true, consume result and prevent queued replay"
+                "description": "为 true 时消费已完成结果，避免该结果在后续队列中重复回放。"
             }
         },
         "required": ["action", "job_id"],
@@ -243,19 +243,19 @@ fn scheduler_send_message_variant() -> serde_json::Value {
         "properties": {
             "action": {
                 "const": "send_message",
-                "description": "Scheduler operation to perform"
+                "description": "向父线程、子任务或匹配目标发送消息，用于协作沟通。"
             },
             "to": {
                 "type": "string",
-                "description": "Mailbox target: job:<job_id>, thread:<thread_id>, parent, *, or a unique direct-child agent name"
+                "description": "消息目标：parent、*、job:<job_id>、thread:<thread_id>，或唯一直属子代理名称；可用于联系父线程或子任务。"
             },
             "message": {
                 "type": "string",
-                "description": "Mailbox message content"
+                "description": "消息正文。用于补充上下文、催办进展、请求澄清，或把新信息同步给子代理/父线程。"
             },
             "summary": {
                 "type": "string",
-                "description": "Optional short summary metadata for the message"
+                "description": "可选短摘要，便于收件方快速判断消息主题。"
             }
         },
         "required": ["action", "to", "message"],
@@ -269,7 +269,7 @@ fn scheduler_check_inbox_variant() -> serde_json::Value {
         "properties": {
             "action": {
                 "const": "check_inbox",
-                "description": "Scheduler operation to perform"
+                "description": "查看当前线程收到的消息；用于发现父线程或其他子任务发来的补充信息。"
             }
         },
         "required": ["action"],
@@ -283,11 +283,11 @@ fn scheduler_mark_read_variant() -> serde_json::Value {
         "properties": {
             "action": {
                 "const": "mark_read",
-                "description": "Scheduler operation to perform"
+                "description": "将已处理的 inbox 消息标记为已读。"
             },
             "message_id": {
                 "type": "string",
-                "description": "Stable mailbox message ID to mark as read"
+                "description": "处理完后要标记已读的稳定消息 ID，通常来自 check_inbox 返回结果。"
             }
         },
         "required": ["action", "message_id"],
@@ -298,7 +298,7 @@ fn scheduler_mark_read_variant() -> serde_json::Value {
 fn scheduler_definition() -> ToolDefinition {
     ToolDefinition {
         name: "scheduler".to_string(),
-        description: "Unified scheduler skill for subagent orchestration. Supports list_subagents, dispatch_job, get_job_result, send_message, check_inbox, and mark_read operations.".to_string(),
+        description: "用于子代理编排和线程协作的 scheduler 工具。先用 list_subagents 查看可派发的子代理及 agent_id；用 dispatch_job 将明确的后台任务派发给子代理，并在 prompt 中写清目标、上下文、产出格式和完成标准，派发后会返回 job_id；用 get_job_result 根据 job_id 查询或消费子代理结果。等待子代理任务完成时，不要高频连续查询；应在 get_job_result 仍未完成后主动调用 sleep，再继续查询，推荐等待节奏为 10000ms -> 20000ms -> 30000ms，之后仍未完成则继续按 30000ms 间隔等待。用 send_message 向父线程、子任务或匹配目标补充上下文、催办进展、请求澄清或同步新信息；用 check_inbox 查看当前线程收到的消息；处理完消息后用 mark_read 标记已读。".to_string(),
         parameters: serde_json::json!({
             "oneOf": [
                 scheduler_dispatch_variant(),
@@ -643,6 +643,120 @@ mod tests {
         assert_eq!(
             send_message_variant["required"],
             serde_json::json!(["action", "to", "message"])
+        );
+    }
+
+    #[test]
+    fn scheduler_definition_describes_orchestration_in_chinese() {
+        let backend = Arc::new(MockSchedulerBackend {
+            dispatch_job_id: "job-1".to_string(),
+            dispatch_calls: Mutex::new(Vec::new()),
+            list_response: Vec::new(),
+            lookup_response: SchedulerJobLookup::Pending,
+            send_calls: Mutex::new(Vec::new()),
+            send_response: SendMessageResponse {
+                delivered: 0,
+                thread_ids: Vec::new(),
+            },
+            inbox_response: Vec::new(),
+            mark_read_calls: Mutex::new(Vec::new()),
+        });
+        let tool = SchedulerTool::new(backend);
+        let definition = tool.definition();
+        let variants = definition.parameters["oneOf"]
+            .as_array()
+            .expect("scheduler definition should use oneOf variants");
+
+        for expected in [
+            "子代理",
+            "dispatch_job",
+            "send_message",
+            "check_inbox",
+            "mark_read",
+            "job_id",
+            "sleep",
+            "10000ms",
+            "20000ms",
+            "30000ms",
+        ] {
+            assert!(
+                definition.description.contains(expected),
+                "scheduler description should mention {expected}"
+            );
+        }
+
+        let dispatch_variant = variants
+            .iter()
+            .find(|variant| {
+                variant["properties"]["action"]["enum"]
+                    .as_array()
+                    .is_some_and(|values| values.contains(&serde_json::json!("dispatch_job")))
+            })
+            .expect("dispatch variant should exist");
+        let send_message_variant = variants
+            .iter()
+            .find(|variant| {
+                variant["properties"]["action"]["const"] == serde_json::json!("send_message")
+            })
+            .expect("send_message variant should exist");
+        let inbox_variant = variants
+            .iter()
+            .find(|variant| {
+                variant["properties"]["action"]["const"] == serde_json::json!("check_inbox")
+            })
+            .expect("check_inbox variant should exist");
+        let mark_read_variant = variants
+            .iter()
+            .find(|variant| {
+                variant["properties"]["action"]["const"] == serde_json::json!("mark_read")
+            })
+            .expect("mark_read variant should exist");
+
+        assert!(
+            dispatch_variant["properties"]["prompt"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("产出格式") && desc.contains("完成标准"))
+        );
+        assert!(
+            dispatch_variant["properties"]["agent_id"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("agent_id") && desc.contains("子代理"))
+        );
+        assert!(
+            dispatch_variant["properties"]["action"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("dispatch_job"))
+        );
+        let get_result_variant = variants
+            .iter()
+            .find(|variant| {
+                variant["properties"]["action"]["const"] == serde_json::json!("get_job_result")
+            })
+            .expect("get_job_result variant should exist");
+        assert!(
+            get_result_variant["properties"]["action"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("sleep") && desc.contains("空转查询"))
+        );
+        assert!(
+            send_message_variant["properties"]["to"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("父线程") && desc.contains("子任务"))
+        );
+        assert!(
+            send_message_variant["properties"]["message"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("补充上下文") && desc.contains("请求澄清"))
+        );
+        assert!(
+            inbox_variant["properties"]["action"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("查看当前线程收到的消息"))
+        );
+        assert!(
+            mark_read_variant["properties"]["message_id"]["description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("处理完") && desc.contains("已读"))
         );
     }
 
