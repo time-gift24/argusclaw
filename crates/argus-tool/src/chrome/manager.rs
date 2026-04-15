@@ -135,7 +135,12 @@ impl ChromeManager {
     }
 
     #[must_use]
-    pub fn new_production(paths: ChromePaths) -> Self {
+    pub fn new_production() -> Self {
+        Self::new_production_with_paths(default_chrome_paths())
+    }
+
+    #[must_use]
+    pub fn new_production_with_paths(paths: ChromePaths) -> Self {
         let shared_host = Arc::new(SystemChromeHost::default());
         let host: Arc<dyn ChromeHost> = shared_host.clone();
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
@@ -154,7 +159,12 @@ impl ChromeManager {
     }
 
     #[must_use]
-    pub fn new_interactive_production(paths: ChromePaths) -> Self {
+    pub fn new_interactive_production() -> Self {
+        Self::new_interactive_production_with_paths(default_chrome_paths())
+    }
+
+    #[must_use]
+    pub fn new_interactive_production_with_paths(paths: ChromePaths) -> Self {
         let shared_host = Arc::new(SystemChromeHost::default());
         let host: Arc<dyn ChromeHost> = shared_host.clone();
         let downloader: Arc<dyn DriverDownloader> = Arc::new(ReqwestDriverDownloader::new());
@@ -451,6 +461,17 @@ impl ChromeManager {
         .iter()
         .any(|needle| reason.contains(needle))
     }
+}
+
+pub(super) fn default_home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn default_chrome_paths() -> ChromePaths {
+    ChromePaths::from_home(&default_home_dir())
 }
 
 fn opened_page_from_session(session: &ChromeSession) -> OpenedPage {
@@ -960,7 +981,7 @@ mod tests {
     use super::{
         BackendOpenResult, BrowserBackend, ChromeHost, ChromeManager, ManagedChromeSupport,
         SessionMode, SystemChromeHost, WINDOWS_CREATE_NO_WINDOW,
-        background_command_creation_flags_for_os, build_chrome_capabilities,
+        background_command_creation_flags_for_os, build_chrome_capabilities, default_home_dir,
         interactive_user_agent_for_os, parse_browser_version_output,
     };
 
@@ -2111,6 +2132,17 @@ mod tests {
         assert!(caps_json["goog:chromeOptions"]["excludeSwitches"].is_null());
         assert!(caps_json.get("goog:loggingPrefs").is_none());
         assert!(caps_json["goog:chromeOptions"]["perfLoggingPrefs"].is_null());
+    }
+
+    #[test]
+    fn production_constructors_default_to_default_home_dir_paths() {
+        let expected_paths = ChromePaths::from_home(&default_home_dir());
+
+        assert_eq!(ChromeManager::new_production().paths, expected_paths);
+        assert_eq!(
+            ChromeManager::new_interactive_production().paths,
+            expected_paths
+        );
     }
 
     #[test]

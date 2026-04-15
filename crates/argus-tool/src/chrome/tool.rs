@@ -13,6 +13,7 @@ use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 use crate::serialize_tool_output;
 
 use super::error::ChromeToolError;
+#[cfg(test)]
 use super::installer::ChromePaths;
 #[cfg(test)]
 use super::installer::DriverDownloader;
@@ -476,17 +477,7 @@ impl NamedTool for ChromeTool {
     }
 }
 
-pub(super) fn default_home_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from))
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 fn shared_production_manager() -> Arc<ChromeManager> {
     static SHARED_MANAGER: OnceLock<Arc<ChromeManager>> = OnceLock::new();
-    Arc::clone(SHARED_MANAGER.get_or_init(|| {
-        let paths = ChromePaths::from_home(&default_home_dir());
-        Arc::new(ChromeManager::new_interactive_production(paths))
-    }))
+    Arc::clone(SHARED_MANAGER.get_or_init(|| Arc::new(ChromeManager::new_interactive_production())))
 }
