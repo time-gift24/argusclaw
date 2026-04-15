@@ -4,6 +4,20 @@ use std::path::{Path, PathBuf};
 
 use crate::ToolError;
 
+#[derive(Debug, thiserror::Error)]
+pub enum PathValidationError {
+    #[error("Path contains forbidden characters or sequences: {0}")]
+    UnsafePath(String),
+    #[error("Path escapes sandbox: {0}")]
+    EscapesSandbox(String),
+}
+
+impl From<PathValidationError> for ToolError {
+    fn from(error: PathValidationError) -> Self {
+        ToolError::NotAuthorized(error.to_string())
+    }
+}
+
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
 pub fn normalize_lexical(path: &Path) -> PathBuf {
     let mut components = Vec::new();
@@ -25,12 +39,12 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
 }
 
 /// Validate that a path is safe (no traversal attacks).
-pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+pub fn validate_path(
+    path_str: &str,
+    base_dir: Option<&Path>,
+) -> Result<PathBuf, PathValidationError> {
     if !is_path_safe_minimal(path_str) {
-        return Err(ToolError::NotAuthorized(format!(
-            "Path contains forbidden characters or sequences: {}",
-            path_str
-        )));
+        return Err(PathValidationError::UnsafePath(path_str.to_string()));
     }
 
     let path = PathBuf::from(path_str);
@@ -82,10 +96,7 @@ pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf,
         };
 
         if !check_path.starts_with(&base_canonical) {
-            return Err(ToolError::NotAuthorized(format!(
-                "Path escapes sandbox: {}",
-                path_str
-            )));
+            return Err(PathValidationError::EscapesSandbox(path_str.to_string()));
         }
     }
 

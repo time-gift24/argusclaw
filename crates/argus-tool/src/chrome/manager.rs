@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use thirtyfour::SessionId;
 use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
 use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
+use thirtyfour::common::cookie::Cookie;
 use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
 use thirtyfour::session::handle::SessionHandle;
 use tokio::process::Command;
@@ -24,10 +25,7 @@ use super::error::ChromeToolError;
 use super::installer::{
     ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
 };
-use super::models::{
-    CookieSummary, LinkSummary, NetworkRequestSummary, NewTabResult, OpenArgs, OpenedSession,
-    PageMetadata, TabInfo,
-};
+use super::models::{NewTabResult, OpenArgs, OpenedSession, PageMetadata, TabInfo};
 use super::session::{
     BrowserSession, ChromeDriverProcess, ChromeSession, ManagedWebDriverSession,
     shutdown_child_process,
@@ -381,13 +379,6 @@ impl ChromeManager {
             .ok_or_else(|| Self::session_not_found(session_id))
     }
 
-    pub async fn list_links(&self, session_id: &str) -> Result<Vec<LinkSummary>, ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .list_links()
-            .await
-    }
-
     pub async fn extract_text(
         &self,
         session_id: &str,
@@ -396,21 +387,6 @@ impl ChromeManager {
         self.session_interaction(session_id)
             .await?
             .extract_text(selector)
-            .await
-    }
-
-    pub async fn get_dom_summary(&self, session_id: &str) -> Result<String, ChromeToolError> {
-        self.extract_text(session_id, None).await
-    }
-
-    pub async fn network_requests(
-        &self,
-        session_id: &str,
-        max_requests: Option<u32>,
-    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .network_requests(max_requests)
             .await
     }
 
@@ -476,7 +452,7 @@ impl ChromeManager {
         &self,
         session_id: &str,
         domain: Option<&str>,
-    ) -> Result<Vec<CookieSummary>, ChromeToolError> {
+    ) -> Result<Vec<Cookie>, ChromeToolError> {
         let cookies = self
             .session_interaction(session_id)
             .await?
@@ -746,7 +722,8 @@ impl ChromeManager {
             | ChromeToolError::FileWriteFailed { .. }
             | ChromeToolError::InteractionFailed { .. }
             | ChromeToolError::TabNotFound { .. }
-            | ChromeToolError::CannotCloseLastTab { .. } => return false,
+            | ChromeToolError::CannotCloseLastTab { .. }
+            | ChromeToolError::OutputSerialization(_) => return false,
         };
 
         let reason = reason.to_ascii_lowercase();
@@ -1122,25 +1099,6 @@ fn build_chrome_capabilities(
 ) -> Result<ChromeCapabilities, ChromeToolError> {
     let mut capabilities = DesiredCapabilities::chrome();
     capabilities
-        .set_base_capability(
-            "goog:loggingPrefs",
-            serde_json::json!({ "performance": "ALL" }),
-        )
-        .map_err(|e| ChromeToolError::DriverStartFailed {
-            reason: format!("failed to enable chrome performance logging: {e}"),
-        })?;
-    capabilities
-        .add_experimental_option(
-            "perfLoggingPrefs",
-            serde_json::json!({
-                "enableNetwork": true,
-                "enablePage": false,
-            }),
-        )
-        .map_err(|e| ChromeToolError::DriverStartFailed {
-            reason: format!("failed to configure chrome performance logging: {e}"),
-        })?;
-    capabilities
         .set_binary(browser_binary.to_string_lossy().as_ref())
         .map_err(|e| ChromeToolError::DriverStartFailed {
             reason: e.to_string(),
@@ -1334,14 +1292,13 @@ mod tests {
 
     use serde_json::json;
     use tempfile::tempdir;
+    use thirtyfour::common::cookie::Cookie;
     #[cfg(unix)]
     use tokio::process::Command;
 
     use crate::chrome::error::ChromeToolError;
     use crate::chrome::installer::{ChromeInstaller, ChromePaths, DriverDownloader};
-    use crate::chrome::models::{
-        CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, PageMetadata,
-    };
+    use crate::chrome::models::{OpenArgs, PageMetadata};
     use crate::chrome::session::{BrowserSession, ChromeDriverProcess};
 
     use super::{
@@ -1355,11 +1312,10 @@ mod tests {
     struct FakePage {
         final_url: String,
         page_title: String,
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
         extra_tabs: Vec<FakeTab>,
+        cookies: Vec<Cookie>,
     }
 
     #[derive(Debug, Default)]
@@ -1379,7 +1335,7 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
         ) -> Self {
             let requested_url = requested_url.into();
@@ -1388,36 +1344,10 @@ mod tests {
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     shutdown_label: requested_url,
                     extra_tabs: Vec::new(),
-                },
-            );
-            self
-        }
-
-        fn with_page_with_network_requests(
-            mut self,
-            requested_url: impl Into<String>,
-            final_url: impl Into<String>,
-            page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
-            text: impl Into<String>,
-            network_requests: Vec<NetworkRequestSummary>,
-        ) -> Self {
-            let requested_url = requested_url.into();
-            self.pages.insert(
-                requested_url.clone(),
-                FakePage {
-                    final_url: final_url.into(),
-                    page_title: page_title.into(),
-                    links,
-                    text: text.into(),
-                    network_requests,
-                    shutdown_label: requested_url,
-                    extra_tabs: Vec::new(),
+                    cookies: Vec::new(),
                 },
             );
             self
@@ -1428,7 +1358,7 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
             extra_tabs: Vec<FakeTab>,
         ) -> Self {
@@ -1438,11 +1368,10 @@ mod tests {
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     shutdown_label: requested_url,
                     extra_tabs,
+                    cookies: Vec::new(),
                 },
             );
             self
@@ -1464,12 +1393,10 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeBrowserSession {
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
         shutdowns: Arc<StdMutex<Vec<String>>>,
-        cookies: Vec<CookieSummary>,
+        cookies: Vec<Cookie>,
         tabs: StdMutex<FakeBrowserTabState>,
     }
 
@@ -1480,21 +1407,6 @@ mod tests {
                 Some(selector) => format!("{} [{selector}]", self.text),
                 None => self.text.clone(),
             })
-        }
-
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(self.links.clone())
-        }
-
-        async fn network_requests(
-            &self,
-            max_requests: Option<u32>,
-        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-            let mut requests = self.network_requests.clone();
-            if let Some(max_requests) = max_requests {
-                requests.truncate(max_requests as usize);
-            }
-            Ok(requests)
         }
 
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
@@ -1529,7 +1441,7 @@ mod tests {
                 })
         }
 
-        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
             Ok(self.cookies.clone())
         }
 
@@ -1639,12 +1551,10 @@ mod tests {
                 })?;
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: page.links.clone(),
                 text: page.text.clone(),
-                network_requests: page.network_requests.clone(),
                 shutdown_label: page.shutdown_label.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
-                cookies: vec![],
+                cookies: page.cookies.clone(),
                 tabs: StdMutex::new(FakeBrowserTabState {
                     tabs: {
                         let mut tabs = vec![FakeTab {
@@ -1697,17 +1607,6 @@ mod tests {
             Ok(String::new())
         }
 
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(Vec::new())
-        }
-
-        async fn network_requests(
-            &self,
-            _max_requests: Option<u32>,
-        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-            Ok(Vec::new())
-        }
-
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
             self.shutdowns
                 .lock()
@@ -1728,7 +1627,7 @@ mod tests {
             Ok(self.current_url.lock().unwrap().clone())
         }
 
-        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
             Ok(Vec::new())
         }
 
@@ -1819,20 +1718,14 @@ mod tests {
                     "https://example.com",
                     "https://example.com",
                     "Example",
-                    vec![LinkSummary {
-                        href: "https://example.com/about".to_string(),
-                        text: "About".to_string(),
-                    }],
+                    Vec::new(),
                     "Example text",
                 )
                 .with_page(
                     "https://example.org",
                     "https://example.org/home",
                     "Example Org",
-                    vec![LinkSummary {
-                        href: "https://example.org/docs".to_string(),
-                        text: "Docs".to_string(),
-                    }],
+                    Vec::new(),
                     "Org text",
                 ),
         )
@@ -2152,18 +2045,16 @@ mod tests {
             .await
             .unwrap();
 
-        let first_links = manager.list_links(&first.session_id).await.unwrap();
-        let second_links = manager.list_links(&second.session_id).await.unwrap();
-        assert_eq!(first_links[0].href, "https://example.com/about");
-        assert_eq!(second_links[0].href, "https://example.org/docs");
-
         let first_text = manager
             .extract_text(&first.session_id, Some("#hero"))
             .await
             .unwrap();
-        let second_summary = manager.get_dom_summary(&second.session_id).await.unwrap();
+        let second_text = manager
+            .extract_text(&second.session_id, None)
+            .await
+            .unwrap();
         assert_eq!(first_text, "Example text [#hero]");
-        assert_eq!(second_summary, "Org text");
+        assert_eq!(second_text, "Org text");
     }
 
     #[tokio::test]
@@ -2243,75 +2134,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_network_requests_returns_records_from_session() {
-        let manager = ChromeManager::new_for_test(sample_backend());
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
-
-        let requests = manager
-            .network_requests(&opened.session_id, None)
-            .await
-            .unwrap();
-        assert!(requests.is_empty());
-    }
-
-    #[tokio::test]
-    async fn manager_network_requests_respects_max_limit() {
-        let manager = ChromeManager::new_for_test(Arc::new(
-            FakeBrowserBackend::default().with_page_with_network_requests(
-                "https://example.com",
-                "https://example.com",
-                "Example",
-                vec![],
-                "Example text",
-                vec![
-                    NetworkRequestSummary {
-                        method: "GET".to_string(),
-                        url: "https://example.com/a".to_string(),
-                        status: Some(200),
-                        request_headers: json!({}),
-                        response_headers: json!({}),
-                        error: None,
-                    },
-                    NetworkRequestSummary {
-                        method: "GET".to_string(),
-                        url: "https://example.com/b".to_string(),
-                        status: Some(200),
-                        request_headers: json!({}),
-                        response_headers: json!({}),
-                        error: None,
-                    },
-                ],
-            ),
-        ));
-
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
-
-        let requests = manager
-            .network_requests(&opened.session_id, Some(1))
-            .await
-            .unwrap();
-        assert_eq!(requests.len(), 1);
-    }
-
-    #[tokio::test]
     async fn manager_api_rejects_missing_session_for_all_session_ops() {
         let manager = ChromeManager::new_for_test(sample_backend());
-
-        let err = manager.list_links("missing").await.unwrap_err();
-        assert!(matches!(
-            err,
-            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
-        ));
 
         let err = manager.extract_text("missing", None).await.unwrap_err();
         assert!(matches!(
@@ -2319,13 +2143,19 @@ mod tests {
             ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
         ));
 
-        let err = manager.get_dom_summary("missing").await.unwrap_err();
+        let err = manager.current_url("missing").await.unwrap_err();
         assert!(matches!(
             err,
             ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
         ));
 
-        let err = manager.network_requests("missing", None).await.unwrap_err();
+        let err = manager.get_cookies("missing", None).await.unwrap_err();
+        assert!(matches!(
+            err,
+            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
+        ));
+
+        let err = manager.list_tabs("missing").await.unwrap_err();
         assert!(matches!(
             err,
             ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
@@ -2382,6 +2212,8 @@ mod tests {
             caps_json["goog:chromeOptions"]["excludeSwitches"],
             json!(["enable-automation"])
         );
+        assert!(caps_json.get("goog:loggingPrefs").is_none());
+        assert!(caps_json["goog:chromeOptions"]["perfLoggingPrefs"].is_null());
     }
 
     #[test]
@@ -2419,6 +2251,7 @@ mod tests {
         let caps_json = serde_json::to_value(caps).unwrap();
 
         assert_eq!(caps_json["pageLoadStrategy"], json!("eager"));
+        assert!(caps_json.get("goog:loggingPrefs").is_none());
     }
 
     #[test]
@@ -2440,6 +2273,8 @@ mod tests {
         assert!(args.contains(&"--headless=new"));
         assert!(!args.contains(&"--disable-blink-features=AutomationControlled"));
         assert!(caps_json["goog:chromeOptions"]["excludeSwitches"].is_null());
+        assert!(caps_json.get("goog:loggingPrefs").is_none());
+        assert!(caps_json["goog:chromeOptions"]["perfLoggingPrefs"].is_null());
     }
 
     #[test]

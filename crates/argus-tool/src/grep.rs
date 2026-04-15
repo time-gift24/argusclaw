@@ -13,13 +13,15 @@
 
 use async_trait::async_trait;
 use regex::RegexBuilder;
-use serde_json::json;
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
+
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Maximum number of matches to return.
 const MAX_MATCHES: usize = 100;
@@ -40,6 +42,46 @@ struct GrepArgs {
     ignore_case: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+struct GrepMatch {
+    file: String,
+    line: usize,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GrepResponse {
+    pattern: String,
+    path: String,
+    files_searched: usize,
+    matches_count: usize,
+    truncated: bool,
+    matches: Vec<GrepMatch>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum GrepToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error("Invalid regex pattern: {0}")]
+    InvalidRegex(regex::Error),
+    #[error("Path does not exist: {0}")]
+    PathDoesNotExist(String),
+    #[error("Invalid glob pattern: {0}")]
+    InvalidGlob(glob::PatternError),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<GrepToolError> for ToolError {
+    fn from(error: GrepToolError) -> Self {
+        ToolError::ExecutionFailed {
+            tool_name: GrepTool::TOOL_NAME.to_string(),
+            reason: error.to_string(),
+        }
+    }
+}
+
 /// Grep tool implementation - searches file contents with risk level High.
 pub struct GrepTool;
 
@@ -50,10 +92,57 @@ impl Default for GrepTool {
 }
 
 impl GrepTool {
+    const TOOL_NAME: &'static str = "grep";
+
     /// Create a new GrepTool.
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    async fn execute_impl(&self, input: serde_json::Value) -> Result<GrepResponse, GrepToolError> {
+        let args: GrepArgs = serde_json::from_value(input)?;
+
+        // Parse path (optional, default current directory)
+        let path = args
+            .path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // Parse glob pattern (optional, default "*")
+        let glob_pattern = args.glob_pattern.as_deref().unwrap_or("*");
+
+        // Parse ignore_case (optional, default false)
+        let ignore_case = args.ignore_case.unwrap_or(false);
+
+        // Build regex
+        let re = RegexBuilder::new(&args.pattern)
+            .case_insensitive(ignore_case)
+            .build()
+            .map_err(GrepToolError::InvalidRegex)?;
+
+        // Search files
+        let mut matches = Vec::new();
+        let mut files_searched = 0;
+
+        self.search_path(&path, &re, glob_pattern, &mut matches, &mut files_searched)
+            .await?;
+
+        // Truncate if too many matches
+        let truncated = matches.len() > MAX_MATCHES;
+        if truncated {
+            matches.truncate(MAX_MATCHES);
+        }
+
+        Ok(GrepResponse {
+            pattern: args.pattern,
+            path: path.to_string_lossy().to_string(),
+            files_searched,
+            matches_count: matches.len(),
+            truncated,
+            matches,
+        })
     }
 }
 
@@ -81,55 +170,10 @@ impl NamedTool for GrepTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: GrepArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "grep".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
-
-        // Parse path (optional, default current directory)
-        let path = args
-            .path
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        // Parse glob pattern (optional, default "*")
-        let glob_pattern = args.glob_pattern.as_deref().unwrap_or("*");
-
-        // Parse ignore_case (optional, default false)
-        let ignore_case = args.ignore_case.unwrap_or(false);
-
-        // Build regex
-        let re = RegexBuilder::new(&args.pattern)
-            .case_insensitive(ignore_case)
-            .build()
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "grep".to_string(),
-                reason: format!("Invalid regex pattern: {}", e),
-            })?;
-
-        // Search files
-        let mut matches = Vec::new();
-        let mut files_searched = 0;
-
-        self.search_path(&path, &re, glob_pattern, &mut matches, &mut files_searched)
-            .await?;
-
-        // Truncate if too many matches
-        let truncated = matches.len() > MAX_MATCHES;
-        if truncated {
-            matches.truncate(MAX_MATCHES);
-        }
-
-        Ok(json!({
-            "pattern": args.pattern,
-            "path": path.to_string_lossy(),
-            "files_searched": files_searched,
-            "matches_count": matches.len(),
-            "truncated": truncated,
-            "matches": matches
-        }))
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(GrepToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -139,27 +183,19 @@ impl GrepTool {
         path: &Path,
         re: &regex::Regex,
         glob_pattern: &str,
-        matches: &mut Vec<serde_json::Value>,
+        matches: &mut Vec<GrepMatch>,
         files_searched: &mut usize,
-    ) -> Result<(), ToolError> {
+    ) -> Result<(), GrepToolError> {
         if !path.exists() {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "grep".to_string(),
-                reason: format!("Path does not exist: {}", path.display()),
-            });
+            return Err(GrepToolError::PathDoesNotExist(path.display().to_string()));
         }
 
         if path.is_file() {
             self.search_file(path, re, matches).await;
             *files_searched += 1;
         } else if path.is_dir() {
-            let glob =
-                glob::glob(&format!("{}/{}", path.display(), glob_pattern)).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        tool_name: "grep".to_string(),
-                        reason: format!("Invalid glob pattern: {}", e),
-                    }
-                })?;
+            let glob = glob::glob(&format!("{}/{}", path.display(), glob_pattern))
+                .map_err(GrepToolError::InvalidGlob)?;
 
             for entry in glob {
                 match entry {
@@ -185,12 +221,7 @@ impl GrepTool {
         Ok(())
     }
 
-    async fn search_file(
-        &self,
-        path: &Path,
-        re: &regex::Regex,
-        matches: &mut Vec<serde_json::Value>,
-    ) {
+    async fn search_file(&self, path: &Path, re: &regex::Regex, matches: &mut Vec<GrepMatch>) {
         let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
             Err(_) => return, // Skip files we can't read
@@ -198,11 +229,11 @@ impl GrepTool {
 
         for (line_num, line) in content.lines().enumerate() {
             if re.is_match(line) {
-                matches.push(json!({
-                    "file": path.to_string_lossy(),
-                    "line": line_num + 1,
-                    "content": line
-                }));
+                matches.push(GrepMatch {
+                    file: path.to_string_lossy().to_string(),
+                    line: line_num + 1,
+                    content: line.to_string(),
+                });
 
                 if matches.len() >= MAX_MATCHES {
                     return;
@@ -216,6 +247,7 @@ impl GrepTool {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use tempfile::tempdir;
     use tokio::sync::broadcast;
 

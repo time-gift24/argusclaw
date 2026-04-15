@@ -5,30 +5,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::{Value, json};
-use thirtyfour::RequestData;
-use thirtyfour::common::command::FormatRequestData;
+use thirtyfour::common::cookie::Cookie;
 use thirtyfour::prelude::{By, WebDriver};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use super::error::ChromeToolError;
-use super::models::{CookieSummary, LinkSummary, NetworkRequestSummary, PageMetadata};
+use super::models::PageMetadata;
 
 #[async_trait]
 pub trait BrowserSession: Send + Sync {
     async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError>;
-    async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError>;
-    async fn network_requests(
-        &self,
-        max_requests: Option<u32>,
-    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError>;
     async fn shutdown(&self) -> Result<(), ChromeToolError>;
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError>;
     async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError>;
     async fn current_url(&self) -> Result<String, ChromeToolError>;
-    async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError>;
+    async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError>;
     async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError>;
     async fn create_new_tab(&self, url: &str) -> Result<(String, PageMetadata), ChromeToolError>;
     async fn switch_to_window(&self, window_handle: &str) -> Result<PageMetadata, ChromeToolError>;
@@ -375,7 +367,6 @@ impl ChromeDriverProcess {
 
 pub struct ManagedWebDriverSession {
     driver: Mutex<Option<WebDriver>>,
-    network_requests: Mutex<NetworkRequestTracker>,
 }
 
 impl fmt::Debug for ManagedWebDriverSession {
@@ -390,7 +381,6 @@ impl ManagedWebDriverSession {
     pub fn new(driver: WebDriver) -> Self {
         Self {
             driver: Mutex::new(Some(driver)),
-            network_requests: Mutex::new(NetworkRequestTracker::default()),
         }
     }
 
@@ -401,211 +391,6 @@ impl ManagedWebDriverSession {
             }
         })
     }
-}
-
-#[derive(Debug)]
-enum ChromeLogCommand {
-    GetLog { log_type: &'static str },
-}
-
-impl FormatRequestData for ChromeLogCommand {
-    fn format_request(&self, session_id: &thirtyfour::SessionId) -> RequestData {
-        match self {
-            Self::GetLog { log_type } => RequestData::new(
-                "POST".parse().expect("POST is always a valid HTTP method"),
-                format!("/session/{session_id}/se/log"),
-            )
-            .add_body(json!({ "type": log_type })),
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct NetworkRequestTracker {
-    order: Vec<String>,
-    requests: HashMap<String, NetworkRequestSummary>,
-}
-
-impl NetworkRequestTracker {
-    fn request_mut(&mut self, request_id: &str) -> &mut NetworkRequestSummary {
-        if !self.requests.contains_key(request_id) {
-            self.order.push(request_id.to_string());
-            self.requests.insert(
-                request_id.to_string(),
-                NetworkRequestSummary {
-                    method: String::new(),
-                    url: String::new(),
-                    status: None,
-                    request_headers: json!({}),
-                    response_headers: json!({}),
-                    error: None,
-                },
-            );
-        }
-
-        self.requests
-            .get_mut(request_id)
-            .expect("request must exist after insertion")
-    }
-
-    fn summaries(&self) -> Vec<NetworkRequestSummary> {
-        self.order
-            .iter()
-            .filter_map(|request_id| self.requests.get(request_id))
-            .filter(|request| !request.url.is_empty())
-            .map(|request| {
-                let mut request = request.clone();
-                if request.method.is_empty() {
-                    request.method = "UNKNOWN".to_string();
-                }
-                if !request.request_headers.is_object() {
-                    request.request_headers = json!({});
-                }
-                if !request.response_headers.is_object() {
-                    request.response_headers = json!({});
-                }
-                request
-            })
-            .collect()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct WebDriverLogEntry {
-    message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PerformanceLogEnvelope {
-    message: PerformanceLogMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct PerformanceLogMessage {
-    method: String,
-    params: Value,
-}
-
-fn apply_performance_log_entries(
-    tracker: &mut NetworkRequestTracker,
-    entries: Vec<WebDriverLogEntry>,
-) {
-    for entry in entries {
-        let Ok(envelope) = serde_json::from_str::<PerformanceLogEnvelope>(&entry.message) else {
-            continue;
-        };
-
-        match envelope.message.method.as_str() {
-            "Network.requestWillBeSent" => {
-                update_request_started(tracker, &envelope.message.params);
-            }
-            "Network.requestWillBeSentExtraInfo" => {
-                update_request_extra_info(tracker, &envelope.message.params);
-            }
-            "Network.responseReceived" => {
-                update_response_received(tracker, &envelope.message.params);
-            }
-            "Network.responseReceivedExtraInfo" => {
-                update_response_extra_info(tracker, &envelope.message.params);
-            }
-            "Network.loadingFailed" => {
-                update_request_failed(tracker, &envelope.message.params);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn update_request_started(tracker: &mut NetworkRequestTracker, params: &Value) {
-    let Some(request_id) = request_id(params) else {
-        return;
-    };
-    let Some(request) = params.get("request") else {
-        return;
-    };
-
-    let tracked = tracker.request_mut(request_id);
-    if let Some(method) = request.get("method").and_then(Value::as_str) {
-        tracked.method = method.to_string();
-    }
-    if let Some(url) = request.get("url").and_then(Value::as_str) {
-        tracked.url = url.to_string();
-    }
-    tracked.request_headers = normalized_headers(request.get("headers"));
-}
-
-fn update_request_extra_info(tracker: &mut NetworkRequestTracker, params: &Value) {
-    let Some(request_id) = request_id(params) else {
-        return;
-    };
-    let tracked = tracker.request_mut(request_id);
-    tracked.request_headers = normalized_headers(params.get("headers"));
-}
-
-fn update_response_received(tracker: &mut NetworkRequestTracker, params: &Value) {
-    let Some(request_id) = request_id(params) else {
-        return;
-    };
-    let Some(response) = params.get("response") else {
-        return;
-    };
-
-    let tracked = tracker.request_mut(request_id);
-    if let Some(url) = response.get("url").and_then(Value::as_str)
-        && tracked.url.is_empty()
-    {
-        tracked.url = url.to_string();
-    }
-    tracked.status = response.get("status").and_then(parse_status_code);
-    tracked.response_headers = normalized_headers(response.get("headers"));
-}
-
-fn update_response_extra_info(tracker: &mut NetworkRequestTracker, params: &Value) {
-    let Some(request_id) = request_id(params) else {
-        return;
-    };
-    let tracked = tracker.request_mut(request_id);
-    if let Some(status) = params.get("statusCode").and_then(parse_status_code) {
-        tracked.status = Some(status);
-    }
-    tracked.response_headers = normalized_headers(params.get("headers"));
-}
-
-fn update_request_failed(tracker: &mut NetworkRequestTracker, params: &Value) {
-    let Some(request_id) = request_id(params) else {
-        return;
-    };
-    let tracked = tracker.request_mut(request_id);
-    if let Some(error) = params.get("errorText").and_then(Value::as_str) {
-        tracked.error = Some(error.to_string());
-    }
-}
-
-fn request_id(params: &Value) -> Option<&str> {
-    params.get("requestId").and_then(Value::as_str)
-}
-
-fn normalized_headers(headers: Option<&Value>) -> Value {
-    match headers {
-        Some(Value::Object(_)) => headers.cloned().unwrap_or_else(|| json!({})),
-        _ => json!({}),
-    }
-}
-
-fn parse_status_code(value: &Value) -> Option<u16> {
-    value
-        .as_u64()
-        .and_then(|status| u16::try_from(status).ok())
-        .or_else(|| {
-            value.as_f64().and_then(|status| {
-                if status.is_finite() && status >= 0.0 && status <= u16::MAX as f64 {
-                    Some(status as u16)
-                } else {
-                    None
-                }
-            })
-        })
-        .or_else(|| value.as_str().and_then(|status| status.parse::<u16>().ok()))
 }
 
 #[async_trait]
@@ -626,65 +411,6 @@ impl BrowserSession for ManagedWebDriverSession {
             .map_err(|e| ChromeToolError::PageReadFailed {
                 reason: e.to_string(),
             })
-    }
-
-    async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-        let driver = self.live_driver().await?;
-        let elements =
-            driver
-                .find_all(By::Css("a"))
-                .await
-                .map_err(|e| ChromeToolError::PageReadFailed {
-                    reason: e.to_string(),
-                })?;
-        let mut links = Vec::with_capacity(elements.len());
-        for element in elements {
-            let href = element
-                .attr("href")
-                .await
-                .map_err(|e| ChromeToolError::PageReadFailed {
-                    reason: e.to_string(),
-                })?
-                .unwrap_or_default();
-            let text = element
-                .text()
-                .await
-                .map_err(|e| ChromeToolError::PageReadFailed {
-                    reason: e.to_string(),
-                })?;
-            links.push(LinkSummary { href, text });
-        }
-        Ok(links)
-    }
-
-    async fn network_requests(
-        &self,
-        max_requests: Option<u32>,
-    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-        let driver = self.live_driver().await?;
-        let entries: Vec<WebDriverLogEntry> = driver
-            .handle
-            .cmd(ChromeLogCommand::GetLog {
-                log_type: "performance",
-            })
-            .await
-            .map_err(|e| ChromeToolError::PageReadFailed {
-                reason: format!("failed to collect chrome performance logs: {e}"),
-            })?
-            .value()
-            .map_err(|e| ChromeToolError::PageReadFailed {
-                reason: format!("failed to parse chrome performance logs: {e}"),
-            })?;
-
-        let mut tracker = self.network_requests.lock().await;
-        apply_performance_log_entries(&mut tracker, entries);
-        let mut requests = tracker.summaries();
-
-        if let Some(max_requests) = max_requests {
-            requests.truncate(max_requests as usize);
-        }
-
-        Ok(requests)
     }
 
     async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
@@ -728,24 +454,14 @@ impl BrowserSession for ManagedWebDriverSession {
             })
     }
 
-    async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+    async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
         let driver = self.live_driver().await?;
-        let cookies =
-            driver
-                .get_all_cookies()
-                .await
-                .map_err(|e| ChromeToolError::PageReadFailed {
-                    reason: format!("failed to get cookies: {e}"),
-                })?;
-        Ok(cookies
-            .into_iter()
-            .map(|c| CookieSummary {
-                name: c.name,
-                value: c.value,
-                domain: c.domain,
-                path: c.path,
+        driver
+            .get_all_cookies()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: format!("failed to get cookies: {e}"),
             })
-            .collect())
     }
 
     async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError> {
@@ -952,10 +668,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{
-        BrowserSession, ChromeToolError, ManagedWebDriverSession, NetworkRequestTracker,
-        WebDriverLogEntry, apply_performance_log_entries,
-    };
+    use super::{BrowserSession, ChromeToolError, ManagedWebDriverSession};
 
     async fn read_http_request(
         stream: &mut tokio::net::TcpStream,
@@ -1017,110 +730,6 @@ mod tests {
         );
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await
-    }
-
-    #[test]
-    fn performance_log_parser_collects_real_network_event_fields() {
-        let mut tracker = NetworkRequestTracker::default();
-
-        apply_performance_log_entries(
-            &mut tracker,
-            vec![
-                WebDriverLogEntry {
-                    message: json!({
-                        "message": {
-                            "method": "Network.requestWillBeSent",
-                            "params": {
-                                "requestId": "req-1",
-                                "request": {
-                                    "method": "POST",
-                                    "url": "https://api.example.com/items",
-                                    "headers": {
-                                        "content-type": "application/json"
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .to_string(),
-                },
-                WebDriverLogEntry {
-                    message: json!({
-                        "message": {
-                            "method": "Network.responseReceived",
-                            "params": {
-                                "requestId": "req-1",
-                                "response": {
-                                    "url": "https://api.example.com/items",
-                                    "status": 201.0,
-                                    "headers": {
-                                        "content-type": "application/json"
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .to_string(),
-                },
-                WebDriverLogEntry {
-                    message: json!({
-                        "message": {
-                            "method": "Network.requestWillBeSent",
-                            "params": {
-                                "requestId": "req-2",
-                                "request": {
-                                    "method": "GET",
-                                    "url": "https://cdn.example.com/app.js",
-                                    "headers": {}
-                                }
-                            }
-                        }
-                    })
-                    .to_string(),
-                },
-                WebDriverLogEntry {
-                    message: json!({
-                        "message": {
-                            "method": "Network.loadingFailed",
-                            "params": {
-                                "requestId": "req-2",
-                                "errorText": "net::ERR_ABORTED"
-                            }
-                        }
-                    })
-                    .to_string(),
-                },
-                WebDriverLogEntry {
-                    message: json!({
-                        "message": {
-                            "method": "Page.loadEventFired",
-                            "params": {}
-                        }
-                    })
-                    .to_string(),
-                },
-            ],
-        );
-
-        let requests = tracker.summaries();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].method, "POST");
-        assert_eq!(requests[0].url, "https://api.example.com/items");
-        assert_eq!(requests[0].status, Some(201));
-        assert_eq!(
-            requests[0].request_headers,
-            json!({ "content-type": "application/json" })
-        );
-        assert_eq!(
-            requests[0].response_headers,
-            json!({ "content-type": "application/json" })
-        );
-        assert_eq!(requests[0].error, None);
-
-        assert_eq!(requests[1].method, "GET");
-        assert_eq!(requests[1].url, "https://cdn.example.com/app.js");
-        assert_eq!(requests[1].status, None);
-        assert_eq!(requests[1].error.as_deref(), Some("net::ERR_ABORTED"));
     }
 
     #[tokio::test]

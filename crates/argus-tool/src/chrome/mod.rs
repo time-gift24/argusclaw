@@ -19,6 +19,7 @@ mod tests {
 
     use serde_json::json;
     use tempfile::tempdir;
+    use thirtyfour::common::cookie::{Cookie, SameSite};
     use zip::write::SimpleFileOptions;
 
     use super::error::ChromeToolError;
@@ -26,10 +27,7 @@ mod tests {
     use super::manager::{
         BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
     };
-    use super::models::{
-        ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, NetworkRequestSummary,
-        PageMetadata,
-    };
+    use super::models::{ChromeAction, ChromeToolArgs, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
     use super::session::BrowserSession;
@@ -256,9 +254,9 @@ mod tests {
     }
 
     #[test]
-    fn list_links_is_allowed() {
+    fn extract_text_is_allowed() {
         ExplorePolicy::readonly()
-            .validate_action(ChromeAction::ListLinks)
+            .validate_action(ChromeAction::ExtractText)
             .unwrap();
     }
 
@@ -288,18 +286,22 @@ mod tests {
         assert!(action_values.contains(&"navigate"));
         assert!(action_values.contains(&"wait"));
         assert!(action_values.contains(&"extract_text"));
-        assert!(action_values.contains(&"list_links"));
-        assert!(action_values.contains(&"get_dom_summary"));
-        assert!(action_values.contains(&"network_requests"));
         assert!(action_values.contains(&"install"));
         assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"new_tab"));
+        assert!(action_values.contains(&"switch_tab"));
+        assert!(action_values.contains(&"close_tab"));
+        assert!(action_values.contains(&"list_tabs"));
         assert!(!action_values.contains(&"open"));
         assert!(!action_values.contains(&"restart"));
         assert!(!action_values.contains(&"click"));
+        assert!(!action_values.contains(&"list_links"));
+        assert!(!action_values.contains(&"get_dom_summary"));
+        assert!(!action_values.contains(&"network_requests"));
 
         assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("selector").is_some());
-        assert!(def.parameters["properties"].get("max_requests").is_some());
+        assert!(def.parameters["properties"].get("max_requests").is_none());
         assert!(def.parameters["properties"].get("text").is_none());
     }
 
@@ -326,10 +328,18 @@ mod tests {
         assert!(action_values.contains(&"install"));
         assert!(action_values.contains(&"close"));
         assert!(action_values.contains(&"navigate"));
+        assert!(action_values.contains(&"new_tab"));
+        assert!(action_values.contains(&"switch_tab"));
+        assert!(action_values.contains(&"close_tab"));
+        assert!(action_values.contains(&"list_tabs"));
         assert!(!action_values.contains(&"open"));
         assert!(!action_values.contains(&"restart"));
+        assert!(!action_values.contains(&"list_links"));
+        assert!(!action_values.contains(&"get_dom_summary"));
+        assert!(!action_values.contains(&"network_requests"));
         assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("text").is_some());
+        assert!(def.parameters["properties"].get("max_requests").is_none());
     }
 
     #[tokio::test]
@@ -355,10 +365,7 @@ mod tests {
             "https://example.com",
             "https://example.com/landing",
             "Example Title",
-            vec![LinkSummary {
-                href: "https://example.com/docs".to_string(),
-                text: "Docs".to_string(),
-            }],
+            Vec::new(),
             "Visible page text",
         )));
 
@@ -383,10 +390,7 @@ mod tests {
             "https://example.com",
             "https://example.com/landing",
             "Example Title",
-            vec![LinkSummary {
-                href: "https://example.com/docs".to_string(),
-                text: "Docs".to_string(),
-            }],
+            Vec::new(),
             "Visible page text",
         )));
 
@@ -423,39 +427,22 @@ mod tests {
             .expect("extract_text should succeed");
         assert_eq!(extract["content"], "Visible page text [main]");
 
-        let links = tool
-            .execute(
-                json!({
-                    "action": "list_links",
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("list_links should succeed");
-        assert_eq!(links["links"].as_array().map(|links| links.len()), Some(1));
-        assert_eq!(links["links"][0]["text"], "Docs");
-
-        let summary = tool
-            .execute(
-                json!({
-                    "action": "get_dom_summary",
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("get_dom_summary should succeed");
-        assert_eq!(summary["summary"], "Visible page text");
-
-        let network = tool
-            .execute(
-                json!({
-                    "action": "network_requests",
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("network_requests should succeed");
-        assert!(network["requests"].is_array());
+        for removed_action in ["list_links", "get_dom_summary", "network_requests"] {
+            let err = tool
+                .execute(
+                    json!({
+                        "action": removed_action,
+                    }),
+                    make_ctx(),
+                )
+                .await
+                .expect_err("removed summary actions should be rejected");
+            assert!(matches!(
+                err,
+                ToolError::ExecutionFailed { reason, .. }
+                if reason.contains("unknown variant")
+            ));
+        }
     }
 
     #[tokio::test]
@@ -534,29 +521,32 @@ mod tests {
                 vec![],
                 "Visible page text",
                 vec![
-                    CookieSummary {
-                        name: "shared".to_string(),
-                        value: "1".to_string(),
-                        domain: Some(".example.com".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("shared", "1");
+                        cookie.set_domain(".example.com");
+                        cookie.set_path("/");
+                        cookie.set_same_site(SameSite::Lax);
+                        cookie
                     },
-                    CookieSummary {
-                        name: "host".to_string(),
-                        value: "2".to_string(),
-                        domain: Some("www.example.com".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("host", "2");
+                        cookie.set_domain("www.example.com");
+                        cookie.set_path("/");
+                        cookie.set_secure(true);
+                        cookie
                     },
-                    CookieSummary {
-                        name: "api".to_string(),
-                        value: "3".to_string(),
-                        domain: Some("api.example.com".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("api", "3");
+                        cookie.set_domain("api.example.com");
+                        cookie.set_path("/");
+                        cookie
                     },
-                    CookieSummary {
-                        name: "other".to_string(),
-                        value: "4".to_string(),
-                        domain: Some("other.example.net".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("other", "4");
+                        cookie.set_domain("other.example.net");
+                        cookie.set_path("/");
+                        cookie.set_expiry(42);
+                        cookie
                     },
                 ],
             ),
@@ -590,6 +580,8 @@ mod tests {
             .filter_map(|cookie| cookie["name"].as_str())
             .collect();
         assert_eq!(names, vec!["shared", "host"]);
+        assert_eq!(cookies["cookies"][0]["sameSite"], "Lax");
+        assert_eq!(cookies["cookies"][1]["secure"], true);
     }
 
     #[tokio::test]
@@ -1051,12 +1043,7 @@ mod tests {
             });
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: vec![LinkSummary {
-                    href: format!("{url}/docs"),
-                    text: "Docs".to_string(),
-                }],
                 text: "Managed text".to_string(),
-                network_requests: Vec::new(),
                 url: url.to_string(),
                 cookies: vec![],
                 tabs: StdMutex::new(vec![FakeTab {
@@ -1097,9 +1084,7 @@ mod tests {
                 .ok_or(ChromeToolError::SharedSessionUnavailable)?;
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: vec![],
                 text: attached.text,
-                network_requests: Vec::new(),
                 url: "https://example.com/recovered".to_string(),
                 cookies: vec![],
                 tabs: StdMutex::new(vec![FakeTab {
@@ -1198,7 +1183,7 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
         ) -> Self {
             self.pages.insert(
@@ -1206,9 +1191,7 @@ mod tests {
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     cookies: Vec::new(),
                 },
             );
@@ -1220,18 +1203,16 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
-            cookies: Vec<CookieSummary>,
+            cookies: Vec<Cookie>,
         ) -> Self {
             self.pages.insert(
                 requested_url.into(),
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     cookies,
                 },
             );
@@ -1243,19 +1224,15 @@ mod tests {
     struct FakePage {
         final_url: String,
         page_title: String,
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
-        cookies: Vec<CookieSummary>,
+        cookies: Vec<Cookie>,
     }
 
     #[derive(Debug)]
     struct FakeBrowserSession {
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
         url: String,
-        cookies: Vec<CookieSummary>,
+        cookies: Vec<Cookie>,
         tabs: StdMutex<Vec<FakeTab>>,
     }
 
@@ -1275,21 +1252,6 @@ mod tests {
             })
         }
 
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(self.links.clone())
-        }
-
-        async fn network_requests(
-            &self,
-            max_requests: Option<u32>,
-        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-            let mut requests = self.network_requests.clone();
-            if let Some(max_requests) = max_requests {
-                requests.truncate(max_requests as usize);
-            }
-            Ok(requests)
-        }
-
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
             Ok(())
         }
@@ -1306,7 +1268,7 @@ mod tests {
             Ok(self.url.clone())
         }
 
-        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
             Ok(self.cookies.clone())
         }
 
@@ -1384,9 +1346,7 @@ mod tests {
                 })?;
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: page.links.clone(),
                 text: page.text.clone(),
-                network_requests: page.network_requests.clone(),
                 url: page.final_url.clone(),
                 cookies: page.cookies.clone(),
                 tabs: StdMutex::new(vec![FakeTab {

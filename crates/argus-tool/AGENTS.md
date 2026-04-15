@@ -150,6 +150,7 @@ pub trait ClapExecutor: Send + Sync {
 - 不要为了兼容模型输出，放宽 hidden/unknown 参数校验
 - 如果 schema 与执行行为不一致，优先修 schema 生成，而不是在 prompt 里打补丁
 - 新增功能时，先补回归测试，再改 `clap_tool.rs`
+- 其它内置 tool 的输出、error 与底层库透传规则，以同目录 `CLAUDE.md` 的修改守则为准；尤其不要新增自定义 `*Summary` 输出，成功返回要先用 typed response 建模。
 
 ## 一个简单心智模型
 

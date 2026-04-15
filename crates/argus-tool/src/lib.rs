@@ -19,6 +19,7 @@ pub mod glob;
 pub mod grep;
 pub mod http;
 pub mod list;
+mod output;
 pub mod patch;
 pub mod path_utils;
 pub mod read;
@@ -35,12 +36,14 @@ pub use list::ListDirTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadTool;
 pub use scheduler::{
-    CheckInboxRequest, MarkReadRequest, SchedulerBackend, SchedulerDispatchRequest,
-    SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest, SchedulerSubagent,
-    SchedulerTool, SendMessageRequest, SendMessageResponse, MAX_DISPATCH_DEPTH,
+    CheckInboxRequest, MAX_DISPATCH_DEPTH, MarkReadRequest, SchedulerBackend,
+    SchedulerDispatchRequest, SchedulerJobLookup, SchedulerJobResult, SchedulerLookupRequest,
+    SchedulerSubagent, SchedulerTool, SendMessageRequest, SendMessageResponse,
 };
 pub use shell::ShellTool;
 pub use write::WriteFileTool;
+
+pub(crate) use output::{ToolOutputError, serialize_tool_output};
 
 /// Registry for tools with concurrent access support.
 pub struct ToolManager {

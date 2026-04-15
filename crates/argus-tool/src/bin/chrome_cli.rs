@@ -23,7 +23,7 @@ struct Cli {
     #[arg(long, global = true, default_value_t = false)]
     pretty: bool,
 
-    /// Keep interactive session open for the specified milliseconds after `open`
+    /// Keep interactive session open for the specified milliseconds after `navigate`
     #[arg(long, global = true, default_value_t = 0)]
     hold_ms: u64,
 
@@ -35,65 +35,32 @@ struct Cli {
 enum Command {
     /// Install matching ChromeDriver for current Chrome version
     Install,
-    /// Open a URL in browser and create a session
-    Open {
+    /// Navigate the shared browser session to a URL
+    Navigate {
         /// HTTP or HTTPS URL to open
         #[arg(long)]
         url: String,
     },
     /// Wait up to the specified milliseconds (default: 1ms, capped at 1000ms)
     Wait {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
         /// Optional milliseconds to wait
         #[arg(long)]
         timeout_ms: Option<u64>,
     },
     /// Extract text from the page body or a CSS selector
     ExtractText {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
         /// CSS selector (optional, defaults to body)
         #[arg(long)]
         selector: Option<String>,
     },
-    /// List all links on the page
-    ListLinks {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
-    },
-    /// Get DOM text summary for the page
-    GetDomSummary {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
-    },
-    /// Capture browser resource timing entries
-    NetworkRequests {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
-        /// Maximum number of records to return
-        #[arg(long)]
-        max_requests: Option<u32>,
-    },
     /// Click an element (interactive mode required)
     Click {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
         /// CSS selector
         #[arg(long)]
         selector: String,
     },
     /// Type text into an input element (interactive mode required)
     Type {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
         /// CSS selector
         #[arg(long)]
         selector: String,
@@ -102,16 +69,12 @@ enum Command {
         text: String,
     },
     /// Get current page URL (interactive mode required)
-    GetUrl {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
-    },
+    GetUrl,
     /// Get cookies from the active page (interactive mode required)
     GetCookies {
-        /// Session ID returned by open
-        #[arg(long = "session-id")]
-        session_id: String,
+        /// Optional cookie domain filter
+        #[arg(long)]
+        domain: Option<String>,
     },
 }
 
@@ -145,90 +108,42 @@ fn make_ctx() -> Arc<ToolExecutionContext> {
 fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
     match command {
         Command::Install => ("install", json!({ "action": "install" })),
-        Command::Open { url } => ("open", json!({ "action": "open", "url": url })),
-        Command::Wait {
-            session_id,
-            timeout_ms,
-        } => (
+        Command::Navigate { url } => ("navigate", json!({ "action": "navigate", "url": url })),
+        Command::Wait { timeout_ms } => (
             "wait",
             json!({
                 "action": "wait",
-                "session_id": session_id,
                 "timeout_ms": timeout_ms,
             }),
         ),
-        Command::ExtractText {
-            session_id,
-            selector,
-        } => (
+        Command::ExtractText { selector } => (
             "extract_text",
             json!({
                 "action": "extract_text",
-                "session_id": session_id,
                 "selector": selector,
             }),
         ),
-        Command::ListLinks { session_id } => (
-            "list_links",
-            json!({
-                "action": "list_links",
-                "session_id": session_id,
-            }),
-        ),
-        Command::GetDomSummary { session_id } => (
-            "get_dom_summary",
-            json!({
-                "action": "get_dom_summary",
-                "session_id": session_id,
-            }),
-        ),
-        Command::NetworkRequests {
-            session_id,
-            max_requests,
-        } => (
-            "network_requests",
-            json!({
-                "action": "network_requests",
-                "session_id": session_id,
-                "max_requests": max_requests,
-            }),
-        ),
-        Command::Click {
-            session_id,
-            selector,
-        } => (
+        Command::Click { selector } => (
             "click",
             json!({
                 "action": "click",
-                "session_id": session_id,
                 "selector": selector,
             }),
         ),
-        Command::Type {
-            session_id,
-            selector,
-            text,
-        } => (
+        Command::Type { selector, text } => (
             "type",
             json!({
                 "action": "type",
-                "session_id": session_id,
                 "selector": selector,
                 "text": text,
             }),
         ),
-        Command::GetUrl { session_id } => (
-            "get_url",
-            json!({
-                "action": "get_url",
-                "session_id": session_id,
-            }),
-        ),
-        Command::GetCookies { session_id } => (
+        Command::GetUrl => ("get_url", json!({ "action": "get_url" })),
+        Command::GetCookies { domain } => (
             "get_cookies",
             json!({
                 "action": "get_cookies",
-                "session_id": session_id,
+                "domain": domain,
             }),
         ),
     }
@@ -247,7 +162,7 @@ async fn run(command: Command, interactive: bool, hold_ms: u64) -> serde_json::V
     let (action, request) = payload_for_command(&command);
     let result = manager.execute("chrome", request, make_ctx()).await;
 
-    if hold_ms > 0 && matches!(command, Command::Open { .. }) && interactive {
+    if hold_ms > 0 && matches!(command, Command::Navigate { .. }) && interactive {
         tokio::time::sleep(Duration::from_millis(hold_ms)).await;
     }
 

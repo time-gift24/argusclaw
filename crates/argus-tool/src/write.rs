@@ -12,14 +12,15 @@
 //! - Parent directory auto-creation
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
-use crate::path_utils::validate_path;
+use crate::path_utils::{PathValidationError, validate_path};
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Maximum file size for writing (5MB).
 const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
@@ -33,6 +34,41 @@ struct WriteFileArgs {
     content: String,
 }
 
+#[derive(Debug, Serialize)]
+struct WriteFileResponse {
+    path: String,
+    bytes_written: usize,
+    success: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum WriteFileToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error("Content too large ({actual} bytes). Maximum is {max} bytes.")]
+    ContentTooLarge { actual: usize, max: usize },
+    #[error(transparent)]
+    PathValidation(#[from] PathValidationError),
+    #[error("Failed to create directories: {0}")]
+    CreateDirectoriesFailed(std::io::Error),
+    #[error("Failed to write file: {0}")]
+    WriteFailed(std::io::Error),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<WriteFileToolError> for ToolError {
+    fn from(error: WriteFileToolError) -> Self {
+        match error {
+            WriteFileToolError::PathValidation(error) => error.into(),
+            other => ToolError::ExecutionFailed {
+                tool_name: WriteFileTool::TOOL_NAME.to_string(),
+                reason: other.to_string(),
+            },
+        }
+    }
+}
+
 /// Write file tool — writes content to files with path validation and size limit.
 pub struct WriteFileTool;
 
@@ -43,10 +79,48 @@ impl Default for WriteFileTool {
 }
 
 impl WriteFileTool {
+    const TOOL_NAME: &'static str = "write_file";
+
     /// Create a new WriteFileTool.
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    async fn execute_impl(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<WriteFileResponse, WriteFileToolError> {
+        let args: WriteFileArgs = serde_json::from_value(input)?;
+
+        // Check content size
+        if args.content.len() > MAX_WRITE_SIZE {
+            return Err(WriteFileToolError::ContentTooLarge {
+                actual: args.content.len(),
+                max: MAX_WRITE_SIZE,
+            });
+        }
+
+        // Validate path (sandboxing)
+        let path = validate_path(&args.path, None)?;
+
+        // Create parent directories
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(WriteFileToolError::CreateDirectoriesFailed)?;
+        }
+
+        // Write file
+        tokio::fs::write(&path, &args.content)
+            .await
+            .map_err(WriteFileToolError::WriteFailed)?;
+
+        Ok(WriteFileResponse {
+            path: path.to_string_lossy().to_string(),
+            bytes_written: args.content.len(),
+            success: true,
+        })
     }
 }
 
@@ -77,50 +151,10 @@ impl NamedTool for WriteFileTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: WriteFileArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "write_file".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
-
-        // Check content size
-        if args.content.len() > MAX_WRITE_SIZE {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "write_file".to_string(),
-                reason: format!(
-                    "Content too large ({} bytes). Maximum is {} bytes.",
-                    args.content.len(),
-                    MAX_WRITE_SIZE
-                ),
-            });
-        }
-
-        // Validate path (sandboxing)
-        let path = validate_path(&args.path, None)?;
-
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool_name: "write_file".to_string(),
-                    reason: format!("Failed to create directories: {}", e),
-                })?;
-        }
-
-        // Write file
-        tokio::fs::write(&path, &args.content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "write_file".to_string(),
-                reason: format!("Failed to write file: {}", e),
-            })?;
-
-        Ok(json!({
-            "path": path.to_string_lossy(),
-            "bytes_written": args.content.len(),
-            "success": true
-        }))
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(WriteFileToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -128,6 +162,7 @@ impl NamedTool for WriteFileTool {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use tokio::sync::broadcast;
 
     fn make_ctx() -> Arc<ToolExecutionContext> {

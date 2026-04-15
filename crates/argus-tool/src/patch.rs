@@ -11,14 +11,15 @@
 //! Patch has `RiskLevel::High` and uses `validate_path` for sandboxing.
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
-use crate::path_utils::validate_path;
+use crate::path_utils::{PathValidationError, validate_path};
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Arguments for the apply_patch tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -34,6 +35,41 @@ struct ApplyPatchArgs {
     replace_all: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+struct ApplyPatchResponse {
+    path: String,
+    replacements: usize,
+    success: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ApplyPatchToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathValidation(#[from] PathValidationError),
+    #[error("Failed to read file: {0}")]
+    ReadFailed(std::io::Error),
+    #[error("Could not find the specified text in {path}. Make sure old_string matches exactly.")]
+    OldStringNotFound { path: String },
+    #[error("Failed to write file: {0}")]
+    WriteFailed(std::io::Error),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<ApplyPatchToolError> for ToolError {
+    fn from(error: ApplyPatchToolError) -> Self {
+        match error {
+            ApplyPatchToolError::PathValidation(error) => error.into(),
+            other => ToolError::ExecutionFailed {
+                tool_name: ApplyPatchTool::TOOL_NAME.to_string(),
+                reason: other.to_string(),
+            },
+        }
+    }
+}
+
 /// Apply patch tool — applies search/replace edits to files.
 pub struct ApplyPatchTool;
 
@@ -44,10 +80,60 @@ impl Default for ApplyPatchTool {
 }
 
 impl ApplyPatchTool {
+    const TOOL_NAME: &'static str = "apply_patch";
+
     /// Create a new ApplyPatchTool.
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    async fn execute_impl(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<ApplyPatchResponse, ApplyPatchToolError> {
+        let args: ApplyPatchArgs = serde_json::from_value(input)?;
+        let replace_all = args.replace_all.unwrap_or(false);
+
+        // Validate path (sandboxing)
+        let path = validate_path(&args.path, None)?;
+
+        // Read current content
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(ApplyPatchToolError::ReadFailed)?;
+
+        // Check if old_string exists
+        if !content.contains(&args.old_string) {
+            return Err(ApplyPatchToolError::OldStringNotFound {
+                path: path.display().to_string(),
+            });
+        }
+
+        // Apply replacement
+        let new_content = if replace_all {
+            content.replace(&args.old_string, &args.new_string)
+        } else {
+            content.replacen(&args.old_string, &args.new_string, 1)
+        };
+
+        // Count replacements
+        let replacements = if replace_all {
+            content.matches(&args.old_string).count()
+        } else {
+            1
+        };
+
+        // Write back
+        tokio::fs::write(&path, &new_content)
+            .await
+            .map_err(ApplyPatchToolError::WriteFailed)?;
+
+        Ok(ApplyPatchResponse {
+            path: path.to_string_lossy().to_string(),
+            replacements,
+            success: true,
+        })
     }
 }
 
@@ -77,63 +163,10 @@ impl NamedTool for ApplyPatchTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: ApplyPatchArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "apply_patch".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
-        let replace_all = args.replace_all.unwrap_or(false);
-
-        // Validate path (sandboxing)
-        let path = validate_path(&args.path, None)?;
-
-        // Read current content
-        let content =
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool_name: "apply_patch".to_string(),
-                    reason: format!("Failed to read file: {}", e),
-                })?;
-
-        // Check if old_string exists
-        if !content.contains(&args.old_string) {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "apply_patch".to_string(),
-                reason: format!(
-                    "Could not find the specified text in {}. Make sure old_string matches exactly.",
-                    path.display()
-                ),
-            });
-        }
-
-        // Apply replacement
-        let new_content = if replace_all {
-            content.replace(&args.old_string, &args.new_string)
-        } else {
-            content.replacen(&args.old_string, &args.new_string, 1)
-        };
-
-        // Count replacements
-        let replacements = if replace_all {
-            content.matches(&args.old_string).count()
-        } else {
-            1
-        };
-
-        // Write back
-        tokio::fs::write(&path, &new_content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "apply_patch".to_string(),
-                reason: format!("Failed to write file: {}", e),
-            })?;
-
-        Ok(json!({
-            "path": path.to_string_lossy(),
-            "replacements": replacements,
-            "success": true
-        }))
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(ApplyPatchToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -141,6 +174,7 @@ impl NamedTool for ApplyPatchTool {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use std::io::Write;
     use tempfile::NamedTempFile;
     use tokio::sync::broadcast;
