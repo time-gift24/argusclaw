@@ -15,15 +15,15 @@ use tokio::sync::broadcast;
     about = "Manual smoke test for Chrome tool"
 )]
 struct Cli {
-    /// Use interactive Chrome actions (click/type/get_url/get_cookies)
-    #[arg(long, global = true)]
-    interactive: bool,
+    /// Deprecated no-op; chrome-cli always uses interactive Chrome actions.
+    #[arg(long, global = true, hide = true)]
+    _interactive: bool,
 
     /// Pretty-print JSON output
     #[arg(long, global = true, default_value_t = false)]
     pretty: bool,
 
-    /// Keep interactive session open for the specified milliseconds after `navigate`
+    /// Keep the browser session open for the specified milliseconds after `navigate`
     #[arg(long, global = true, default_value_t = 0)]
     hold_ms: u64,
 
@@ -53,13 +53,13 @@ enum Command {
         #[arg(long)]
         selector: Option<String>,
     },
-    /// Click an element (interactive mode required)
+    /// Click an element
     Click {
         /// CSS selector
         #[arg(long)]
         selector: String,
     },
-    /// Type text into an input element (interactive mode required)
+    /// Type text into an input element
     Type {
         /// CSS selector
         #[arg(long)]
@@ -68,9 +68,9 @@ enum Command {
         #[arg(long)]
         text: String,
     },
-    /// Get current page URL (interactive mode required)
+    /// Get current page URL
     GetUrl,
-    /// Get cookies from the active page (interactive mode required)
+    /// Get cookies from the active page
     GetCookies {
         /// Optional cookie domain filter
         #[arg(long)]
@@ -81,7 +81,7 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let result = run(cli.command, cli.interactive, cli.hold_ms).await;
+    let result = run(cli.command, cli.hold_ms).await;
 
     let output = if cli.pretty {
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| {
@@ -149,12 +149,8 @@ fn payload_for_command(command: &Command) -> (&'static str, serde_json::Value) {
     }
 }
 
-async fn run(command: Command, interactive: bool, hold_ms: u64) -> serde_json::Value {
-    let tool = if interactive {
-        ChromeTool::new_interactive()
-    } else {
-        ChromeTool::new()
-    };
+async fn run(command: Command, hold_ms: u64) -> serde_json::Value {
+    let tool = ChromeTool::new_interactive();
 
     let manager = ToolManager::new();
     manager.register(Arc::new(tool));
@@ -162,7 +158,7 @@ async fn run(command: Command, interactive: bool, hold_ms: u64) -> serde_json::V
     let (action, request) = payload_for_command(&command);
     let result = manager.execute("chrome", request, make_ctx()).await;
 
-    if hold_ms > 0 && matches!(command, Command::Navigate { .. }) && interactive {
+    if hold_ms > 0 && matches!(command, Command::Navigate { .. }) {
         tokio::time::sleep(Duration::from_millis(hold_ms)).await;
     }
 
@@ -176,5 +172,32 @@ async fn run(command: Command, interactive: bool, hold_ms: u64) -> serde_json::V
             "action": action,
             "error": error.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn chrome_cli_allows_interactive_actions_by_default() {
+        let result = run(
+            Command::Click {
+                selector: "#login".to_string(),
+            },
+            0,
+        )
+        .await;
+
+        assert_eq!(result["ok"], false);
+        let error = result["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("shared browser session is unavailable"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error.contains("not authorized") && !error.contains("not allowed"),
+            "interactive action should not be blocked by readonly policy: {error}"
+        );
     }
 }
