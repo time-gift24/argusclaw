@@ -27,7 +27,9 @@ pub mod scheduler;
 pub mod shell;
 pub mod write;
 
-pub use chrome::ChromeTool;
+pub use chrome::{
+    ChromeManager, ChromePaths, ChromeTool, NewTabResult, OpenedPage, PageMetadata, TabInfo,
+};
 pub use clap_tool::{ClapExecutor, ClapTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;

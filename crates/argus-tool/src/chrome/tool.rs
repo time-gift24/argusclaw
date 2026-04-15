@@ -87,6 +87,24 @@ impl ChromeTool {
     }
 
     #[must_use]
+    pub fn with_manager(manager: Arc<ChromeManager>) -> Self {
+        Self {
+            manager,
+            policy: ExplorePolicy::readonly(),
+            interactive: false,
+        }
+    }
+
+    #[must_use]
+    pub fn new_interactive_with_manager(manager: Arc<ChromeManager>) -> Self {
+        Self {
+            manager,
+            policy: ExplorePolicy::interactive(),
+            interactive: true,
+        }
+    }
+
+    #[must_use]
     #[cfg(test)]
     pub(crate) fn new_for_test(backend: Arc<dyn BrowserBackend>) -> Self {
         Self::new_with_backend(backend)
@@ -215,7 +233,7 @@ impl ChromeTool {
             }
             ChromeAction::Navigate => {
                 let url = required_field(&args, "url", args.url.as_deref())?;
-                let opened = self.manager.navigate_shared(url).await?;
+                let opened = self.manager.navigate(url).await?;
                 Self::serialize_response(ChromeNavigateResponse {
                     action: "navigate",
                     final_url: opened.final_url,
@@ -223,14 +241,14 @@ impl ChromeTool {
                 })
             }
             ChromeAction::Close => {
-                self.manager.close_shared().await?;
+                self.manager.close().await?;
                 Self::serialize_response(ChromeStatusResponse {
                     action: "close",
                     status: "ok",
                 })
             }
             ChromeAction::Wait => {
-                self.manager.shared_session_id().await?;
+                self.manager.current_url().await?;
 
                 let timeout_ms = args.timeout_ms.unwrap_or(1).min(1_000);
                 tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
@@ -241,102 +259,78 @@ impl ChromeTool {
                 })
             }
             ChromeAction::ExtractText => {
-                let session_id = self.manager.shared_session_id().await?;
-                let text = self
-                    .manager
-                    .extract_text(&session_id, args.selector.as_deref())
-                    .await?;
+                let text = self.manager.extract_text(args.selector.as_deref()).await?;
                 Self::serialize_response(ChromeSessionContentResponse {
                     action: "extract_text",
-                    session_id,
                     content: text,
                 })
             }
             ChromeAction::Click => {
-                let session_id = self.manager.shared_session_id().await?;
                 let selector = required_field(&args, "selector", args.selector.as_deref())?;
-                self.manager.click(&session_id, selector).await?;
+                self.manager.click(selector).await?;
                 Self::serialize_response(ChromeSessionStatusResponse {
                     action: "click",
-                    session_id,
                     tab_id: None,
                     status: "ok",
                 })
             }
             ChromeAction::Type => {
-                let session_id = self.manager.shared_session_id().await?;
                 let selector = required_field(&args, "selector", args.selector.as_deref())?;
                 let text = required_field(&args, "text", args.text.as_deref())?;
-                self.manager.type_text(&session_id, selector, text).await?;
+                self.manager.type_text(selector, text).await?;
                 Self::serialize_response(ChromeSessionStatusResponse {
                     action: "type",
-                    session_id,
                     tab_id: None,
                     status: "ok",
                 })
             }
             ChromeAction::GetUrl => {
-                let session_id = self.manager.shared_session_id().await?;
-                let url = self.manager.current_url(&session_id).await?;
+                let url = self.manager.current_url().await?;
                 Self::serialize_response(ChromeSessionUrlResponse {
                     action: "get_url",
-                    session_id,
                     url,
                 })
             }
             ChromeAction::GetCookies => {
-                let session_id = self.manager.shared_session_id().await?;
-                let cookies = self
-                    .manager
-                    .get_cookies(&session_id, args.domain.as_deref())
-                    .await?;
+                let cookies = self.manager.get_cookies(args.domain.as_deref()).await?;
                 Self::serialize_response(ChromeCookiesResponse {
                     action: "get_cookies",
-                    session_id,
                     cookies,
                 })
             }
             ChromeAction::NewTab => {
-                let session_id = self.manager.shared_session_id().await?;
                 let url = required_field(&args, "url", args.url.as_deref())?;
-                let result = self.manager.new_tab(&session_id, url).await?;
+                let result = self.manager.new_tab(url).await?;
                 Self::serialize_response(ChromeNewTabResponse {
                     action: "new_tab",
-                    session_id,
                     tab_id: result.tab_id,
                     url: result.url,
                     page_title: result.page_title,
                 })
             }
             ChromeAction::SwitchTab => {
-                let session_id = self.manager.shared_session_id().await?;
                 let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
-                let metadata = self.manager.switch_tab(&session_id, tab_id).await?;
+                let metadata = self.manager.switch_tab(tab_id).await?;
                 Self::serialize_response(ChromeTabMetadataResponse {
                     action: "switch_tab",
-                    session_id,
                     tab_id,
                     url: metadata.final_url,
                     page_title: metadata.page_title,
                 })
             }
             ChromeAction::CloseTab => {
-                let session_id = self.manager.shared_session_id().await?;
                 let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
-                self.manager.close_tab(&session_id, tab_id).await?;
+                self.manager.close_tab(tab_id).await?;
                 Self::serialize_response(ChromeSessionStatusResponse {
                     action: "close_tab",
-                    session_id,
                     tab_id: Some(tab_id),
                     status: "ok",
                 })
             }
             ChromeAction::ListTabs => {
-                let session_id = self.manager.shared_session_id().await?;
-                let tabs = self.manager.list_tabs(&session_id).await?;
+                let tabs = self.manager.list_tabs().await?;
                 Self::serialize_response(ChromeListTabsResponse {
                     action: "list_tabs",
-                    session_id,
                     tabs,
                 })
             }
@@ -388,14 +382,12 @@ struct ChromeWaitResponse {
 #[derive(Debug, Serialize)]
 struct ChromeSessionContentResponse {
     action: &'static str,
-    session_id: String,
     content: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ChromeSessionStatusResponse<'a> {
     action: &'static str,
-    session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     tab_id: Option<&'a str>,
     status: &'static str,
@@ -404,21 +396,18 @@ struct ChromeSessionStatusResponse<'a> {
 #[derive(Debug, Serialize)]
 struct ChromeSessionUrlResponse {
     action: &'static str,
-    session_id: String,
     url: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ChromeCookiesResponse<T> {
     action: &'static str,
-    session_id: String,
     cookies: Vec<T>,
 }
 
 #[derive(Debug, Serialize)]
 struct ChromeNewTabResponse {
     action: &'static str,
-    session_id: String,
     tab_id: String,
     url: String,
     page_title: String,
@@ -427,7 +416,6 @@ struct ChromeNewTabResponse {
 #[derive(Debug, Serialize)]
 struct ChromeTabMetadataResponse<'a> {
     action: &'static str,
-    session_id: String,
     tab_id: &'a str,
     url: String,
     page_title: String,
@@ -436,7 +424,6 @@ struct ChromeTabMetadataResponse<'a> {
 #[derive(Debug, Serialize)]
 struct ChromeListTabsResponse {
     action: &'static str,
-    session_id: String,
     tabs: Vec<super::models::TabInfo>,
 }
 
@@ -459,10 +446,10 @@ impl NamedTool for ChromeTool {
 
     fn definition(&self) -> ToolDefinition {
         let description = if self.interactive {
-            "Chrome browser tool with interactive capabilities for explicit driver install, a hidden shared browser session, navigate(url) for starting or switching pages, close for shutting down the shared browser, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
+            "Chrome browser tool with interactive capabilities for explicit driver install, a process-scoped browser session, navigate(url) for starting or switching pages, close for shutting down the browser, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
                 .to_string()
         } else {
-            "Chrome explore tool for explicit driver install, a hidden shared browser session, navigate(url) for starting or switching pages, close for shutting down the shared browser, and inspecting page state."
+            "Chrome explore tool for explicit driver install, a process-scoped browser session, navigate(url) for starting or switching pages, close for shutting down the browser, and inspecting page state."
                 .to_string()
         };
         ToolDefinition {

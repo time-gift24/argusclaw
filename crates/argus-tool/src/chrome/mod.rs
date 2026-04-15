@@ -7,6 +7,9 @@ mod policy;
 mod session;
 mod tool;
 
+pub use installer::ChromePaths;
+pub use manager::ChromeManager;
+pub use models::{NewTabResult, OpenedPage, PageMetadata, TabInfo};
 pub use tool::ChromeTool;
 
 #[cfg(test)]
@@ -273,7 +276,7 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("explicit driver install"));
-        assert!(def.description.contains("hidden shared browser session"));
+        assert!(def.description.contains("process-scoped browser session"));
         assert!(def.description.contains("navigate(url)"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
@@ -311,7 +314,7 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("interactive"));
-        assert!(def.description.contains("hidden shared browser session"));
+        assert!(def.description.contains("process-scoped browser session"));
         assert!(def.description.contains("navigate(url)"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
@@ -426,6 +429,7 @@ mod tests {
             .await
             .expect("extract_text should succeed");
         assert_eq!(extract["content"], "Visible page text [main]");
+        assert!(extract.get("session_id").is_none());
 
         for removed_action in ["list_links", "get_dom_summary", "network_requests"] {
             let err = tool
@@ -572,6 +576,7 @@ mod tests {
             )
             .await
             .expect("get_cookies should succeed");
+        assert!(cookies.get("session_id").is_none());
 
         let names: Vec<&str> = cookies["cookies"]
             .as_array()
@@ -820,6 +825,7 @@ mod tests {
             .await
             .expect("session should still be alive");
         assert_eq!(result["action"], "extract_text");
+        assert!(result.get("session_id").is_none());
     }
 
     #[test]
@@ -829,53 +835,54 @@ mod tests {
     }
 
     #[test]
-    fn chrome_paths_include_shared_session_state_file() {
+    fn chrome_paths_do_not_include_shared_session_state_file() {
         let paths = ChromePaths::from_home(Path::new("/tmp/home"));
-        assert_eq!(
-            paths.shared_session_state,
-            PathBuf::from("/tmp/home/.arguswing/chrome/shared-session.json")
-        );
+        assert!(!format!("{paths:?}").contains("shared-session.json"));
     }
 
     #[tokio::test]
-    async fn managed_constructor_recovers_shared_session_from_state_file() {
+    async fn managed_constructor_ignores_persisted_shared_session_file() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         paths.ensure_directories().unwrap();
         std::fs::write(
-            &paths.shared_session_state,
+            paths.root.join("shared-session.json"),
             r#"{"session_id":"persisted-session"}"#,
         )
         .unwrap();
-        let host = Arc::new(
-            FakeManagedChromeHost::new(home.path().join("Google Chrome"), "124", "Managed Example")
-                .with_attached_session("persisted-session", "Recovered text"),
-        );
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
         let tool = ChromeTool::new_with_managed_components_for_test(
             host.clone(),
             SpyManagedDownloader::new(HashMap::new()),
             paths,
         );
 
-        let result = tool
+        let err = tool
             .execute(json!({ "action": "extract_text" }), make_ctx())
             .await
-            .expect("extract_text should recover persisted shared session");
+            .expect_err(
+                "extract_text should require navigate instead of recovering persisted state",
+            );
 
-        assert_eq!(result["content"], "Recovered text");
-        assert_eq!(
-            host.attach_calls.lock().unwrap().as_slice(),
-            &["persisted-session"]
-        );
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("navigate(url)")
+        ));
+        assert!(host.attach_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn managed_constructor_requires_navigate_when_persisted_session_is_stale() {
+    async fn managed_constructor_ignores_stale_persisted_session_file() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         paths.ensure_directories().unwrap();
         std::fs::write(
-            &paths.shared_session_state,
+            paths.root.join("shared-session.json"),
             r#"{"session_id":"stale-session"}"#,
         )
         .unwrap();
@@ -900,19 +907,16 @@ mod tests {
             ToolError::ExecutionFailed { reason, .. }
             if reason.contains("navigate(url)")
         ));
-        assert_eq!(
-            host.attach_calls.lock().unwrap().as_slice(),
-            &["stale-session"]
-        );
+        assert!(host.attach_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn managed_constructor_recreates_stale_shared_session_on_navigate() {
+    async fn managed_constructor_navigates_without_attaching_stale_persisted_session() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         paths.ensure_directories().unwrap();
         std::fs::write(
-            &paths.shared_session_state,
+            paths.root.join("shared-session.json"),
             r#"{"session_id":"stale-session"}"#,
         )
         .unwrap();
@@ -947,10 +951,7 @@ mod tests {
             .expect("navigate should recreate stale persisted session");
 
         assert_eq!(result["page_title"], "Managed Example");
-        assert_eq!(
-            host.attach_calls.lock().unwrap().as_slice(),
-            &["stale-session"]
-        );
+        assert!(host.attach_calls.lock().unwrap().is_empty());
         assert_eq!(host.open_calls.lock().unwrap().len(), 1);
     }
 
@@ -972,19 +973,12 @@ mod tests {
         session_mode: SessionMode,
     }
 
-    #[derive(Debug, Clone)]
-    struct AttachedManagedSession {
-        page_title: String,
-        text: String,
-    }
-
     struct FakeManagedChromeHost {
         browser_binary: PathBuf,
         browser_version: String,
         page_title: String,
         open_calls: StdMutex<Vec<ManagedOpenCall>>,
         attach_calls: StdMutex<Vec<String>>,
-        attached_sessions: StdMutex<HashMap<String, AttachedManagedSession>>,
     }
 
     impl FakeManagedChromeHost {
@@ -999,23 +993,7 @@ mod tests {
                 page_title: page_title.into(),
                 open_calls: StdMutex::new(Vec::new()),
                 attach_calls: StdMutex::new(Vec::new()),
-                attached_sessions: StdMutex::new(HashMap::new()),
             }
-        }
-
-        fn with_attached_session(
-            self,
-            session_id: impl Into<String>,
-            text: impl Into<String>,
-        ) -> Self {
-            self.attached_sessions.lock().unwrap().insert(
-                session_id.into(),
-                AttachedManagedSession {
-                    page_title: self.page_title.clone(),
-                    text: text.into(),
-                },
-            );
-            self
         }
     }
 
@@ -1054,51 +1032,9 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
-                backend_session_id: Some(format!(
-                    "managed-session-{}",
-                    self.open_calls.lock().unwrap().len()
-                )),
                 metadata: PageMetadata {
                     final_url: url.to_string(),
                     page_title: self.page_title.clone(),
-                },
-                session,
-            })
-        }
-
-        async fn attach_session(
-            &self,
-            session_id: &str,
-            _session_mode: SessionMode,
-        ) -> Result<BackendOpenResult, ChromeToolError> {
-            self.attach_calls
-                .lock()
-                .unwrap()
-                .push(session_id.to_string());
-            let attached = self
-                .attached_sessions
-                .lock()
-                .unwrap()
-                .get(session_id)
-                .cloned()
-                .ok_or(ChromeToolError::SharedSessionUnavailable)?;
-
-            let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                text: attached.text,
-                url: "https://example.com/recovered".to_string(),
-                cookies: vec![],
-                tabs: StdMutex::new(vec![FakeTab {
-                    handle: "tab-1".to_string(),
-                    url: "https://example.com/recovered".to_string(),
-                    title: attached.page_title.clone(),
-                }]),
-            });
-
-            Ok(BackendOpenResult {
-                backend_session_id: Some(session_id.to_string()),
-                metadata: PageMetadata {
-                    final_url: "https://example.com/recovered".to_string(),
-                    page_title: attached.page_title,
                 },
                 session,
             })
@@ -1357,7 +1293,6 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
-                backend_session_id: None,
                 metadata: PageMetadata {
                     final_url: page.final_url.clone(),
                     page_title: page.page_title.clone(),
