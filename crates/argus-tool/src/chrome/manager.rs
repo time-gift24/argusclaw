@@ -7,13 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::Client as ReqwestClient;
-use serde::{Deserialize, Serialize};
-use thirtyfour::SessionId;
 use thirtyfour::common::capabilities::chrome::ChromeCapabilities;
 use thirtyfour::common::capabilities::desiredcapabilities::{CapabilitiesHelper, PageLoadStrategy};
+use thirtyfour::common::cookie::Cookie;
 use thirtyfour::prelude::{ChromiumLikeCapabilities, DesiredCapabilities, WebDriver};
-use thirtyfour::session::handle::SessionHandle;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
@@ -24,17 +21,13 @@ use super::error::ChromeToolError;
 use super::installer::{
     ChromeInstaller, ChromePaths, DriverDownloader, InstalledDriver, ReqwestDriverDownloader,
 };
-use super::models::{
-    CookieSummary, LinkSummary, NetworkRequestSummary, NewTabResult, OpenArgs, OpenedSession,
-    PageMetadata, TabInfo,
-};
+use super::models::{NewTabResult, OpenArgs, OpenedPage, OpenedSession, PageMetadata, TabInfo};
 use super::session::{
     BrowserSession, ChromeDriverProcess, ChromeSession, ManagedWebDriverSession,
     shutdown_child_process,
 };
 
 pub struct BackendOpenResult {
-    pub backend_session_id: Option<String>,
     pub metadata: PageMetadata,
     pub session: Arc<dyn BrowserSession>,
 }
@@ -68,12 +61,6 @@ pub trait ChromeHost: Send + Sync {
         driver_binary: &Path,
         session_mode: SessionMode,
     ) -> Result<BackendOpenResult, ChromeToolError>;
-
-    async fn attach_session(
-        &self,
-        session_id: &str,
-        session_mode: SessionMode,
-    ) -> Result<BackendOpenResult, ChromeToolError>;
 }
 
 struct ManagedChromeBackend {
@@ -86,25 +73,12 @@ struct ManagedChromeBackend {
 struct ManagedChromeSupport {
     host: Arc<dyn ChromeHost>,
     installer: Arc<ChromeInstaller>,
-    session_mode: SessionMode,
     shared_host: Option<Arc<SystemChromeHost>>,
 }
 
 const SHARED_DRIVER_PORT: u16 = 19_515;
-const SHARED_DRIVER_SERVER_URL: &str = "http://127.0.0.1:19515";
 #[cfg(any(test, windows))]
 const WINDOWS_CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct SharedSessionState {
-    session_id: String,
-}
-
-enum SharedSessionRecovery {
-    Missing,
-    Restored(String),
-    Stale,
-}
 
 impl ManagedChromeBackend {
     fn new(
@@ -183,7 +157,6 @@ impl ChromeManager {
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
-            session_mode: SessionMode::Readonly,
             shared_host: Some(shared_host),
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
@@ -208,7 +181,6 @@ impl ChromeManager {
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
-            session_mode: SessionMode::Interactive,
             shared_host: Some(shared_host),
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
@@ -235,7 +207,6 @@ impl ChromeManager {
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
-            session_mode: SessionMode::Readonly,
             shared_host: None,
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
@@ -262,7 +233,6 @@ impl ChromeManager {
         let managed_support = Some(ManagedChromeSupport {
             host: host.clone(),
             installer: installer.clone(),
-            session_mode: SessionMode::Interactive,
             shared_host: None,
         });
         let backend: Arc<dyn BrowserBackend> = Arc::new(ManagedChromeBackend::new(
@@ -302,46 +272,114 @@ impl ChromeManager {
         Ok((detected, install))
     }
 
-    pub async fn navigate_shared(&self, url: &str) -> Result<OpenedSession, ChromeToolError> {
-        if let Some(session_id) = self.current_shared_session_id().await {
-            return self.navigate(&session_id, url).await;
+    pub async fn navigate(&self, url: &str) -> Result<OpenedPage, ChromeToolError> {
+        if let Some(session_id) = self.current_active_session_id().await {
+            return self.navigate_session(&session_id, url).await;
         }
 
-        match self.recover_shared_session().await? {
-            SharedSessionRecovery::Restored(session_id) => {
-                return self.navigate(&session_id, url).await;
-            }
-            SharedSessionRecovery::Missing | SharedSessionRecovery::Stale => {}
-        }
-
-        self.open(OpenArgs {
-            url: url.to_string(),
+        let opened = self
+            .open(OpenArgs {
+                url: url.to_string(),
+            })
+            .await?;
+        Ok(OpenedPage {
+            final_url: opened.final_url,
+            page_title: opened.page_title,
         })
-        .await
     }
 
-    pub async fn close_shared(&self) -> Result<(), ChromeToolError> {
-        if let Some(session_id) = self.current_shared_session_id().await {
+    pub async fn close(&self) -> Result<(), ChromeToolError> {
+        if let Some(session_id) = self.current_active_session_id().await {
             self.close_session(&session_id).await?;
         }
-        self.clear_shared_session_state()?;
         Ok(())
     }
 
-    pub async fn shared_session_id(&self) -> Result<String, ChromeToolError> {
-        if let Some(session_id) = self.current_shared_session_id().await {
-            return Ok(session_id);
-        }
-
-        match self.recover_shared_session().await? {
-            SharedSessionRecovery::Restored(session_id) => Ok(session_id),
-            SharedSessionRecovery::Missing | SharedSessionRecovery::Stale => {
-                Err(ChromeToolError::SharedSessionUnavailable)
-            }
-        }
+    pub async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
+        self.active_session_interaction()
+            .await?
+            .extract_text(selector)
+            .await
     }
 
-    pub async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {
+    pub async fn click(&self, selector: &str) -> Result<(), ChromeToolError> {
+        self.active_session_interaction()
+            .await?
+            .click(selector)
+            .await
+    }
+
+    pub async fn type_text(&self, selector: &str, text: &str) -> Result<(), ChromeToolError> {
+        self.active_session_interaction()
+            .await?
+            .type_text(selector, text)
+            .await
+    }
+
+    pub async fn current_url(&self) -> Result<String, ChromeToolError> {
+        self.active_session_interaction().await?.current_url().await
+    }
+
+    pub async fn get_cookies(&self, domain: Option<&str>) -> Result<Vec<Cookie>, ChromeToolError> {
+        let cookies = self
+            .active_session_interaction()
+            .await?
+            .get_cookies()
+            .await?;
+
+        let Some(domain) = domain.and_then(normalize_cookie_domain) else {
+            return Ok(cookies);
+        };
+
+        Ok(cookies
+            .into_iter()
+            .filter(|cookie| cookie_matches_domain(cookie.domain.as_deref(), &domain))
+            .collect())
+    }
+
+    pub async fn new_tab(&self, url: &str) -> Result<NewTabResult, ChromeToolError> {
+        let session_id = self.active_session_id().await?;
+        let session = self.session(&session_id).await?;
+        let result = session.create_new_tab(url).await?;
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.update_metadata(PageMetadata {
+                final_url: result.url.clone(),
+                page_title: result.page_title.clone(),
+            });
+        }
+        Ok(result)
+    }
+
+    pub async fn switch_tab(&self, tab_id: &str) -> Result<PageMetadata, ChromeToolError> {
+        let session_id = self.active_session_id().await?;
+        let session = self.session(&session_id).await?;
+        let metadata = session.switch_tab(tab_id).await?;
+        let mut sessions = self.sessions.write().await;
+        if let Some(s) = sessions.get_mut(&session_id) {
+            s.update_metadata(metadata.clone());
+        }
+        Ok(metadata)
+    }
+
+    pub async fn close_tab(&self, tab_id: &str) -> Result<(), ChromeToolError> {
+        let session_id = self.active_session_id().await?;
+        let session = self.session(&session_id).await?;
+        let metadata = session.close_tab(tab_id).await?;
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.update_metadata(metadata);
+        }
+        Ok(())
+    }
+
+    pub async fn list_tabs(&self) -> Result<Vec<TabInfo>, ChromeToolError> {
+        let session_id = self.active_session_id().await?;
+        let session = self.session(&session_id).await?;
+        session.list_tabs().await
+    }
+
+    async fn open(&self, args: OpenArgs) -> Result<OpenedSession, ChromeToolError> {
         self.paths.ensure_directories()?;
 
         // Reuse existing session in single-session mode (production)
@@ -353,7 +391,12 @@ impl ChromeManager {
             if let Some(existing_id) = existing_id
                 && self.sessions.read().await.contains_key(&existing_id)
             {
-                return self.navigate(&existing_id, &args.url).await;
+                let page = self.navigate_session(&existing_id, &args.url).await?;
+                return Ok(OpenedSession {
+                    session_id: existing_id,
+                    final_url: page.final_url,
+                    page_title: page.page_title,
+                });
             }
         }
 
@@ -361,7 +404,7 @@ impl ChromeManager {
         self.store_backend_opened_session(opened).await
     }
 
-    pub async fn close_session(&self, session_id: &str) -> Result<(), ChromeToolError> {
+    async fn close_session(&self, session_id: &str) -> Result<(), ChromeToolError> {
         self.remove_session_order_entry(session_id).await;
         let session = self
             .sessions
@@ -372,7 +415,7 @@ impl ChromeManager {
         session.interaction().shutdown().await
     }
 
-    pub async fn session(&self, session_id: &str) -> Result<ChromeSession, ChromeToolError> {
+    async fn session(&self, session_id: &str) -> Result<ChromeSession, ChromeToolError> {
         self.sessions
             .read()
             .await
@@ -381,70 +424,11 @@ impl ChromeManager {
             .ok_or_else(|| Self::session_not_found(session_id))
     }
 
-    pub async fn list_links(&self, session_id: &str) -> Result<Vec<LinkSummary>, ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .list_links()
-            .await
-    }
-
-    pub async fn extract_text(
-        &self,
-        session_id: &str,
-        selector: Option<&str>,
-    ) -> Result<String, ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .extract_text(selector)
-            .await
-    }
-
-    pub async fn get_dom_summary(&self, session_id: &str) -> Result<String, ChromeToolError> {
-        self.extract_text(session_id, None).await
-    }
-
-    pub async fn network_requests(
-        &self,
-        session_id: &str,
-        max_requests: Option<u32>,
-    ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .network_requests(max_requests)
-            .await
-    }
-
-    pub async fn click(&self, session_id: &str, selector: &str) -> Result<(), ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .click(selector)
-            .await
-    }
-
-    pub async fn type_text(
-        &self,
-        session_id: &str,
-        selector: &str,
-        text: &str,
-    ) -> Result<(), ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .type_text(selector, text)
-            .await
-    }
-
-    pub async fn current_url(&self, session_id: &str) -> Result<String, ChromeToolError> {
-        self.session_interaction(session_id)
-            .await?
-            .current_url()
-            .await
-    }
-
-    pub async fn navigate(
+    async fn navigate_session(
         &self,
         session_id: &str,
         url: &str,
-    ) -> Result<OpenedSession, ChromeToolError> {
+    ) -> Result<OpenedPage, ChromeToolError> {
         let metadata = match self
             .session_interaction(session_id)
             .await?
@@ -465,78 +449,10 @@ impl ChromeManager {
             session.update_metadata(metadata.clone());
         }
 
-        Ok(OpenedSession {
-            session_id: session_id.to_string(),
+        Ok(OpenedPage {
             final_url: metadata.final_url,
             page_title: metadata.page_title,
         })
-    }
-
-    pub async fn get_cookies(
-        &self,
-        session_id: &str,
-        domain: Option<&str>,
-    ) -> Result<Vec<CookieSummary>, ChromeToolError> {
-        let cookies = self
-            .session_interaction(session_id)
-            .await?
-            .get_cookies()
-            .await?;
-
-        let Some(domain) = domain.and_then(normalize_cookie_domain) else {
-            return Ok(cookies);
-        };
-
-        Ok(cookies
-            .into_iter()
-            .filter(|cookie| cookie_matches_domain(cookie.domain.as_deref(), &domain))
-            .collect())
-    }
-
-    pub async fn new_tab(
-        &self,
-        session_id: &str,
-        url: &str,
-    ) -> Result<NewTabResult, ChromeToolError> {
-        let session = self.session(session_id).await?;
-        let result = session.create_new_tab(url).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.update_metadata(PageMetadata {
-                final_url: result.url.clone(),
-                page_title: result.page_title.clone(),
-            });
-        }
-        Ok(result)
-    }
-
-    pub async fn switch_tab(
-        &self,
-        session_id: &str,
-        tab_id: &str,
-    ) -> Result<PageMetadata, ChromeToolError> {
-        let session = self.session(session_id).await?;
-        let metadata = session.switch_tab(tab_id).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(s) = sessions.get_mut(session_id) {
-            s.update_metadata(metadata.clone());
-        }
-        Ok(metadata)
-    }
-
-    pub async fn close_tab(&self, session_id: &str, tab_id: &str) -> Result<(), ChromeToolError> {
-        let session = self.session(session_id).await?;
-        let metadata = session.close_tab(tab_id).await?;
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.update_metadata(metadata);
-        }
-        Ok(())
-    }
-
-    pub async fn list_tabs(&self, session_id: &str) -> Result<Vec<TabInfo>, ChromeToolError> {
-        let session = self.session(session_id).await?;
-        session.list_tabs().await
     }
 
     fn next_session_id(&self) -> String {
@@ -556,7 +472,18 @@ impl ChromeManager {
             .ok_or_else(|| Self::session_not_found(session_id))
     }
 
-    async fn current_shared_session_id(&self) -> Option<String> {
+    async fn active_session_id(&self) -> Result<String, ChromeToolError> {
+        self.current_active_session_id()
+            .await
+            .ok_or(ChromeToolError::SharedSessionUnavailable)
+    }
+
+    async fn active_session_interaction(&self) -> Result<Arc<dyn BrowserSession>, ChromeToolError> {
+        let session_id = self.active_session_id().await?;
+        self.session_interaction(&session_id).await
+    }
+
+    async fn current_active_session_id(&self) -> Option<String> {
         let session_id = {
             let order = self.session_order.read().await;
             order.back().cloned()
@@ -569,39 +496,11 @@ impl ChromeManager {
             .then_some(session_id)
     }
 
-    async fn recover_shared_session(&self) -> Result<SharedSessionRecovery, ChromeToolError> {
-        let Some(support) = self.managed_support.as_ref() else {
-            return Ok(SharedSessionRecovery::Missing);
-        };
-        let Some(state) = self.read_shared_session_state()? else {
-            return Ok(SharedSessionRecovery::Missing);
-        };
-
-        match support
-            .host
-            .attach_session(&state.session_id, support.session_mode)
-            .await
-        {
-            Ok(opened) => {
-                let opened = self.store_backend_opened_session(opened).await?;
-                Ok(SharedSessionRecovery::Restored(opened.session_id))
-            }
-            Err(_) => {
-                self.clear_shared_session_state()?;
-                Ok(SharedSessionRecovery::Stale)
-            }
-        }
-    }
-
     async fn store_backend_opened_session(
         &self,
         opened: BackendOpenResult,
     ) -> Result<OpenedSession, ChromeToolError> {
-        let BackendOpenResult {
-            backend_session_id,
-            metadata,
-            session,
-        } = opened;
+        let BackendOpenResult { metadata, session } = opened;
         let session_id = self.next_session_id();
 
         let session = ChromeSession::new(
@@ -626,64 +525,11 @@ impl ChromeManager {
             .push_back(session_id.clone());
         self.evict_excess_sessions().await?;
 
-        if self.session_limit == Self::PRODUCTION_SESSION_LIMIT
-            && let Some(backend_session_id) = backend_session_id.as_deref()
-        {
-            self.write_shared_session_state(backend_session_id)?;
-        }
-
         Ok(OpenedSession {
             session_id,
             final_url: metadata.final_url,
             page_title: metadata.page_title,
         })
-    }
-
-    fn read_shared_session_state(&self) -> Result<Option<SharedSessionState>, ChromeToolError> {
-        if !self.paths.shared_session_state.is_file() {
-            return Ok(None);
-        }
-
-        let contents = std::fs::read_to_string(&self.paths.shared_session_state).map_err(|e| {
-            ChromeToolError::FileReadFailed {
-                path: self.paths.shared_session_state.clone(),
-                reason: e.to_string(),
-            }
-        })?;
-        let state =
-            serde_json::from_str(&contents).map_err(|e| ChromeToolError::FileReadFailed {
-                path: self.paths.shared_session_state.clone(),
-                reason: format!("invalid shared session state: {e}"),
-            })?;
-        Ok(Some(state))
-    }
-
-    fn write_shared_session_state(&self, session_id: &str) -> Result<(), ChromeToolError> {
-        self.paths.ensure_directories()?;
-        let contents = serde_json::to_vec(&SharedSessionState {
-            session_id: session_id.to_string(),
-        })
-        .map_err(|e| ChromeToolError::FileWriteFailed {
-            path: self.paths.shared_session_state.clone(),
-            reason: e.to_string(),
-        })?;
-        std::fs::write(&self.paths.shared_session_state, contents).map_err(|e| {
-            ChromeToolError::FileWriteFailed {
-                path: self.paths.shared_session_state.clone(),
-                reason: e.to_string(),
-            }
-        })
-    }
-
-    fn clear_shared_session_state(&self) -> Result<(), ChromeToolError> {
-        match std::fs::remove_file(&self.paths.shared_session_state) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(ChromeToolError::FileWriteFailed {
-                path: self.paths.shared_session_state.clone(),
-                reason: err.to_string(),
-            }),
-        }
     }
 
     async fn evict_excess_sessions(&self) -> Result<(), ChromeToolError> {
@@ -746,7 +592,8 @@ impl ChromeManager {
             | ChromeToolError::FileWriteFailed { .. }
             | ChromeToolError::InteractionFailed { .. }
             | ChromeToolError::TabNotFound { .. }
-            | ChromeToolError::CannotCloseLastTab { .. } => return false,
+            | ChromeToolError::CannotCloseLastTab { .. }
+            | ChromeToolError::OutputSerialization(_) => return false,
         };
 
         let reason = reason.to_ascii_lowercase();
@@ -768,15 +615,18 @@ impl ChromeManager {
         &self,
         session_id: &str,
         url: &str,
-    ) -> Result<OpenedSession, ChromeToolError> {
+    ) -> Result<OpenedPage, ChromeToolError> {
         self.remove_session_order_entry(session_id).await;
         let session = self.sessions.write().await.remove(session_id);
         if let Some(session) = session {
             let _ = session.interaction().shutdown().await;
         }
-        let _ = self.clear_shared_session_state();
         let opened = self.backend.open(url).await?;
-        self.store_backend_opened_session(opened).await
+        let opened = self.store_backend_opened_session(opened).await?;
+        Ok(OpenedPage {
+            final_url: opened.final_url,
+            page_title: opened.page_title,
+        })
     }
 }
 
@@ -900,56 +750,9 @@ impl ChromeHost for SystemChromeHost {
             .map_err(|e| ChromeToolError::PageReadFailed {
                 reason: e.to_string(),
             })?;
-        let backend_session_id = driver.session_id().to_string();
 
         let session: Arc<dyn BrowserSession> = Arc::new(ManagedWebDriverSession::new(driver));
         Ok(BackendOpenResult {
-            backend_session_id: Some(backend_session_id),
-            metadata: PageMetadata {
-                final_url,
-                page_title,
-            },
-            session,
-        })
-    }
-
-    async fn attach_session(
-        &self,
-        session_id: &str,
-        _session_mode: SessionMode,
-    ) -> Result<BackendOpenResult, ChromeToolError> {
-        let client = Arc::new(
-            ReqwestClient::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .map_err(|e| ChromeToolError::DriverStartFailed {
-                    reason: e.to_string(),
-                })?,
-        );
-        let handle = SessionHandle::new(
-            client,
-            SHARED_DRIVER_SERVER_URL,
-            SessionId::from(session_id.to_string()),
-        )
-        .map_err(|e| ChromeToolError::DriverStartFailed {
-            reason: e.to_string(),
-        })?;
-        let driver = WebDriver {
-            handle: Arc::new(handle),
-        };
-        let final_url = driver
-            .current_url()
-            .await
-            .map(|url| url.to_string())
-            .map_err(|_| ChromeToolError::SharedSessionUnavailable)?;
-        let page_title = driver
-            .title()
-            .await
-            .map_err(|_| ChromeToolError::SharedSessionUnavailable)?;
-
-        let session: Arc<dyn BrowserSession> = Arc::new(ManagedWebDriverSession::new(driver));
-        Ok(BackendOpenResult {
-            backend_session_id: Some(session_id.to_string()),
             metadata: PageMetadata {
                 final_url,
                 page_title,
@@ -1121,25 +924,6 @@ fn build_chrome_capabilities(
     session_mode: SessionMode,
 ) -> Result<ChromeCapabilities, ChromeToolError> {
     let mut capabilities = DesiredCapabilities::chrome();
-    capabilities
-        .set_base_capability(
-            "goog:loggingPrefs",
-            serde_json::json!({ "performance": "ALL" }),
-        )
-        .map_err(|e| ChromeToolError::DriverStartFailed {
-            reason: format!("failed to enable chrome performance logging: {e}"),
-        })?;
-    capabilities
-        .add_experimental_option(
-            "perfLoggingPrefs",
-            serde_json::json!({
-                "enableNetwork": true,
-                "enablePage": false,
-            }),
-        )
-        .map_err(|e| ChromeToolError::DriverStartFailed {
-            reason: format!("failed to configure chrome performance logging: {e}"),
-        })?;
     capabilities
         .set_binary(browser_binary.to_string_lossy().as_ref())
         .map_err(|e| ChromeToolError::DriverStartFailed {
@@ -1334,14 +1118,13 @@ mod tests {
 
     use serde_json::json;
     use tempfile::tempdir;
+    use thirtyfour::common::cookie::Cookie;
     #[cfg(unix)]
     use tokio::process::Command;
 
     use crate::chrome::error::ChromeToolError;
     use crate::chrome::installer::{ChromeInstaller, ChromePaths, DriverDownloader};
-    use crate::chrome::models::{
-        CookieSummary, LinkSummary, NetworkRequestSummary, OpenArgs, PageMetadata,
-    };
+    use crate::chrome::models::{OpenArgs, PageMetadata};
     use crate::chrome::session::{BrowserSession, ChromeDriverProcess};
 
     use super::{
@@ -1355,11 +1138,10 @@ mod tests {
     struct FakePage {
         final_url: String,
         page_title: String,
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
         extra_tabs: Vec<FakeTab>,
+        cookies: Vec<Cookie>,
     }
 
     #[derive(Debug, Default)]
@@ -1379,7 +1161,7 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
         ) -> Self {
             let requested_url = requested_url.into();
@@ -1388,36 +1170,10 @@ mod tests {
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     shutdown_label: requested_url,
                     extra_tabs: Vec::new(),
-                },
-            );
-            self
-        }
-
-        fn with_page_with_network_requests(
-            mut self,
-            requested_url: impl Into<String>,
-            final_url: impl Into<String>,
-            page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
-            text: impl Into<String>,
-            network_requests: Vec<NetworkRequestSummary>,
-        ) -> Self {
-            let requested_url = requested_url.into();
-            self.pages.insert(
-                requested_url.clone(),
-                FakePage {
-                    final_url: final_url.into(),
-                    page_title: page_title.into(),
-                    links,
-                    text: text.into(),
-                    network_requests,
-                    shutdown_label: requested_url,
-                    extra_tabs: Vec::new(),
+                    cookies: Vec::new(),
                 },
             );
             self
@@ -1428,7 +1184,7 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
             extra_tabs: Vec<FakeTab>,
         ) -> Self {
@@ -1438,11 +1194,10 @@ mod tests {
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     shutdown_label: requested_url,
                     extra_tabs,
+                    cookies: Vec::new(),
                 },
             );
             self
@@ -1464,12 +1219,10 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeBrowserSession {
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
         shutdown_label: String,
         shutdowns: Arc<StdMutex<Vec<String>>>,
-        cookies: Vec<CookieSummary>,
+        cookies: Vec<Cookie>,
         tabs: StdMutex<FakeBrowserTabState>,
     }
 
@@ -1480,21 +1233,6 @@ mod tests {
                 Some(selector) => format!("{} [{selector}]", self.text),
                 None => self.text.clone(),
             })
-        }
-
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(self.links.clone())
-        }
-
-        async fn network_requests(
-            &self,
-            max_requests: Option<u32>,
-        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-            let mut requests = self.network_requests.clone();
-            if let Some(max_requests) = max_requests {
-                requests.truncate(max_requests as usize);
-            }
-            Ok(requests)
         }
 
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
@@ -1529,7 +1267,7 @@ mod tests {
                 })
         }
 
-        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
             Ok(self.cookies.clone())
         }
 
@@ -1639,12 +1377,10 @@ mod tests {
                 })?;
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: page.links.clone(),
                 text: page.text.clone(),
-                network_requests: page.network_requests.clone(),
                 shutdown_label: page.shutdown_label.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
-                cookies: vec![],
+                cookies: page.cookies.clone(),
                 tabs: StdMutex::new(FakeBrowserTabState {
                     tabs: {
                         let mut tabs = vec![FakeTab {
@@ -1660,7 +1396,6 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
-                backend_session_id: None,
                 metadata: PageMetadata {
                     final_url: page.final_url.clone(),
                     page_title: page.page_title.clone(),
@@ -1697,17 +1432,6 @@ mod tests {
             Ok(String::new())
         }
 
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(Vec::new())
-        }
-
-        async fn network_requests(
-            &self,
-            _max_requests: Option<u32>,
-        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-            Ok(Vec::new())
-        }
-
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
             self.shutdowns
                 .lock()
@@ -1728,7 +1452,7 @@ mod tests {
             Ok(self.current_url.lock().unwrap().clone())
         }
 
-        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
             Ok(Vec::new())
         }
 
@@ -1802,7 +1526,6 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
-                backend_session_id: None,
                 metadata: PageMetadata {
                     final_url: url.to_string(),
                     page_title: format!("Opened {url}"),
@@ -1819,20 +1542,14 @@ mod tests {
                     "https://example.com",
                     "https://example.com",
                     "Example",
-                    vec![LinkSummary {
-                        href: "https://example.com/about".to_string(),
-                        text: "About".to_string(),
-                    }],
+                    Vec::new(),
                     "Example text",
                 )
                 .with_page(
                     "https://example.org",
                     "https://example.org/home",
                     "Example Org",
-                    vec![LinkSummary {
-                        href: "https://example.org/docs".to_string(),
-                        text: "Docs".to_string(),
-                    }],
+                    Vec::new(),
                     "Org text",
                 ),
         )
@@ -1983,7 +1700,6 @@ mod tests {
             Some(ManagedChromeSupport {
                 host: host_trait,
                 installer,
-                session_mode: SessionMode::Readonly,
                 shared_host: Some(host.clone()),
             }),
             paths,
@@ -2057,11 +1773,12 @@ mod tests {
             .expect("initial open should succeed");
 
         let reopened = manager
-            .navigate(&opened.session_id, "https://example.org")
+            .navigate("https://example.org")
             .await
             .expect("navigate should recover by reopening a fresh session");
 
-        assert_ne!(reopened.session_id, opened.session_id);
+        let active_session_id = manager.current_active_session_id().await.unwrap();
+        assert_ne!(active_session_id, opened.session_id);
         assert_eq!(reopened.final_url, "https://example.org");
         assert_eq!(reopened.page_title, "Opened https://example.org");
         assert_eq!(
@@ -2137,33 +1854,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_uses_session_handle_for_read_operations() {
+    async fn manager_uses_active_session_for_read_operations() {
         let manager = ChromeManager::new_for_test(sample_backend());
-        let first = manager
+        manager
             .open(OpenArgs {
                 url: "https://example.com".into(),
             })
             .await
             .unwrap();
-        let second = manager
+        manager
             .open(OpenArgs {
                 url: "https://example.org".into(),
             })
             .await
             .unwrap();
 
-        let first_links = manager.list_links(&first.session_id).await.unwrap();
-        let second_links = manager.list_links(&second.session_id).await.unwrap();
-        assert_eq!(first_links[0].href, "https://example.com/about");
-        assert_eq!(second_links[0].href, "https://example.org/docs");
-
-        let first_text = manager
-            .extract_text(&first.session_id, Some("#hero"))
-            .await
-            .unwrap();
-        let second_summary = manager.get_dom_summary(&second.session_id).await.unwrap();
-        assert_eq!(first_text, "Example text [#hero]");
-        assert_eq!(second_summary, "Org text");
+        let text = manager.extract_text(Some("#hero")).await.unwrap();
+        assert_eq!(text, "Org text [#hero]");
     }
 
     #[tokio::test]
@@ -2176,18 +1883,12 @@ mod tests {
             .await
             .unwrap();
 
-        let new_tab = manager
-            .new_tab(&opened.session_id, "https://example.org")
-            .await
-            .unwrap();
-        manager
-            .switch_tab(&opened.session_id, &new_tab.tab_id)
-            .await
-            .unwrap();
+        let new_tab = manager.new_tab("https://example.org").await.unwrap();
+        manager.switch_tab(&new_tab.tab_id).await.unwrap();
 
         tokio::time::timeout(
             Duration::from_millis(200),
-            manager.close_tab(&opened.session_id, &new_tab.tab_id),
+            manager.close_tab(&new_tab.tab_id),
         )
         .await
         .expect("close_tab should not deadlock")
@@ -2197,7 +1898,7 @@ mod tests {
         assert_eq!(session.current_url, "https://example.com");
         assert_eq!(session.page_title, "Example");
 
-        let tabs = manager.list_tabs(&opened.session_id).await.unwrap();
+        let tabs = manager.list_tabs().await.unwrap();
         assert_eq!(tabs.len(), 1);
         assert!(tabs[0].active);
         assert_eq!(tabs[0].url, "https://example.com");
@@ -2220,116 +1921,40 @@ mod tests {
             ),
         ));
 
-        let opened = manager
+        manager
             .open(OpenArgs {
                 url: "https://example.com".into(),
             })
             .await
             .unwrap();
 
-        let tabs = manager.list_tabs(&opened.session_id).await.unwrap();
+        let tabs = manager.list_tabs().await.unwrap();
         assert_eq!(tabs.len(), 2);
         let popup = tabs
             .iter()
             .find(|tab| tab.url == "https://example.org/popup")
             .expect("popup tab should be listed");
 
-        let metadata = manager
-            .switch_tab(&opened.session_id, &popup.tab_id)
-            .await
-            .unwrap();
+        let metadata = manager.switch_tab(&popup.tab_id).await.unwrap();
         assert_eq!(metadata.final_url, "https://example.org/popup");
         assert_eq!(metadata.page_title, "Popup");
     }
 
     #[tokio::test]
-    async fn manager_network_requests_returns_records_from_session() {
-        let manager = ChromeManager::new_for_test(sample_backend());
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
-
-        let requests = manager
-            .network_requests(&opened.session_id, None)
-            .await
-            .unwrap();
-        assert!(requests.is_empty());
-    }
-
-    #[tokio::test]
-    async fn manager_network_requests_respects_max_limit() {
-        let manager = ChromeManager::new_for_test(Arc::new(
-            FakeBrowserBackend::default().with_page_with_network_requests(
-                "https://example.com",
-                "https://example.com",
-                "Example",
-                vec![],
-                "Example text",
-                vec![
-                    NetworkRequestSummary {
-                        method: "GET".to_string(),
-                        url: "https://example.com/a".to_string(),
-                        status: Some(200),
-                        request_headers: json!({}),
-                        response_headers: json!({}),
-                        error: None,
-                    },
-                    NetworkRequestSummary {
-                        method: "GET".to_string(),
-                        url: "https://example.com/b".to_string(),
-                        status: Some(200),
-                        request_headers: json!({}),
-                        response_headers: json!({}),
-                        error: None,
-                    },
-                ],
-            ),
-        ));
-
-        let opened = manager
-            .open(OpenArgs {
-                url: "https://example.com".into(),
-            })
-            .await
-            .unwrap();
-
-        let requests = manager
-            .network_requests(&opened.session_id, Some(1))
-            .await
-            .unwrap();
-        assert_eq!(requests.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn manager_api_rejects_missing_session_for_all_session_ops() {
+    async fn manager_api_requires_active_session_for_all_session_ops() {
         let manager = ChromeManager::new_for_test(sample_backend());
 
-        let err = manager.list_links("missing").await.unwrap_err();
-        assert!(matches!(
-            err,
-            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
-        ));
+        let err = manager.extract_text(None).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
 
-        let err = manager.extract_text("missing", None).await.unwrap_err();
-        assert!(matches!(
-            err,
-            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
-        ));
+        let err = manager.current_url().await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
 
-        let err = manager.get_dom_summary("missing").await.unwrap_err();
-        assert!(matches!(
-            err,
-            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
-        ));
+        let err = manager.get_cookies(None).await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
 
-        let err = manager.network_requests("missing", None).await.unwrap_err();
-        assert!(matches!(
-            err,
-            ChromeToolError::SessionNotFound { session_id } if session_id == "missing"
-        ));
+        let err = manager.list_tabs().await.unwrap_err();
+        assert!(matches!(err, ChromeToolError::SharedSessionUnavailable));
     }
 
     #[test]
@@ -2382,6 +2007,8 @@ mod tests {
             caps_json["goog:chromeOptions"]["excludeSwitches"],
             json!(["enable-automation"])
         );
+        assert!(caps_json.get("goog:loggingPrefs").is_none());
+        assert!(caps_json["goog:chromeOptions"]["perfLoggingPrefs"].is_null());
     }
 
     #[test]
@@ -2419,6 +2046,7 @@ mod tests {
         let caps_json = serde_json::to_value(caps).unwrap();
 
         assert_eq!(caps_json["pageLoadStrategy"], json!("eager"));
+        assert!(caps_json.get("goog:loggingPrefs").is_none());
     }
 
     #[test]
@@ -2440,6 +2068,8 @@ mod tests {
         assert!(args.contains(&"--headless=new"));
         assert!(!args.contains(&"--disable-blink-features=AutomationControlled"));
         assert!(caps_json["goog:chromeOptions"]["excludeSwitches"].is_null());
+        assert!(caps_json.get("goog:loggingPrefs").is_none());
+        assert!(caps_json["goog:chromeOptions"]["perfLoggingPrefs"].is_null());
     }
 
     #[test]

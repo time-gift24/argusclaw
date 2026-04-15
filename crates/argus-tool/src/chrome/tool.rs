@@ -2,11 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
+use serde_json::{Value, json};
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
+
+use crate::serialize_tool_output;
 
 use super::error::ChromeToolError;
 use super::installer::ChromePaths;
@@ -26,9 +29,6 @@ const RO_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Close,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
-    ChromeAction::ListLinks,
-    ChromeAction::NetworkRequests,
-    ChromeAction::GetDomSummary,
     ChromeAction::NewTab,
     ChromeAction::SwitchTab,
     ChromeAction::CloseTab,
@@ -41,9 +41,6 @@ const INTERACTIVE_ACTIONS: &[ChromeAction] = &[
     ChromeAction::Close,
     ChromeAction::Wait,
     ChromeAction::ExtractText,
-    ChromeAction::ListLinks,
-    ChromeAction::NetworkRequests,
-    ChromeAction::GetDomSummary,
     ChromeAction::Click,
     ChromeAction::Type,
     ChromeAction::GetUrl,
@@ -67,6 +64,8 @@ impl Default for ChromeTool {
 }
 
 impl ChromeTool {
+    const TOOL_NAME: &'static str = "chrome";
+
     #[must_use]
     pub fn new() -> Self {
         let paths = ChromePaths::from_home(&default_home_dir());
@@ -82,6 +81,24 @@ impl ChromeTool {
         let paths = ChromePaths::from_home(&default_home_dir());
         Self {
             manager: Arc::new(ChromeManager::new_interactive_production(paths)),
+            policy: ExplorePolicy::interactive(),
+            interactive: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_manager(manager: Arc<ChromeManager>) -> Self {
+        Self {
+            manager,
+            policy: ExplorePolicy::readonly(),
+            interactive: false,
+        }
+    }
+
+    #[must_use]
+    pub fn new_interactive_with_manager(manager: Arc<ChromeManager>) -> Self {
+        Self {
+            manager,
             policy: ExplorePolicy::interactive(),
             interactive: true,
         }
@@ -170,10 +187,6 @@ impl ChromeTool {
                 "type": "integer",
                 "description": "Optional bounded passive wait in milliseconds for wait"
             },
-            "max_requests": {
-                "type": "integer",
-                "description": "Optional maximum number of request records for network requests"
-            },
             "tab_id": {
                 "type": "string",
                 "description": "Tab identifier for tab operations (switch_tab, close_tab)"
@@ -199,15 +212,230 @@ impl ChromeTool {
         })
     }
 
-    fn map_error(error: ChromeToolError) -> ToolError {
+    fn serialize_response<T: Serialize>(value: T) -> Result<Value, ChromeToolError> {
+        serialize_tool_output(Self::TOOL_NAME, value).map_err(ChromeToolError::from)
+    }
+
+    async fn execute_impl(&self, input: Value) -> Result<Value, ChromeToolError> {
+        let args = ChromeToolArgs::validate(input)?;
+        self.policy.validate_action(args.action)?;
+
+        match args.action {
+            ChromeAction::Install => {
+                let (detected, install) = self.manager.install_driver().await?;
+                Self::serialize_response(ChromeInstallResponse {
+                    action: "install",
+                    browser_version: detected.browser_version,
+                    driver_version: install.driver_version,
+                    driver_path: install.patched_driver,
+                    cache_hit: install.cache_hit,
+                })
+            }
+            ChromeAction::Navigate => {
+                let url = required_field(&args, "url", args.url.as_deref())?;
+                let opened = self.manager.navigate(url).await?;
+                Self::serialize_response(ChromeNavigateResponse {
+                    action: "navigate",
+                    final_url: opened.final_url,
+                    page_title: opened.page_title,
+                })
+            }
+            ChromeAction::Close => {
+                self.manager.close().await?;
+                Self::serialize_response(ChromeStatusResponse {
+                    action: "close",
+                    status: "ok",
+                })
+            }
+            ChromeAction::Wait => {
+                self.manager.current_url().await?;
+
+                let timeout_ms = args.timeout_ms.unwrap_or(1).min(1_000);
+                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+                Self::serialize_response(ChromeWaitResponse {
+                    action: "wait",
+                    status: "ok",
+                    waited_ms: timeout_ms,
+                })
+            }
+            ChromeAction::ExtractText => {
+                let text = self.manager.extract_text(args.selector.as_deref()).await?;
+                Self::serialize_response(ChromeSessionContentResponse {
+                    action: "extract_text",
+                    content: text,
+                })
+            }
+            ChromeAction::Click => {
+                let selector = required_field(&args, "selector", args.selector.as_deref())?;
+                self.manager.click(selector).await?;
+                Self::serialize_response(ChromeSessionStatusResponse {
+                    action: "click",
+                    tab_id: None,
+                    status: "ok",
+                })
+            }
+            ChromeAction::Type => {
+                let selector = required_field(&args, "selector", args.selector.as_deref())?;
+                let text = required_field(&args, "text", args.text.as_deref())?;
+                self.manager.type_text(selector, text).await?;
+                Self::serialize_response(ChromeSessionStatusResponse {
+                    action: "type",
+                    tab_id: None,
+                    status: "ok",
+                })
+            }
+            ChromeAction::GetUrl => {
+                let url = self.manager.current_url().await?;
+                Self::serialize_response(ChromeSessionUrlResponse {
+                    action: "get_url",
+                    url,
+                })
+            }
+            ChromeAction::GetCookies => {
+                let cookies = self.manager.get_cookies(args.domain.as_deref()).await?;
+                Self::serialize_response(ChromeCookiesResponse {
+                    action: "get_cookies",
+                    cookies,
+                })
+            }
+            ChromeAction::NewTab => {
+                let url = required_field(&args, "url", args.url.as_deref())?;
+                let result = self.manager.new_tab(url).await?;
+                Self::serialize_response(ChromeNewTabResponse {
+                    action: "new_tab",
+                    tab_id: result.tab_id,
+                    url: result.url,
+                    page_title: result.page_title,
+                })
+            }
+            ChromeAction::SwitchTab => {
+                let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
+                let metadata = self.manager.switch_tab(tab_id).await?;
+                Self::serialize_response(ChromeTabMetadataResponse {
+                    action: "switch_tab",
+                    tab_id,
+                    url: metadata.final_url,
+                    page_title: metadata.page_title,
+                })
+            }
+            ChromeAction::CloseTab => {
+                let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
+                self.manager.close_tab(tab_id).await?;
+                Self::serialize_response(ChromeSessionStatusResponse {
+                    action: "close_tab",
+                    tab_id: Some(tab_id),
+                    status: "ok",
+                })
+            }
+            ChromeAction::ListTabs => {
+                let tabs = self.manager.list_tabs().await?;
+                Self::serialize_response(ChromeListTabsResponse {
+                    action: "list_tabs",
+                    tabs,
+                })
+            }
+        }
+    }
+}
+
+impl From<ChromeToolError> for ToolError {
+    fn from(error: ChromeToolError) -> Self {
         match error {
             ChromeToolError::ActionNotAllowed { action } => ToolError::NotAuthorized(action),
             other => ToolError::ExecutionFailed {
-                tool_name: "chrome".to_string(),
+                tool_name: ChromeTool::TOOL_NAME.to_string(),
                 reason: other.to_string(),
             },
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeInstallResponse {
+    action: &'static str,
+    browser_version: String,
+    driver_version: String,
+    driver_path: std::path::PathBuf,
+    cache_hit: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeNavigateResponse {
+    action: &'static str,
+    final_url: String,
+    page_title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeStatusResponse {
+    action: &'static str,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeWaitResponse {
+    action: &'static str,
+    status: &'static str,
+    waited_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeSessionContentResponse {
+    action: &'static str,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeSessionStatusResponse<'a> {
+    action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tab_id: Option<&'a str>,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeSessionUrlResponse {
+    action: &'static str,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeCookiesResponse<T> {
+    action: &'static str,
+    cookies: Vec<T>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeNewTabResponse {
+    action: &'static str,
+    tab_id: String,
+    url: String,
+    page_title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeTabMetadataResponse<'a> {
+    action: &'static str,
+    tab_id: &'a str,
+    url: String,
+    page_title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ChromeListTabsResponse {
+    action: &'static str,
+    tabs: Vec<super::models::TabInfo>,
+}
+
+fn required_field<'a>(
+    args: &ChromeToolArgs,
+    field_name: &'static str,
+    value: Option<&'a str>,
+) -> Result<&'a str, ChromeToolError> {
+    value.ok_or_else(|| ChromeToolError::MissingRequiredField {
+        action: args.action.as_str().to_string(),
+        field: field_name,
+    })
 }
 
 #[async_trait]
@@ -218,10 +446,10 @@ impl NamedTool for ChromeTool {
 
     fn definition(&self) -> ToolDefinition {
         let description = if self.interactive {
-            "Chrome browser tool with interactive capabilities for explicit driver install, a hidden shared browser session, navigate(url) for starting or switching pages, close for shutting down the shared browser, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
+            "Chrome browser tool with interactive capabilities for explicit driver install, a process-scoped browser session, navigate(url) for starting or switching pages, close for shutting down the browser, navigating OAuth2 login flows, typing credentials, clicking buttons, and extracting tokens."
                 .to_string()
         } else {
-            "Chrome explore tool for explicit driver install, a hidden shared browser session, navigate(url) for starting or switching pages, close for shutting down the shared browser, and inspecting page state."
+            "Chrome explore tool for explicit driver install, a process-scoped browser session, navigate(url) for starting or switching pages, close for shutting down the browser, and inspecting page state."
                 .to_string()
         };
         ToolDefinition {
@@ -240,297 +468,8 @@ impl NamedTool for ChromeTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args = ChromeToolArgs::validate(input).map_err(Self::map_error)?;
-        self.policy
-            .validate_action(args.action)
-            .map_err(Self::map_error)?;
-
-        match args.action {
-            ChromeAction::Install => {
-                let (detected, install) = self
-                    .manager
-                    .install_driver()
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "install",
-                    "browser_version": detected.browser_version,
-                    "driver_version": install.driver_version,
-                    "driver_path": install.patched_driver,
-                    "cache_hit": install.cache_hit,
-                }))
-            }
-            ChromeAction::Navigate => {
-                let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
-                    tool_name: "chrome".to_string(),
-                    reason: "missing url for navigate action".to_string(),
-                })?;
-                let opened = self
-                    .manager
-                    .navigate_shared(&url)
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "navigate",
-                    "final_url": opened.final_url,
-                    "page_title": opened.page_title,
-                }))
-            }
-            ChromeAction::Close => {
-                self.manager.close_shared().await.map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "close",
-                    "status": "ok",
-                }))
-            }
-            ChromeAction::Wait => {
-                self.manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-
-                let timeout_ms = args.timeout_ms.unwrap_or(1).min(1_000);
-                tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-                Ok(json!({
-                    "action": "wait",
-                    "status": "ok",
-                    "waited_ms": timeout_ms,
-                }))
-            }
-            ChromeAction::ExtractText => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let text = self
-                    .manager
-                    .extract_text(&session_id, args.selector.as_deref())
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "extract_text",
-                    "session_id": session_id,
-                    "content": text,
-                }))
-            }
-            ChromeAction::ListLinks => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let links = self
-                    .manager
-                    .list_links(&session_id)
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "list_links",
-                    "session_id": session_id,
-                    "links": links,
-                }))
-            }
-            ChromeAction::GetDomSummary => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let summary = self
-                    .manager
-                    .get_dom_summary(&session_id)
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "get_dom_summary",
-                    "session_id": session_id,
-                    "summary": summary,
-                }))
-            }
-            ChromeAction::NetworkRequests => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let requests = self
-                    .manager
-                    .network_requests(&session_id, args.max_requests)
-                    .await
-                    .map_err(Self::map_error)?;
-
-                Ok(json!({
-                    "action": "network_requests",
-                    "session_id": session_id,
-                    "requests": requests,
-                }))
-            }
-            ChromeAction::Click => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let selector = required_field(&args, "selector", args.selector.as_deref())?;
-                self.manager
-                    .click(&session_id, selector)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "click",
-                    "session_id": session_id,
-                    "status": "ok",
-                }))
-            }
-            ChromeAction::Type => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let selector = required_field(&args, "selector", args.selector.as_deref())?;
-                let text = required_field(&args, "text", args.text.as_deref())?;
-                self.manager
-                    .type_text(&session_id, selector, text)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "type",
-                    "session_id": session_id,
-                    "status": "ok",
-                }))
-            }
-            ChromeAction::GetUrl => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let url = self
-                    .manager
-                    .current_url(&session_id)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "get_url",
-                    "session_id": session_id,
-                    "url": url,
-                }))
-            }
-            ChromeAction::GetCookies => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let cookies = self
-                    .manager
-                    .get_cookies(&session_id, args.domain.as_deref())
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "get_cookies",
-                    "session_id": session_id,
-                    "cookies": cookies,
-                }))
-            }
-            ChromeAction::NewTab => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let url = args.url.ok_or_else(|| ToolError::ExecutionFailed {
-                    tool_name: "chrome".to_string(),
-                    reason: "missing url for new_tab action".to_string(),
-                })?;
-                let result = self
-                    .manager
-                    .new_tab(&session_id, &url)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "new_tab",
-                    "session_id": session_id,
-                    "tab_id": result.tab_id,
-                    "url": result.url,
-                    "page_title": result.page_title,
-                }))
-            }
-            ChromeAction::SwitchTab => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
-                let metadata = self
-                    .manager
-                    .switch_tab(&session_id, tab_id)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "switch_tab",
-                    "session_id": session_id,
-                    "tab_id": tab_id,
-                    "url": metadata.final_url,
-                    "page_title": metadata.page_title,
-                }))
-            }
-            ChromeAction::CloseTab => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let tab_id = required_field(&args, "tab_id", args.tab_id.as_deref())?;
-                self.manager
-                    .close_tab(&session_id, tab_id)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "close_tab",
-                    "session_id": session_id,
-                    "tab_id": tab_id,
-                    "status": "ok",
-                }))
-            }
-            ChromeAction::ListTabs => {
-                let session_id = self
-                    .manager
-                    .shared_session_id()
-                    .await
-                    .map_err(Self::map_error)?;
-                let tabs = self
-                    .manager
-                    .list_tabs(&session_id)
-                    .await
-                    .map_err(Self::map_error)?;
-                Ok(json!({
-                    "action": "list_tabs",
-                    "session_id": session_id,
-                    "tabs": tabs,
-                }))
-            }
-        }
+        self.execute_impl(input).await.map_err(ToolError::from)
     }
-}
-
-fn required_field<'a>(
-    args: &ChromeToolArgs,
-    field_name: &str,
-    value: Option<&'a str>,
-) -> Result<&'a str, ToolError> {
-    value.ok_or_else(|| ToolError::ExecutionFailed {
-        tool_name: "chrome".to_string(),
-        reason: format!("missing {field_name} for {} action", args.action.as_str()),
-    })
 }
 
 pub(super) fn default_home_dir() -> std::path::PathBuf {

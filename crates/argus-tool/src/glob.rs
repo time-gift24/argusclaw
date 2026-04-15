@@ -10,12 +10,14 @@
 //! so callers can apply appropriate policy or UI treatment.
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
+
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Maximum number of results to return.
 const MAX_RESULTS: usize = 1000;
@@ -30,6 +32,36 @@ struct GlobArgs {
     path: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct GlobResponse {
+    pattern: String,
+    path: String,
+    count: usize,
+    truncated: bool,
+    files: Vec<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum GlobToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error("Path does not exist: {0}")]
+    PathDoesNotExist(String),
+    #[error("Invalid glob pattern: {0}")]
+    InvalidPattern(glob::PatternError),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<GlobToolError> for ToolError {
+    fn from(error: GlobToolError) -> Self {
+        ToolError::ExecutionFailed {
+            tool_name: GlobTool::TOOL_NAME.to_string(),
+            reason: error.to_string(),
+        }
+    }
+}
+
 /// Glob tool implementation - finds files matching patterns with risk level High.
 pub struct GlobTool;
 
@@ -40,10 +72,69 @@ impl Default for GlobTool {
 }
 
 impl GlobTool {
+    const TOOL_NAME: &'static str = "glob";
+
     /// Create a new GlobTool.
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    async fn execute_impl(&self, input: serde_json::Value) -> Result<GlobResponse, GlobToolError> {
+        let args: GlobArgs = serde_json::from_value(input)?;
+
+        // Parse path (optional, default current directory)
+        let base_path = args
+            .path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        // Validate base path exists
+        if !base_path.exists() {
+            return Err(GlobToolError::PathDoesNotExist(
+                base_path.display().to_string(),
+            ));
+        }
+
+        // Build full glob pattern
+        let full_pattern = if base_path.is_dir() {
+            format!("{}/{}", base_path.display(), args.pattern)
+        } else {
+            args.pattern.clone()
+        };
+
+        // Execute glob
+        let mut files = Vec::new();
+        let glob = glob::glob(&full_pattern).map_err(GlobToolError::InvalidPattern)?;
+
+        for entry in glob {
+            match entry {
+                Ok(path) => {
+                    files.push(path.to_string_lossy().to_string());
+                }
+                Err(e) => {
+                    tracing::debug!("Skipping path due to error: {}", e);
+                }
+            }
+
+            if files.len() >= MAX_RESULTS {
+                break;
+            }
+        }
+
+        let truncated = files.len() >= MAX_RESULTS;
+        if truncated {
+            files.truncate(MAX_RESULTS);
+        }
+
+        Ok(GlobResponse {
+            pattern: args.pattern,
+            path: base_path.to_string_lossy().to_string(),
+            count: files.len(),
+            truncated,
+            files,
+        })
     }
 }
 
@@ -72,68 +163,10 @@ impl NamedTool for GlobTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: GlobArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "glob".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
-
-        // Parse path (optional, default current directory)
-        let base_path = args
-            .path
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-        // Validate base path exists
-        if !base_path.exists() {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "glob".to_string(),
-                reason: format!("Path does not exist: {}", base_path.display()),
-            });
-        }
-
-        // Build full glob pattern
-        let full_pattern = if base_path.is_dir() {
-            format!("{}/{}", base_path.display(), args.pattern)
-        } else {
-            args.pattern.clone()
-        };
-
-        // Execute glob
-        let mut files = Vec::new();
-        let glob = glob::glob(&full_pattern).map_err(|e| ToolError::ExecutionFailed {
-            tool_name: "glob".to_string(),
-            reason: format!("Invalid glob pattern: {}", e),
-        })?;
-
-        for entry in glob {
-            match entry {
-                Ok(path) => {
-                    files.push(path.to_string_lossy().to_string());
-                }
-                Err(e) => {
-                    tracing::debug!("Skipping path due to error: {}", e);
-                }
-            }
-
-            if files.len() >= MAX_RESULTS {
-                break;
-            }
-        }
-
-        let truncated = files.len() >= MAX_RESULTS;
-        if truncated {
-            files.truncate(MAX_RESULTS);
-        }
-
-        Ok(json!({
-            "pattern": args.pattern,
-            "path": base_path.to_string_lossy(),
-            "count": files.len(),
-            "truncated": truncated,
-            "files": files
-        }))
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(GlobToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -141,6 +174,7 @@ impl NamedTool for GlobTool {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
     use tokio::sync::broadcast;

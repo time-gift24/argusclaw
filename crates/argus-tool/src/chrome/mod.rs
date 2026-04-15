@@ -7,6 +7,9 @@ mod policy;
 mod session;
 mod tool;
 
+pub use installer::ChromePaths;
+pub use manager::ChromeManager;
+pub use models::{NewTabResult, OpenedPage, PageMetadata, TabInfo};
 pub use tool::ChromeTool;
 
 #[cfg(test)]
@@ -19,6 +22,7 @@ mod tests {
 
     use serde_json::json;
     use tempfile::tempdir;
+    use thirtyfour::common::cookie::{Cookie, SameSite};
     use zip::write::SimpleFileOptions;
 
     use super::error::ChromeToolError;
@@ -26,10 +30,7 @@ mod tests {
     use super::manager::{
         BackendOpenResult, BrowserBackend, ChromeHost, DetectedChrome, SessionMode,
     };
-    use super::models::{
-        ChromeAction, ChromeToolArgs, CookieSummary, LinkSummary, NetworkRequestSummary,
-        PageMetadata,
-    };
+    use super::models::{ChromeAction, ChromeToolArgs, PageMetadata};
     use super::patcher::patch_cdc_tokens;
     use super::policy::ExplorePolicy;
     use super::session::BrowserSession;
@@ -256,9 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn list_links_is_allowed() {
+    fn extract_text_is_allowed() {
         ExplorePolicy::readonly()
-            .validate_action(ChromeAction::ListLinks)
+            .validate_action(ChromeAction::ExtractText)
             .unwrap();
     }
 
@@ -275,7 +276,7 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("explicit driver install"));
-        assert!(def.description.contains("hidden shared browser session"));
+        assert!(def.description.contains("process-scoped browser session"));
         assert!(def.description.contains("navigate(url)"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
@@ -288,18 +289,22 @@ mod tests {
         assert!(action_values.contains(&"navigate"));
         assert!(action_values.contains(&"wait"));
         assert!(action_values.contains(&"extract_text"));
-        assert!(action_values.contains(&"list_links"));
-        assert!(action_values.contains(&"get_dom_summary"));
-        assert!(action_values.contains(&"network_requests"));
         assert!(action_values.contains(&"install"));
         assert!(action_values.contains(&"close"));
+        assert!(action_values.contains(&"new_tab"));
+        assert!(action_values.contains(&"switch_tab"));
+        assert!(action_values.contains(&"close_tab"));
+        assert!(action_values.contains(&"list_tabs"));
         assert!(!action_values.contains(&"open"));
         assert!(!action_values.contains(&"restart"));
         assert!(!action_values.contains(&"click"));
+        assert!(!action_values.contains(&"list_links"));
+        assert!(!action_values.contains(&"get_dom_summary"));
+        assert!(!action_values.contains(&"network_requests"));
 
         assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("selector").is_some());
-        assert!(def.parameters["properties"].get("max_requests").is_some());
+        assert!(def.parameters["properties"].get("max_requests").is_none());
         assert!(def.parameters["properties"].get("text").is_none());
     }
 
@@ -309,7 +314,7 @@ mod tests {
         let def = tool.definition();
         assert_eq!(def.name, "chrome");
         assert!(def.description.contains("interactive"));
-        assert!(def.description.contains("hidden shared browser session"));
+        assert!(def.description.contains("process-scoped browser session"));
         assert!(def.description.contains("navigate(url)"));
 
         let action_enum = def.parameters["properties"]["action"]["enum"]
@@ -326,10 +331,18 @@ mod tests {
         assert!(action_values.contains(&"install"));
         assert!(action_values.contains(&"close"));
         assert!(action_values.contains(&"navigate"));
+        assert!(action_values.contains(&"new_tab"));
+        assert!(action_values.contains(&"switch_tab"));
+        assert!(action_values.contains(&"close_tab"));
+        assert!(action_values.contains(&"list_tabs"));
         assert!(!action_values.contains(&"open"));
         assert!(!action_values.contains(&"restart"));
+        assert!(!action_values.contains(&"list_links"));
+        assert!(!action_values.contains(&"get_dom_summary"));
+        assert!(!action_values.contains(&"network_requests"));
         assert!(def.parameters["properties"].get("session_id").is_none());
         assert!(def.parameters["properties"].get("text").is_some());
+        assert!(def.parameters["properties"].get("max_requests").is_none());
     }
 
     #[tokio::test]
@@ -355,10 +368,7 @@ mod tests {
             "https://example.com",
             "https://example.com/landing",
             "Example Title",
-            vec![LinkSummary {
-                href: "https://example.com/docs".to_string(),
-                text: "Docs".to_string(),
-            }],
+            Vec::new(),
             "Visible page text",
         )));
 
@@ -383,10 +393,7 @@ mod tests {
             "https://example.com",
             "https://example.com/landing",
             "Example Title",
-            vec![LinkSummary {
-                href: "https://example.com/docs".to_string(),
-                text: "Docs".to_string(),
-            }],
+            Vec::new(),
             "Visible page text",
         )));
 
@@ -422,40 +429,24 @@ mod tests {
             .await
             .expect("extract_text should succeed");
         assert_eq!(extract["content"], "Visible page text [main]");
+        assert!(extract.get("session_id").is_none());
 
-        let links = tool
-            .execute(
-                json!({
-                    "action": "list_links",
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("list_links should succeed");
-        assert_eq!(links["links"].as_array().map(|links| links.len()), Some(1));
-        assert_eq!(links["links"][0]["text"], "Docs");
-
-        let summary = tool
-            .execute(
-                json!({
-                    "action": "get_dom_summary",
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("get_dom_summary should succeed");
-        assert_eq!(summary["summary"], "Visible page text");
-
-        let network = tool
-            .execute(
-                json!({
-                    "action": "network_requests",
-                }),
-                make_ctx(),
-            )
-            .await
-            .expect("network_requests should succeed");
-        assert!(network["requests"].is_array());
+        for removed_action in ["list_links", "get_dom_summary", "network_requests"] {
+            let err = tool
+                .execute(
+                    json!({
+                        "action": removed_action,
+                    }),
+                    make_ctx(),
+                )
+                .await
+                .expect_err("removed summary actions should be rejected");
+            assert!(matches!(
+                err,
+                ToolError::ExecutionFailed { reason, .. }
+                if reason.contains("unknown variant")
+            ));
+        }
     }
 
     #[tokio::test]
@@ -534,29 +525,32 @@ mod tests {
                 vec![],
                 "Visible page text",
                 vec![
-                    CookieSummary {
-                        name: "shared".to_string(),
-                        value: "1".to_string(),
-                        domain: Some(".example.com".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("shared", "1");
+                        cookie.set_domain(".example.com");
+                        cookie.set_path("/");
+                        cookie.set_same_site(SameSite::Lax);
+                        cookie
                     },
-                    CookieSummary {
-                        name: "host".to_string(),
-                        value: "2".to_string(),
-                        domain: Some("www.example.com".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("host", "2");
+                        cookie.set_domain("www.example.com");
+                        cookie.set_path("/");
+                        cookie.set_secure(true);
+                        cookie
                     },
-                    CookieSummary {
-                        name: "api".to_string(),
-                        value: "3".to_string(),
-                        domain: Some("api.example.com".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("api", "3");
+                        cookie.set_domain("api.example.com");
+                        cookie.set_path("/");
+                        cookie
                     },
-                    CookieSummary {
-                        name: "other".to_string(),
-                        value: "4".to_string(),
-                        domain: Some("other.example.net".to_string()),
-                        path: Some("/".to_string()),
+                    {
+                        let mut cookie = Cookie::new("other", "4");
+                        cookie.set_domain("other.example.net");
+                        cookie.set_path("/");
+                        cookie.set_expiry(42);
+                        cookie
                     },
                 ],
             ),
@@ -582,6 +576,7 @@ mod tests {
             )
             .await
             .expect("get_cookies should succeed");
+        assert!(cookies.get("session_id").is_none());
 
         let names: Vec<&str> = cookies["cookies"]
             .as_array()
@@ -590,6 +585,8 @@ mod tests {
             .filter_map(|cookie| cookie["name"].as_str())
             .collect();
         assert_eq!(names, vec!["shared", "host"]);
+        assert_eq!(cookies["cookies"][0]["sameSite"], "Lax");
+        assert_eq!(cookies["cookies"][1]["secure"], true);
     }
 
     #[tokio::test]
@@ -828,6 +825,7 @@ mod tests {
             .await
             .expect("session should still be alive");
         assert_eq!(result["action"], "extract_text");
+        assert!(result.get("session_id").is_none());
     }
 
     #[test]
@@ -837,53 +835,54 @@ mod tests {
     }
 
     #[test]
-    fn chrome_paths_include_shared_session_state_file() {
+    fn chrome_paths_do_not_include_shared_session_state_file() {
         let paths = ChromePaths::from_home(Path::new("/tmp/home"));
-        assert_eq!(
-            paths.shared_session_state,
-            PathBuf::from("/tmp/home/.arguswing/chrome/shared-session.json")
-        );
+        assert!(!format!("{paths:?}").contains("shared-session.json"));
     }
 
     #[tokio::test]
-    async fn managed_constructor_recovers_shared_session_from_state_file() {
+    async fn managed_constructor_ignores_persisted_shared_session_file() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         paths.ensure_directories().unwrap();
         std::fs::write(
-            &paths.shared_session_state,
+            paths.root.join("shared-session.json"),
             r#"{"session_id":"persisted-session"}"#,
         )
         .unwrap();
-        let host = Arc::new(
-            FakeManagedChromeHost::new(home.path().join("Google Chrome"), "124", "Managed Example")
-                .with_attached_session("persisted-session", "Recovered text"),
-        );
+        let host = Arc::new(FakeManagedChromeHost::new(
+            home.path().join("Google Chrome"),
+            "124",
+            "Managed Example",
+        ));
         let tool = ChromeTool::new_with_managed_components_for_test(
             host.clone(),
             SpyManagedDownloader::new(HashMap::new()),
             paths,
         );
 
-        let result = tool
+        let err = tool
             .execute(json!({ "action": "extract_text" }), make_ctx())
             .await
-            .expect("extract_text should recover persisted shared session");
+            .expect_err(
+                "extract_text should require navigate instead of recovering persisted state",
+            );
 
-        assert_eq!(result["content"], "Recovered text");
-        assert_eq!(
-            host.attach_calls.lock().unwrap().as_slice(),
-            &["persisted-session"]
-        );
+        assert!(matches!(
+            err,
+            ToolError::ExecutionFailed { reason, .. }
+            if reason.contains("navigate(url)")
+        ));
+        assert!(host.attach_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn managed_constructor_requires_navigate_when_persisted_session_is_stale() {
+    async fn managed_constructor_ignores_stale_persisted_session_file() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         paths.ensure_directories().unwrap();
         std::fs::write(
-            &paths.shared_session_state,
+            paths.root.join("shared-session.json"),
             r#"{"session_id":"stale-session"}"#,
         )
         .unwrap();
@@ -908,19 +907,16 @@ mod tests {
             ToolError::ExecutionFailed { reason, .. }
             if reason.contains("navigate(url)")
         ));
-        assert_eq!(
-            host.attach_calls.lock().unwrap().as_slice(),
-            &["stale-session"]
-        );
+        assert!(host.attach_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn managed_constructor_recreates_stale_shared_session_on_navigate() {
+    async fn managed_constructor_navigates_without_attaching_stale_persisted_session() {
         let home = tempdir().unwrap();
         let paths = ChromePaths::from_home(home.path());
         paths.ensure_directories().unwrap();
         std::fs::write(
-            &paths.shared_session_state,
+            paths.root.join("shared-session.json"),
             r#"{"session_id":"stale-session"}"#,
         )
         .unwrap();
@@ -955,10 +951,7 @@ mod tests {
             .expect("navigate should recreate stale persisted session");
 
         assert_eq!(result["page_title"], "Managed Example");
-        assert_eq!(
-            host.attach_calls.lock().unwrap().as_slice(),
-            &["stale-session"]
-        );
+        assert!(host.attach_calls.lock().unwrap().is_empty());
         assert_eq!(host.open_calls.lock().unwrap().len(), 1);
     }
 
@@ -980,19 +973,12 @@ mod tests {
         session_mode: SessionMode,
     }
 
-    #[derive(Debug, Clone)]
-    struct AttachedManagedSession {
-        page_title: String,
-        text: String,
-    }
-
     struct FakeManagedChromeHost {
         browser_binary: PathBuf,
         browser_version: String,
         page_title: String,
         open_calls: StdMutex<Vec<ManagedOpenCall>>,
         attach_calls: StdMutex<Vec<String>>,
-        attached_sessions: StdMutex<HashMap<String, AttachedManagedSession>>,
     }
 
     impl FakeManagedChromeHost {
@@ -1007,23 +993,7 @@ mod tests {
                 page_title: page_title.into(),
                 open_calls: StdMutex::new(Vec::new()),
                 attach_calls: StdMutex::new(Vec::new()),
-                attached_sessions: StdMutex::new(HashMap::new()),
             }
-        }
-
-        fn with_attached_session(
-            self,
-            session_id: impl Into<String>,
-            text: impl Into<String>,
-        ) -> Self {
-            self.attached_sessions.lock().unwrap().insert(
-                session_id.into(),
-                AttachedManagedSession {
-                    page_title: self.page_title.clone(),
-                    text: text.into(),
-                },
-            );
-            self
         }
     }
 
@@ -1051,12 +1021,7 @@ mod tests {
             });
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: vec![LinkSummary {
-                    href: format!("{url}/docs"),
-                    text: "Docs".to_string(),
-                }],
                 text: "Managed text".to_string(),
-                network_requests: Vec::new(),
                 url: url.to_string(),
                 cookies: vec![],
                 tabs: StdMutex::new(vec![FakeTab {
@@ -1067,53 +1032,9 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
-                backend_session_id: Some(format!(
-                    "managed-session-{}",
-                    self.open_calls.lock().unwrap().len()
-                )),
                 metadata: PageMetadata {
                     final_url: url.to_string(),
                     page_title: self.page_title.clone(),
-                },
-                session,
-            })
-        }
-
-        async fn attach_session(
-            &self,
-            session_id: &str,
-            _session_mode: SessionMode,
-        ) -> Result<BackendOpenResult, ChromeToolError> {
-            self.attach_calls
-                .lock()
-                .unwrap()
-                .push(session_id.to_string());
-            let attached = self
-                .attached_sessions
-                .lock()
-                .unwrap()
-                .get(session_id)
-                .cloned()
-                .ok_or(ChromeToolError::SharedSessionUnavailable)?;
-
-            let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: vec![],
-                text: attached.text,
-                network_requests: Vec::new(),
-                url: "https://example.com/recovered".to_string(),
-                cookies: vec![],
-                tabs: StdMutex::new(vec![FakeTab {
-                    handle: "tab-1".to_string(),
-                    url: "https://example.com/recovered".to_string(),
-                    title: attached.page_title.clone(),
-                }]),
-            });
-
-            Ok(BackendOpenResult {
-                backend_session_id: Some(session_id.to_string()),
-                metadata: PageMetadata {
-                    final_url: "https://example.com/recovered".to_string(),
-                    page_title: attached.page_title,
                 },
                 session,
             })
@@ -1198,7 +1119,7 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
         ) -> Self {
             self.pages.insert(
@@ -1206,9 +1127,7 @@ mod tests {
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     cookies: Vec::new(),
                 },
             );
@@ -1220,18 +1139,16 @@ mod tests {
             requested_url: impl Into<String>,
             final_url: impl Into<String>,
             page_title: impl Into<String>,
-            links: Vec<LinkSummary>,
+            _links: Vec<()>,
             text: impl Into<String>,
-            cookies: Vec<CookieSummary>,
+            cookies: Vec<Cookie>,
         ) -> Self {
             self.pages.insert(
                 requested_url.into(),
                 FakePage {
                     final_url: final_url.into(),
                     page_title: page_title.into(),
-                    links,
                     text: text.into(),
-                    network_requests: Vec::new(),
                     cookies,
                 },
             );
@@ -1243,19 +1160,15 @@ mod tests {
     struct FakePage {
         final_url: String,
         page_title: String,
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
-        cookies: Vec<CookieSummary>,
+        cookies: Vec<Cookie>,
     }
 
     #[derive(Debug)]
     struct FakeBrowserSession {
-        links: Vec<LinkSummary>,
         text: String,
-        network_requests: Vec<NetworkRequestSummary>,
         url: String,
-        cookies: Vec<CookieSummary>,
+        cookies: Vec<Cookie>,
         tabs: StdMutex<Vec<FakeTab>>,
     }
 
@@ -1275,21 +1188,6 @@ mod tests {
             })
         }
 
-        async fn list_links(&self) -> Result<Vec<LinkSummary>, ChromeToolError> {
-            Ok(self.links.clone())
-        }
-
-        async fn network_requests(
-            &self,
-            max_requests: Option<u32>,
-        ) -> Result<Vec<NetworkRequestSummary>, ChromeToolError> {
-            let mut requests = self.network_requests.clone();
-            if let Some(max_requests) = max_requests {
-                requests.truncate(max_requests as usize);
-            }
-            Ok(requests)
-        }
-
         async fn shutdown(&self) -> Result<(), ChromeToolError> {
             Ok(())
         }
@@ -1306,7 +1204,7 @@ mod tests {
             Ok(self.url.clone())
         }
 
-        async fn get_cookies(&self) -> Result<Vec<CookieSummary>, ChromeToolError> {
+        async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError> {
             Ok(self.cookies.clone())
         }
 
@@ -1384,9 +1282,7 @@ mod tests {
                 })?;
 
             let session: Arc<dyn BrowserSession> = Arc::new(FakeBrowserSession {
-                links: page.links.clone(),
                 text: page.text.clone(),
-                network_requests: page.network_requests.clone(),
                 url: page.final_url.clone(),
                 cookies: page.cookies.clone(),
                 tabs: StdMutex::new(vec![FakeTab {
@@ -1397,7 +1293,6 @@ mod tests {
             });
 
             Ok(BackendOpenResult {
-                backend_session_id: None,
                 metadata: PageMetadata {
                     final_url: page.final_url.clone(),
                     page_title: page.page_title.clone(),

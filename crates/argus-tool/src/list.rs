@@ -10,7 +10,7 @@
 //! Directory listing has `RiskLevel::Medium` and skips common non-essential directories.
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -18,7 +18,8 @@ use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
-use crate::path_utils::validate_path;
+use crate::path_utils::{PathValidationError, validate_path};
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Maximum directory listing entries.
 const MAX_DIR_ENTRIES: usize = 500;
@@ -35,6 +36,42 @@ struct ListDirArgs {
     /// Maximum depth for recursive listing (default 3)
     #[serde(default)]
     max_depth: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListDirResponse {
+    path: String,
+    entries: Vec<String>,
+    count: usize,
+    truncated: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ListDirToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathValidation(#[from] PathValidationError),
+    #[error("Path is not a directory: {0}")]
+    PathIsNotDirectory(String),
+    #[error("Failed to read directory: {0}")]
+    ReadDirectoryFailed(std::io::Error),
+    #[error("Failed to read entry: {0}")]
+    ReadEntryFailed(std::io::Error),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<ListDirToolError> for ToolError {
+    fn from(error: ListDirToolError) -> Self {
+        match error {
+            ListDirToolError::PathValidation(error) => error.into(),
+            other => ToolError::ExecutionFailed {
+                tool_name: ListDirTool::TOOL_NAME.to_string(),
+                reason: other.to_string(),
+            },
+        }
+    }
 }
 
 /// Directories to skip during recursive listing.
@@ -57,10 +94,63 @@ impl Default for ListDirTool {
 }
 
 impl ListDirTool {
+    const TOOL_NAME: &'static str = "list_dir";
+
     /// Create a new ListDirTool.
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    async fn execute_impl(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<ListDirResponse, ListDirToolError> {
+        let args: ListDirArgs = serde_json::from_value(input)?;
+        let path_str = args.path.as_deref().unwrap_or(".");
+        let recursive = args.recursive.unwrap_or(false);
+        let max_depth = args.max_depth.unwrap_or(3);
+
+        // Validate path (sandboxing)
+        let path = validate_path(path_str, None)?;
+
+        if !path.is_dir() {
+            return Err(ListDirToolError::PathIsNotDirectory(
+                path.display().to_string(),
+            ));
+        }
+
+        let mut entries = Vec::new();
+        list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
+
+        // Sort entries: directories first, then alphabetically
+        entries.sort_by(|a, b| {
+            let a_is_dir = a.ends_with('/');
+            let b_is_dir = b.ends_with('/');
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.cmp(b),
+            }
+        });
+
+        let truncated = entries.len() > MAX_DIR_ENTRIES;
+        if truncated {
+            entries.truncate(MAX_DIR_ENTRIES);
+        }
+
+        let count = if truncated {
+            MAX_DIR_ENTRIES
+        } else {
+            entries.len()
+        };
+
+        Ok(ListDirResponse {
+            path: path.to_string_lossy().to_string(),
+            entries,
+            count,
+            truncated,
+        })
     }
 }
 
@@ -88,50 +178,10 @@ impl NamedTool for ListDirTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: ListDirArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "list_dir".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
-        let path_str = args.path.as_deref().unwrap_or(".");
-        let recursive = args.recursive.unwrap_or(false);
-        let max_depth = args.max_depth.unwrap_or(3);
-
-        // Validate path (sandboxing)
-        let path = validate_path(path_str, None)?;
-
-        if !path.is_dir() {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "list_dir".to_string(),
-                reason: format!("Path is not a directory: {}", path.display()),
-            });
-        }
-
-        let mut entries = Vec::new();
-        list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
-
-        // Sort entries: directories first, then alphabetically
-        entries.sort_by(|a, b| {
-            let a_is_dir = a.ends_with('/');
-            let b_is_dir = b.ends_with('/');
-            match (a_is_dir, b_is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.cmp(b),
-            }
-        });
-
-        let truncated = entries.len() > MAX_DIR_ENTRIES;
-        if truncated {
-            entries.truncate(MAX_DIR_ENTRIES);
-        }
-
-        Ok(json!({
-            "path": path.to_string_lossy(),
-            "entries": entries,
-            "count": if truncated { MAX_DIR_ENTRIES } else { entries.len() },
-            "truncated": truncated
-        }))
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(ListDirToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -143,25 +193,19 @@ async fn list_dir_inner(
     max_depth: usize,
     current_depth: usize,
     entries: &mut Vec<String>,
-) -> Result<(), ToolError> {
+) -> Result<(), ListDirToolError> {
     if entries.len() >= MAX_DIR_ENTRIES {
         return Ok(());
     }
 
     let mut dir = tokio::fs::read_dir(path)
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool_name: "list_dir".to_string(),
-            reason: format!("Failed to read directory: {}", e),
-        })?;
+        .map_err(ListDirToolError::ReadDirectoryFailed)?;
 
     while let Some(entry) = dir
         .next_entry()
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            tool_name: "list_dir".to_string(),
-            reason: format!("Failed to read entry: {}", e),
-        })?
+        .map_err(ListDirToolError::ReadEntryFailed)?
     {
         if entries.len() >= MAX_DIR_ENTRIES {
             break;
@@ -209,6 +253,7 @@ async fn list_dir_inner(
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use tokio::sync::broadcast;
 
     fn make_ctx() -> Arc<ToolExecutionContext> {

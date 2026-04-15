@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::ToolOutputError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ChromeToolError {
     #[error("invalid arguments: {reason}")]
@@ -78,4 +80,7 @@ pub enum ChromeToolError {
 
     #[error("tab operation failed: {reason}")]
     TabOperationFailed { reason: String },
+
+    #[error(transparent)]
+    OutputSerialization(#[from] ToolOutputError),
 }

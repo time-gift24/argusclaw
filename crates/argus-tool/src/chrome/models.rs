@@ -2,7 +2,6 @@ use std::net::IpAddr;
 
 use argus_protocol::is_blocked_ip;
 use serde::Deserialize;
-use serde_json::Value;
 use url::Url;
 
 use super::error::ChromeToolError;
@@ -15,9 +14,6 @@ pub enum ChromeAction {
     Close,
     Wait,
     ExtractText,
-    ListLinks,
-    NetworkRequests,
-    GetDomSummary,
     Click,
     Type,
     GetUrl,
@@ -37,9 +33,6 @@ impl ChromeAction {
             Self::Close => "close",
             Self::Wait => "wait",
             Self::ExtractText => "extract_text",
-            Self::ListLinks => "list_links",
-            Self::NetworkRequests => "network_requests",
-            Self::GetDomSummary => "get_dom_summary",
             Self::Click => "click",
             Self::Type => "type",
             Self::GetUrl => "get_url",
@@ -62,8 +55,6 @@ pub struct ChromeToolArgs {
     pub selector: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub max_requests: Option<u32>,
     #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
@@ -101,15 +92,6 @@ impl ChromeToolArgs {
             ChromeAction::ExtractText => {
                 validate_for_extract_text(&args)?;
             }
-            ChromeAction::ListLinks => {
-                validate_for_list_links(&args)?;
-            }
-            ChromeAction::NetworkRequests => {
-                validate_for_network_requests(&args)?;
-            }
-            ChromeAction::GetDomSummary => {
-                validate_for_dom_summary(&args)?;
-            }
             ChromeAction::Click => {
                 validate_for_click(&args)?;
             }
@@ -141,8 +123,8 @@ impl ChromeToolArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenArgs {
-    pub url: String,
+pub(super) struct OpenArgs {
+    pub(super) url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,34 +134,16 @@ pub struct PageMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenedSession {
-    pub session_id: String,
+pub(super) struct OpenedSession {
+    pub(super) session_id: String,
+    pub(super) final_url: String,
+    pub(super) page_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPage {
     pub final_url: String,
     pub page_title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
-pub struct LinkSummary {
-    pub href: String,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct CookieSummary {
-    pub name: String,
-    pub value: String,
-    pub domain: Option<String>,
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct NetworkRequestSummary {
-    pub method: String,
-    pub url: String,
-    pub status: Option<u16>,
-    pub request_headers: Value,
-    pub response_headers: Value,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -269,29 +233,6 @@ fn validate_for_install(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
 
 fn validate_for_extract_text(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
     allow_only_fields(args, &["selector"])
-}
-
-fn validate_for_list_links(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &[])
-}
-
-fn validate_for_network_requests(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    if let Some(max_requests) = args.max_requests
-        && max_requests == 0
-    {
-        return Err(ChromeToolError::InvalidArguments {
-            reason: format!(
-                "field 'max_requests' must be greater than 0 for action '{}'",
-                args.action.as_str()
-            ),
-        });
-    }
-
-    allow_only_fields(args, &["max_requests"])
-}
-
-fn validate_for_dom_summary(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
-    allow_only_fields(args, &[])
 }
 
 fn validate_for_click(args: &ChromeToolArgs) -> Result<(), ChromeToolError> {
@@ -385,9 +326,6 @@ fn present_fields(args: &ChromeToolArgs) -> Vec<&'static str> {
     }
     if args.timeout_ms.is_some() {
         fields.push("timeout_ms");
-    }
-    if args.max_requests.is_some() {
-        fields.push("max_requests");
     }
     if args.text.is_some() {
         fields.push("text");

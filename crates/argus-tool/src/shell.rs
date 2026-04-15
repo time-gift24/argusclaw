@@ -14,13 +14,15 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
+
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -223,6 +225,49 @@ struct ShellArgs {
     cwd: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ShellResponse {
+    output: String,
+    exit_code: i32,
+    success: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ShellToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error("{0}: {1}")]
+    BlockedCommand(&'static str, String),
+    #[error("Command injection detected ({reason}): {command}")]
+    CommandInjection {
+        reason: &'static str,
+        command: String,
+    },
+    #[error("Failed to spawn command: {0}")]
+    SpawnFailed(std::io::Error),
+    #[error("Command execution failed: {0}")]
+    ExecutionFailed(std::io::Error),
+    #[error("Command timed out after {0:?}")]
+    Timeout(Duration),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<ShellToolError> for ToolError {
+    fn from(error: ShellToolError) -> Self {
+        match error {
+            ShellToolError::BlockedCommand(..) | ShellToolError::CommandInjection { .. } => {
+                ToolError::NotAuthorized(error.to_string())
+            }
+            ShellToolError::Timeout(duration) => ToolError::Timeout(duration),
+            other => ToolError::ExecutionFailed {
+                tool_name: ShellTool::TOOL_NAME.to_string(),
+                reason: other.to_string(),
+            },
+        }
+    }
+}
+
 /// Shell command execution tool with risk level Critical.
 pub struct ShellTool {
     timeout_secs: u64,
@@ -235,6 +280,8 @@ impl Default for ShellTool {
 }
 
 impl ShellTool {
+    const TOOL_NAME: &'static str = "shell";
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -265,56 +312,27 @@ impl ShellTool {
 
         None
     }
-}
 
-#[async_trait]
-impl NamedTool for ShellTool {
-    fn name(&self) -> &str {
-        "shell"
-    }
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "shell".to_string(),
-            description:
-                "Execute a shell command. Commands run in a subprocess with captured output."
-                    .to_string(),
-            parameters: serde_json::to_value(schemars::schema_for!(ShellArgs))
-                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
-        }
-    }
-
-    fn risk_level(&self) -> RiskLevel {
-        RiskLevel::Critical
-    }
-
-    async fn execute(
+    async fn execute_impl(
         &self,
         input: serde_json::Value,
-        _ctx: Arc<ToolExecutionContext>,
-    ) -> Result<serde_json::Value, ToolError> {
-        let args: ShellArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "shell".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
+    ) -> Result<ShellResponse, ShellToolError> {
+        let args: ShellArgs = serde_json::from_value(input)?;
         let timeout_secs = args.timeout.unwrap_or(self.timeout_secs);
         let cwd = args.cwd.as_deref().map(PathBuf::from);
 
         if let Some(reason) = self.is_blocked(&args.command) {
-            return Err(ToolError::NotAuthorized(format!(
-                "{}: {}",
+            return Err(ShellToolError::BlockedCommand(
                 reason,
-                truncate_for_error(&args.command)
-            )));
+                truncate_for_error(&args.command),
+            ));
         }
 
         if let Some(reason) = detect_command_injection(&args.command) {
-            return Err(ToolError::NotAuthorized(format!(
-                "Command injection detected ({}): {}",
+            return Err(ShellToolError::CommandInjection {
                 reason,
-                truncate_for_error(&args.command)
-            )));
+                command: truncate_for_error(&args.command),
+            });
         }
 
         let workdir =
@@ -345,10 +363,7 @@ impl NamedTool for ShellTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = command.spawn().map_err(|e| ToolError::ExecutionFailed {
-            tool_name: "shell".to_string(),
-            reason: format!("Failed to spawn command: {}", e),
-        })?;
+        let mut child = command.spawn().map_err(ShellToolError::SpawnFailed)?;
 
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
@@ -382,7 +397,6 @@ impl NamedTool for ShellTool {
                 }
             };
 
-            // Use try_join! for parallel reads (available in tokio without extra features)
             let (stdout, stderr) = tokio::try_join!(stdout_fut, stderr_fut)?;
             let status = child.wait().await?;
 
@@ -399,20 +413,50 @@ impl NamedTool for ShellTool {
         .await;
 
         match result {
-            Ok(Ok((output, code))) => Ok(json!({
-                "output": truncate_output(&output),
-                "exit_code": code,
-                "success": code == 0
-            })),
-            Ok(Err(e)) => Err(ToolError::ExecutionFailed {
-                tool_name: "shell".to_string(),
-                reason: format!("Command execution failed: {}", e),
+            Ok(Ok((output, code))) => Ok(ShellResponse {
+                output: truncate_output(&output),
+                exit_code: code,
+                success: code == 0,
             }),
+            Ok(Err(e)) => Err(ShellToolError::ExecutionFailed(e)),
             Err(_) => {
                 let _ = child.kill().await;
-                Err(ToolError::Timeout(Duration::from_secs(timeout_secs)))
+                Err(ShellToolError::Timeout(Duration::from_secs(timeout_secs)))
             }
         }
+    }
+}
+
+#[async_trait]
+impl NamedTool for ShellTool {
+    fn name(&self) -> &str {
+        "shell"
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "shell".to_string(),
+            description:
+                "Execute a shell command. Commands run in a subprocess with captured output."
+                    .to_string(),
+            parameters: serde_json::to_value(schemars::schema_for!(ShellArgs))
+                .unwrap_or_else(|_| serde_json::json!({"type": "object"})),
+        }
+    }
+
+    fn risk_level(&self) -> RiskLevel {
+        RiskLevel::Critical
+    }
+
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: Arc<ToolExecutionContext>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(ShellToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -452,6 +496,7 @@ fn truncate_for_error(s: &str) -> String {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use tokio::sync::broadcast;
 
     fn make_ctx() -> Arc<ToolExecutionContext> {

@@ -13,14 +13,15 @@
 //! - Null byte and URL-encoded separator detection
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::Arc;
 
 use argus_protocol::llm::ToolDefinition;
 use argus_protocol::risk_level::RiskLevel;
 use argus_protocol::{NamedTool, ToolError, ToolExecutionContext};
 
-use crate::path_utils::validate_path;
+use crate::path_utils::{PathValidationError, validate_path};
+use crate::{ToolOutputError, serialize_tool_output};
 
 /// Maximum file size for reading (1MB).
 const MAX_READ_SIZE: u64 = 1024 * 1024;
@@ -38,6 +39,48 @@ struct ReadArgs {
     limit: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+struct ReadResponse {
+    content: String,
+    total_lines: usize,
+    lines_shown: usize,
+    path: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ReadToolError {
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(#[from] serde_json::Error),
+    #[error(transparent)]
+    PathValidation(#[from] PathValidationError),
+    #[error("Path does not exist: {0}")]
+    PathDoesNotExist(String),
+    #[error("Path is not a file: {0}")]
+    PathIsNotFile(String),
+    #[error("Cannot access file: {0}")]
+    AccessFailed(std::io::Error),
+    #[error(
+        "File too large ({actual} bytes). Maximum is {max} bytes. Use offset/limit for partial reads."
+    )]
+    FileTooLarge { actual: u64, max: u64 },
+    #[error("Failed to read file: {0}")]
+    ReadFailed(std::io::Error),
+    #[error(transparent)]
+    Output(#[from] ToolOutputError),
+}
+
+impl From<ReadToolError> for ToolError {
+    fn from(error: ReadToolError) -> Self {
+        match error {
+            ReadToolError::PathValidation(error) => error.into(),
+            other => ToolError::ExecutionFailed {
+                tool_name: ReadTool::TOOL_NAME.to_string(),
+                reason: other.to_string(),
+            },
+        }
+    }
+}
+
 /// Read tool implementation — reads file contents with path validation and size limit.
 pub struct ReadTool;
 
@@ -48,10 +91,71 @@ impl Default for ReadTool {
 }
 
 impl ReadTool {
+    const TOOL_NAME: &'static str = "read";
+
     /// Create a new ReadTool.
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    async fn execute_impl(&self, input: serde_json::Value) -> Result<ReadResponse, ReadToolError> {
+        let args: ReadArgs = serde_json::from_value(input)?;
+        let offset = args.offset.unwrap_or(1).max(1) as usize;
+        let limit = args.limit.map(u64::from);
+
+        // Validate path (sandboxing)
+        let path = validate_path(&args.path, None)?;
+
+        // Check file exists and is a file
+        if !path.exists() {
+            return Err(ReadToolError::PathDoesNotExist(path.display().to_string()));
+        }
+        if !path.is_file() {
+            return Err(ReadToolError::PathIsNotFile(path.display().to_string()));
+        }
+
+        // Check file size
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(ReadToolError::AccessFailed)?;
+
+        if metadata.len() > MAX_READ_SIZE {
+            return Err(ReadToolError::FileTooLarge {
+                actual: metadata.len(),
+                max: MAX_READ_SIZE,
+            });
+        }
+
+        // Read file
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(ReadToolError::ReadFailed)?;
+
+        // Apply offset and limit
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len();
+
+        let start_line = offset.saturating_sub(1).min(total_lines);
+        let end_line = if let Some(lim) = limit {
+            (start_line + lim as usize).min(total_lines)
+        } else {
+            total_lines
+        };
+
+        // Format with line numbers (ironclaw style)
+        let selected_lines: Vec<String> = lines[start_line..end_line]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
+            .collect();
+
+        Ok(ReadResponse {
+            content: selected_lines.join("\n"),
+            total_lines,
+            lines_shown: end_line - start_line,
+            path: path.to_string_lossy().to_string(),
+        })
     }
 }
 
@@ -82,84 +186,10 @@ impl NamedTool for ReadTool {
         input: serde_json::Value,
         _ctx: Arc<ToolExecutionContext>,
     ) -> Result<serde_json::Value, ToolError> {
-        let args: ReadArgs =
-            serde_json::from_value(input).map_err(|e| ToolError::ExecutionFailed {
-                tool_name: "read".to_string(),
-                reason: format!("Invalid arguments: {e}"),
-            })?;
-        let offset = args.offset.unwrap_or(1).max(1) as usize;
-        let limit = args.limit.map(u64::from);
-
-        // Validate path (sandboxing)
-        let path = validate_path(&args.path, None)?;
-
-        // Check file exists and is a file
-        if !path.exists() {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "read".to_string(),
-                reason: format!("Path does not exist: {}", path.display()),
-            });
-        }
-        if !path.is_file() {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "read".to_string(),
-                reason: format!("Path is not a file: {}", path.display()),
-            });
-        }
-
-        // Check file size
-        let metadata =
-            tokio::fs::metadata(&path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool_name: "read".to_string(),
-                    reason: format!("Cannot access file: {}", e),
-                })?;
-
-        if metadata.len() > MAX_READ_SIZE {
-            return Err(ToolError::ExecutionFailed {
-                tool_name: "read".to_string(),
-                reason: format!(
-                    "File too large ({} bytes). Maximum is {} bytes. Use offset/limit for partial reads.",
-                    metadata.len(),
-                    MAX_READ_SIZE
-                ),
-            });
-        }
-
-        // Read file
-        let content =
-            tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    tool_name: "read".to_string(),
-                    reason: format!("Failed to read file: {}", e),
-                })?;
-
-        // Apply offset and limit
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-
-        let start_line = offset.saturating_sub(1).min(total_lines);
-        let end_line = if let Some(lim) = limit {
-            (start_line + lim as usize).min(total_lines)
-        } else {
-            total_lines
-        };
-
-        // Format with line numbers (ironclaw style)
-        let selected_lines: Vec<String> = lines[start_line..end_line]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
-            .collect();
-
-        Ok(json!({
-            "content": selected_lines.join("\n"),
-            "total_lines": total_lines,
-            "lines_shown": end_line - start_line,
-            "path": path.to_string_lossy()
-        }))
+        let response = self.execute_impl(input).await.map_err(ToolError::from)?;
+        serialize_tool_output(Self::TOOL_NAME, response)
+            .map_err(ReadToolError::from)
+            .map_err(ToolError::from)
     }
 }
 
@@ -167,6 +197,7 @@ impl NamedTool for ReadTool {
 mod tests {
     use super::*;
     use argus_protocol::ids::ThreadId;
+    use serde_json::json;
     use std::io::Write;
     use tempfile::NamedTempFile;
     use tokio::sync::broadcast;
