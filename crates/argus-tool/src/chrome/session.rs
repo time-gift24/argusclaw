@@ -40,6 +40,7 @@ pub trait BrowserSession: Send + Sync {
     async fn current_url(&self) -> Result<String, ChromeToolError>;
     async fn get_cookies(&self) -> Result<Vec<Cookie>, ChromeToolError>;
     async fn navigate(&self, url: &str) -> Result<PageMetadata, ChromeToolError>;
+    async fn refresh(&self) -> Result<PageMetadata, ChromeToolError>;
     async fn create_new_tab(&self, url: &str) -> Result<(String, PageMetadata), ChromeToolError>;
     async fn switch_to_window(&self, window_handle: &str) -> Result<PageMetadata, ChromeToolError>;
     async fn close_current_window(&self) -> Result<(), ChromeToolError>;
@@ -512,6 +513,33 @@ impl BrowserSession for ManagedWebDriverSession {
             .map_err(|e| ChromeToolError::NavigationFailed {
                 url: url.to_string(),
                 reason: e.to_string(),
+            })?;
+        let final_url = driver
+            .current_url()
+            .await
+            .map(|u| u.to_string())
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+        let page_title = driver
+            .title()
+            .await
+            .map_err(|e| ChromeToolError::PageReadFailed {
+                reason: e.to_string(),
+            })?;
+        Ok(PageMetadata {
+            final_url,
+            page_title,
+        })
+    }
+
+    async fn refresh(&self) -> Result<PageMetadata, ChromeToolError> {
+        let driver = self.live_driver().await?;
+        driver
+            .refresh()
+            .await
+            .map_err(|e| ChromeToolError::InteractionFailed {
+                reason: format!("failed to refresh page: {e}"),
             })?;
         let final_url = driver
             .current_url()

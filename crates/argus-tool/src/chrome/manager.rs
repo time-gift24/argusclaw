@@ -298,6 +298,21 @@ impl ChromeManager {
         Ok(())
     }
 
+    pub async fn refresh(&self) -> Result<OpenedPage, ChromeToolError> {
+        let session_id = self.active_session_id().await?;
+        let metadata = self.session_interaction(&session_id).await?.refresh().await?;
+
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.update_metadata(metadata.clone());
+        }
+
+        Ok(OpenedPage {
+            final_url: metadata.final_url,
+            page_title: metadata.page_title,
+        })
+    }
+
     pub async fn extract_text(&self, selector: Option<&str>) -> Result<String, ChromeToolError> {
         self.active_session_interaction()
             .await?
@@ -1315,6 +1330,25 @@ mod tests {
             })
         }
 
+        async fn refresh(&self) -> Result<PageMetadata, ChromeToolError> {
+            let tabs = self.tabs.lock().unwrap();
+            let active_handle = tabs.active_handle.as_deref().ok_or_else(|| {
+                ChromeToolError::TabOperationFailed {
+                    reason: "no active tab".to_string(),
+                }
+            })?;
+            tabs.tabs
+                .iter()
+                .find(|tab| tab.handle == active_handle)
+                .map(|tab| PageMetadata {
+                    final_url: tab.url.clone(),
+                    page_title: tab.title.clone(),
+                })
+                .ok_or_else(|| ChromeToolError::TabOperationFailed {
+                    reason: "active tab not found".to_string(),
+                })
+        }
+
         async fn create_new_tab(
             &self,
             url: &str,
@@ -1487,6 +1521,13 @@ mod tests {
 
             *self.current_url.lock().unwrap() = url.to_string();
             *self.current_title.lock().unwrap() = format!("Navigated to {url}");
+            Ok(PageMetadata {
+                final_url: self.current_url.lock().unwrap().clone(),
+                page_title: self.current_title.lock().unwrap().clone(),
+            })
+        }
+
+        async fn refresh(&self) -> Result<PageMetadata, ChromeToolError> {
             Ok(PageMetadata {
                 final_url: self.current_url.lock().unwrap().clone(),
                 page_title: self.current_title.lock().unwrap().clone(),
