@@ -13,6 +13,7 @@ impl ExplorePolicy {
         let allowed = HashSet::from([
             ChromeAction::Install,
             ChromeAction::Navigate,
+            ChromeAction::Refresh,
             ChromeAction::Close,
             ChromeAction::Wait,
             ChromeAction::ExtractText,
@@ -29,6 +30,7 @@ impl ExplorePolicy {
         let allowed = HashSet::from([
             ChromeAction::Install,
             ChromeAction::Navigate,
+            ChromeAction::Refresh,
             ChromeAction::Close,
             ChromeAction::Wait,
             ChromeAction::ExtractText,
