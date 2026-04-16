@@ -1138,6 +1138,7 @@ impl Thread {
         if !agent_record.subagent_names.is_empty() {
             enabled_tool_names.insert("scheduler");
         }
+        enabled_tool_names.insert("sleep");
         let mut tools = self
             .tool_manager
             .list_ids()
@@ -1357,6 +1358,58 @@ mod tests {
         assert!(
             tool_names.iter().any(|name| name == "scheduler"),
             "dispatch-capable agents should automatically receive scheduler"
+        );
+    }
+
+    #[test]
+    fn build_shared_turn_tools_includes_sleep_by_default() {
+        let tool_manager = Arc::new(ToolManager::new());
+        tool_manager.register(Arc::new(StubTool { name: "sleep" }));
+
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .tool_manager(Arc::clone(&tool_manager))
+            .agent_record(Arc::new(AgentRecord {
+                tool_names: vec![],
+                ..(*test_agent_record()).clone()
+            }))
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+
+        let tools = thread.build_shared_turn_tools(thread.agent_record.as_ref(), Vec::new());
+        let tool_names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
+
+        assert!(
+            tool_names.iter().any(|name| name == "sleep"),
+            "sleep should be available without explicit agent tool_names selection"
+        );
+    }
+
+    #[test]
+    fn build_shared_turn_tools_deduplicates_explicit_sleep_selection() {
+        let tool_manager = Arc::new(ToolManager::new());
+        tool_manager.register(Arc::new(StubTool { name: "sleep" }));
+
+        let thread = ThreadBuilder::new()
+            .provider(Arc::new(DummyProvider))
+            .compactor(Arc::new(NoopCompactor))
+            .tool_manager(Arc::clone(&tool_manager))
+            .agent_record(Arc::new(AgentRecord {
+                tool_names: vec!["sleep".to_string()],
+                ..(*test_agent_record()).clone()
+            }))
+            .session_id(SessionId::new())
+            .build()
+            .expect("thread should build");
+
+        let tools = thread.build_shared_turn_tools(thread.agent_record.as_ref(), Vec::new());
+        let sleep_count = tools.iter().filter(|tool| tool.name() == "sleep").count();
+
+        assert_eq!(
+            sleep_count, 1,
+            "sleep should only appear once even if selected explicitly"
         );
     }
 
