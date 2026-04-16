@@ -133,6 +133,31 @@ test("agent editor auto-enables scheduler when subagents are configured", () => 
   assert.match(agentEditorSource, /因子代理配置自动启用/);
 });
 
+test("agent editor renders tool details in a portal tooltip so hover does not expand the page width", () => {
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(
+    agentEditorSource,
+    /import[\s\S]*Tooltip[\s\S]*TooltipContent[\s\S]*TooltipTrigger[\s\S]*from "@\/components\/ui\/tooltip"/,
+  );
+  assert.match(agentEditorSource, /<Tooltip[\s>]/);
+  assert.match(agentEditorSource, /<TooltipTrigger[\s\S]*render=\{/);
+  assert.match(agentEditorSource, /<TooltipContent[\s\S]*side=\{/);
+  assert.doesNotMatch(agentEditorSource, /group-hover:opacity-100/);
+  assert.doesNotMatch(agentEditorSource, /bottom-full mb-2 left-1\/2 -translate-x-1\/2/);
+  assert.doesNotMatch(agentEditorSource, /left-full ml-2 top-1\/2 -translate-y-1\/2/);
+  assert.doesNotMatch(agentEditorSource, /right-full mr-2 top-1\/2 -translate-y-1\/2/);
+});
+
+test("agent editor stacks tooltip description above parameters with separate sections", () => {
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(
+    agentEditorSource,
+    /<TooltipContent[\s\S]*?<div className="space-y-3">[\s\S]*?<section className="space-y-1">[\s\S]*?描述[\s\S]*?<section className="space-y-1\.5 border-t border-primary\/10 pt-3">[\s\S]*?参数/s,
+  );
+});
+
 test("settings layout keeps edit pages inside a shrinkable scroll container", () => {
   const settingsLayoutSource = readFileSync(settingsLayoutPath, "utf8");
   const agentEditorSource = readFileSync(agentEditorPath, "utf8");

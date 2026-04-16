@@ -21,6 +21,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/components/ui/toast"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Dialog,
@@ -713,108 +714,99 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
                     const isSelected = isLockedScheduler || formData.tool_names.includes(tool.name)
                     const columnIndex = index % 4
                     const isTopRow = index < 4
-                    const hoverPositionClass =
-                      isTopRow
-                        ? "bottom-full mb-2 left-1/2 -translate-x-1/2"
-                        : columnIndex < 2
-                          ? "left-full ml-2 top-1/2 -translate-y-1/2"
-                          : "right-full mr-2 top-1/2 -translate-y-1/2"
-                    const arrowPositionClass =
-                      isTopRow
-                        ? "left-1/2 -translate-x-1/2 top-full -mt-1"
-                        : columnIndex < 2
-                          ? "right-full -mr-1 top-1/2 -translate-y-1/2"
-                          : "left-full -ml-1 top-1/2 -translate-y-1/2"
+                    const tooltipSide = isTopRow ? "top" : columnIndex < 2 ? "right" : "left"
 
                     return (
-                    <div
-                      key={tool.name}
-                      onClick={() => {
-                        if (isLockedScheduler) return
-                        setFormData((prev) => ({
-                          ...prev,
-                          tool_names: isSelected
-                            ? prev.tool_names.filter((n) => n !== tool.name)
-                            : [...prev.tool_names, tool.name],
-                        }))
-                        if (isSchedulerTool) {
-                          setSchedulerExplicitlySelected(!isSelected)
-                        }
-                      }}
-                      className={cn(
-                        "group relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 transition-all",
-                        isLockedScheduler ? "cursor-not-allowed border-primary/40 bg-primary/10 shadow-inner" : "cursor-pointer",
-                        isSelected
-                          ? "border-primary bg-primary/5 shadow-inner"
-                          : "border-muted/60 bg-background hover:border-primary/30"
-                      )}
-                    >
-                      <Checkbox
-                        id={`tool-${tool.name}`}
-                        checked={isSelected}
-                        disabled={isLockedScheduler}
-                        className="mt-0.5 shrink-0"
-                        onClick={(e) => e.stopPropagation()}
-                      />
-                      <div className="min-w-0">
-                        <Label
-                          htmlFor={`tool-${tool.name}`}
-                          className="text-[11px] font-bold cursor-pointer block truncate"
-                        >
-                          {tool.name}
-                        </Label>
-                        <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1">
-                          {tool.description || "无描述"}
-                        </p>
-                        {isLockedScheduler && (
-                          <p className="mt-1 text-[10px] font-medium text-primary">
-                            因子代理配置自动启用
-                          </p>
-                        )}
-                      </div>
-                      <div
-                        onClick={(event) => event.stopPropagation()}
-                        className={cn(
-                          "pointer-events-auto absolute z-20 max-h-[min(24rem,55vh)] w-80 overflow-y-auto custom-scrollbar overscroll-contain rounded-2xl border border-primary/25 bg-gradient-to-br from-background via-background to-primary/10 p-3 pr-2 shadow-2xl shadow-primary/15 opacity-0 backdrop-blur-sm transition-all duration-200 group-hover:opacity-100",
-                          hoverPositionClass,
-                        )}
-                      >
-                        <div className="text-[11px] font-bold text-foreground">{tool.name}</div>
-                        <div className="mt-1 text-[10px] font-semibold text-foreground/90">描述</div>
-                        <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
-                          {detailedDescription}
-                        </p>
-
-                        <div className="mt-2 text-[10px] font-semibold text-foreground/90">参数</div>
-                        {parameterDetails.length === 0 ? (
-                          <p className="mt-0.5 text-[10px] text-muted-foreground">无参数</p>
-                        ) : (
-                          <div className="mt-1 space-y-1 pr-1">
-                            {parameterDetails.map((parameter) => (
-                              <div key={`${tool.name}-${parameter.name}`} className="rounded-lg border border-muted/50 bg-background/70 px-2 py-1.5">
-                                <div className="flex items-center gap-1.5 text-[10px]">
-                                  <span className="font-semibold text-foreground break-all">
-                                    {parameter.name}{parameter.required ? "*" : ""}
-                                  </span>
-                                  <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-                                    {parameter.typeLabel}
-                                  </span>
-                                </div>
-                                <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
-                                  {parameter.description}
+                      <Tooltip key={tool.name}>
+                        <TooltipTrigger
+                          render={
+                            <div
+                              onClick={() => {
+                                if (isLockedScheduler) return
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  tool_names: isSelected
+                                    ? prev.tool_names.filter((n) => n !== tool.name)
+                                    : [...prev.tool_names, tool.name],
+                                }))
+                                if (isSchedulerTool) {
+                                  setSchedulerExplicitlySelected(!isSelected)
+                                }
+                              }}
+                              className={cn(
+                                "relative flex min-h-[64px] items-start gap-2 rounded-xl border p-2 transition-all",
+                                isLockedScheduler ? "cursor-not-allowed border-primary/40 bg-primary/10 shadow-inner" : "cursor-pointer",
+                                isSelected
+                                  ? "border-primary bg-primary/5 shadow-inner"
+                                  : "border-muted/60 bg-background hover:border-primary/30",
+                              )}
+                            >
+                              <Checkbox
+                                id={`tool-${tool.name}`}
+                                checked={isSelected}
+                                disabled={isLockedScheduler}
+                                className="mt-0.5 shrink-0"
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                              <div className="min-w-0">
+                                <Label
+                                  htmlFor={`tool-${tool.name}`}
+                                  className="text-[11px] font-bold cursor-pointer block truncate"
+                                >
+                                  {tool.name}
+                                </Label>
+                                <p className="text-[10px] text-muted-foreground leading-snug line-clamp-1">
+                                  {tool.description || "无描述"}
                                 </p>
+                                {isLockedScheduler && (
+                                  <p className="mt-1 text-[10px] font-medium text-primary">
+                                    因子代理配置自动启用
+                                  </p>
+                                )}
                               </div>
-                            ))}
-                          </div>
-                        )}
-                        <div
-                          className={cn(
-                            "absolute h-2.5 w-2.5 rotate-45 border border-primary/25 bg-background",
-                            arrowPositionClass,
-                          )}
+                            </div>
+                          }
                         />
-                      </div>
-                    </div>
+                        <TooltipContent
+                          side={tooltipSide}
+                          className="z-50 max-h-[min(24rem,55vh)] w-80 overflow-y-auto custom-scrollbar overscroll-contain rounded-2xl border border-primary/25 bg-gradient-to-br from-background via-background to-primary/10 p-3 pr-2 text-left text-background shadow-2xl shadow-primary/15 backdrop-blur-sm"
+                        >
+                          <div className="space-y-3">
+                            <div className="text-[11px] font-bold text-foreground">{tool.name}</div>
+                            <section className="space-y-1">
+                              <div className="text-[10px] font-semibold text-foreground/90">描述</div>
+                              <p className="text-[10px] leading-snug text-muted-foreground">
+                                {detailedDescription}
+                              </p>
+                            </section>
+
+                            <section className="space-y-1.5 border-t border-primary/10 pt-3">
+                              <div className="text-[10px] font-semibold text-foreground/90">参数</div>
+                              {parameterDetails.length === 0 ? (
+                                <p className="text-[10px] text-muted-foreground">无参数</p>
+                              ) : (
+                                <div className="space-y-1 pr-1">
+                                  {parameterDetails.map((parameter) => (
+                                    <div key={`${tool.name}-${parameter.name}`} className="rounded-lg border border-muted/50 bg-background/70 px-2 py-1.5">
+                                      <div className="flex items-center gap-1.5 text-[10px]">
+                                        <span className="font-semibold text-foreground break-all">
+                                          {parameter.name}{parameter.required ? "*" : ""}
+                                        </span>
+                                        <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                                          {parameter.typeLabel}
+                                        </span>
+                                      </div>
+                                      <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">
+                                        {parameter.description}
+                                      </p>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </section>
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
                     )
                   })}
                 </div>
