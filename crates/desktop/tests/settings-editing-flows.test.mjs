@@ -133,6 +133,15 @@ test("agent editor auto-enables scheduler when subagents are configured", () => 
   assert.match(agentEditorSource, /因子代理配置自动启用/);
 });
 
+test("agent editor section headings use Chinese labels consistently", () => {
+  const agentEditorSource = readFileSync(agentEditorPath, "utf8");
+
+  assert.match(agentEditorSource, /基础信息/);
+  assert.match(agentEditorSource, /模型参数/);
+  assert.doesNotMatch(agentEditorSource, /Basic Information/);
+  assert.doesNotMatch(agentEditorSource, /Model Parameters/);
+});
+
 test("agent editor renders tool details in a portal tooltip so hover does not expand the page width", () => {
   const agentEditorSource = readFileSync(agentEditorPath, "utf8");
 
@@ -207,6 +216,29 @@ test("provider editing flow uses dedicated routes while keeping dialog open stat
   assert.match(providerDialogSource, /secret_status:/);
   assert.match(providerDialogSource, /requires_reentry/);
   assert.match(providerDialogSource, /重新填写 API Key/);
+  assert.match(providersPageSource, /模型提供者/);
+  assert.doesNotMatch(providersPageSource, /模型提供者 \(LLM Providers\)/);
+  assert.match(providerDialogSource, /编辑提供者|新增提供者/);
+  assert.doesNotMatch(providerDialogSource, /Edit Provider|Add Provider/);
+});
+
+test("provider editor section headings use Chinese labels consistently", () => {
+  const providerEditorSource = readFileSync(providerEditorPath, "utf8");
+
+  assert.match(providerEditorSource, /连接设置/);
+  assert.match(providerEditorSource, /可用模型/);
+  assert.doesNotMatch(providerEditorSource, /Connection Settings/);
+  assert.doesNotMatch(providerEditorSource, /Available Models/);
+});
+
+test("agent form dialog titles use Chinese labels consistently", () => {
+  const agentFormDialogSource = readFileSync(
+    new URL("../components/settings/agent-form-dialog.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(agentFormDialogSource, /编辑智能体|新增智能体/);
+  assert.doesNotMatch(agentFormDialogSource, /Edit Agent|Add Agent/);
 });
 
 test("provider form dialog can test the current draft configuration before saving", () => {

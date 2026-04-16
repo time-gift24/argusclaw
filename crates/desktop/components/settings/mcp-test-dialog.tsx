@@ -69,7 +69,7 @@ export function McpTestDialog({
             MCP 测试结果
           </DialogTitle>
           <DialogDescription>
-            {serverName || "未命名 MCP Server"} 的连接结果与最近发现到的 tools 快照。
+            {serverName || "未命名 MCP 服务"} 的连接结果与最近发现到的工具快照。
           </DialogDescription>
         </DialogHeader>
 
@@ -95,7 +95,7 @@ export function McpTestDialog({
               </div>
               <p className="text-sm font-semibold">
                 {testing
-                  ? "正在尝试连接 MCP server..."
+                  ? "正在尝试连接 MCP 服务..."
                   : result?.message ?? "点击重新测试后可查看详细结果。"}
               </p>
               {result && (
@@ -109,7 +109,7 @@ export function McpTestDialog({
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm font-bold text-foreground">
               <Wrench className="h-4 w-4 text-primary" />
-              Discovered Tools
+              已发现工具
             </div>
             {discoveredTools.length === 0 ? (
               <div className="rounded-xl border border-dashed border-muted/60 px-3 py-4 text-xs text-muted-foreground">
@@ -124,7 +124,7 @@ export function McpTestDialog({
                   >
                     <p className="text-sm font-semibold truncate">{tool.tool_name_original}</p>
                     <p className="text-[11px] text-muted-foreground line-clamp-3">
-                      {tool.description || "No description"}
+                      {tool.description || "暂无描述"}
                     </p>
                   </div>
                 ))}

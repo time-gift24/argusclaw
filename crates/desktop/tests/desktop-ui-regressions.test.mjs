@@ -36,6 +36,10 @@ test("tool fallback collapse styling targets Base UI data attributes", () => {
   assert.match(toolFallbackSource, /group-not-data-\[panel-open\]\/trigger:-rotate-90/);
   assert.match(toolFallbackSource, /data-\[open\]:animate-collapsible-down/);
   assert.match(toolFallbackSource, /data-\[closed\]:animate-collapsible-up/);
+  assert.match(toolFallbackSource, /工具参数/);
+  assert.match(toolFallbackSource, /工具输出/);
+  assert.doesNotMatch(toolFallbackSource, /参数 \(Arguments\)/);
+  assert.doesNotMatch(toolFallbackSource, /输出 \(Output\)/);
   assert.doesNotMatch(toolFallbackSource, /data-\[state=/);
 });
 

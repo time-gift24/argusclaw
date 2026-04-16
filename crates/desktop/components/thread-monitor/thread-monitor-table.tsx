@@ -100,9 +100,9 @@ export function ThreadMonitorTable({
   return (
     <Card className="border-muted/60 bg-background/70 backdrop-blur-xl shadow-[0_8px_24px_rgba(0,0,0,0.06)]">
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">统一 Runtime 列表</CardTitle>
+        <CardTitle className="text-base">统一运行时列表</CardTitle>
         <CardDescription>
-          展示后端当前返回的 chat / job runtime 状态，按最近活动时间排序，并支持停止运行中的 job。
+          展示后端当前返回的聊天线程与任务线程运行时状态，按最近活动时间排序，并支持停止运行中的任务。
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0">
@@ -113,13 +113,13 @@ export function ThreadMonitorTable({
         ) : (
           <div className="overflow-x-auto rounded-xl border border-muted-foreground/10">
             <div className="min-w-[1180px] grid grid-cols-[1.2fr_0.7fr_1fr_0.9fr_0.8fr_1fr_0.8fr_1fr] gap-0 border-b border-muted-foreground/10 bg-muted/30 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-              <div>Thread</div>
-              <div>Kind</div>
-              <div>Job</div>
-              <div>Status</div>
-              <div>Memory</div>
-              <div>Last Active</div>
-              <div>Recovery</div>
+              <div>线程</div>
+              <div>类型</div>
+              <div>任务</div>
+              <div>状态</div>
+              <div>内存</div>
+              <div>最近活跃</div>
+              <div>恢复性</div>
               <div>操作</div>
             </div>
             <div className="min-w-[1180px] divide-y divide-muted-foreground/10">

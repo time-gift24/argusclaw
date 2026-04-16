@@ -156,7 +156,7 @@ export default function ProvidersPage() {
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <Cloud className="h-4 w-4 text-primary" />
-            <h1 className="text-lg font-bold tracking-tight">模型提供者 (LLM Providers)</h1>
+            <h1 className="text-lg font-bold tracking-tight">模型提供者</h1>
           </div>
           <p className="text-muted-foreground text-sm">
             管理您的 AI 模型提供者连接、API 密钥及模型列表。

@@ -53,8 +53,9 @@ test("chat screen wires assistant-ui runtime into the thread UI", () => {
   assert.match(threadMonitorScreenSource, /已驱逐/);
   assert.match(
     threadMonitorScreenSource,
-    /kindFilter|全部类型|Thread Monitor|监控优先/,
+    /kindFilter|全部类型|线程监控|监控优先/,
   );
+  assert.doesNotMatch(threadMonitorScreenSource, /Thread Monitor/);
   assert.match(threadMonitorScreenSource, /权威|authoritative/i);
   assert.match(chatScreenSource, /<Thread \/>/);
   assert.match(

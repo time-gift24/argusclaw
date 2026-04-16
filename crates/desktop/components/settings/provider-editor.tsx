@@ -271,7 +271,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
             <div className="flex flex-col space-y-4 h-full">
               <div className="flex items-center gap-2 text-[11px] font-bold text-primary uppercase tracking-widest px-1">
                 <div className="bg-primary/10 p-1.5 rounded-lg text-primary"><Globe className="h-3.5 w-3.5" /></div>
-                Connection Settings
+                连接设置
               </div>
               <div className="flex-1 grid gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
                 <div className="space-y-2">
@@ -308,7 +308,7 @@ export function ProviderEditor({ providerId }: ProviderEditorProps) {
             <div className="flex flex-col space-y-4 h-full">
               <div className="flex items-center gap-2 text-[11px] font-bold text-primary uppercase tracking-widest px-1">
                 <div className="bg-primary/10 p-1.5 rounded-lg text-primary"><List className="h-3.5 w-3.5" /></div>
-                Available Models
+                可用模型
               </div>
               <div className="flex-1 flex flex-col gap-6 bg-muted/20 p-6 rounded-[24px] border border-muted/60 shadow-sm">
                 <div className="space-y-2">

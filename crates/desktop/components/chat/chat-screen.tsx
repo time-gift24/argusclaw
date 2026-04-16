@@ -24,8 +24,8 @@ export function ChatScreen() {
     >
       <div className="px-4 pt-4">
         <TabsList className="bg-muted/60 shadow-sm">
-          <TabsTrigger value="chat">Chat</TabsTrigger>
-          <TabsTrigger value="threads">Threads</TabsTrigger>
+          <TabsTrigger value="chat">聊天</TabsTrigger>
+          <TabsTrigger value="threads">线程监控</TabsTrigger>
         </TabsList>
       </div>
       <TabsContent

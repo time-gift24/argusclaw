@@ -182,7 +182,7 @@ function ToolFallbackArgs({
       className={cn("aui-tool-fallback-args space-y-1.5", className)}
       {...props}
     >
-      <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">参数 (Arguments)</p>
+      <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">工具参数</p>
       <pre className="aui-tool-fallback-args-value max-h-[16rem] overflow-auto custom-scrollbar whitespace-pre-wrap rounded-lg border border-muted/40 bg-muted/20 p-2.5 font-mono text-[11px] text-muted-foreground">
         {argsText}
       </pre>
@@ -208,7 +208,7 @@ function ToolFallbackResult({
       )}
       {...props}
     >
-      <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">输出 (Output)</p>
+      <p className="text-[10px] font-bold uppercase tracking-widest opacity-50 ml-1">工具输出</p>
       <pre className="aui-tool-fallback-result-content max-h-[16rem] overflow-auto custom-scrollbar whitespace-pre-wrap rounded-lg border border-emerald-500/10 bg-emerald-500/5 p-2.5 font-mono text-[11px] text-muted-foreground">
         {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
       </pre>

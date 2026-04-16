@@ -286,7 +286,7 @@ export function SessionHistoryButton() {
                   历史会话
                 </DialogTitle>
                 <DialogDescription className="text-xs font-medium text-muted-foreground uppercase tracking-widest opacity-70">
-                  Session History
+                  会话历史
                 </DialogDescription>
               </div>
             </div>
@@ -296,7 +296,7 @@ export function SessionHistoryButton() {
             <div className="border-r border-muted/60">
               <div className="border-b border-muted/60 px-5 py-3">
                 <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground">
-                  Sessions
+                  会话列表
                 </div>
               </div>
               <div className="max-h-[420px] overflow-y-auto px-3 py-3 custom-scrollbar">
@@ -406,17 +406,17 @@ export function SessionHistoryButton() {
             <div className="flex min-h-0 flex-col">
               <div className="border-b border-muted/60 px-5 py-3">
                 <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground">
-                  Threads
+                  对话列表
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  {selectedSession ? displaySessionName(selectedSession) : "请选择左侧 Session"}
+                  {selectedSession ? displaySessionName(selectedSession) : "请选择左侧会话"}
                 </div>
               </div>
 
               <div className="max-h-[420px] overflow-y-auto px-3 py-3 custom-scrollbar">
                 {!selectedSessionId ? (
                   <div className="rounded-xl border border-dashed border-muted-foreground/20 px-4 py-6 text-center text-sm text-muted-foreground">
-                    请选择左侧 Session
+                    请选择左侧会话
                   </div>
                 ) : isThreadLoading ? (
                   <div className="flex items-center justify-center py-8">
@@ -424,7 +424,7 @@ export function SessionHistoryButton() {
                   </div>
                 ) : sessionThreads.length === 0 ? (
                   <div className="rounded-xl border border-dashed border-muted-foreground/20 px-4 py-6 text-center text-sm text-muted-foreground">
-                    暂无 Thread
+                    暂无对话
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -528,7 +528,7 @@ export function SessionHistoryButton() {
                     }
                   >
                     <Pencil className="size-3.5" />
-                    重命名 Session
+                    重命名会话
                   </button>
                   <button
                     type="button"
@@ -539,7 +539,7 @@ export function SessionHistoryButton() {
                     }}
                   >
                     <Trash2 className="size-3.5" />
-                    删除 Session
+                    删除会话
                   </button>
                 </>
               ) : (
@@ -557,7 +557,7 @@ export function SessionHistoryButton() {
                     }
                   >
                     <Pencil className="size-3.5" />
-                    重命名 Thread
+                    重命名对话
                   </button>
                   <button
                     type="button"
@@ -568,7 +568,7 @@ export function SessionHistoryButton() {
                     }}
                   >
                     <MessageSquare className="size-3.5" />
-                    切换到此 Thread
+                    切换到此对话
                   </button>
                 </>
               )}
@@ -589,7 +589,7 @@ export function SessionHistoryButton() {
         <DialogContent className="sm:max-w-[420px]">
           <DialogHeader>
             <DialogTitle>
-              {renameTarget?.kind === "session" ? "重命名 Session" : "重命名 Thread"}
+              {renameTarget?.kind === "session" ? "重命名会话" : "重命名对话"}
             </DialogTitle>
             <DialogDescription>
               留空即可恢复为 ID 回退显示。
@@ -599,7 +599,7 @@ export function SessionHistoryButton() {
             autoFocus
             value={renameValue}
             onChange={(event) => setRenameValue(event.target.value)}
-            placeholder={renameTarget?.kind === "session" ? "输入 Session 名称" : "输入 Thread 标题"}
+            placeholder={renameTarget?.kind === "session" ? "输入会话名称" : "输入对话标题"}
           />
           <DialogFooter>
             <Button
